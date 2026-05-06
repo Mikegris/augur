@@ -1,0 +1,696 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AUGUR // WEALTH INTELLIGENCE SYSTEM</title>
+  <link rel="stylesheet" href="/static/css/terminal.css">
+  <!-- Chart.js -->
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+  <!-- TradingView Lightweight Charts -->
+  <script src="https://unpkg.com/lightweight-charts@4.1.3/dist/lightweight-charts.standalone.production.js"></script>
+</head>
+<body>
+
+<a href="#main" class="skip-link">SKIP TO CONTENT</a>
+
+<div id="progress-bar" style="width:0;height:2px;background:var(--green);position:fixed;top:44px;left:0;z-index:8000;transition:width .3s,opacity .3s;opacity:0"></div>
+
+<!-- ════════════════════════════════════════════════════════════
+     APPLICATION SHELL
+     ════════════════════════════════════════════════════════════ -->
+<div id="app">
+
+  <!-- ── Header ──────────────────────────────────────────────── -->
+  <header id="header">
+    <div class="header-brand">
+      <div class="brand-logo">T</div>
+      <div class="brand-text">
+        <span class="brand-name">AUGUR</span>
+        <span class="brand-sub">WEALTH INTELLIGENCE SYSTEM</span>
+      </div>
+    </div>
+
+    <div class="header-ticker-wrap">
+      <div class="header-ticker" id="header-ticker">
+        <span class="ticker-item">
+          <span class="ticker-label">LOADING</span>
+          <span class="ticker-price blink">...</span>
+        </span>
+      </div>
+    </div>
+
+    <div class="header-controls">
+      <div id="clock">00:00:00</div>
+      <div class="market-status">
+        <div class="status-dot closed"></div>
+        <div class="status-label">—</div>
+      </div>
+      <button id="sidebar-toggle" type="button" aria-label="Toggle navigation menu" aria-controls="sidebar" aria-expanded="false">☰</button>
+    </div>
+  </header>
+
+  <!-- ── Command Bar ─────────────────────────────────────────── -->
+  <div id="cmdbar">
+    <span class="cmd-prefix">⟩</span>
+    <input id="cmd-input" type="text" placeholder="Search symbol, company, or crypto... (press Enter to go)" autocomplete="off" spellcheck="false">
+    <span class="cmd-hint">ENTER TO OPEN &nbsp;|&nbsp; ESC TO CLOSE &nbsp;|&nbsp; ARROWS TO NAVIGATE</span>
+  </div>
+
+  <!-- Search Results Dropdown -->
+  <div id="search-results"></div>
+
+  <!-- ── Sidebar ─────────────────────────────────────────────── -->
+  <nav id="sidebar" aria-label="Primary navigation">
+    <div class="nav-section">
+      <div class="nav-label">ANALYTICS</div>
+      <div class="nav-item active" data-view="overview">
+        <span class="nav-icon">◈</span> OVERVIEW
+      </div>
+      <div class="nav-item" data-view="portfolio">
+        <span class="nav-icon">◉</span> PORTFOLIO
+      </div>
+      <div class="nav-item" data-view="markets">
+        <span class="nav-icon">◎</span> MARKETS
+      </div>
+      <div class="nav-item" data-view="research">
+        <span class="nav-icon">⊕</span> RESEARCH
+      </div>
+      <div class="nav-item" data-view="analytics">
+        <span class="nav-icon">⊠</span> ANALYTICS
+      </div>
+      <div class="nav-item" data-view="intel">
+        <span class="nav-icon">◑</span> INTEL
+      </div>
+      <div class="nav-item" data-view="earnings">
+        <span class="nav-icon">⚡</span> EARNINGS
+      </div>
+      <div class="nav-item" data-view="signals">
+        <span class="nav-icon">◈</span> SIGNALS
+      </div>
+      <div class="nav-item" data-view="options-flow">
+        <span class="nav-icon">⊛</span> OPTIONS FLOW
+      </div>
+      <div class="nav-item" data-view="congress">
+        <span class="nav-icon">⊠</span> CONGRESS
+      </div>
+      <div class="nav-item" data-view="terminal">
+        <span class="nav-icon">▸</span> TERMINAL
+      </div>
+      <div class="nav-item" data-view="ideas">
+        <span class="nav-icon">⚄</span> IDEAS
+      </div>
+    </div>
+    <div class="nav-section">
+      <div class="nav-label">ASSETS</div>
+      <div class="nav-item" data-view="crypto">
+        <span class="nav-icon">₿</span> CRYPTO
+      </div>
+      <div class="nav-item" data-view="watchlist">
+        <span class="nav-icon">◇</span> WATCHLIST
+      </div>
+      <div class="nav-item" data-view="transactions">
+        <span class="nav-icon">⊞</span> TRANSACTIONS
+      </div>
+      <div class="nav-item" data-view="screener">
+        <span class="nav-icon">⊟</span> SCREENER
+      </div>
+      <div class="nav-item" data-view="scanner">
+        <span class="nav-icon">⊙</span> SCANNER
+      </div>
+      <div class="nav-item" data-view="dividends">
+        <span class="nav-icon">⊛</span> DIVIDENDS
+      </div>
+    </div>
+    <div class="nav-section">
+      <div class="nav-label">RISK &amp; MACRO</div>
+      <div class="nav-item" data-view="macro">
+        <span class="nav-icon">⊕</span> MACRO
+      </div>
+      <div class="nav-item" data-view="stress">
+        <span class="nav-icon">⚠</span> STRESS TEST
+      </div>
+      <div class="nav-item" data-view="alerts">
+        <span class="nav-icon">◉</span> ALERTS
+        <span class="alert-nav-badge" id="alert-nav-count" style="display:none"></span>
+      </div>
+    </div>
+    <div class="nav-section">
+      <div class="nav-label">ALPHA ENGINE</div>
+      <div class="nav-item" data-view="gex">
+        <span class="nav-icon">⊗</span> GEX FLOW
+      </div>
+      <div class="nav-item" data-view="contagion">
+        <span class="nav-icon">◈</span> CONTAGION
+      </div>
+      <div class="nav-item" data-view="narrative">
+        <span class="nav-icon">◉</span> NARRATIVE
+      </div>
+      <div class="nav-item" data-view="synthetic-insider">
+        <span class="nav-icon">⊛</span> SYNTH INSIDER
+      </div>
+      <div class="nav-item" data-view="reflexivity">
+        <span class="nav-icon">◎</span> REFLEXIVITY
+      </div>
+      <div class="nav-item" data-view="liquidity">
+        <span class="nav-icon">⊕</span> LIQUIDITY
+      </div>
+      <div class="nav-item" data-view="alt-data">
+        <span class="nav-icon">⊞</span> ALT-DATA
+      </div>
+    </div>
+    <div class="nav-section">
+      <div class="nav-label">INFO</div>
+      <div class="nav-item" data-view="news">
+        <span class="nav-icon">⊡</span> NEWS FEED
+      </div>
+      <div class="nav-item" data-view="settings">
+        <span class="nav-icon">⚙</span> SETTINGS
+      </div>
+    </div>
+
+    <!-- Quick Watchlist -->
+    <div class="nav-label" style="padding:8px 14px 4px;margin-top:4px">WATCHLIST</div>
+    <div class="sidebar-watchlist" id="sidebar-watchlist">
+      <div style="padding:8px 14px;font-size:10px;color:var(--text-muted)">Loading...</div>
+    </div>
+  </nav>
+
+  <!-- ── Main Content ─────────────────────────────────────────── -->
+  <main id="main" tabindex="-1">
+
+    <!-- OVERVIEW -->
+    <div id="view-overview" class="view active">
+      <div class="loading"><div class="spinner"></div> LOADING AUGUR...</div>
+    </div>
+
+    <!-- PORTFOLIO -->
+    <div id="view-portfolio" class="view">
+      <div class="loading"><div class="spinner"></div></div>
+    </div>
+
+    <!-- MARKETS -->
+    <div id="view-markets" class="view">
+      <div class="loading"><div class="spinner"></div></div>
+    </div>
+
+    <!-- RESEARCH -->
+    <div id="view-research" class="view">
+      <div class="empty-state">
+        <span class="empty-icon" style="font-size:40px">⊕</span>
+        <span style="color:var(--green);font-size:16px">RESEARCH TERMINAL</span>
+        <span style="color:var(--text-secondary)">Search for a symbol in the command bar above</span>
+        <div style="margin-top:16px;display:flex;flex-wrap:wrap;gap:6px;justify-content:center">
+          ${['AAPL','MSFT','NVDA','TSLA','AMZN','GOOGL','META','BTC-USD'].map(s =>
+            `<button class="btn btn-ghost btn-sm" onclick="openResearch('${s}')">${s}</button>`
+          ).join('')}
+        </div>
+      </div>
+    </div>
+
+    <!-- ANALYTICS -->
+    <div id="view-analytics" class="view">
+      <div class="loading"><div class="spinner"></div></div>
+    </div>
+
+    <!-- INTEL -->
+    <div id="view-intel" class="view">
+      <div class="loading"><div class="spinner"></div></div>
+    </div>
+
+    <!-- EARNINGS -->
+    <div id="view-earnings" class="view">
+      <div class="loading"><div class="spinner"></div></div>
+    </div>
+
+    <!-- SIGNALS (Smart Money) -->
+    <div id="view-signals" class="view">
+      <div class="loading"><div class="spinner"></div></div>
+    </div>
+
+    <!-- OPTIONS FLOW -->
+    <div id="view-options-flow" class="view">
+      <div class="loading"><div class="spinner"></div></div>
+    </div>
+
+    <!-- CONGRESS -->
+    <div id="view-congress" class="view">
+      <div class="loading"><div class="spinner"></div></div>
+    </div>
+
+    <!-- TERMINAL -->
+    <div id="view-terminal" class="view">
+      <div class="loading"><div class="spinner"></div></div>
+    </div>
+
+    <!-- DIVIDENDS -->
+    <div id="view-dividends" class="view">
+      <div class="loading"><div class="spinner"></div></div>
+    </div>
+
+    <!-- MACRO -->
+    <div id="view-macro" class="view">
+      <div class="loading"><div class="spinner"></div></div>
+    </div>
+
+    <!-- STRESS TEST -->
+    <div id="view-stress" class="view">
+      <div class="loading"><div class="spinner"></div></div>
+    </div>
+
+    <!-- ALERTS -->
+    <div id="view-alerts" class="view">
+      <div class="loading"><div class="spinner"></div></div>
+    </div>
+
+    <!-- CRYPTO -->
+    <div id="view-crypto" class="view">
+      <div class="loading"><div class="spinner"></div></div>
+    </div>
+
+    <!-- WATCHLIST -->
+    <div id="view-watchlist" class="view">
+      <div class="loading"><div class="spinner"></div></div>
+    </div>
+
+    <!-- TRANSACTIONS -->
+    <div id="view-transactions" class="view">
+      <div class="loading"><div class="spinner"></div></div>
+    </div>
+
+    <!-- SCREENER -->
+    <div id="view-screener" class="view">
+      <div class="loading"><div class="spinner"></div></div>
+    </div>
+
+    <!-- SCANNER -->
+    <div id="view-scanner" class="view">
+      <div class="loading"><div class="spinner"></div></div>
+    </div>
+
+    <!-- GEX -->
+    <div id="view-gex" class="view">
+      <div class="loading"><div class="spinner"></div></div>
+    </div>
+
+    <!-- CONTAGION -->
+    <div id="view-contagion" class="view">
+      <div class="loading"><div class="spinner"></div></div>
+    </div>
+
+    <!-- NARRATIVE -->
+    <div id="view-narrative" class="view">
+      <div class="loading"><div class="spinner"></div></div>
+    </div>
+
+    <!-- SYNTHETIC INSIDER -->
+    <div id="view-synthetic-insider" class="view">
+      <div class="loading"><div class="spinner"></div></div>
+    </div>
+
+    <!-- REFLEXIVITY -->
+    <div id="view-reflexivity" class="view">
+      <div class="loading"><div class="spinner"></div></div>
+    </div>
+
+    <!-- LIQUIDITY -->
+    <div id="view-liquidity" class="view">
+      <div class="loading"><div class="spinner"></div></div>
+    </div>
+
+    <!-- ALT-DATA -->
+    <div id="view-alt-data" class="view">
+      <div class="loading"><div class="spinner"></div></div>
+    </div>
+
+    <!-- IDEAS -->
+    <div id="view-ideas" class="view">
+      <div class="loading"><div class="spinner"></div></div>
+    </div>
+
+    <!-- NEWS -->
+    <div id="view-news" class="view">
+      <div class="loading"><div class="spinner"></div></div>
+    </div>
+
+    <!-- SETTINGS -->
+    <div id="view-settings" class="view">
+      <div class="loading"><div class="spinner"></div></div>
+    </div>
+
+  </main>
+
+  <!-- ── Status Bar ──────────────────────────────────────────── -->
+  <footer id="statusbar">
+    <div class="status-item">
+      <span class="status-key">SYS:</span>
+      <span class="status-val green">AUGUR v1.0</span>
+    </div>
+    <div class="status-item">
+      <span class="status-key">DATA:</span>
+      <span class="status-val">YAHOO FINANCE // COINGECKO</span>
+    </div>
+    <div class="status-item">
+      <span class="status-key">REFRESH:</span>
+      <span class="status-val" id="status-last-refresh">—</span>
+    </div>
+    <div class="status-item">
+      <span class="status-key">PORTFOLIO:</span>
+      <span class="status-val green" id="status-portfolio-value">—</span>
+    </div>
+    <div class="status-spacer"></div>
+    <div class="status-item">
+      <span class="status-key">NODE:</span>
+      <span class="status-val green blink">● LIVE</span>
+    </div>
+    <div class="status-item">
+      <span class="status-key">DB:</span>
+      <span class="status-val green">LOCAL SQLITE</span>
+    </div>
+  </footer>
+
+</div>
+
+<!-- ════════════════════════════════════════════════════════════
+     MODALS
+     ════════════════════════════════════════════════════════════ -->
+
+<!-- Add Position Modal -->
+<div class="modal-overlay" id="modal-add-position">
+  <div class="modal">
+    <div class="modal-header">
+      <span class="modal-title">ADD POSITION</span>
+      <button class="modal-close" data-modal-close="modal-add-position">✕</button>
+    </div>
+    <div class="modal-body">
+      <form id="form-add-position" onsubmit="event.preventDefault(); submitAddPosition()">
+        <div class="form-row">
+          <div class="form-group">
+            <label class="form-label">SYMBOL *</label>
+            <input class="form-input" id="pos-symbol" placeholder="AAPL" required>
+          </div>
+          <div class="form-group">
+            <label class="form-label">COMPANY NAME</label>
+            <input class="form-input" id="pos-name" placeholder="Auto-filled if blank">
+          </div>
+        </div>
+        <div class="form-row">
+          <div class="form-group">
+            <label class="form-label">SHARES *</label>
+            <input class="form-input" id="pos-shares" type="number" step="any" min="0" placeholder="10" required>
+          </div>
+          <div class="form-group">
+            <label class="form-label">AVG COST / SHARE *</label>
+            <input class="form-input" id="pos-cost" type="number" step="any" min="0" placeholder="150.00" required>
+          </div>
+        </div>
+        <div class="form-row">
+          <div class="form-group">
+            <label class="form-label">ASSET TYPE</label>
+            <select class="form-select" id="pos-type">
+              <option value="stock">Stock</option>
+              <option value="etf">ETF</option>
+              <option value="crypto">Crypto</option>
+              <option value="option">Option</option>
+              <option value="other">Other</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label class="form-label">FEES</label>
+            <input class="form-input" id="pos-fees" type="number" step="any" placeholder="0.00">
+          </div>
+        </div>
+        <div class="form-row">
+          <div class="form-group">
+            <label class="form-label">ACCOUNT</label>
+            <select class="form-select" id="pos-account">
+              <option value="">— No Account —</option>
+            </select>
+          </div>
+          <div class="form-group" style="display:flex;align-items:flex-end">
+            <button type="button" class="btn btn-ghost btn-sm" onclick="Modal.open('modal-manage-accounts')" style="white-space:nowrap">MANAGE ACCOUNTS</button>
+          </div>
+        </div>
+        <div class="form-group">
+          <label class="form-label">NOTES</label>
+          <input class="form-input" id="pos-notes" placeholder="Optional notes">
+        </div>
+      </form>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-ghost" data-modal-close="modal-add-position">CANCEL</button>
+      <button class="btn btn-green btn-lg" onclick="submitAddPosition()">ADD TO PORTFOLIO</button>
+    </div>
+  </div>
+</div>
+
+<!-- Manage Accounts Modal -->
+<div class="modal-overlay" id="modal-manage-accounts">
+  <div class="modal" style="max-width:600px">
+    <div class="modal-header">
+      <span class="modal-title">MANAGE ACCOUNTS</span>
+      <button class="modal-close" data-modal-close="modal-manage-accounts">✕</button>
+    </div>
+    <div class="modal-body">
+      <div id="accounts-list" style="margin-bottom:12px">
+        <div class="text-dim" style="font-size:11px">Loading accounts...</div>
+      </div>
+      <div style="border-top:1px solid var(--border);padding-top:12px">
+        <div style="font-size:11px;letter-spacing:.1em;color:var(--green);margin-bottom:8px">ADD NEW ACCOUNT</div>
+        <div class="form-row">
+          <div class="form-group">
+            <label class="form-label">ACCOUNT NAME *</label>
+            <input class="form-input" id="acct-name" placeholder="e.g. Fidelity 401k">
+          </div>
+          <div class="form-group">
+            <label class="form-label">ACCOUNT TYPE</label>
+            <select class="form-select" id="acct-type">
+              <option value="brokerage">Brokerage</option>
+              <option value="401k">401(k)</option>
+              <option value="ira">Traditional IRA</option>
+              <option value="roth_ira">Roth IRA</option>
+              <option value="hsa">HSA</option>
+              <option value="529">529 Plan</option>
+              <option value="trust">Trust</option>
+              <option value="crypto">Crypto Exchange</option>
+              <option value="other">Other</option>
+            </select>
+          </div>
+        </div>
+        <div class="form-row">
+          <div class="form-group">
+            <label class="form-label">INSTITUTION</label>
+            <input class="form-input" id="acct-institution" placeholder="e.g. Fidelity, Schwab, Coinbase">
+          </div>
+          <div class="form-group">
+            <label class="form-label">COLOR TAG</label>
+            <select class="form-select" id="acct-color">
+              <option value="">Default</option>
+              <option value="#00ff41">Green</option>
+              <option value="#00bfff">Blue</option>
+              <option value="#ff6b35">Orange</option>
+              <option value="#ff3366">Pink</option>
+              <option value="#b967ff">Purple</option>
+              <option value="#ffcc00">Gold</option>
+              <option value="#00ffcc">Teal</option>
+            </select>
+          </div>
+        </div>
+        <div class="form-group">
+          <label class="form-label">NOTES</label>
+          <input class="form-input" id="acct-notes" placeholder="Optional notes">
+        </div>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-ghost" data-modal-close="modal-manage-accounts">CLOSE</button>
+      <button class="btn btn-green" onclick="submitAddAccount()">+ ADD ACCOUNT</button>
+    </div>
+  </div>
+</div>
+
+<!-- Add Watchlist Modal -->
+<div class="modal-overlay" id="modal-add-watchlist">
+  <div class="modal">
+    <div class="modal-header">
+      <span class="modal-title">ADD TO WATCHLIST</span>
+      <button class="modal-close" data-modal-close="modal-add-watchlist">✕</button>
+    </div>
+    <div class="modal-body">
+      <form id="form-add-watchlist" onsubmit="event.preventDefault(); submitAddWatchlist()">
+        <div class="form-row">
+          <div class="form-group">
+            <label class="form-label">SYMBOL *</label>
+            <input class="form-input" id="wl-symbol" placeholder="TSLA" required>
+          </div>
+          <div class="form-group">
+            <label class="form-label">ASSET TYPE</label>
+            <select class="form-select" id="wl-type">
+              <option value="stock">Stock</option>
+              <option value="etf">ETF</option>
+              <option value="crypto">Crypto</option>
+              <option value="other">Other</option>
+            </select>
+          </div>
+        </div>
+        <div class="form-row">
+          <div class="form-group">
+            <label class="form-label">ALERT ABOVE PRICE</label>
+            <input class="form-input" id="wl-alert-high" type="number" step="any" placeholder="e.g. 300.00">
+          </div>
+          <div class="form-group">
+            <label class="form-label">ALERT BELOW PRICE</label>
+            <input class="form-input" id="wl-alert-low" type="number" step="any" placeholder="e.g. 200.00">
+          </div>
+        </div>
+        <div class="form-group">
+          <label class="form-label">NOTES</label>
+          <input class="form-input" id="wl-notes" placeholder="Optional notes">
+        </div>
+      </form>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-ghost" data-modal-close="modal-add-watchlist">CANCEL</button>
+      <button class="btn btn-blue btn-lg" onclick="submitAddWatchlist()">ADD TO WATCHLIST</button>
+    </div>
+  </div>
+</div>
+
+<!-- Log Trade Modal -->
+<div class="modal-overlay" id="modal-add-txn">
+  <div class="modal">
+    <div class="modal-header">
+      <span class="modal-title">LOG TRADE</span>
+      <button class="modal-close" data-modal-close="modal-add-txn">✕</button>
+    </div>
+    <div class="modal-body">
+      <form id="form-add-txn" onsubmit="event.preventDefault(); submitAddTxn()">
+        <div class="form-row">
+          <div class="form-group">
+            <label class="form-label">SYMBOL *</label>
+            <input class="form-input" id="txn-symbol" placeholder="AAPL" required>
+          </div>
+          <div class="form-group">
+            <label class="form-label">ACTION</label>
+            <select class="form-select" id="txn-action">
+              <option value="BUY">BUY</option>
+              <option value="SELL">SELL</option>
+              <option value="DIVIDEND">DIVIDEND</option>
+              <option value="SPLIT">SPLIT</option>
+            </select>
+          </div>
+        </div>
+        <div class="form-row">
+          <div class="form-group">
+            <label class="form-label">SHARES *</label>
+            <input class="form-input" id="txn-shares" type="number" step="any" min="0" required>
+          </div>
+          <div class="form-group">
+            <label class="form-label">PRICE / SHARE *</label>
+            <input class="form-input" id="txn-price" type="number" step="any" min="0" required>
+          </div>
+        </div>
+        <div class="form-row">
+          <div class="form-group">
+            <label class="form-label">FEES</label>
+            <input class="form-input" id="txn-fees" type="number" step="any" placeholder="0.00">
+          </div>
+          <div class="form-group">
+            <label class="form-label">DATE</label>
+            <input class="form-input" id="txn-date" type="date">
+          </div>
+        </div>
+        <div class="form-group">
+          <label class="form-label">NOTES</label>
+          <input class="form-input" id="txn-notes" placeholder="Optional notes">
+        </div>
+      </form>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-ghost" data-modal-close="modal-add-txn">CANCEL</button>
+      <button class="btn btn-green btn-lg" onclick="submitAddTxn()">LOG TRADE</button>
+    </div>
+  </div>
+</div>
+
+<!-- CSV Import Modal -->
+<div class="modal-overlay" id="modal-csv-import">
+  <div class="modal">
+    <div class="modal-header">
+      <span class="modal-title">IMPORT PORTFOLIO CSV</span>
+      <button class="modal-close" data-modal-close="modal-csv-import">✕</button>
+    </div>
+    <div class="modal-body">
+      <div style="font-size:10px;color:var(--text-secondary);margin-bottom:12px;line-height:1.8">
+        <span style="color:var(--green)">SUPPORTED FORMATS:</span><br>
+        Generic: symbol, shares, avg_cost<br>
+        Robinhood: Symbol, Average Cost, Quantity<br>
+        Fidelity: Symbol, Quantity, Average Cost Basis<br>
+        Schwab: Symbol, Description, Quantity, Cost Basis
+      </div>
+      <div id="csv-drop-zone" style="border:1px dashed var(--border-bright);padding:24px;text-align:center;cursor:pointer;transition:border-color .2s"
+           ondragover="event.preventDefault();this.style.borderColor='var(--green)'"
+           ondragleave="this.style.borderColor='var(--border-bright)'"
+           ondrop="handleCsvDrop(event)">
+        <div style="color:var(--text-dim);font-size:11px">DRAG & DROP CSV FILE HERE</div>
+        <div style="color:var(--text-muted);font-size:10px;margin-top:4px">— or —</div>
+        <button class="btn btn-ghost btn-sm" style="margin-top:8px" onclick="document.getElementById('csv-file-input').click()">BROWSE FILE</button>
+      </div>
+      <input type="file" id="csv-file-input" accept=".csv" style="display:none" onchange="handleCsvFileSelect(event)">
+      <div id="csv-import-status" style="margin-top:10px;font-size:11px"></div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-ghost" data-modal-close="modal-csv-import">CANCEL</button>
+      <button class="btn btn-green btn-lg" onclick="submitCsvImport()">IMPORT</button>
+    </div>
+  </div>
+</div>
+
+<!-- Toast Container -->
+<div id="toast-container" role="status" aria-live="polite" aria-atomic="false"></div>
+
+<!-- Keyboard Shortcut Help Overlay (toggled via `?`) -->
+<div id="shortcut-help" role="dialog" aria-modal="true" aria-labelledby="shortcut-help-title">
+  <div class="sh-panel">
+    <div class="sh-title">
+      <span id="shortcut-help-title">KEYBOARD SHORTCUTS</span>
+      <button class="btn btn-ghost btn-sm" type="button" onclick="ShortcutHelp.close()" aria-label="Close shortcuts help">ESC</button>
+    </div>
+    <dl>
+      <div class="sh-section">GLOBAL</div>
+      <dt><kbd>?</kbd></dt><dd>Open this shortcuts panel</dd>
+      <dt><kbd>/</kbd></dt><dd>Focus the command bar / search</dd>
+      <dt><kbd>Esc</kbd></dt><dd>Close modal, dropdown, or this panel</dd>
+      <dt><kbd>Enter</kbd></dt><dd>Open the highlighted result in the search dropdown</dd>
+      <dt><kbd>↑</kbd> <kbd>↓</kbd></dt><dd>Navigate search results</dd>
+
+      <div class="sh-section">NAVIGATION (with Alt)</div>
+      <dt><kbd>Alt</kbd>+<kbd>O</kbd></dt><dd>Overview</dd>
+      <dt><kbd>Alt</kbd>+<kbd>P</kbd></dt><dd>Portfolio</dd>
+      <dt><kbd>Alt</kbd>+<kbd>R</kbd></dt><dd>Research</dd>
+      <dt><kbd>Alt</kbd>+<kbd>M</kbd></dt><dd>Markets</dd>
+      <dt><kbd>Alt</kbd>+<kbd>W</kbd></dt><dd>Watchlist</dd>
+      <dt><kbd>Alt</kbd>+<kbd>A</kbd></dt><dd>Alerts</dd>
+      <dt><kbd>Alt</kbd>+<kbd>N</kbd></dt><dd>News feed</dd>
+
+      <div class="sh-section">TIPS</div>
+      <dt><kbd>Tab</kbd></dt><dd>Move focus — green ring shows the focused element</dd>
+      <dt><kbd>Shift</kbd>+<kbd>Tab</kbd></dt><dd>Move focus backward</dd>
+    </dl>
+  </div>
+</div>
+
+<!-- Scripts -->
+<script src="/static/js/charts.js?v=2"></script>
+<script src="/static/js/app.js?v=9"></script>
+
+<!-- Inline: pre-populate research quick buttons -->
+<script>
+  // Allow inline onclick for quick buttons in the research view placeholder
+  document.querySelectorAll('#view-research button[onclick]').forEach(btn => {
+    btn.onclick = new Function(btn.getAttribute('onclick').replace('openResearch', 'window.openResearch'));
+  });
+</script>
+
+</body>
+</html>

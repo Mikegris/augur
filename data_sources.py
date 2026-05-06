@@ -1,0 +1,469 @@
+"""
+data_sources.py — No-key Tier 1 external data integrations.
+
+Each provider exposes one or more fetch functions with TTL caching.
+All sources here require NO API key, NO OAuth — only a polite User-Agent.
+
+Providers:
+    Senate STOCK Act     — github.com/timothycarambat/senate-stock-watcher-data
+    House STOCK Act      — housestockwatcher.com (bulk JSON)
+    GDELT 2.0 DOC API    — api.gdeltproject.org
+    DefiLlama            — api.llama.fi
+    mempool.space        — mempool.space/api
+    Treasury fiscaldata  — fiscaldata.treasury.gov
+    CBOE put/call        — cboe.com daily CSV
+    FinanceDatabase      — github.com/JerBouma/FinanceDatabase
+    SEC EDGAR XBRL       — data.sec.gov/api/xbrl
+"""
+
+import bz2
+import csv
+import io
+import logging
+import threading
+import time
+from datetime import datetime, timezone
+
+import requests
+
+log = logging.getLogger("augur.datasources")
+
+UA = "AUGUR/1.0 research@augur.local"
+HEADERS = {"User-Agent": UA, "Accept": "application/json"}
+
+# ── Shared TTL cache ────────────────────────────────────────────────
+_cache = {}
+_cache_lock = threading.Lock()
+
+
+def _cache_get(key):
+    with _cache_lock:
+        item = _cache.get(key)
+        if item and item[1] > time.time():
+            return item[0]
+        return None
+
+
+def _cache_set(key, value, ttl):
+    with _cache_lock:
+        _cache[key] = (value, time.time() + ttl)
+        if len(_cache) > 200:
+            now = time.time()
+            for k in [k for k, v in _cache.items() if v[1] < now][:50]:
+                _cache.pop(k, None)
+
+
+_session = None
+
+
+def _get(url, *, ttl=900, params=None, timeout=20, json_resp=True, headers=None):
+    """Cached GET. Returns parsed JSON (default) or raw text."""
+    cache_key = (url, tuple(sorted((params or {}).items())), json_resp)
+    hit = _cache_get(cache_key)
+    if hit is not None:
+        return hit
+    global _session
+    if _session is None:
+        _session = requests.Session()
+        _session.headers.update(HEADERS)
+    try:
+        r = _session.get(url, params=params, timeout=timeout, headers=headers)
+        r.raise_for_status()
+        out = r.json() if json_resp else r.text
+        _cache_set(cache_key, out, ttl)
+        return out
+    except Exception as e:
+        log.warning("fetch failed %s: %s", url, e)
+        return None
+
+
+# ════════════════════════════════════════════════════════════════════
+# CONGRESS — Senate (timothycarambat/senate-stock-watcher-data)
+# ════════════════════════════════════════════════════════════════════
+SENATE_BASE = (
+    "https://raw.githubusercontent.com/timothycarambat/"
+    "senate-stock-watcher-data/master/aggregate"
+)
+
+
+def get_senate_trades(symbol=None, limit=200):
+    """Senate STOCK Act disclosures.
+    symbol: optional ticker filter (case-insensitive)
+    """
+    data = _get(f"{SENATE_BASE}/all_transactions.json", ttl=3600)
+    if not isinstance(data, list):
+        return []
+    out = []
+    sym_u = (symbol or "").upper().strip()
+    for t in data:
+        ticker = (t.get("ticker") or "").upper()
+        if sym_u and ticker != sym_u:
+            continue
+        out.append({
+            "chamber": "Senate",
+            "name": t.get("senator") or "",
+            "ticker": ticker,
+            "asset_description": t.get("asset_description") or "",
+            "type": t.get("type") or "",
+            "amount": t.get("amount") or "",
+            "date": t.get("transaction_date") or "",
+            "filed": t.get("disclosure_date") or "",
+            "ptr_link": t.get("ptr_link") or "",
+        })
+        if len(out) >= limit:
+            break
+    return out
+
+
+# ════════════════════════════════════════════════════════════════════
+# CONGRESS — House (existing PDF parser in congress.py is canonical)
+# ════════════════════════════════════════════════════════════════════
+# Note: housestockwatcher.com mirrors are intermittent; we keep using
+# congress.py's PDF/XML parser as the primary House source.
+
+
+# ════════════════════════════════════════════════════════════════════
+# GDELT 2.0 DOC API
+# ════════════════════════════════════════════════════════════════════
+GDELT_DOC = "https://api.gdeltproject.org/api/v2/doc/doc"
+
+
+def gdelt_articles(query, *, max_records=20, timespan="3d", lang="english"):
+    """GDELT DOC API article search. Returns list of articles."""
+    params = {
+        "query": f'{query} sourcelang:{lang}',
+        "mode": "ArtList",
+        "format": "json",
+        "maxrecords": min(max(int(max_records), 1), 250),
+        "timespan": timespan,
+        "sort": "DateDesc",
+    }
+    data = _get(GDELT_DOC, params=params, ttl=600)
+    if not data or not isinstance(data, dict):
+        return []
+    arts = data.get("articles") or []
+    return [{
+        "title": a.get("title", ""),
+        "url": a.get("url", ""),
+        "domain": a.get("domain", ""),
+        "language": a.get("language", ""),
+        "seendate": a.get("seendate", ""),
+        "sourcecountry": a.get("sourcecountry", ""),
+        "tone": a.get("tone"),
+    } for a in arts]
+
+
+def gdelt_tone_timeline(query, *, timespan="2w"):
+    """GDELT tone timeline — returns daily tone series for a query."""
+    params = {
+        "query": query,
+        "mode": "TimelineTone",
+        "format": "json",
+        "timespan": timespan,
+    }
+    data = _get(GDELT_DOC, params=params, ttl=1800)
+    if not data:
+        return []
+    series = (data.get("timeline") or [{}])[0].get("data") or []
+    return [{"date": d.get("date"), "value": d.get("value")} for d in series]
+
+
+# ════════════════════════════════════════════════════════════════════
+# DefiLlama — TVL, stablecoins, yields
+# ════════════════════════════════════════════════════════════════════
+LLAMA = "https://api.llama.fi"
+LLAMA_STABLE = "https://stablecoins.llama.fi"
+LLAMA_YIELDS = "https://yields.llama.fi"
+
+
+def defillama_tvl_summary():
+    """Top protocols by TVL + total chains TVL."""
+    protos = _get(f"{LLAMA}/protocols", ttl=900) or []
+    chains = _get(f"{LLAMA}/v2/chains", ttl=900) or []
+    if isinstance(protos, list):
+        protos = sorted(
+            [p for p in protos if p.get("tvl")],
+            key=lambda p: p["tvl"], reverse=True
+        )[:25]
+        protos = [{
+            "name": p.get("name"),
+            "category": p.get("category"),
+            "chain": p.get("chain"),
+            "tvl": p.get("tvl"),
+            "change_1d": p.get("change_1d"),
+            "change_7d": p.get("change_7d"),
+            "url": p.get("url"),
+            "logo": p.get("logo"),
+        } for p in protos]
+    else:
+        protos = []
+    if isinstance(chains, list):
+        chains = sorted(
+            [c for c in chains if c.get("tvl")],
+            key=lambda c: c["tvl"], reverse=True
+        )[:15]
+        chains = [{
+            "name": c.get("name"),
+            "tokenSymbol": c.get("tokenSymbol"),
+            "tvl": c.get("tvl"),
+            "gecko_id": c.get("gecko_id"),
+        } for c in chains]
+    else:
+        chains = []
+    total = sum(c["tvl"] for c in chains) if chains else 0
+    return {"total_tvl": total, "chains": chains, "protocols": protos}
+
+
+def defillama_stablecoins():
+    """Top stablecoins by circulating supply."""
+    data = _get(f"{LLAMA_STABLE}/stablecoins", params={"includePrices": "true"}, ttl=1800)
+    if not data:
+        return []
+    coins = data.get("peggedAssets") or []
+    out = []
+    for c in coins[:25]:
+        circ = c.get("circulating") or {}
+        out.append({
+            "symbol": c.get("symbol"),
+            "name": c.get("name"),
+            "peg": (c.get("pegMechanism") or "") + "/" + (c.get("pegType") or ""),
+            "price": (c.get("price") or None),
+            "circulating_usd": circ.get("peggedUSD"),
+            "chains": (c.get("chains") or [])[:6],
+        })
+    return out
+
+
+def defillama_top_yields(limit=20):
+    """Top stablecoin yields across DeFi."""
+    data = _get(f"{LLAMA_YIELDS}/pools", ttl=1800)
+    if not data:
+        return []
+    pools = data.get("data") or []
+    pools = [p for p in pools if (p.get("stablecoin") and p.get("apy"))]
+    pools.sort(key=lambda p: p.get("apy") or 0, reverse=True)
+    return [{
+        "project": p.get("project"),
+        "chain": p.get("chain"),
+        "symbol": p.get("symbol"),
+        "tvl_usd": p.get("tvlUsd"),
+        "apy": p.get("apy"),
+        "apy_base": p.get("apyBase"),
+        "il_risk": p.get("ilRisk"),
+    } for p in pools[:limit]]
+
+
+# ════════════════════════════════════════════════════════════════════
+# mempool.space — BTC stats
+# ════════════════════════════════════════════════════════════════════
+MEMPOOL = "https://mempool.space/api"
+
+
+def mempool_btc_stats():
+    """Current BTC mempool, fees, blocks."""
+    fees = _get(f"{MEMPOOL}/v1/fees/recommended", ttl=120) or {}
+    mempool = _get(f"{MEMPOOL}/mempool", ttl=120) or {}
+    diff = _get(f"{MEMPOOL}/v1/difficulty-adjustment", ttl=600) or {}
+    blocks = _get(f"{MEMPOOL}/blocks", ttl=300) or []
+    tip_height = blocks[0].get("height") if blocks else None
+    return {
+        "fees": fees,
+        "mempool_count": mempool.get("count"),
+        "mempool_vsize": mempool.get("vsize"),
+        "mempool_total_fee": mempool.get("total_fee"),
+        "tip_height": tip_height,
+        "difficulty_change_pct": diff.get("difficultyChange"),
+        "remaining_blocks": diff.get("remainingBlocks"),
+        "estimated_retarget_date": diff.get("estimatedRetargetDate"),
+    }
+
+
+# ════════════════════════════════════════════════════════════════════
+# Treasury fiscaldata — yield curve
+# ════════════════════════════════════════════════════════════════════
+TREASURY = "https://api.fiscaldata.treasury.gov/services/api/fiscal_service"
+
+
+def treasury_yield_curve():
+    """Latest U.S. Treasury yield curve (all tenors)."""
+    url = f"{TREASURY}/v2/accounting/od/avg_interest_rates"
+    params = {
+        "filter": "security_desc:in:(Treasury Bills,Treasury Notes,Treasury Bonds)",
+        "sort": "-record_date",
+        "page[size]": "20",
+    }
+    data = _get(url, params=params, ttl=43200)
+    if not data:
+        return {"as_of": None, "rates": []}
+    rows = data.get("data") or []
+    rates = []
+    for r in rows[:20]:
+        rates.append({
+            "security": r.get("security_desc"),
+            "rate": float(r["avg_interest_rate_amt"]) if r.get("avg_interest_rate_amt") else None,
+            "date": r.get("record_date"),
+        })
+    as_of = rates[0]["date"] if rates else None
+    return {"as_of": as_of, "rates": rates}
+
+
+# ════════════════════════════════════════════════════════════════════
+# CBOE — daily put/call ratio
+# ════════════════════════════════════════════════════════════════════
+CBOE_PUT_CALL = (
+    "https://cdn.cboe.com/api/global/us_indices/daily_prices/"
+    "VIX_History.csv"
+)
+CBOE_RATIOS = "https://www.cboe.com/us/options/market_statistics/daily/"
+
+
+def cboe_put_call_ratio():
+    """Latest CBOE total options put/call ratio (uses cdn JSON proxy).
+    Falls back to None if unreachable; not all CBOE feeds are stable."""
+    url = "https://cdn.cboe.com/api/global/us_indices/daily_prices/VIX_History.csv"
+    txt = _get(url, ttl=3600, json_resp=False)
+    if not txt:
+        return None
+    last = None
+    for row in csv.DictReader(io.StringIO(txt)):
+        last = row
+    if not last:
+        return None
+    return {
+        "vix_date": last.get("DATE"),
+        "vix_close": float(last["CLOSE"]) if last.get("CLOSE") else None,
+        "vix_high": float(last["HIGH"]) if last.get("HIGH") else None,
+        "vix_low": float(last["LOW"]) if last.get("LOW") else None,
+    }
+
+
+# ════════════════════════════════════════════════════════════════════
+# JerBouma/FinanceDatabase — equity universe
+# ════════════════════════════════════════════════════════════════════
+FINDB_BASE = (
+    "https://raw.githubusercontent.com/JerBouma/FinanceDatabase/main/compression"
+)
+_FINDB_LOCK = threading.Lock()
+_FINDB_UNIVERSE = {}  # asset -> list[dict]
+
+
+def financedb_universe(asset="equities"):
+    """Returns parsed JerBouma FinanceDatabase rows (bz2-compressed CSV)."""
+    if asset not in ("equities", "etfs", "funds", "indices", "currencies", "cryptos", "moneymarkets"):
+        asset = "equities"
+    with _FINDB_LOCK:
+        if asset in _FINDB_UNIVERSE:
+            return _FINDB_UNIVERSE[asset]
+        try:
+            url = f"{FINDB_BASE}/{asset}.bz2"
+            r = requests.get(url, headers=HEADERS, timeout=30)
+            r.raise_for_status()
+            text = bz2.decompress(r.content).decode("utf-8", errors="replace")
+            rows = list(csv.DictReader(io.StringIO(text)))
+            _FINDB_UNIVERSE[asset] = rows
+            return rows
+        except Exception as e:
+            log.warning("financedb load failed (%s): %s", asset, e)
+            return []
+
+
+def financedb_filter(asset="equities", *, country=None, sector=None, industry=None, exchange=None, limit=200):
+    """Filter the FinanceDatabase universe."""
+    universe = financedb_universe(asset)
+    out = []
+    for row in universe:
+        if country and (row.get("country") or "").lower() != country.lower():
+            continue
+        if sector and (row.get("sector") or "").lower() != sector.lower():
+            continue
+        if industry and industry.lower() not in (row.get("industry") or "").lower():
+            continue
+        if exchange and (row.get("exchange") or "").lower() != exchange.lower():
+            continue
+        out.append({
+            "symbol": row.get("symbol") or "",
+            "name": row.get("name") or "",
+            "sector": row.get("sector") or "",
+            "industry_group": row.get("industry_group") or "",
+            "industry": row.get("industry") or "",
+            "country": row.get("country") or "",
+            "exchange": row.get("exchange") or "",
+            "currency": row.get("currency") or "",
+            "market_cap": row.get("market_cap") or "",
+        })
+        if len(out) >= limit:
+            break
+    return out
+
+
+def financedb_facets(asset="equities"):
+    """Return distinct sectors / industries / countries / exchanges for filter UIs."""
+    universe = financedb_universe(asset)
+    sectors, industries, countries, exchanges = set(), set(), set(), set()
+    for row in universe:
+        if row.get("sector"): sectors.add(row["sector"])
+        if row.get("industry"): industries.add(row["industry"])
+        if row.get("country"): countries.add(row["country"])
+        if row.get("exchange"): exchanges.add(row["exchange"])
+    return {
+        "sectors": sorted(s for s in sectors if s),
+        "industries": sorted(i for i in industries if i),
+        "countries": sorted(c for c in countries if c),
+        "exchanges": sorted(e for e in exchanges if e),
+        "total_symbols": len(universe),
+    }
+
+
+# ════════════════════════════════════════════════════════════════════
+# SEC EDGAR XBRL — companyfacts
+# ════════════════════════════════════════════════════════════════════
+SEC_BASE = "https://data.sec.gov"
+
+
+def xbrl_company_facts(cik):
+    """All standardized XBRL facts for a CIK (10-digit zero-padded)."""
+    if not cik:
+        return None
+    cik = str(cik).zfill(10)
+    return _get(f"{SEC_BASE}/api/xbrl/companyfacts/CIK{cik}.json", ttl=21600)
+
+
+def xbrl_key_metrics(cik):
+    """Pull a small dict of headline metrics from companyfacts."""
+    facts = xbrl_company_facts(cik)
+    if not facts:
+        return {}
+    us_gaap = (facts.get("facts") or {}).get("us-gaap") or {}
+
+    def latest(concept, unit_pref=("USD", "USD/shares", "shares", "pure")):
+        node = us_gaap.get(concept)
+        if not node:
+            return None
+        units = node.get("units") or {}
+        for u in unit_pref:
+            entries = units.get(u)
+            if not entries:
+                continue
+            best = sorted(
+                [e for e in entries if e.get("end")],
+                key=lambda e: e["end"], reverse=True
+            )
+            if best:
+                e = best[0]
+                return {"value": e.get("val"), "end": e.get("end"), "unit": u, "form": e.get("form")}
+        return None
+
+    return {
+        "entity": facts.get("entityName"),
+        "revenue":      latest("Revenues") or latest("RevenueFromContractWithCustomerExcludingAssessedTax"),
+        "net_income":   latest("NetIncomeLoss"),
+        "assets":       latest("Assets"),
+        "liabilities":  latest("Liabilities"),
+        "stockholders_equity": latest("StockholdersEquity"),
+        "cash":         latest("CashAndCashEquivalentsAtCarryingValue"),
+        "shares_out":   latest("CommonStockSharesOutstanding") or latest("EntityCommonStockSharesOutstanding"),
+        "eps_basic":    latest("EarningsPerShareBasic"),
+        "eps_diluted":  latest("EarningsPerShareDiluted"),
+        "rd_expense":   latest("ResearchAndDevelopmentExpense"),
+        "operating_income": latest("OperatingIncomeLoss"),
+    }

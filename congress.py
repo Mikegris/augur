@@ -1,0 +1,435 @@
+"""
+congress.py — Congressional Trading Intelligence
+Parses House PTR (Periodic Transaction Report) PDFs from the official
+House Financial Disclosure website to extract real stock trades.
+"""
+
+import re
+import io
+import zipfile
+import logging
+import requests
+import xml.etree.ElementTree as ET
+from datetime import datetime, timedelta
+
+try:
+    import pdfplumber
+    _PDF_OK = True
+except ImportError:
+    _PDF_OK = False
+
+log = logging.getLogger(__name__)
+
+HOUSE_FD_BASE = "https://disclosures-clerk.house.gov"
+HOUSE_PTR_PDF = HOUSE_FD_BASE + "/public_disc/ptr-pdfs/{year}/{doc_id}.pdf"
+HOUSE_FD_ZIP  = HOUSE_FD_BASE + "/public_disc/financial-pdfs/{year}FD.ZIP"
+
+# Amount range midpoints for sorting/display
+AMOUNT_MIDPOINTS = {
+    "$1,001 - $15,000":      8000,
+    "$15,001 - $50,000":    32500,
+    "$50,001 - $100,000":   75000,
+    "$100,001 - $250,000": 175000,
+    "$250,001 - $500,000": 375000,
+    "$500,001 - $1,000,000": 750000,
+    "$1,000,001 - $5,000,000": 3000000,
+    "Over $5,000,000": 5000000,
+}
+
+OWNER_LABELS = {
+    "JT": "Joint",
+    "SP": "Spouse",
+    "DC": "Dep. Child",
+    "": "Self",
+}
+
+TXN_LABELS = {
+    "P": "Buy",
+    "S": "Sell",
+    "S (partial)": "Sell (Partial)",
+    "S (Exchange)": "Exchange",
+    "E (Exchange)": "Exchange",
+    "PE": "Purchase (Exercise)",
+    "SE": "Sale (Exercise)",
+}
+
+
+def _fetch_fd_index(year):
+    """Download and parse the House FD ZIP for a given year.
+    Returns list of PTR dicts: {last, first, state, date_str, doc_id, year}"""
+    url = HOUSE_FD_ZIP.format(year=year)
+    try:
+        resp = requests.get(url, timeout=20)
+        if resp.status_code != 200:
+            return []
+        zdata = zipfile.ZipFile(io.BytesIO(resp.content))
+        xml_name = f"{year}FD.xml"
+        if xml_name not in zdata.namelist():
+            return []
+        xml_bytes = zdata.read(xml_name)
+        root = ET.fromstring(xml_bytes.decode("utf-8-sig", errors="replace"))
+        records = []
+        for m in root.findall("Member"):
+            if m.findtext("FilingType", "") != "P":
+                continue
+            records.append({
+                "last":    m.findtext("Last", ""),
+                "first":   m.findtext("First", ""),
+                "state":   m.findtext("StateDst", ""),
+                "date_str": m.findtext("FilingDate", ""),
+                "doc_id":  m.findtext("DocID", ""),
+                "year":    year,
+            })
+        return records
+    except Exception as e:
+        log.warning("FD index fetch error (%s): %s", year, e)
+        return []
+
+
+def _parse_filing_date(date_str):
+    """Parse M/D/YYYY or MM/DD/YYYY to datetime."""
+    for fmt in ("%m/%d/%Y", "%-m/%-d/%Y"):
+        try:
+            return datetime.strptime(date_str, fmt)
+        except ValueError:
+            pass
+    return None
+
+
+def _parse_amount(amount_str):
+    """Convert amount range string to midpoint integer."""
+    s = amount_str.strip()
+    for k, v in AMOUNT_MIDPOINTS.items():
+        if k.lower() in s.lower():
+            return v
+    # Try parsing raw numbers
+    nums = re.findall(r"[\d,]+", s)
+    if len(nums) >= 2:
+        try:
+            lo = int(nums[0].replace(",", ""))
+            hi = int(nums[1].replace(",", ""))
+            return (lo + hi) // 2
+        except Exception:
+            pass
+    if nums:
+        try:
+            return int(nums[0].replace(",", ""))
+        except Exception:
+            pass
+    return 0
+
+
+def _parse_ptr_pdf(pdf_bytes, member_name, doc_id, filing_year):
+    """Parse a PTR PDF binary and return list of transaction dicts."""
+    if not _PDF_OK:
+        return []
+    transactions = []
+    try:
+        with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
+            full_text = ""
+            for page in pdf.pages:
+                full_text += (page.extract_text() or "") + "\n"
+    except Exception as e:
+        log.warning("PDF parse error for %s: %s", doc_id, e)
+        return []
+
+    # Clean null bytes and normalize
+    text = full_text.replace("\x00", " ").replace("\r", "")
+
+    # Extract member name from PDF (more reliable than XML)
+    name_match = re.search(r"Name:\s*Hon\.\s*(.+)", text)
+    if name_match:
+        member_name = name_match.group(1).strip()
+
+    state_match = re.search(r"State/District:\s*(\w+)", text)
+    state = state_match.group(1).strip() if state_match else ""
+
+    # Remove header/footer boilerplate
+    text = re.sub(r"ID\s+Owner\s+Asset.*?Cap\.\s*\n.*?Gains.*?\n.*?\$200\?", "", text, flags=re.DOTALL)
+    text = re.sub(r"F\s+S\s*:\s*New", "", text)
+    text = re.sub(r"S\s+O\s*:.*?\n", "\n", text)
+    # Remove description lines (options metadata like "Expires MM/DD/YYYY")
+    text = re.sub(r"D\s*:\s*.*?\n", "\n", text)
+    text = re.sub(r"Filing ID.*?\n", "", text)
+    text = re.sub(r"Clerk of the House.*?\n", "", text)
+    text = re.sub(r"For the complete list.*?\n", "", text)
+    text = re.sub(r"I CERTIFY.*", "", text, flags=re.DOTALL)
+    text = re.sub(r"Digitally Signed.*", "", text, flags=re.DOTALL)
+    text = re.sub(r"I\s+V\s+D\s*\n.*", "", text, flags=re.DOTALL)
+    text = re.sub(r"I\s+P\s+O.*", "", text, flags=re.DOTALL)
+    text = re.sub(r"C\s+S\s*\n", "", text)
+    text = re.sub(r"F\s+I\s*\n", "", text)
+    text = re.sub(r"T\s*\n", "", text)
+
+    # Collapse multiple blank lines
+    text = re.sub(r"\n{3,}", "\n\n", text)
+
+    # Now search for transaction patterns
+    # Pattern: find lines containing (TICKER) [ASSET_TYPE]
+    # and extract the surrounding transaction data
+
+    # Date pattern: MM/DD/YYYY
+    DATE_RE = r"(\d{1,2}/\d{1,2}/\d{4})"
+    AMOUNT_RE = r"(\$[\d,]+\s*-\s*\$[\d,]+|Over\s*\$[\d,]+)"
+    TICKER_RE = r"\(([A-Z]{1,5})\)\s*\[(ST|OP|MF|GS|OT|RE|PF|HC|VI)\]"
+    TXN_TYPE_RE = r"\b(S\s*\(partial\)|S\s*\(Exchange\)|E\s*\(Exchange\)|P|S|PE|SE)\b"
+    OWNER_RE = r"^(JT|SP|DC)\s+"
+
+    lines = text.split("\n")
+    i = 0
+    while i < len(lines):
+        line = lines[i].strip()
+        if not line:
+            i += 1
+            continue
+
+        # Check if this line or combined with next contains a ticker
+        combined = line
+        if i + 1 < len(lines):
+            combined = line + " " + lines[i + 1].strip()
+        if i + 2 < len(lines):
+            combined3 = combined + " " + lines[i + 2].strip()
+        else:
+            combined3 = combined
+
+        ticker_match = re.search(TICKER_RE, combined3)
+        if not ticker_match:
+            i += 1
+            continue
+
+        ticker = ticker_match.group(1)
+        asset_type = ticker_match.group(2)
+
+        # Look for transaction type, dates, amount in the surrounding context
+        # Collect up to 4 lines starting at i
+        block_lines = []
+        for j in range(i, min(i + 5, len(lines))):
+            block_lines.append(lines[j].strip())
+        block = " ".join(block_lines)
+        block = block.replace("\x00", " ")
+
+        # Owner
+        owner = ""
+        owner_match = re.match(OWNER_RE, line)
+        if owner_match:
+            owner = owner_match.group(1)
+
+        # Transaction type (P=Buy, S=Sell, S (partial), etc.)
+        txn_type = ""
+        # Look for transaction type after the asset type bracket
+        after_ticker = block[block.find(ticker_match.group(0)) + len(ticker_match.group(0)):]
+        # Also check in a window before the first date
+        date_matches = list(re.finditer(DATE_RE, block))
+        pre_date = block
+        if date_matches:
+            pre_date = block[:date_matches[0].start()]
+
+        # Priority: check the full block for S (partial) first
+        if re.search(r"S\s*\(partial\)", block, re.IGNORECASE):
+            txn_type = "S (partial)"
+        elif re.search(r"S\s*\(Exchange\)", block, re.IGNORECASE):
+            txn_type = "S (Exchange)"
+        elif re.search(r"E\s*\(Exchange\)", block, re.IGNORECASE):
+            txn_type = "E (Exchange)"
+        else:
+            # Look for isolated P or S after ticker
+            m = re.search(r"\]\s+(P|S|PE|SE)\b", after_ticker)
+            if not m:
+                # Check in pre_date window after removing owner prefix
+                clean = re.sub(OWNER_RE, "", pre_date).strip()
+                m = re.search(r"\b(P|S|PE|SE)\b", clean[:100])
+            if m:
+                txn_type = m.group(1)
+
+        if not txn_type:
+            i += 1
+            continue
+
+        # Dates
+        txn_date = ""
+        notif_date = ""
+        if date_matches:
+            txn_date = date_matches[0].group(1)
+            if len(date_matches) >= 2:
+                notif_date = date_matches[1].group(1)
+
+        # Amount
+        amount_str = ""
+        amount_val = 0
+        amount_match = re.search(AMOUNT_RE, block)
+        if amount_match:
+            amount_str = amount_match.group(1).strip()
+            amount_val = _parse_amount(amount_str)
+
+        # Only record stock and option trades (filter out government securities, etc.)
+        if asset_type not in ("ST", "OP"):
+            i += 1
+            continue
+
+        # Parse transaction date
+        txn_dt = None
+        if txn_date:
+            try:
+                txn_dt = datetime.strptime(txn_date, "%m/%d/%Y")
+            except Exception:
+                pass
+
+        transactions.append({
+            "member_name": member_name,
+            "state":       state,
+            "doc_id":      doc_id,
+            "filing_year": filing_year,
+            "owner":       OWNER_LABELS.get(owner, owner or "Self"),
+            "ticker":      ticker,
+            "asset_type":  asset_type,
+            "txn_type":    TXN_LABELS.get(txn_type, txn_type),
+            "txn_type_raw": txn_type,
+            "txn_date":    txn_date,
+            "txn_dt":      txn_dt,
+            "notif_date":  notif_date,
+            "amount_str":  amount_str,
+            "amount_val":  amount_val,
+            "pdf_url":     HOUSE_PTR_PDF.format(year=filing_year, doc_id=doc_id),
+        })
+
+        i += 1
+
+    # Deduplicate (same ticker + date + type within same filing)
+    seen = set()
+    unique = []
+    for t in transactions:
+        key = (t["ticker"], t["txn_date"], t["txn_type_raw"], t["owner"])
+        if key not in seen:
+            seen.add(key)
+            unique.append(t)
+
+    return unique
+
+
+def get_recent_trades(days=90, max_pdfs=100, tickers=None):
+    """
+    Fetch and parse recent House PTR filings.
+    Returns list of trade dicts sorted by transaction date desc.
+
+    days      — how many days back to include (based on filing date)
+    max_pdfs  — cap on number of PDFs to parse (newest first)
+    tickers   — optional list to filter results
+    """
+    if not _PDF_OK:
+        return {"error": "pdfplumber not installed", "trades": []}
+
+    cutoff = datetime.now() - timedelta(days=days)
+    current_year = datetime.now().year
+
+    # Get filing indices for current and previous year
+    all_ptrs = []
+    for year in [current_year, current_year - 1]:
+        recs = _fetch_fd_index(year)
+        for r in recs:
+            dt = _parse_filing_date(r["date_str"])
+            if dt and dt >= cutoff:
+                r["filing_dt"] = dt
+                all_ptrs.append(r)
+
+    # Sort newest first
+    all_ptrs.sort(key=lambda x: x.get("filing_dt", datetime.min), reverse=True)
+    all_ptrs = all_ptrs[:max_pdfs]
+
+    # Parse PDFs in parallel (5 concurrent downloads)
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    def _fetch_one(ptr):
+        doc_id = ptr["doc_id"]
+        year   = ptr["year"]
+        member = f"{ptr['first']} {ptr['last']}"
+        url    = HOUSE_PTR_PDF.format(year=year, doc_id=doc_id)
+        try:
+            resp = requests.get(url, timeout=15)
+            if resp.status_code != 200:
+                return []
+            return _parse_ptr_pdf(resp.content, member, doc_id, year)
+        except Exception as e:
+            log.warning("PTR fetch error for %s: %s", doc_id, e)
+            return []
+
+    all_trades = []
+    with ThreadPoolExecutor(max_workers=5) as pool:
+        futures = {pool.submit(_fetch_one, ptr): ptr for ptr in all_ptrs}
+        for future in as_completed(futures):
+            all_trades.extend(future.result())
+
+    # Filter by ticker if requested
+    if tickers:
+        upper = [t.upper() for t in tickers]
+        all_trades = [t for t in all_trades if t["ticker"] in upper]
+
+    # Sort by transaction date desc
+    all_trades.sort(
+        key=lambda x: x.get("txn_dt") or datetime.min,
+        reverse=True
+    )
+
+    return {"trades": all_trades, "filings_parsed": len(all_ptrs)}
+
+
+def get_trades_for_ticker(ticker, days=180):
+    """Get all recent congressional trades for a specific ticker."""
+    result = get_recent_trades(days=days, max_pdfs=200, tickers=[ticker])
+    return result.get("trades", [])
+
+
+def get_congress_summary(days=90, max_pdfs=80):
+    """
+    Get summary of recent congressional trading activity:
+    - most traded tickers
+    - recent trades table
+    - buy/sell ratio by ticker
+    """
+    result = get_recent_trades(days=days, max_pdfs=max_pdfs)
+    trades = result.get("trades", [])
+
+    # Aggregate by ticker
+    ticker_stats = {}
+    for t in trades:
+        sym = t["ticker"]
+        if sym not in ticker_stats:
+            ticker_stats[sym] = {
+                "ticker": sym,
+                "buys": 0,
+                "sells": 0,
+                "total_trades": 0,
+                "members": set(),
+                "latest_date": "",
+                "total_amount": 0,
+            }
+        s = ticker_stats[sym]
+        raw = t.get("txn_type_raw", "")
+        if raw in ("P", "PE"):
+            s["buys"] += 1
+        elif raw in ("S", "S (partial)", "SP", "SE", "S (Exchange)"):
+            s["sells"] += 1
+        s["total_trades"] += 1
+        s["members"].add(t["member_name"])
+        s["total_amount"] += t.get("amount_val", 0)
+        if not s["latest_date"] or t["txn_date"] > s["latest_date"]:
+            s["latest_date"] = t["txn_date"]
+
+    # Convert sets to counts
+    ticker_list = []
+    for sym, s in ticker_stats.items():
+        member_count = len(s["members"])
+        s["member_count"] = member_count
+        del s["members"]
+        buy_pct = round(s["buys"] / s["total_trades"] * 100) if s["total_trades"] else 0
+        s["buy_pct"] = buy_pct
+        s["sentiment"] = "BULLISH" if buy_pct >= 70 else ("BEARISH" if buy_pct <= 30 else "MIXED")
+        ticker_list.append(s)
+
+    ticker_list.sort(key=lambda x: x["total_trades"], reverse=True)
+
+    return {
+        "trades": trades[:200],
+        "ticker_summary": ticker_list[:50],
+        "filings_parsed": result.get("filings_parsed", 0),
+        "total_trades_found": len(trades),
+    }
