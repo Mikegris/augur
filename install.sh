@@ -121,16 +121,20 @@ say "Running setup.sh (creates venv + installs dependencies, ~2-5 min)..."
 bash ./setup.sh
 
 # ── offer to start now ──────────────────────────────────────────────────────
+# Default: don't auto-start. We only prompt when we can actually open /dev/tty
+# for reading (which fails inside non-interactive subshells like CI runners,
+# the Bash tool, or daemonized contexts — even though `[ -r /dev/tty ]` may
+# return true for the special device).
 echo
-if [ -r /dev/tty ]; then
+START="no"
+if (exec </dev/tty) 2>/dev/null; then
   printf "Start AUGUR now? [Y/n] "
-  read -r REPLY < /dev/tty || REPLY="y"
-  case "$REPLY" in
-    n|N|no|No) START="no" ;;
-    *)         START="yes" ;;
-  esac
-else
-  START="no"
+  if read -r REPLY < /dev/tty 2>/dev/null; then
+    case "$REPLY" in
+      n|N|no|No) START="no" ;;
+      *)         START="yes" ;;
+    esac
+  fi
 fi
 
 if [ "$START" = "yes" ]; then
