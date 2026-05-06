@@ -57,12 +57,41 @@ _(Add screenshots here after first run.)_
 
 ### Prerequisites
 
-- **Python 3.9 or newer** ([download](https://www.python.org/downloads/))
+- **Python 3.9 or newer** ([download](https://www.python.org/downloads/)) — the installer will tell you if it's missing and how to install it
 - **~500 MB free disk space** for the virtualenv + dependencies
 - An internet connection (for the data feeds)
 - *(Optional)* an OpenAI API key for AI-generated theses
 
-### macOS / Linux
+### Quick install — paste one line
+
+**macOS / Linux** (Terminal):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Mikegris/augur/main/install.sh | bash
+```
+
+**Windows** (PowerShell):
+
+```powershell
+iwr -useb https://raw.githubusercontent.com/Mikegris/augur/main/install.ps1 | iex
+```
+
+The installer will:
+1. Verify Python 3.9+ (and tell you exactly how to install it if missing)
+2. Clone the repo into `~/augur` (or `$HOME\augur` on Windows) — set `AUGUR_DIR` to override
+3. Create a virtual environment and install dependencies (~2-5 min)
+4. Initialize a fresh local database
+5. Optionally start the app and open your browser
+
+The app opens at **http://localhost:5001**.
+
+> **Want to read the script before running it?** Just paste the URL into your browser, or run `curl -fsSL https://raw.githubusercontent.com/Mikegris/augur/main/install.sh` (without `| bash`) to print it.
+
+### Manual install
+
+If you'd rather clone yourself:
+
+**macOS / Linux:**
 
 ```bash
 git clone https://github.com/Mikegris/augur.git
@@ -71,7 +100,7 @@ cd augur
 ./run.sh          # starts the app and opens your browser to localhost:5001
 ```
 
-### Windows
+**Windows:**
 
 ```bat
 git clone https://github.com/Mikegris/augur.git
@@ -79,8 +108,6 @@ cd augur
 setup.bat
 run.bat
 ```
-
-The app opens at **http://localhost:5001**.
 
 ### Configuration (optional)
 
