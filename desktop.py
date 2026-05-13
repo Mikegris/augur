@@ -118,16 +118,20 @@ def main() -> int:
         return 1
     log.info("Flask is up on http://127.0.0.1:%d", port)
 
-    webview.create_window(
+    log.info("[desktop] pywebview version: %s", getattr(webview, "__version__", "?"))
+    log.info("[desktop] creating window ...")
+    win = webview.create_window(
         title="AUGUR — Wealth Intelligence System",
         url=f"http://127.0.0.1:{port}",
         width=1400,
         height=900,
         min_size=(900, 600),
     )
+    log.info("[desktop] window created: %r — calling webview.start() ...", win)
     # pywebview's start() blocks the main thread until the window closes.
     # The Flask thread is a daemon, so it terminates with us.
-    webview.start()
+    webview.start(debug=bool(os.environ.get("AUGUR_WEBVIEW_DEBUG")))
+    log.info("[desktop] webview.start() returned — exiting")
     return 0
 
 

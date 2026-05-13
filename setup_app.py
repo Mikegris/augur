@@ -132,8 +132,7 @@ setup(
                 # files collide with the top-level ones during py2app collect.
                 "setuptools", "pkg_resources",
             ],
-            # iconfile: omitted — uses the default Python rocket icon.
-            #   Drop a .icns file here later to brand the app.
+            "iconfile": str(HERE / "icon.icns"),
         }
     },
     setup_requires=["py2app"],
