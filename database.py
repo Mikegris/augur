@@ -1,9 +1,14 @@
+import os
 import sqlite3
 import json
 import threading
 from datetime import datetime, timezone
 
-DB_PATH = "wealth.db"
+# Default to a relative path so existing CLI / dev workflows keep working;
+# the desktop bundle overrides this via AUGUR_DB_PATH to point at the user's
+# Application Support directory (which is the only writable place once the
+# app is launched as a .app bundle from /Applications).
+DB_PATH = os.environ.get("AUGUR_DB_PATH", "wealth.db")
 
 # Thread-local connection pool — reuse connections per thread instead of
 # opening/closing on every call. Saves ~1-5ms per DB operation.

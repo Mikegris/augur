@@ -1,0 +1,6 @@
+# Build-only dependencies for producing the macOS .app bundle.
+# Install via: pip install -r requirements-build.txt
+# Used by: python setup_app.py py2app
+# py2app 0.28+ requires Python 3.10+ (uses importlib.resources._files).
+# Pin to 0.27 for Python 3.9 compatibility — bump this once we move to 3.10+.
+py2app>=0.27,<0.28

@@ -20,9 +20,45 @@ import socket
 import sys
 import threading
 import time
+from pathlib import Path
 
 log = logging.getLogger("augur.desktop")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+
+
+def _user_data_dir() -> Path:
+    """Platform-appropriate per-user writable dir for wealth.db.
+
+    When run as `python desktop.py` from a checkout, CWD is writable and
+    AUGUR_DB_PATH is left alone so it falls back to `./wealth.db` (matches
+    the existing CLI / run.sh behaviour). When run from a `.app` bundle in
+    /Applications, CWD is `/`, so we need an explicit writable location.
+    """
+    if sys.platform == "darwin":
+        return Path.home() / "Library" / "Application Support" / "AUGUR"
+    if sys.platform.startswith("win"):
+        base = os.environ.get("APPDATA") or str(Path.home() / "AppData" / "Roaming")
+        return Path(base) / "AUGUR"
+    # Linux / other XDG
+    base = os.environ.get("XDG_DATA_HOME") or str(Path.home() / ".local" / "share")
+    return Path(base) / "augur"
+
+
+def _bootstrap_user_data_dir() -> None:
+    """If running from a frozen bundle (py2app / pyinstaller), point the DB at
+    the user data dir so we can actually write to it. No-op for dev runs from
+    a checkout, where the working directory is already writable."""
+    if not getattr(sys, "frozen", False):
+        return
+    if "AUGUR_DB_PATH" in os.environ:
+        return  # user explicitly overrode it
+    data_dir = _user_data_dir()
+    data_dir.mkdir(parents=True, exist_ok=True)
+    os.environ["AUGUR_DB_PATH"] = str(data_dir / "wealth.db")
+    log.info("Using user data dir: %s", data_dir)
+
+
+_bootstrap_user_data_dir()
 
 
 def _port_in_use(port: int, host: str = "127.0.0.1") -> bool:

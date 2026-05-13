@@ -53,7 +53,16 @@ def _valid_ticker(symbol):
 def _utc_now():
     return datetime.now(timezone.utc)
 
-app = Flask(__name__)
+# When bundled by py2app, app.py lives inside a .zip and Flask's default
+# template/static lookup (relative to __file__) breaks. py2app exports
+# RESOURCEPATH pointing at Contents/Resources/ where data_files land, so
+# prefer that when available; otherwise fall back to the source layout.
+_BASE = os.environ.get("RESOURCEPATH") or os.path.dirname(os.path.abspath(__file__))
+app = Flask(
+    __name__,
+    template_folder=os.path.join(_BASE, "templates"),
+    static_folder=os.path.join(_BASE, "static"),
+)
 app.config["JSON_SORT_KEYS"] = False
 
 # Gzip compression — reduces JSON response sizes by 60-80%
