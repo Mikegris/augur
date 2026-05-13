@@ -1,0 +1,8 @@
+# Optional dependencies for the native desktop wrapper (desktop.py).
+# Install via: pip install -r requirements-desktop.txt
+#
+# pywebview pulls the platform-specific backend automatically:
+#   • macOS:   pyobjc-core + pyobjc-framework-WebKit  (WKWebView)
+#   • Windows: pythonnet                              (WebView2 / EdgeHTML)
+#   • Linux:   either pygobject (GTK) or pyqt5/qt6 — install your preference
+pywebview>=5.0
