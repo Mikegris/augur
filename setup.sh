@@ -32,6 +32,21 @@ if [ "$PY_MAJOR" -lt 3 ] || { [ "$PY_MAJOR" -eq 3 ] && [ "$PY_MINOR" -lt 9 ]; };
 fi
 echo "✓ Python ${PY_VERSION} detected"
 
+# ── pip sanity check ────────────────────────────────────────────────────────
+# Some Python builds (notably the macOS Xcode CLT shim) lack a working pip /
+# ensurepip. Fail fast here with actionable guidance instead of after the
+# venv is half-built.
+if ! python3 -m pip --version &>/dev/null; then
+  echo "ERROR: python3 is installed but pip is not working."
+  echo ""
+  echo "Try one of:"
+  echo "  • python3 -m ensurepip --upgrade"
+  echo "  • macOS:  brew install python3"
+  echo "  • Linux:  sudo apt install python3-pip python3-venv"
+  exit 1
+fi
+echo "✓ pip available"
+
 # ── Virtual environment ─────────────────────────────────────────────────────
 if [ ! -d "venv" ]; then
   echo "► Creating virtual environment..."
@@ -43,10 +58,17 @@ source venv/bin/activate
 
 # ── Dependencies ────────────────────────────────────────────────────────────
 echo "► Upgrading pip..."
-pip install -q --upgrade pip
+pip install --upgrade pip
 
-echo "► Installing dependencies (this may take a few minutes)..."
-pip install -q -r requirements.txt
+# Prefer the lock file for reproducible installs; fall back to the loose
+# requirements.txt if it's missing (e.g. dev clones without a lock).
+if [ -f "requirements.lock" ]; then
+  echo "► Installing pinned dependencies from requirements.lock (this may take a few minutes)..."
+  pip install -r requirements.lock
+else
+  echo "► Installing dependencies from requirements.txt (this may take a few minutes)..."
+  pip install -r requirements.txt
+fi
 
 # ── Local config ────────────────────────────────────────────────────────────
 if [ ! -f ".env" ] && [ -f ".env.example" ]; then
@@ -56,7 +78,26 @@ fi
 
 # ── Initialize the database ─────────────────────────────────────────────────
 echo "► Initializing local database..."
-python3 -c "import database; database.init_db(); print('✓ wealth.db ready')"
+if ! python3 - <<'PY'
+import sys, traceback
+try:
+    import database
+    database.init_db()
+    print("✓ wealth.db ready")
+except Exception as e:
+    print(f"DB init failed: {type(e).__name__}: {e}", file=sys.stderr)
+    traceback.print_exc(file=sys.stderr)
+    sys.exit(1)
+PY
+then
+  echo ""
+  echo "✗ Database initialization failed. The error above usually means a"
+  echo "  missing dependency or a corrupted wealth.db file. Try:"
+  echo "    rm -f wealth.db wealth.db-shm wealth.db-wal && ./setup.sh"
+  echo "  If it persists, file an issue at:"
+  echo "    https://github.com/Mikegris/augur/issues"
+  exit 1
+fi
 
 echo ""
 echo "╔══════════════════════════════════════════════════╗"

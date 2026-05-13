@@ -25,6 +25,16 @@ if errorlevel 1 (
 for /f "tokens=2 delims= " %%v in ('python --version 2^>^&1') do set PY_VERSION=%%v
 echo Python %PY_VERSION% detected
 
+REM ---- pip sanity check ---------------------------------------------------
+python -m pip --version >nul 2>&1
+if errorlevel 1 (
+    echo ERROR: python is installed but pip is not working.
+    echo.
+    echo Try: python -m ensurepip --upgrade
+    exit /b 1
+)
+echo pip available
+
 REM ---- Virtual environment ------------------------------------------------
 if not exist "venv" (
     echo Creating virtual environment...
@@ -40,10 +50,15 @@ call venv\Scripts\activate.bat
 
 REM ---- Dependencies -------------------------------------------------------
 echo Upgrading pip...
-python -m pip install -q --upgrade pip
+python -m pip install --upgrade pip
 
-echo Installing dependencies (this may take a few minutes)...
-pip install -q -r requirements.txt
+if exist "requirements.lock" (
+    echo Installing pinned dependencies from requirements.lock ^(this may take a few minutes^)...
+    pip install -r requirements.lock
+) else (
+    echo Installing dependencies from requirements.txt ^(this may take a few minutes^)...
+    pip install -r requirements.txt
+)
 if errorlevel 1 (
     echo ERROR: pip install failed.
     exit /b 1
@@ -60,6 +75,14 @@ if not exist ".env" (
 REM ---- Initialize the database --------------------------------------------
 echo Initializing local database...
 python -c "import database; database.init_db(); print('wealth.db ready')"
+if errorlevel 1 (
+    echo.
+    echo Database initialization failed. Try:
+    echo   del wealth.db wealth.db-shm wealth.db-wal ^&^& setup.bat
+    echo If it persists, file an issue at:
+    echo   https://github.com/Mikegris/augur/issues
+    exit /b 1
+)
 
 echo.
 echo ====================================================

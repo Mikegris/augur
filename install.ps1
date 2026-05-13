@@ -7,9 +7,10 @@
 #   iwr -useb https://raw.githubusercontent.com/Mikegris/augur/main/install.ps1
 #
 # Optional environment overrides:
-#   $env:AUGUR_DIR    — install location (default: $HOME\augur)
-#   $env:AUGUR_REPO   — source repo (default: Mikegris/augur)
-#   $env:AUGUR_BRANCH — branch (default: main)
+#   $env:AUGUR_DIR     — install location (default: $HOME\augur)
+#   $env:AUGUR_REPO    — source repo (default: Mikegris/augur)
+#   $env:AUGUR_BRANCH  — branch (default: main)
+#   $env:AUGUR_NO_LINK — set to "1" to skip the Start Menu / WindowsApps shim
 
 $ErrorActionPreference = 'Stop'
 
@@ -21,6 +22,41 @@ function Say($m)  { Write-Host "▸ $m" -ForegroundColor Cyan }
 function Ok($m)   { Write-Host "✓ $m" -ForegroundColor Green }
 function Warn($m) { Write-Host "⚠ $m" -ForegroundColor Yellow }
 function Err($m)  { Write-Host "✗ $m" -ForegroundColor Red }
+
+# Detect whether we can actually prompt the user. PowerShell's
+# `Read-Host` will throw in non-interactive contexts (CI runners, scheduled
+# tasks, certain `iex`-from-pipe contexts). Guard so we degrade gracefully.
+function CanPrompt {
+    if (-not [Environment]::UserInteractive) { return $false }
+    try {
+        if ([Console]::IsInputRedirected) { return $false }
+    } catch { return $false }
+    return $true
+}
+
+function MaybeInstallPathShim($targetDir) {
+    if ($env:AUGUR_NO_LINK -eq '1') { return }
+    # Drop a Start Menu shortcut + a small batch shim on PATH so users can
+    # type `augur` from any shell. We pick %USERPROFILE%\.local\bin to match
+    # the macOS/Linux convention; it's created if missing.
+    $binDir = Join-Path $HOME '.local\bin'
+    if (-not (Test-Path $binDir)) {
+        New-Item -ItemType Directory -Path $binDir -Force | Out-Null
+    }
+    $shim = Join-Path $binDir 'augur.bat'
+    "@echo off`r`ncall `"$targetDir\run.bat`" %*" | Set-Content -Path $shim -Encoding ASCII
+    Ok "Installed launcher: $shim -> $targetDir\run.bat"
+
+    $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
+    if (-not ($userPath -split ';' | Where-Object { $_ -eq $binDir })) {
+        Warn "$binDir is not on your user PATH."
+        Write-Host ""
+        Write-Host "  Add it permanently with:"
+        Write-Host "    setx PATH `"$binDir;%PATH%`""
+        Write-Host "  Then close + reopen PowerShell."
+        Write-Host ""
+    }
+}
 
 Write-Host ""
 Write-Host "╔══════════════════════════════════════════════════╗"
@@ -53,8 +89,43 @@ if ($pyMaj -lt 3 -or ($pyMaj -eq 3 -and $pyMin -lt 9)) {
 Ok "Python $pyVer"
 
 # ── target directory ────────────────────────────────────────────────────────
+# If it already exists and is an augur git checkout, offer to update in place.
 if (Test-Path $target) {
-    Err "$target already exists."
+    $isAugurCheckout = $false
+    if ((Test-Path (Join-Path $target '.git')) -and (Get-Command git -ErrorAction SilentlyContinue)) {
+        $originUrl = & git -C $target remote get-url origin 2>$null
+        if ($originUrl -and $originUrl -match "[/:]$([regex]::Escape($repo))(\.git)?$") {
+            $isAugurCheckout = $true
+        }
+    }
+
+    if ($isAugurCheckout) {
+        Say "Existing AUGUR install found at $target"
+        $doUpdate = $true
+        if (CanPrompt) {
+            $reply = Read-Host "Update in place (git pull + re-run setup)? [Y/n]"
+            if ($reply -match '^(n|no)$') { $doUpdate = $false }
+        }
+        if ($doUpdate) {
+            Say "Updating $target ..."
+            & git -C $target pull --ff-only origin $branch
+            if ($LASTEXITCODE -ne 0) { Err "git pull failed."; exit 1 }
+            Set-Location $target
+            & cmd /c .\setup.bat
+            if ($LASTEXITCODE -ne 0) { Err "setup.bat failed."; exit 1 }
+            MaybeInstallPathShim $target
+            Ok "Update complete."
+            Write-Host ""
+            Write-Host "To start AUGUR:"
+            Write-Host "  cd $target"
+            Write-Host "  .\run.bat"
+            exit 0
+        }
+        Err "Aborted."
+        exit 1
+    }
+
+    Err "$target already exists (not an augur checkout)."
     Write-Host ""
     Write-Host "Choose one:"
     Write-Host "  • cd `"$target`"; .\run.bat"
@@ -102,17 +173,27 @@ Say "Running setup.bat (creates venv + installs dependencies, ~2-5 min)..."
 & cmd /c .\setup.bat
 if ($LASTEXITCODE -ne 0) { Err "setup.bat failed."; exit 1 }
 
+# ── install launcher shim ──────────────────────────────────────────────────
+MaybeInstallPathShim $target
+
 # ── offer to start ──────────────────────────────────────────────────────────
 Write-Host ""
-$reply = Read-Host "Start AUGUR now? [Y/n]"
-if ($reply -match '^(n|no)$') {
+$start = $false
+if (CanPrompt) {
+    $reply = Read-Host "Start AUGUR now? [Y/n]"
+    if (-not ($reply -match '^(n|no)$')) { $start = $true }
+}
+
+if ($start) {
+    & cmd /c .\run.bat
+} else {
     Ok "Install complete."
     Write-Host ""
     Write-Host "To start AUGUR later:"
     Write-Host "  cd $target"
     Write-Host "  .\run.bat"
     Write-Host ""
+    Write-Host "(or just ``augur`` if ~\.local\bin is on your PATH)"
+    Write-Host ""
     Write-Host "The app will open at http://localhost:5001"
-} else {
-    & cmd /c .\run.bat
 }
