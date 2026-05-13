@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Hardened-runtime entitlements for AUGUR.app.
+
+  These are the minimum exceptions a py2app-bundled Python application
+  needs to survive `codesign --options runtime` and notarization:
+
+    • allow-unsigned-executable-memory:
+        ctypes / cffi (used by curl_cffi, cryptography) write+exec memory
+        at runtime for trampolines.
+
+    • allow-dyld-environment-variables:
+        The bundled Python.framework expects DYLD_FRAMEWORK_PATH etc. to
+        be honoured during launch.
+
+    • disable-library-validation:
+        We load dylibs that aren't all signed with our Team ID
+        (pyobjc submodules, curl_cffi's bundled libcurl, lxml's libxml2).
+
+  If your build adds new native deps, you may need additional flags. Look
+  at codesign's --options runtime errors first; only add what's needed.
+-->
+<plist version="1.0">
+<dict>
+    <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+    <true/>
+    <key>com.apple.security.cs.allow-dyld-environment-variables</key>
+    <true/>
+    <key>com.apple.security.cs.disable-library-validation</key>
+    <true/>
+</dict>
+</plist>
