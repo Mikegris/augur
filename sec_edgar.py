@@ -36,11 +36,18 @@ EDGAR_HEADERS = {
 TRACKED_FUNDS = {
     "Berkshire Hathaway": "0001067983",
     "Pershing Square": "0001336528",
-    "Appaloosa Management": "0000814599",
+    # Appaloosa: old CIK 0000814599 404s; David Tepper's pre-2016 LP (CIK
+    # 0001006438) stopped filing 13Fs when he converted to a family office.
+    # 0001656456 ("Appaloosa LP") is the post-conversion entity that's still
+    # filing 13Fs (most recent 2026-02-17).
+    "Appaloosa Management": "0001656456",
     "Duquesne Family Office": "0001536411",
     "Scion Asset Management": "0001649339",
     "Third Point": "0001040273",
-    "Elliott Investment": "0001061219",
+    # Elliott: old CIK 0001061219 actually resolved to "Enterprise Products
+    # Partners L.P." (an unrelated energy MLP). The current Elliott entity is
+    # 0001791786 ("Elliott Investment Management L.P.") — active 13F filer.
+    "Elliott Investment": "0001791786",
 }
 
 # Module-level cache
