@@ -14,13 +14,17 @@ requirements-desktop.txt).
 
 from __future__ import annotations
 
+import json
 import logging
 import os
+import plistlib
 import socket
 import sys
 import threading
 import time
+import urllib.request
 import warnings
+import webbrowser
 from pathlib import Path
 
 # Silence known-benign warnings BEFORE third-party imports trigger them.
@@ -75,6 +79,100 @@ def _bootstrap_user_data_dir() -> None:
 
 
 _bootstrap_user_data_dir()
+
+
+# ── update check ──────────────────────────────────────────────────────────
+# Polls GitHub's releases API once on startup. If a newer version is tagged,
+# a native confirmation dialog asks the user whether to open the release
+# page in their default browser. They drag the new .app to /Applications
+# to install — same UX as the first-time install.
+#
+# Opt out: set AUGUR_NO_UPDATE_CHECK=1.
+# Force a specific "current" version for testing: AUGUR_VERSION_OVERRIDE=0.1.0.
+
+GITHUB_RELEASES_API = "https://api.github.com/repos/Mikegris/augur/releases/latest"
+
+
+def _current_version() -> str:
+    """Read CFBundleShortVersionString from the bundle's Info.plist; return
+    'dev' for source runs (we skip the prompt in that case)."""
+    override = os.environ.get("AUGUR_VERSION_OVERRIDE")
+    if override:
+        return override
+    if not getattr(sys, "frozen", False):
+        return "dev"
+    plist_path = Path(sys.executable).parent.parent / "Info.plist"
+    try:
+        with open(plist_path, "rb") as f:
+            return plistlib.load(f).get("CFBundleShortVersionString", "0.0.0")
+    except Exception:
+        return "0.0.0"
+
+
+def _parse_semver(v: str) -> tuple:
+    """Lenient parser: '1.2.3-rc.1' → (1, 2, 3). Stops at first non-numeric
+    chunk so suffixes like '-beta' don't break comparison."""
+    parts: list[int] = []
+    for piece in v.lstrip("v").split("."):
+        head = piece.split("-")[0].split("+")[0]
+        try:
+            parts.append(int(head))
+        except ValueError:
+            break
+    return tuple(parts) if parts else (0,)
+
+
+def _fetch_latest_release() -> tuple[str, str] | None:
+    """Return (latest_tag_no_v_prefix, html_url) or None on any failure."""
+    try:
+        req = urllib.request.Request(
+            GITHUB_RELEASES_API,
+            headers={
+                "User-Agent": "AUGUR-updater",
+                "Accept": "application/vnd.github+json",
+            },
+        )
+        with urllib.request.urlopen(req, timeout=5) as r:
+            data = json.loads(r.read())
+        tag = data.get("tag_name", "").lstrip("v")
+        url = data.get("html_url", "")
+        return (tag, url) if tag and url else None
+    except Exception as e:
+        log.debug("update fetch failed: %s", e)
+        return None
+
+
+def _check_for_updates(window) -> None:
+    """Background-thread worker — fetch latest release, prompt user if newer.
+    Silent no-op on any error (offline, GitHub down, etc.); a wealth tracker
+    that can't check for updates should still launch cleanly."""
+    if os.environ.get("AUGUR_NO_UPDATE_CHECK") == "1":
+        return
+    current = _current_version()
+    if current == "dev":
+        log.info("update check skipped — dev run")
+        return
+
+    result = _fetch_latest_release()
+    if not result:
+        return
+    latest, url = result
+
+    if _parse_semver(latest) <= _parse_semver(current):
+        log.info("up to date (have %s, latest %s)", current, latest)
+        return
+
+    log.info("update available: %s → %s", current, latest)
+    try:
+        confirmed = window.create_confirmation_dialog(
+            "AUGUR — update available",
+            f"Version {latest} is available (you have {current}).\n\n"
+            f"Open the download page in your default browser?",
+        )
+        if confirmed:
+            webbrowser.open(url)
+    except Exception as e:
+        log.warning("update prompt failed: %s", e)
 
 
 def _port_in_use(port: int, host: str = "127.0.0.1") -> bool:
@@ -144,6 +242,17 @@ def main() -> int:
         min_size=(900, 600),
     )
     log.info("[desktop] window created: %r — calling webview.start() ...", win)
+
+    # Fire the update check once the WKWebView has loaded the page — running
+    # any earlier risks the dialog appearing on a blank window, and the user
+    # has no idea what app is prompting them. Background thread so we don't
+    # block the page interaction while polling GitHub.
+    def _on_loaded():
+        threading.Thread(
+            target=_check_for_updates, args=(win,), daemon=True
+        ).start()
+    win.events.loaded += _on_loaded
+
     # pywebview's start() blocks the main thread until the window closes.
     # The Flask thread is a daemon, so it terminates with us.
     webview.start(debug=bool(os.environ.get("AUGUR_WEBVIEW_DEBUG")))
