@@ -2710,6 +2710,8 @@ async function loadMacroView() {
 
     // Treasury yield curve + CBOE VIX (no-key Tier 1)
     DataPanels.appendTreasuryPanel(view);
+    // FRED economic indicators — CPI, unemployment, fed funds, M2, GDP, etc.
+    DataPanels.appendFredSnapshot(view);
   } catch(e) {
     view.innerHTML = `<div class="empty-state"><span class="text-red">${e.message}</span></div>`;
   }
@@ -6426,9 +6428,11 @@ async function loadAltDataView() {
     + '<div class="panel-header"><span class="panel-title">REVENUE NOWCASTING</span></div>'
     + '<div class="panel-body">'
     + '<p style="color:var(--text-secondary);font-size:11px;margin-bottom:12px">Alternative data earnings surprise predictor</p>'
-    + '<div style="display:flex;gap:8px;align-items:center;margin-bottom:12px">'
+    + '<div style="display:flex;gap:8px;align-items:center;margin-bottom:12px;flex-wrap:wrap">'
     + '<input id="altdata-symbol" type="text" class="form-input" placeholder="Symbol..." style="width:120px" onkeydown="if(event.key===\'Enter\')nowcastAltData()" />'
     + '<button class="btn btn-green" onclick="nowcastAltData()">NOWCAST</button>'
+    + '<button class="btn btn-ghost" onclick="loadWikiAttention()">WIKI ATTENTION</button>'
+    + '<button class="btn btn-ghost" onclick="loadHackerNews()">HN SENTIMENT</button>'
     + '<button class="btn btn-ghost" onclick="scanAltDataPortfolio()">PORTFOLIO SCAN</button>'
     + '</div>'
     + '<div style="display:flex;gap:6px;margin-bottom:16px">'
@@ -6494,6 +6498,26 @@ async function nowcastAltData(sym) {
   } catch (e) {
     results.innerHTML = '<div class="empty-state"><span class="col-negative">Error: ' + e.message + '</span></div>';
   }
+}
+
+async function loadWikiAttention(sym) {
+  const input = document.getElementById('altdata-symbol');
+  const symbol = sym || (input ? input.value.trim().toUpperCase() : '');
+  if (!symbol) return;
+  if (input) input.value = symbol;
+  const results = document.getElementById('altdata-results');
+  if (!results) return;
+  await DataPanels.renderWikiAttention(results, symbol);
+}
+
+async function loadHackerNews(sym) {
+  const input = document.getElementById('altdata-symbol');
+  const symbol = sym || (input ? input.value.trim().toUpperCase() : '');
+  if (!symbol) return;
+  if (input) input.value = symbol;
+  const results = document.getElementById('altdata-results');
+  if (!results) return;
+  await DataPanels.renderHackerNews(results, symbol);
 }
 
 async function scanAltDataPortfolio() {
@@ -6772,6 +6796,146 @@ const DataPanels = {
         </div>`;
     } catch (e) {
       wrap.innerHTML = `<div class="empty-state"><span class="col-negative">Alt-data panel error: ${this._esc(e.message)}</span></div>`;
+    }
+  },
+
+  // ── Macro: FRED economic-indicators snapshot ───────────────────
+  async appendFredSnapshot(parent) {
+    if (!parent) return;
+    const wrap = document.createElement('div');
+    wrap.style.marginTop = '8px';
+    parent.appendChild(wrap);
+    wrap.innerHTML = `<div class="panel"><div class="panel-header"><span class="panel-title">ECONOMIC INDICATORS — FRED</span></div><div class="panel-body"><div class="loading"><div class="spinner"></div> Loading FRED series ...</div></div></div>`;
+    try {
+      const data = await API.get('/api/macro/fred/snapshot');
+      const series = (data && data.snapshot) || [];
+      if (!series.length) {
+        wrap.querySelector('.panel-body').innerHTML = '<div class="empty-state">FRED snapshot unavailable</div>';
+        return;
+      }
+      // Group by category for visual structure
+      const byCat = {};
+      series.forEach(s => {
+        const c = s.category || 'other';
+        (byCat[c] = byCat[c] || []).push(s);
+      });
+      const catLabels = {
+        rates: 'INTEREST RATES', inflation: 'INFLATION', labor: 'LABOR MARKET',
+        monetary: 'MONETARY', growth: 'GROWTH', consumer: 'CONSUMER',
+        commodity: 'COMMODITIES',
+      };
+      const order = ['rates', 'inflation', 'labor', 'consumer', 'growth', 'monetary', 'commodity'];
+      const cardHtml = (s) => {
+        const v = s.latest_value;
+        const d = s.delta_pct;
+        const dColor = d == null ? 'var(--text-dim)' : d > 0 ? 'var(--green)' : 'var(--red)';
+        const dStr = d == null ? '—' : `${d >= 0 ? '+' : ''}${d.toFixed(2)}%`;
+        const valStr = v == null ? '—' : (Math.abs(v) >= 1000 ? v.toLocaleString(undefined, {maximumFractionDigits: 0}) : v.toFixed(2));
+        return `
+          <div class="macro-card">
+            <div class="macro-card-label">${this._esc(s.label || s.id)}</div>
+            <div class="macro-card-value">${valStr}</div>
+            <div class="macro-card-chg" style="color:${dColor}">${dStr}</div>
+            <div class="macro-card-note">${this._esc(s.latest_date || '')} · ${this._esc(s.frequency || '')}</div>
+          </div>`;
+      };
+      let html = '';
+      for (const cat of order) {
+        if (!byCat[cat]) continue;
+        html += `<div class="macro-section-label" style="margin-top:8px">${catLabels[cat] || cat.toUpperCase()}</div>`;
+        html += `<div class="macro-grid">${byCat[cat].map(s => cardHtml(s)).join('')}</div>`;
+      }
+      html += `<div style="font-size:9px;color:var(--text-dim);margin-top:8px">Source: <a href="https://fred.stlouisfed.org" target="_blank" rel="noopener" style="color:var(--blue)">FRED · Federal Reserve Bank of St. Louis</a></div>`;
+      wrap.innerHTML = html;
+    } catch (e) {
+      wrap.innerHTML = `<div class="empty-state"><span class="col-negative">FRED panel error: ${this._esc(e.message)}</span></div>`;
+    }
+  },
+
+  // ── Alt-data: Wikipedia pageviews (retail-attention proxy) ─────
+  async renderWikiAttention(parent, symbol) {
+    if (!parent || !symbol) return;
+    parent.innerHTML = `<div class="loading"><div class="spinner"></div> Fetching Wikipedia pageviews for ${this._esc(symbol)}...</div>`;
+    try {
+      const data = await API.get(`/api/alt-data/wiki/${encodeURIComponent(symbol)}`);
+      if (data.error && (!data.points || !data.points.length)) {
+        parent.innerHTML = `<div class="empty-state"><span class="col-negative">${this._esc(data.error)}</span></div>`;
+        return;
+      }
+      const stats = data.stats || {};
+      const spike = stats.spike_pct_vs_baseline;
+      const spikeColor = spike == null ? 'var(--text-dim)' : spike > 30 ? 'var(--green)' : spike < -30 ? 'var(--red)' : 'var(--amber)';
+      const spikeLabel = spike == null ? '—' : spike > 50 ? 'STRONG SPIKE' : spike > 10 ? 'ABOVE BASELINE' : spike > -10 ? 'NORMAL' : 'BELOW BASELINE';
+
+      // Tiny inline sparkline (SVG)
+      const pts = (data.points || []).map(p => p.views);
+      const maxV = Math.max(...pts, 1);
+      const w = 280, h = 60, n = pts.length;
+      const path = pts.map((v, i) => {
+        const x = (i / Math.max(n - 1, 1)) * w;
+        const y = h - (v / maxV) * h;
+        return `${i === 0 ? 'M' : 'L'}${x.toFixed(1)},${y.toFixed(1)}`;
+      }).join(' ');
+      const sparkline = `<svg viewBox="0 0 ${w} ${h}" width="${w}" height="${h}" style="display:block"><path d="${path}" fill="none" stroke="var(--green)" stroke-width="1.5" /></svg>`;
+
+      parent.innerHTML = `
+        <div class="kpi-grid" style="display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:16px">
+          <div class="kpi-card"><div class="form-label">Latest pageviews</div><div style="font-size:18px;font-weight:700">${(stats.latest || 0).toLocaleString()}</div></div>
+          <div class="kpi-card"><div class="form-label">30-day mean</div><div style="font-size:18px;font-weight:700">${(stats.mean || 0).toLocaleString()}</div></div>
+          <div class="kpi-card"><div class="form-label">vs 7-day baseline</div><div style="font-size:18px;font-weight:700;color:${spikeColor}">${spike == null ? '—' : (spike >= 0 ? '+' : '') + spike.toFixed(1) + '%'}</div></div>
+          <div class="kpi-card"><div class="form-label">Signal</div><div style="font-size:14px;font-weight:600;color:${spikeColor}">${spikeLabel}</div></div>
+        </div>
+        <div class="panel">
+          <div class="panel-header"><span class="panel-title">DAILY PAGEVIEWS — ${this._esc(data.article || symbol)}</span></div>
+          <div class="panel-body">
+            ${sparkline}
+            <div style="font-size:10px;color:var(--text-dim);margin-top:6px">${n} daily observations · <a href="${this._esc(data.article_url)}" target="_blank" rel="noopener" style="color:var(--blue)">Wikipedia article ↗</a></div>
+          </div>
+        </div>`;
+    } catch (e) {
+      parent.innerHTML = `<div class="empty-state"><span class="col-negative">Wikipedia fetch failed: ${this._esc(e.message)}</span></div>`;
+    }
+  },
+
+  // ── Alt-data: Hacker News mentions ────────────────────────────
+  async renderHackerNews(parent, symbol) {
+    if (!parent || !symbol) return;
+    parent.innerHTML = `<div class="loading"><div class="spinner"></div> Fetching Hacker News mentions for ${this._esc(symbol)}...</div>`;
+    try {
+      const data = await API.get(`/api/alt-data/hackernews/${encodeURIComponent(symbol)}?hours=168`);
+      const stats = data.stats || {};
+      const net = stats.net_polarity || 0;
+      const netColor = net > 3 ? 'var(--green)' : net < -3 ? 'var(--red)' : 'var(--amber)';
+      const sentLabel = net > 5 ? 'BULLISH' : net > 0 ? 'SLIGHTLY POSITIVE' : net < -5 ? 'BEARISH' : net < 0 ? 'SLIGHTLY NEGATIVE' : 'NEUTRAL';
+      const rows = (data.mentions || []).slice(0, 15).map(m => {
+        const polColor = m.polarity > 0 ? 'var(--green)' : m.polarity < 0 ? 'var(--red)' : 'var(--text-dim)';
+        const polStr = m.polarity > 0 ? `+${m.polarity}` : String(m.polarity);
+        const dateStr = m.created_at ? m.created_at.slice(0, 10) : '—';
+        return `
+          <tr>
+            <td style="color:${polColor};text-align:center;font-weight:700">${polStr}</td>
+            <td>${this._esc(m.title || '')}</td>
+            <td style="color:var(--text-dim);font-size:10px">${m.kind || ''}</td>
+            <td style="color:var(--text-dim);font-size:10px">${dateStr}</td>
+            <td><a href="${this._esc(m.url)}" target="_blank" rel="noopener" style="color:var(--blue);font-size:10px">open ↗</a></td>
+          </tr>`;
+      }).join('');
+      parent.innerHTML = `
+        <div class="kpi-grid" style="display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:16px">
+          <div class="kpi-card"><div class="form-label">Mentions (7d)</div><div style="font-size:18px;font-weight:700">${data.mention_count || 0}</div></div>
+          <div class="kpi-card"><div class="form-label">Net polarity</div><div style="font-size:18px;font-weight:700;color:${netColor}">${net >= 0 ? '+' : ''}${net}</div></div>
+          <div class="kpi-card"><div class="form-label">Positive / Negative</div><div style="font-size:14px;font-weight:600"><span style="color:var(--green)">${stats.positive_count || 0}</span> / <span style="color:var(--red)">${stats.negative_count || 0}</span></div></div>
+          <div class="kpi-card"><div class="form-label">Tone</div><div style="font-size:14px;font-weight:600;color:${netColor}">${sentLabel}</div></div>
+        </div>
+        <div class="panel">
+          <div class="panel-header"><span class="panel-title">RECENT HN MENTIONS — ${this._esc(symbol)}${data.company_searched ? ' + "' + this._esc(data.company_searched) + '"' : ''}</span></div>
+          <div class="panel-body"><table class="data-table"><thead><tr>
+            <th style="width:60px">Polarity</th><th>Title</th><th style="width:80px">Type</th><th style="width:90px">Date</th><th style="width:60px"></th>
+          </tr></thead><tbody>${rows || '<tr><td colspan="5" class="empty-state">No mentions in the last 7 days</td></tr>'}</tbody></table></div>
+        </div>
+        <div style="font-size:9px;color:var(--text-dim);margin-top:8px">Polarity = positive-keyword count − negative-keyword count. Coarse vibe-check, not a true sentiment model.</div>`;
+    } catch (e) {
+      parent.innerHTML = `<div class="empty-state"><span class="col-negative">HN fetch failed: ${this._esc(e.message)}</span></div>`;
     }
   },
 };
