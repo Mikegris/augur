@@ -289,15 +289,113 @@ const State = {
 };
 
 // ── Navigation ────────────────────────────────────────────────────────────────
-function navigate(view) {
-  document.querySelectorAll('.nav-item').forEach(el => {
-    el.classList.toggle('active', el.dataset.view === view);
+// Five top-level groups, each fans out to its full feature set via a
+// sub-tab strip. Every existing data-view ID continues to work — navigate()
+// resolves the view to its group and lights up both levels.
+const NAV_GROUPS = {
+  dashboard: {
+    label: 'DASHBOARD',
+    items: [
+      { view: 'overview',     label: 'Overview' },
+      { view: 'portfolio',    label: 'Portfolio' },
+      { view: 'watchlist',    label: 'Watchlist' },
+      { view: 'transactions', label: 'Transactions' },
+      { view: 'dividends',    label: 'Dividends' },
+      { view: 'alerts',       label: 'Alerts' },
+      { view: 'scanner',      label: 'Scanner' },
+    ],
+  },
+  markets: {
+    label: 'MARKETS',
+    items: [
+      { view: 'markets',   label: 'Markets' },
+      { view: 'crypto',    label: 'Crypto' },
+      { view: 'macro',     label: 'Macro' },
+      { view: 'stress',    label: 'Stress Test' },
+      { view: 'liquidity', label: 'Liquidity' },
+      { view: 'news',      label: 'News' },
+    ],
+  },
+  research: {
+    label: 'RESEARCH',
+    items: [
+      { view: 'research',  label: 'Research' },
+      { view: 'analytics', label: 'Analytics' },
+      { view: 'intel',     label: 'Intel' },
+      { view: 'earnings',  label: 'Earnings' },
+      { view: 'screener',  label: 'Screener' },
+      { view: 'narrative', label: 'Narrative' },
+      { view: 'alt-data',  label: 'Alt Data' },
+    ],
+  },
+  alpha: {
+    label: 'ALPHA',
+    items: [
+      { view: 'signals',           label: 'Signals' },
+      { view: 'ideas',             label: 'Ideas' },
+      { view: 'options-flow',      label: 'Options Flow' },
+      { view: 'gex',               label: 'GEX' },
+      { view: 'contagion',         label: 'Contagion' },
+      { view: 'reflexivity',       label: 'Reflexivity' },
+      { view: 'synthetic-insider', label: 'Synth Insider' },
+      { view: 'congress',          label: 'Congress' },
+    ],
+  },
+  console: {
+    label: 'CONSOLE',
+    items: [
+      { view: 'terminal', label: 'Terminal' },
+      { view: 'settings', label: 'Settings' },
+    ],
+  },
+};
+
+function findGroupForView(view) {
+  for (const [gid, g] of Object.entries(NAV_GROUPS)) {
+    if (g.items.some(it => it.view === view)) return gid;
+  }
+  return null;
+}
+
+function renderSubNav(group, activeView) {
+  const subNav = document.getElementById('sub-nav');
+  if (!subNav) return;
+  const items = NAV_GROUPS[group].items;
+  subNav.innerHTML = items.map(it => {
+    const isActive = it.view === activeView;
+    return `<button class="sub-nav-item${isActive ? ' active' : ''}" `
+         + `data-view="${it.view}" role="tab" aria-selected="${isActive}">`
+         + `${it.label}</button>`;
+  }).join('');
+  subNav.querySelectorAll('.sub-nav-item').forEach(el => {
+    el.addEventListener('click', () => navigate(el.dataset.view));
   });
+}
+
+function navigate(view) {
+  const group = findGroupForView(view);
+  if (!group) {
+    console.warn('navigate: unknown view', view);
+    return;
+  }
+
+  // Top-level sidebar groups
+  document.querySelectorAll('.nav-item[data-group]').forEach(el => {
+    el.classList.toggle('active', el.dataset.group === group);
+  });
+
+  // Sub-tab strip for the active group
+  renderSubNav(group, view);
+
+  // Show the matching view div, hide all others
   document.querySelectorAll('.view').forEach(el => {
     el.classList.toggle('active', el.id === `view-${view}`);
   });
+
   State.activeView = view;
-  // Lazy-load views
+  State.activeGroup = group;
+
+  // Lazy-load views (unchanged)
   switch (view) {
     case 'overview':     loadOverview(); break;
     case 'portfolio':    loadPortfolio(); break;
@@ -3274,9 +3372,14 @@ async function init() {
     State.settings = await API.get('/api/settings');
   } catch(e) {}
 
-  // Wire navigation
-  document.querySelectorAll('.nav-item[data-view]').forEach(el => {
-    el.addEventListener('click', () => navigate(el.dataset.view));
+  // Wire top-level sidebar groups — each navigates to its first sub-item,
+  // which lights up the sub-nav strip for that group.
+  document.querySelectorAll('.nav-item[data-group]').forEach(el => {
+    el.addEventListener('click', () => {
+      const g = el.dataset.group;
+      const first = NAV_GROUPS[g] && NAV_GROUPS[g].items[0];
+      if (first) navigate(first.view);
+    });
   });
 
   // Wire command bar
@@ -3310,7 +3413,7 @@ async function init() {
       sbToggle.setAttribute('aria-expanded', String(open));
     });
     // Close sidebar after navigating on narrow screens
-    document.querySelectorAll('.nav-item[data-view]').forEach(el => {
+    document.querySelectorAll('.nav-item[data-group]').forEach(el => {
       el.addEventListener('click', () => {
         if (window.matchMedia('(max-width: 900px)').matches) {
           sb.classList.remove('open');

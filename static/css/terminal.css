@@ -383,6 +383,60 @@ body::before {
   font-size: 9px;
 }
 
+/* ── Sub-navigation strip ──────────────────────────────────────────────────
+   Rendered into #sub-nav by app.js whenever the active top-level group
+   changes. Horizontal segmented control; scrolls horizontally on narrow
+   screens (the ALPHA group has 8 sub-items). */
+.sub-nav {
+  display: flex;
+  gap: 2px;
+  padding: 6px 12px;
+  background: var(--bg-secondary);
+  border-bottom: 1px solid var(--border-bright);
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: thin;
+  position: sticky;
+  top: 0;
+  z-index: 5;
+}
+
+.sub-nav:empty {
+  display: none;
+}
+
+.sub-nav-item {
+  flex: 0 0 auto;
+  padding: 6px 14px;
+  background: transparent;
+  border: 1px solid transparent;
+  border-bottom: 2px solid transparent;
+  color: var(--text-secondary);
+  font-family: inherit;
+  font-size: var(--font-size-sm);
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: all var(--transition);
+}
+
+.sub-nav-item:hover {
+  color: var(--text-primary);
+  background: var(--bg-hover);
+}
+
+.sub-nav-item.active {
+  color: var(--green);
+  border-bottom-color: var(--green);
+  background: var(--green-glow);
+}
+
+.sub-nav-item:focus-visible {
+  outline: 1px solid var(--green);
+  outline-offset: -1px;
+}
+
 /* Quick watchlist in sidebar */
 .sidebar-watchlist {
   flex: 1;

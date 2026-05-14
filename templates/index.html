@@ -61,111 +61,26 @@
   <div id="search-results"></div>
 
   <!-- ── Sidebar ─────────────────────────────────────────────── -->
+  <!-- Five consolidated groups; each renders a sub-tab strip in #sub-nav
+       so every original feature stays one click away. Group → sub-view
+       routing lives in NAV_GROUPS in app.js. -->
   <nav id="sidebar" aria-label="Primary navigation">
     <div class="nav-section">
-      <div class="nav-label">ANALYTICS</div>
-      <div class="nav-item active" data-view="overview">
-        <span class="nav-icon">◈</span> OVERVIEW
-      </div>
-      <div class="nav-item" data-view="portfolio">
-        <span class="nav-icon">◉</span> PORTFOLIO
-      </div>
-      <div class="nav-item" data-view="markets">
-        <span class="nav-icon">◎</span> MARKETS
-      </div>
-      <div class="nav-item" data-view="research">
-        <span class="nav-icon">⊕</span> RESEARCH
-      </div>
-      <div class="nav-item" data-view="analytics">
-        <span class="nav-icon">⊠</span> ANALYTICS
-      </div>
-      <div class="nav-item" data-view="intel">
-        <span class="nav-icon">◑</span> INTEL
-      </div>
-      <div class="nav-item" data-view="earnings">
-        <span class="nav-icon">⚡</span> EARNINGS
-      </div>
-      <div class="nav-item" data-view="signals">
-        <span class="nav-icon">◈</span> SIGNALS
-      </div>
-      <div class="nav-item" data-view="options-flow">
-        <span class="nav-icon">⊛</span> OPTIONS FLOW
-      </div>
-      <div class="nav-item" data-view="congress">
-        <span class="nav-icon">⊠</span> CONGRESS
-      </div>
-      <div class="nav-item" data-view="terminal">
-        <span class="nav-icon">▸</span> TERMINAL
-      </div>
-      <div class="nav-item" data-view="ideas">
-        <span class="nav-icon">⚄</span> IDEAS
-      </div>
-    </div>
-    <div class="nav-section">
-      <div class="nav-label">ASSETS</div>
-      <div class="nav-item" data-view="crypto">
-        <span class="nav-icon">₿</span> CRYPTO
-      </div>
-      <div class="nav-item" data-view="watchlist">
-        <span class="nav-icon">◇</span> WATCHLIST
-      </div>
-      <div class="nav-item" data-view="transactions">
-        <span class="nav-icon">⊞</span> TRANSACTIONS
-      </div>
-      <div class="nav-item" data-view="screener">
-        <span class="nav-icon">⊟</span> SCREENER
-      </div>
-      <div class="nav-item" data-view="scanner">
-        <span class="nav-icon">⊙</span> SCANNER
-      </div>
-      <div class="nav-item" data-view="dividends">
-        <span class="nav-icon">⊛</span> DIVIDENDS
-      </div>
-    </div>
-    <div class="nav-section">
-      <div class="nav-label">RISK &amp; MACRO</div>
-      <div class="nav-item" data-view="macro">
-        <span class="nav-icon">⊕</span> MACRO
-      </div>
-      <div class="nav-item" data-view="stress">
-        <span class="nav-icon">⚠</span> STRESS TEST
-      </div>
-      <div class="nav-item" data-view="alerts">
-        <span class="nav-icon">◉</span> ALERTS
+      <div class="nav-item active" data-group="dashboard">
+        <span class="nav-icon">◈</span> DASHBOARD
         <span class="alert-nav-badge" id="alert-nav-count" style="display:none"></span>
       </div>
-    </div>
-    <div class="nav-section">
-      <div class="nav-label">ALPHA ENGINE</div>
-      <div class="nav-item" data-view="gex">
-        <span class="nav-icon">⊗</span> GEX FLOW
+      <div class="nav-item" data-group="markets">
+        <span class="nav-icon">◎</span> MARKETS
       </div>
-      <div class="nav-item" data-view="contagion">
-        <span class="nav-icon">◈</span> CONTAGION
+      <div class="nav-item" data-group="research">
+        <span class="nav-icon">⊕</span> RESEARCH
       </div>
-      <div class="nav-item" data-view="narrative">
-        <span class="nav-icon">◉</span> NARRATIVE
+      <div class="nav-item" data-group="alpha">
+        <span class="nav-icon">◇</span> ALPHA
       </div>
-      <div class="nav-item" data-view="synthetic-insider">
-        <span class="nav-icon">⊛</span> SYNTH INSIDER
-      </div>
-      <div class="nav-item" data-view="reflexivity">
-        <span class="nav-icon">◎</span> REFLEXIVITY
-      </div>
-      <div class="nav-item" data-view="liquidity">
-        <span class="nav-icon">⊕</span> LIQUIDITY
-      </div>
-      <div class="nav-item" data-view="alt-data">
-        <span class="nav-icon">⊞</span> ALT-DATA
-      </div>
-    </div>
-    <div class="nav-section">
-      <div class="nav-label">INFO</div>
-      <div class="nav-item" data-view="news">
-        <span class="nav-icon">⊡</span> NEWS FEED
-      </div>
-      <div class="nav-item" data-view="settings">
-        <span class="nav-icon">⚙</span> SETTINGS
+      <div class="nav-item" data-group="console">
+        <span class="nav-icon">▸</span> CONSOLE
       </div>
     </div>
 
@@ -178,6 +93,10 @@
 
   <!-- ── Main Content ─────────────────────────────────────────── -->
   <main id="main" tabindex="-1">
+
+    <!-- Sub-navigation strip — rendered dynamically by app.js based on
+         the active group in NAV_GROUPS. Click → navigate(viewId). -->
+    <div id="sub-nav" class="sub-nav" role="tablist" aria-label="Feature sub-navigation"></div>
 
     <!-- OVERVIEW -->
     <div id="view-overview" class="view active">
