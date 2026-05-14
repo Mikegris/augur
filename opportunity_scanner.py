@@ -63,11 +63,14 @@ UNIVERSE_INCOME = [
 UNIVERSE_CRYPTO_IDS = {
     "BTC": "bitcoin", "ETH": "ethereum", "SOL": "solana",
     "ADA": "cardano", "AVAX": "avalanche-2", "DOT": "polkadot",
-    "MATIC": "matic-network", "LINK": "chainlink", "UNI": "uniswap",
+    "LINK": "chainlink",
     "AAVE": "aave", "XRP": "ripple", "BNB": "binancecoin",
-    "NEAR": "near", "SUI": "sui", "APT": "aptos",
+    "NEAR": "near", "APT": "aptos",
     "DOGE": "dogecoin", "SHIB": "shiba-inu", "ARB": "arbitrum",
     "OP": "optimism", "FIL": "filecoin",
+    # Removed: MATIC (rebranded to POL, no -USD ticker on Yahoo),
+    # SUI (not on Yahoo Finance), UNI (Yahoo blocks the -USD ticker).
+    # All three were producing "possibly delisted" errors on every warm pass.
 }
 
 SECTORS = [

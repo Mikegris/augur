@@ -1,6 +1,14 @@
 flask>=3.0.0
-yfinance>=0.2.40
+# yfinance 1.2.1+ requires curl_cffi>=0.15 which needs Python 3.10. We're on
+# 3.9, so cap to 1.2.0. The occasional "401 Invalid Crumb" from Yahoo's API
+# is silenced via logger.setLevel(CRITICAL) in app.py/desktop.py — Yahoo
+# eventually re-issues the crumb on the next request anyway.
+yfinance>=1.2.0,<1.2.1
 requests>=2.31.0
+# chardet is a pure-Python fallback for `requests`' character detection.
+# charset_normalizer 3.x ships hash-named mypyc binaries that py2app can't
+# trace, so the bundled app falls back to chardet instead.
+chardet>=5.0.0
 pandas>=2.0.0
 numpy>=1.24.0
 python-dateutil>=2.8.2

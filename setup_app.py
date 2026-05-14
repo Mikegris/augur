@@ -8,6 +8,8 @@ Usage:
 Produces dist/AUGUR.app — a self-contained macOS bundle.
 """
 
+import subprocess
+import sys
 from pathlib import Path
 from setuptools import setup
 
@@ -57,6 +59,13 @@ EXTRA_PACKAGES = [
     "pandas",
     "numpy",
     "sklearn",
+    # sklearn lazy-imports joblib and threadpoolctl inside utils submodules,
+    # which py2app's modulefinder doesn't follow. Missing them surfaces as
+    # the opaque "cannot import name 'ClassifierMixin'" because the import
+    # chain breaks one level up in sklearn/utils/__init__.py. List them
+    # explicitly so the modulefinder pulls their full trees.
+    "joblib",
+    "threadpoolctl",
     "scipy",
     "bs4",
     "lxml",
@@ -70,6 +79,11 @@ EXTRA_PACKAGES = [
     "pydantic_core",
     "requests",
     "urllib3",
+    # chardet is the pure-Python char-detection fallback for `requests`.
+    # charset_normalizer 3.x ships hash-named mypyc binaries that py2app
+    # can't trace, so requests can't load it from the bundle even when the
+    # files are physically present. chardet has no compiled extensions.
+    "chardet",
     "charset_normalizer",
     "certifi",
     "idna",
@@ -137,3 +151,30 @@ setup(
     },
     setup_requires=["py2app"],
 )
+
+
+# ── post-build: fix multiprocessing helper python's dylib reference ─────────
+# py2app ships a stripped helper at Contents/MacOS/python used by Python's
+# multiprocessing module when it spawns worker subprocesses (joblib /
+# sklearn n_jobs=-1 trigger this). The helper's LC_LOAD_DYLIB records
+# `@executable_path/../../../../Python3` — four levels up resolves OUTSIDE
+# the bundle, so every worker dies with `Library not loaded: Python3`.
+# Rewrite that load command to point at the actual framework location.
+# Without this, the bundled app spews ~4 dyld errors per second under load.
+if len(sys.argv) > 1 and sys.argv[1] == "py2app":
+    helper = HERE / "dist" / "AUGUR.app" / "Contents" / "MacOS" / "python"
+    if helper.exists():
+        try:
+            subprocess.run(
+                [
+                    "install_name_tool", "-change",
+                    "@executable_path/../../../../Python3",
+                    "@executable_path/../Frameworks/Python3.framework/Python3",
+                    str(helper),
+                ],
+                check=True,
+                capture_output=True,
+            )
+            print(f"\n✓ rewrote Python3 dylib path in {helper.relative_to(HERE)}")
+        except subprocess.CalledProcessError as e:
+            print(f"\n⚠ install_name_tool failed: {e.stderr.decode()}", file=sys.stderr)

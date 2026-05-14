@@ -3,6 +3,34 @@ AUGUR — Wealth Intelligence System
 Local personal stock & wealth tracker.
 """
 
+# Silence known-benign warnings BEFORE third-party imports trigger them.
+# Filters must be installed by message-pattern (not category) here because
+# importing the warning class itself would already trigger the noisy import.
+import warnings as _warnings
+import os as _early_os
+
+# urllib3 v2 + macOS LibreSSL: one-time NotOpenSSLWarning at urllib3 import.
+_warnings.filterwarnings("ignore", message=r".*OpenSSL 1\.1\.1\+.*")
+# joblib/loky worker pool teardown fires this every batch — sklearn n_jobs=-1
+# starts new pools constantly during the warm pass, producing log spam.
+_warnings.filterwarnings(
+    "ignore",
+    message=r"resource_tracker:.*process died unexpectedly.*",
+)
+# sklearn matmul instability — RandomForest/LinearRegression on sparse or
+# extreme-value feature matrices throws overflow/divide-by-zero warnings.
+# We've clamped what we can (see ml_forecast.py); silence the rest.
+_warnings.filterwarnings(
+    "ignore",
+    category=RuntimeWarning,
+    module=r"sklearn\..*",
+)
+
+# yfinance logs per-ticker "possibly delisted" + "Invalid Crumb" directly to
+# its logger; we already log meaningful failures ourselves at WARNING.
+import logging as _early_logging
+_early_logging.getLogger("yfinance").setLevel(_early_logging.CRITICAL)
+
 from flask import Flask, jsonify, request, render_template, abort, Response
 import database as db
 import fetcher

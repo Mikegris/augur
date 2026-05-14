@@ -158,13 +158,17 @@ def _rf_predict(hist):
         return None
     X_latest = scaler.transform(latest.values)
 
-    # Train RF
+    # Train RF — n_jobs=1 forces single-process fitting. With n_jobs=-1 joblib
+    # spawns a loky pool whose worker teardown spams stderr with
+    # "resource_tracker died" warnings on every batch (~200/min during the
+    # warm pass). The fit is fast enough on this dataset that the parallelism
+    # isn't worth the noise.
     rf = RandomForestClassifier(
         n_estimators=200,
         max_depth=6,
         min_samples_leaf=10,
         random_state=42,
-        n_jobs=-1,
+        n_jobs=1,
     )
     rf.fit(X_train_scaled, y_train)
 
@@ -213,12 +217,18 @@ def _trend_forecast(hist, days_ahead=30):
     blend forecasts, compute confidence intervals.
     """
     close = hist["Close"].dropna()
+    # Drop any non-positive closes — they propagate -inf through np.log and
+    # poison polyfit / sklearn matmul downstream (the source of all those
+    # "divide by zero in log" and "invalid value in matmul" RuntimeWarnings).
+    close = close[close > 0]
     if len(close) < 60:
         return None
 
     log_prices = np.log(close.values)
     n = len(log_prices)
     current_price = float(close.iloc[-1])
+    if current_price <= 0:
+        return None
 
     forecasts = {}
     for label, window in [("short", 60), ("mid", 120), ("long", 250)]:
@@ -257,8 +267,12 @@ def _trend_forecast(hist, days_ahead=30):
     # Confidence bands (using short-term residual std)
     res_std = forecasts["short"]["residual_std"]
     ci_factor = res_std * np.sqrt(days_ahead) * 1.96
-    upper_price = round(current_price * np.exp(np.log(blend_price / current_price) + ci_factor), 2)
-    lower_price = round(current_price * np.exp(np.log(blend_price / current_price) - ci_factor), 2)
+    # blend_price comes out of OLS extrapolation and can briefly go non-positive
+    # for highly-shorted instruments — np.log(<=0) emits a RuntimeWarning every
+    # forecast pass. Clamp to a small epsilon so the band collapses to 0 instead.
+    log_ratio = np.log(max(blend_price / current_price, 1e-9))
+    upper_price = round(current_price * np.exp(log_ratio + ci_factor), 2)
+    lower_price = round(current_price * np.exp(log_ratio - ci_factor), 2)
 
     # Forecast path (daily for chart)
     short_coeffs = np.polyfit(np.arange(min(60, n)), log_prices[-min(60, n):], 1)

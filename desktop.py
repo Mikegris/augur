@@ -20,7 +20,23 @@ import socket
 import sys
 import threading
 import time
+import warnings
 from pathlib import Path
+
+# Silence known-benign warnings BEFORE third-party imports trigger them.
+# Filters must use message patterns here — importing the warning class would
+# already trigger the noisy module-level prints we're trying to suppress.
+warnings.filterwarnings("ignore", message=r".*OpenSSL 1\.1\.1\+.*")
+warnings.filterwarnings(
+    "ignore",
+    message=r"resource_tracker:.*process died unexpectedly.*",
+)
+warnings.filterwarnings(
+    "ignore",
+    category=RuntimeWarning,
+    module=r"sklearn\..*",
+)
+logging.getLogger("yfinance").setLevel(logging.CRITICAL)
 
 log = logging.getLogger("augur.desktop")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")

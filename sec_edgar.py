@@ -4,6 +4,7 @@ All requests use proper User-Agent and rate limiting.
 Python 3.9 compatible.
 """
 
+import os
 import time
 import json
 import logging
@@ -18,8 +19,16 @@ logger = logging.getLogger(__name__)
 
 EDGAR_BASE = "https://data.sec.gov"
 EDGAR_ARCHIVES = "https://www.sec.gov/Archives/edgar/data"
+# SEC's fair-use policy requires a UA with a real contact email. The original
+# `research@augur.local` was being filtered as suspicious (`.local` is reserved
+# for mDNS) and getting 429-rate-limited on every CIK lookup. AUGUR_SEC_UA lets
+# the operator drop in their own contact; the fallback uses a registered
+# domain so SEC doesn't reject it.
 EDGAR_HEADERS = {
-    "User-Agent": "AUGUR/1.0 research@augur.local",
+    "User-Agent": os.environ.get(
+        "AUGUR_SEC_UA",
+        "AUGUR Research Bot research@augur-app.org",
+    ),
     "Accept-Encoding": "gzip, deflate",
     "Accept": "application/json",
 }
