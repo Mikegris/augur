@@ -14,6 +14,85 @@ import threading
 COINGECKO_BASE = "https://api.coingecko.com/api/v3"
 HEADERS = {"User-Agent": "WealthTracker/1.0 (personal)"}
 
+# Yahoo Finance periodically drops or rate-limits crypto `<SYM>-USD` tickers.
+# When a quote fetch fails (delisted / 401 Invalid Crumb / 429) for any
+# ticker matching `<SYM>-USD` where SYM is in this dict, fall back to
+# CoinGecko's quote endpoint by the mapped coin ID. Keep in sync with
+# opportunity_scanner.UNIVERSE_CRYPTO_IDS.
+CRYPTO_FALLBACK_IDS = {
+    "BTC": "bitcoin", "ETH": "ethereum", "SOL": "solana",
+    "ADA": "cardano", "AVAX": "avalanche-2", "DOT": "polkadot",
+    "MATIC": "polygon-ecosystem-token",  # ex-matic-network, rebranded to POL
+    "LINK": "chainlink", "UNI": "uniswap",
+    "AAVE": "aave", "XRP": "ripple", "BNB": "binancecoin",
+    "NEAR": "near", "SUI": "sui", "APT": "aptos",
+    "DOGE": "dogecoin", "SHIB": "shiba-inu", "ARB": "arbitrum",
+    "OP": "optimism", "FIL": "filecoin",
+}
+
+
+def _coin_id_for_yf_symbol(symbol: str):
+    """Return CoinGecko coin ID for a yfinance-style symbol like 'BTC-USD',
+    or None if it isn't a known crypto ticker."""
+    s = symbol.upper()
+    if not s.endswith("-USD"):
+        return None
+    return CRYPTO_FALLBACK_IDS.get(s[:-4])
+
+
+def _coingecko_simple_batch(coin_ids):
+    """Fetch many coin quotes in a single HTTP call. Returns a dict keyed by
+    CoinGecko coin ID. Uses the /simple/price endpoint — far cheaper than
+    /coins/{id} (which gets rate-limited at the free tier after ~30/min)."""
+    if not coin_ids:
+        return {}
+    try:
+        return _cg_get("/simple/price", {
+            "ids": ",".join(sorted(set(coin_ids))),
+            "vs_currencies": "usd",
+            "include_24hr_change": "true",
+            "include_24hr_vol": "true",
+            "include_market_cap": "true",
+        })
+    except Exception:
+        return {}
+
+
+def _coingecko_quote(coin_id: str, yf_symbol: str) -> dict:
+    """Single-coin quote shaped to match yfinance's output. Hits the cheap
+    /simple/price endpoint to stay under CoinGecko's free-tier rate limit."""
+    batch = _coingecko_simple_batch([coin_id])
+    d = batch.get(coin_id)
+    if not d or "usd" not in d:
+        return {"symbol": yf_symbol.upper(), "error": "coingecko returned no data"}
+    price = d.get("usd")
+    change_pct = d.get("usd_24h_change")
+    change = (price * change_pct / 100) if (price and change_pct is not None) else None
+    prev = (price - change) if (price and change is not None) else None
+    return {
+        "symbol": yf_symbol.upper(),
+        "price": price,
+        "prev_close": round(prev, 6) if prev is not None else None,
+        "change": round(change, 6) if change is not None else None,
+        "change_pct": round(change_pct, 4) if change_pct is not None else None,
+        "volume": d.get("usd_24h_vol"),
+        "market_cap": d.get("usd_market_cap"),
+        "currency": "USD",
+        "exchange": "coingecko",
+        "source": "coingecko",
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+def _is_failed_crypto_quote(q: dict) -> bool:
+    """True if a quote dict looks like a yfinance failure we can recover
+    from via CoinGecko (no price, error string, or rate-limited)."""
+    if not isinstance(q, dict):
+        return True
+    if "error" in q:
+        return True
+    return q.get("price") is None
+
 
 # ─── TTL Cache ───────────────────────────────────────────────────────────────
 # Simple in-memory cache. Stores (value, expiry_ts) so each entry honours the
@@ -68,11 +147,37 @@ def _safe(val):
 
 # ─── Equity / ETF ─────────────────────────────────────────────────────────────
 
+def _try_crypto_fallback(symbol, ttl=30):
+    """If symbol maps to a known coin, fetch its CoinGecko quote and cache.
+    Returns a quote dict, or None if the symbol isn't a known crypto."""
+    coin_id = _coin_id_for_yf_symbol(symbol)
+    if not coin_id:
+        return None
+    cg_quote = _coingecko_quote(coin_id, symbol)
+    if "error" not in cg_quote:
+        _set_cache(("quote", symbol.upper()), cg_quote, ttl=ttl)
+    return cg_quote
+
+
 def get_quote(symbol: str) -> dict:
     ck = ("quote", symbol.upper())
     hit = _cached(ck, ttl=30)
     if hit is not None:
         return hit
+
+    # For known crypto symbols, prefer CoinGecko over yfinance. Yahoo's
+    # crypto data has been silently shipping wildly-wrong prices for some
+    # tickers (UNI returned $0.0002 instead of $3.74, SUI returned $0.0003
+    # instead of $1.19). CoinGecko is the canonical source for these.
+    # 120s TTL keeps API pressure low — CoinGecko's free tier is ~30/min.
+    coin_id = _coin_id_for_yf_symbol(symbol)
+    if coin_id:
+        cg_quote = _coingecko_quote(coin_id, symbol)
+        if "error" not in cg_quote and cg_quote.get("price"):
+            _set_cache(ck, cg_quote, ttl=120)
+            return cg_quote
+        # Fall through to yfinance if CoinGecko hiccups (rate-limit, etc.)
+
     try:
         t = yf.Ticker(symbol)
         info = t.fast_info
@@ -103,9 +208,18 @@ def get_quote(symbol: str) -> dict:
             "fifty_two_week_low": _safe(getattr(info, "year_low", None)),
             "timestamp": datetime.now(timezone.utc).isoformat(),
         }
+        # yfinance returned a quote but no price → treat as failure and
+        # try CoinGecko fallback for known crypto symbols.
+        if result.get("price") is None:
+            fallback = _try_crypto_fallback(symbol)
+            if fallback and "error" not in fallback:
+                return fallback
         _set_cache(ck, result, ttl=30)
         return result
     except Exception as e:
+        fallback = _try_crypto_fallback(symbol)
+        if fallback and "error" not in fallback:
+            return fallback
         return {"symbol": symbol.upper(), "error": str(e)}
 
 
@@ -138,6 +252,55 @@ def get_quotes_batch(symbols: list) -> dict:
         # Fallback: individual fetches
         for sym in symbols:
             results[sym.upper()] = get_quote(sym)
+
+    # CoinGecko sweep — collect every crypto in the batch (failed OR
+    # known-untrustworthy on Yahoo) and batch-fetch them in one /simple/price
+    # call. This is much faster than per-coin requests and avoids hitting
+    # CoinGecko's free-tier rate limit when scanning the full crypto universe.
+    crypto_to_resolve = {}  # cg_id -> yf_symbol
+    for sym in symbols:
+        cg_id = _coin_id_for_yf_symbol(sym)
+        if not cg_id:
+            continue
+        q = results.get(sym.upper())
+        # Prefer CoinGecko for every known crypto — Yahoo has been silently
+        # serving wrong prices for some (see _coingecko_quote for context).
+        crypto_to_resolve[cg_id] = sym.upper()
+
+    if crypto_to_resolve:
+        # Check cache first — if we have a recent CoinGecko quote for this
+        # ticker, use it directly without hitting the API. Keeps us well
+        # under the free-tier rate limit when the UI polls every few seconds.
+        still_need = {}
+        for cg_id, yf_sym in crypto_to_resolve.items():
+            cached = _cached(("quote", yf_sym), ttl=120)  # 2-min crypto cache
+            if cached and cached.get("source") == "coingecko":
+                results[yf_sym] = cached
+            else:
+                still_need[cg_id] = yf_sym
+        if still_need:
+            batch = _coingecko_simple_batch(list(still_need.keys()))
+            for cg_id, yf_sym in still_need.items():
+                d = batch.get(cg_id)
+                if not d or "usd" not in d:
+                    continue
+                price = d["usd"]
+                change_pct = d.get("usd_24h_change")
+                change = (price * change_pct / 100) if change_pct is not None else None
+                prev = (price - change) if change is not None else None
+                quote = {
+                    "symbol": yf_sym,
+                    "price": price,
+                    "prev_close": round(prev, 6) if prev is not None else None,
+                    "change": round(change, 6) if change is not None else None,
+                    "change_pct": round(change_pct, 4) if change_pct is not None else None,
+                    "day_high": None,
+                    "day_low": None,
+                    "market_cap": d.get("usd_market_cap"),
+                    "source": "coingecko",
+                }
+                results[yf_sym] = quote
+                _set_cache(("quote", yf_sym), quote, ttl=120)
     return results
 
 

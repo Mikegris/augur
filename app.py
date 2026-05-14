@@ -1779,6 +1779,38 @@ def macro_vix():
     return jsonify(ds.cboe_put_call_ratio() or {})
 
 
+# ── FRED (Federal Reserve Economic Data) ──────────────────────────
+# Free, no-auth CSV endpoints for 800k+ macro series. We expose three
+# routes: a snapshot dashboard, the curated catalog, and per-series detail.
+try:
+    import fred_data
+except Exception as _fred_err:
+    fred_data = None
+    log.warning("fred_data unavailable: %s", _fred_err)
+
+
+@app.route("/api/macro/fred/snapshot")
+def fred_snapshot():
+    if not fred_data:
+        return jsonify({"error": "fred_data module not available"}), 500
+    return jsonify(fred_data.snapshot())
+
+
+@app.route("/api/macro/fred/catalog")
+def fred_catalog():
+    if not fred_data:
+        return jsonify({"error": "fred_data module not available"}), 500
+    return jsonify({"series": fred_data.catalog()})
+
+
+@app.route("/api/macro/fred/<series_id>")
+def fred_series(series_id):
+    if not fred_data:
+        return jsonify({"error": "fred_data module not available"}), 500
+    obs = _safe_int(request.args.get("observations"), 60)
+    return jsonify(fred_data.fetch_series(series_id, observations=obs))
+
+
 # ── FinanceDatabase universe ──────────────────────────────────────
 @app.route("/api/screener/facets")
 def screener_facets():
@@ -1899,6 +1931,46 @@ def alt_stocktwits(symbol):
 @app.route("/api/alt-data/stocktwits-trending")
 def alt_stocktwits_trending():
     return jsonify({"trending": alt_signals.stocktwits_trending(limit=20)})
+
+
+# ── Wikipedia pageviews — retail-attention proxy ──────────────────
+# Free, key-less. Daily pageview series for a stock's article + spike
+# detection vs. a 7-day baseline.
+try:
+    import wiki_attention
+except Exception as _wiki_err:
+    wiki_attention = None
+    log.warning("wiki_attention unavailable: %s", _wiki_err)
+
+
+@app.route("/api/alt-data/wiki/<symbol>")
+def alt_wiki_pageviews(symbol):
+    if not wiki_attention:
+        return jsonify({"error": "wiki_attention module not available"}), 500
+    if not _valid_ticker(symbol):
+        return jsonify({"error": "Invalid symbol"}), 400
+    days = _safe_int(request.args.get("days"), 30)
+    return jsonify(wiki_attention.fetch_pageviews(symbol.upper(), days=days))
+
+
+# ── Hacker News mentions — tech sentiment signal ──────────────────
+# Algolia-backed search, no auth. Returns recent stories/comments
+# mentioning the ticker or company name, with coarse polarity scores.
+try:
+    import hn_sentiment
+except Exception as _hn_err:
+    hn_sentiment = None
+    log.warning("hn_sentiment unavailable: %s", _hn_err)
+
+
+@app.route("/api/alt-data/hackernews/<symbol>")
+def alt_hackernews(symbol):
+    if not hn_sentiment:
+        return jsonify({"error": "hn_sentiment module not available"}), 500
+    if not _valid_ticker(symbol):
+        return jsonify({"error": "Invalid symbol"}), 400
+    hours = _safe_int(request.args.get("hours"), 168)
+    return jsonify(hn_sentiment.fetch_mentions(symbol.upper(), hours=hours))
 
 
 # ──────────────────────────────────────────────────────────────────────────────

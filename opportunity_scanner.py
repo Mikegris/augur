@@ -63,14 +63,14 @@ UNIVERSE_INCOME = [
 UNIVERSE_CRYPTO_IDS = {
     "BTC": "bitcoin", "ETH": "ethereum", "SOL": "solana",
     "ADA": "cardano", "AVAX": "avalanche-2", "DOT": "polkadot",
-    "LINK": "chainlink",
+    "MATIC": "polygon-ecosystem-token", "LINK": "chainlink", "UNI": "uniswap",
     "AAVE": "aave", "XRP": "ripple", "BNB": "binancecoin",
-    "NEAR": "near", "APT": "aptos",
+    "NEAR": "near", "SUI": "sui", "APT": "aptos",
     "DOGE": "dogecoin", "SHIB": "shiba-inu", "ARB": "arbitrum",
     "OP": "optimism", "FIL": "filecoin",
-    # Removed: MATIC (rebranded to POL, no -USD ticker on Yahoo),
-    # SUI (not on Yahoo Finance), UNI (Yahoo blocks the -USD ticker).
-    # All three were producing "possibly delisted" errors on every warm pass.
+    # MATIC/SUI/UNI's -USD tickers fail on Yahoo Finance. fetcher.get_quote()
+    # falls back to CoinGecko for any ticker in CRYPTO_FALLBACK_IDS, so the
+    # full universe stays scannable even when Yahoo's coverage drops a coin.
 }
 
 SECTORS = [
