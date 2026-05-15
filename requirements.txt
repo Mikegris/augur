@@ -18,3 +18,6 @@ lxml>=4.9.0
 pdfplumber>=0.11.0
 scikit-learn>=1.0.0
 flask-compress>=1.13
+# finvizfinance — keyless Finviz scraper (sector heatmap, insider trades,
+# per-ticker news). GitHub: https://github.com/lit-llm/finvizfinance
+finvizfinance>=1.3.0

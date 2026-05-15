@@ -1811,6 +1811,76 @@ def fred_series(series_id):
     return jsonify(fred_data.fetch_series(series_id, observations=obs))
 
 
+# ── CFTC Commitments of Traders ───────────────────────────────────
+# Weekly futures positioning data, no auth required. Drives a Macro
+# panel showing the net long/short shift of leveraged funds across
+# S&P/Treasuries/USD/commodities.
+try:
+    import cftc_cot
+except Exception as _cftc_err:
+    cftc_cot = None
+    log.warning("cftc_cot unavailable: %s", _cftc_err)
+
+
+@app.route("/api/macro/cftc/snapshot")
+def cftc_snapshot():
+    if not cftc_cot:
+        return jsonify({"error": "cftc_cot module not available"}), 500
+    return jsonify(cftc_cot.snapshot())
+
+
+# ── Wikidata corporate metadata ───────────────────────────────────
+# SPARQL endpoint, keyless. Returns HQ/inception/CEO/parent/employees
+# for any ticker that has a Wikidata entity.
+try:
+    import wikidata_meta
+except Exception as _wd_err:
+    wikidata_meta = None
+    log.warning("wikidata_meta unavailable: %s", _wd_err)
+
+
+@app.route("/api/research/wikidata/<symbol>")
+def research_wikidata(symbol):
+    if not wikidata_meta:
+        return jsonify({"error": "wikidata_meta module not available"}), 500
+    if not _valid_ticker(symbol):
+        return jsonify({"error": "Invalid symbol"}), 400
+    return jsonify(wikidata_meta.fetch_facts(symbol.upper()))
+
+
+# ── Finviz scraping (via finvizfinance library on GitHub) ─────────
+# Sector performance/valuation heatmap + insider trades + per-ticker news.
+try:
+    import finviz_data
+except Exception as _fv_err:
+    finviz_data = None
+    log.warning("finviz_data unavailable: %s", _fv_err)
+
+
+@app.route("/api/market/finviz/sectors")
+def finviz_sectors():
+    if not finviz_data:
+        return jsonify({"error": "finviz_data module not available"}), 500
+    return jsonify(finviz_data.sector_heatmap())
+
+
+@app.route("/api/intel/finviz/insiders")
+def finviz_insiders():
+    if not finviz_data:
+        return jsonify({"error": "finviz_data module not available"}), 500
+    option = request.args.get("option", "latest")
+    return jsonify(finviz_data.insider_trades(option=option))
+
+
+@app.route("/api/news/finviz/<symbol>")
+def finviz_news(symbol):
+    if not finviz_data:
+        return jsonify({"error": "finviz_data module not available"}), 500
+    if not _valid_ticker(symbol):
+        return jsonify({"error": "Invalid symbol"}), 400
+    return jsonify(finviz_data.stock_news(symbol.upper()))
+
+
 # ── FinanceDatabase universe ──────────────────────────────────────
 @app.route("/api/screener/facets")
 def screener_facets():

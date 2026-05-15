@@ -70,6 +70,7 @@ EXTRA_PACKAGES = [
     "bs4",
     "lxml",
     "pdfplumber",
+    "finvizfinance",
     "openai",
     "httpx",
     "httpcore",
@@ -116,8 +117,8 @@ PLIST = {
     "CFBundleName":            "AUGUR",
     "CFBundleDisplayName":     "AUGUR",
     "CFBundleIdentifier":      "com.augur.wealth",
-    "CFBundleShortVersionString": "0.1.3",
-    "CFBundleVersion":         "0.1.3",
+    "CFBundleShortVersionString": "0.1.4",
+    "CFBundleVersion":         "0.1.4",
     "LSMinimumSystemVersion":  "10.13",
     "NSHighResolutionCapable": True,
     # We want a Dock icon + menubar; LSUIElement=0 keeps the app visible.

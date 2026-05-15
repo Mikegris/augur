@@ -1,0 +1,190 @@
+"""
+Wikidata SPARQL — corporate-metadata enrichment.
+
+Free, keyless SPARQL endpoint at query.wikidata.org. We resolve a stock
+ticker → Wikidata entity, then pull a fixed bundle of facts: HQ city,
+country, inception date, employee count, CEO name, parent company,
+website, industry. Useful "at-a-glance" context for the Research view.
+
+Wikidata is community-maintained so coverage varies (Apple has rich data,
+small-caps may have nothing). We return whatever's available + flag
+missing fields explicitly.
+
+Cache aggressively — corporate metadata changes maybe yearly.
+"""
+
+from __future__ import annotations
+
+import logging
+import time
+from typing import Optional
+
+import requests
+
+log = logging.getLogger("augur.wikidata")
+
+WIKIDATA_SPARQL = "https://query.wikidata.org/sparql"
+WIKIDATA_SEARCH = "https://www.wikidata.org/w/api.php"
+HEADERS = {
+    "User-Agent": "AUGUR/1.0 wealth-tracker (research@augur-app.org)",
+    "Accept": "application/sparql-results+json",
+}
+
+# Wikidata's P249 (ticker symbol) is sparsely populated — Apple's entity
+# has no ticker stored at all. For reliability we hardcode the top US
+# tickers → Wikidata QID. Anything not in this map falls back to a label
+# search (wbsearchentities), which works for any company with a clean name.
+TICKER_TO_QID = {
+    "AAPL":"Q312", "MSFT":"Q2283", "GOOGL":"Q20800404", "GOOG":"Q20800404",
+    "AMZN":"Q3884", "META":"Q380", "NVDA":"Q182477", "TSLA":"Q478214",
+    "BRK.A":"Q217583", "BRK.B":"Q217583", "JPM":"Q192314", "JNJ":"Q333718",
+    "V":"Q328880", "WMT":"Q483551", "PG":"Q203409", "MA":"Q44150",
+    "UNH":"Q2103532", "HD":"Q864407", "BAC":"Q487907", "PFE":"Q207137",
+    "XOM":"Q156238", "DIS":"Q7414", "KO":"Q103476", "PEP":"Q334777",
+    "CVX":"Q319642", "ABBV":"Q502090", "MRK":"Q58863", "ABT":"Q300193",
+    "ADBE":"Q189533", "NFLX":"Q907311", "T":"Q35476", "VZ":"Q467752",
+    "CRM":"Q941127", "ORCL":"Q41506", "INTC":"Q248", "AMD":"Q128896",
+    "CSCO":"Q34735", "QCOM":"Q160120", "TXN":"Q174684", "IBM":"Q37156",
+    "NKE":"Q483915", "MCD":"Q38076", "SBUX":"Q37158", "BA":"Q66",
+    "CAT":"Q459965", "GS":"Q193326", "MS":"Q1226523", "C":"Q219508",
+    "WFC":"Q744149", "BLK":"Q1064902", "AXP":"Q126032",
+    "GME":"Q1145897", "AMC":"Q272681", "PLTR":"Q24941398",
+    "COIN":"Q98770591", "HOOD":"Q101076869", "SHOP":"Q3500117",
+    "UBER":"Q15852335", "ABNB":"Q21709512",
+}
+
+_CACHE: dict = {}
+DEFAULT_TTL = 7 * 24 * 3600  # 1 week
+
+
+def _cache_get(key):
+    hit = _CACHE.get(key)
+    if not hit: return None
+    val, exp = hit
+    if time.time() > exp:
+        _CACHE.pop(key, None)
+        return None
+    return val
+
+
+def _cache_set(key, val, ttl):
+    _CACHE[key] = (val, time.time() + ttl)
+
+
+def _sparql(query: str) -> Optional[list]:
+    try:
+        resp = requests.get(
+            WIKIDATA_SPARQL,
+            params={"query": query, "format": "json"},
+            headers=HEADERS,
+            timeout=20,
+        )
+        resp.raise_for_status()
+        return resp.json().get("results", {}).get("bindings", [])
+    except Exception as e:
+        log.debug("wikidata sparql failed: %s", e)
+        return None
+
+
+def _entity_for_ticker(symbol: str) -> Optional[str]:
+    """Resolve ticker → Wikidata QID. Tries the hardcoded map first (covers
+    top US names where Wikidata's P249 is missing), then falls back to
+    label search via wbsearchentities for anything else."""
+    sym = symbol.upper().split("-")[0]
+    if sym in TICKER_TO_QID:
+        return TICKER_TO_QID[sym]
+    # Fallback: search for the ticker as a literal — sometimes the symbol
+    # appears in an alias or description.
+    try:
+        resp = requests.get(
+            WIKIDATA_SEARCH,
+            params={
+                "action": "wbsearchentities",
+                "search": sym,
+                "language": "en",
+                "format": "json",
+                "type": "item",
+                "limit": 5,
+            },
+            headers={"User-Agent": HEADERS["User-Agent"]},
+            timeout=10,
+        )
+        resp.raise_for_status()
+        for hit in resp.json().get("search", []):
+            desc = (hit.get("description") or "").lower()
+            # Prefer entries that look like a company
+            if any(w in desc for w in ("company", "corporation", "inc.", "holdings", "group")):
+                return hit.get("id")
+        # No company-shaped match — return the first hit if any
+        first = resp.json().get("search", [])
+        return first[0].get("id") if first else None
+    except Exception as e:
+        log.debug("wikidata search failed for %s: %s", sym, e)
+        return None
+
+
+def fetch_facts(symbol: str) -> dict:
+    """Return a flat dict of corporate facts. Empty values are kept as null
+    so the UI knows to show '—' rather than hide the field entirely."""
+    sym = symbol.upper()
+    cache_key = ("wikidata", sym)
+    cached = _cache_get(cache_key)
+    if cached is not None:
+        return cached
+
+    qid = _entity_for_ticker(sym)
+    if not qid:
+        result = {
+            "symbol": sym, "qid": None, "found": False,
+            "note": "no Wikidata entity matches this ticker symbol",
+        }
+        _cache_set(cache_key, result, DEFAULT_TTL)
+        return result
+
+    # One query pulls every fact we care about.
+    query = f"""
+SELECT ?label
+       ?industryLabel ?countryLabel ?headquartersLabel
+       ?inception ?employees
+       ?ceoLabel ?parentLabel ?website
+WHERE {{
+  wd:{qid} rdfs:label ?label . FILTER(LANG(?label) = "en")
+  OPTIONAL {{ wd:{qid} wdt:P452  ?industry . }}
+  OPTIONAL {{ wd:{qid} wdt:P17   ?country  . }}
+  OPTIONAL {{ wd:{qid} wdt:P159  ?headquarters . }}
+  OPTIONAL {{ wd:{qid} wdt:P571  ?inception . }}
+  OPTIONAL {{ wd:{qid} wdt:P1128 ?employees . }}
+  OPTIONAL {{ wd:{qid} wdt:P169  ?ceo . }}
+  OPTIONAL {{ wd:{qid} wdt:P749  ?parent . }}
+  OPTIONAL {{ wd:{qid} wdt:P856  ?website . }}
+  SERVICE wikibase:label {{ bd:serviceParam wikibase:language "en". }}
+}}
+LIMIT 1
+"""
+    rows = _sparql(query)
+    if not rows:
+        result = {"symbol": sym, "qid": qid, "found": True, "note": "SPARQL returned no rows"}
+        _cache_set(cache_key, result, DEFAULT_TTL)
+        return result
+
+    r = rows[0]
+    def g(k):
+        return (r.get(k) or {}).get("value")
+
+    result = {
+        "symbol": sym,
+        "qid": qid,
+        "found": True,
+        "name":         g("label"),
+        "industry":     g("industryLabel"),
+        "country":      g("countryLabel"),
+        "headquarters": g("headquartersLabel"),
+        "inception":    (g("inception") or "")[:10] or None,
+        "employees":    int(g("employees")) if g("employees") and g("employees").isdigit() else None,
+        "ceo":          g("ceoLabel"),
+        "parent":       g("parentLabel"),
+        "website":      g("website"),
+        "wikidata_url": f"https://www.wikidata.org/wiki/{qid}",
+    }
+    _cache_set(cache_key, result, DEFAULT_TTL)
+    return result

@@ -1466,6 +1466,9 @@ async function loadResearchFor(symbol) {
     // Load news async
     loadNewsFor(symbol, `news-feed-${symbol}`);
 
+    // Wikidata corporate-metadata profile (HQ, CEO, employees, parent, …)
+    DataPanels.appendWikidataFacts(view, symbol);
+
   } catch(e) {
     view.innerHTML = `<div class="empty-state"><span class="empty-icon">⚠</span><span class="text-red">${e.message}</span></div>`;
   }
@@ -1712,6 +1715,8 @@ async function loadCrypto() {
 
     // DefiLlama TVL + BTC mempool + cross-exchange (no-key Tier 1)
     DataPanels.appendDefiPanel(view);
+    // Finviz sector heatmap (1w performance, P/E, stock counts)
+    DataPanels.appendFinvizSectors(view);
 
   } catch(e) {
     view.innerHTML = `<div class="empty-state"><span class="empty-icon">⚠</span><span class="text-red">${e.message}</span></div>`;
@@ -2712,6 +2717,8 @@ async function loadMacroView() {
     DataPanels.appendTreasuryPanel(view);
     // FRED economic indicators — CPI, unemployment, fed funds, M2, GDP, etc.
     DataPanels.appendFredSnapshot(view);
+    // CFTC Commitments of Traders — weekly futures positioning
+    DataPanels.appendCftcSnapshot(view);
   } catch(e) {
     view.innerHTML = `<div class="empty-state"><span class="text-red">${e.message}</span></div>`;
   }
@@ -4169,6 +4176,7 @@ async function loadIntelInsiders() {
     <div id="insider-results">
       <div class="loading"><div class="spinner"></div></div>
     </div>
+    <div id="finviz-insider-feed"></div>
   `;
   document.getElementById('insider-symbol-input').addEventListener('keydown', e => {
     if (e.key === 'Enter') searchInsiders();
@@ -4177,6 +4185,9 @@ async function loadIntelInsiders() {
   // Auto-load first symbol
   const sym = defaultSymbols[0] || 'AAPL';
   await loadInsidersFor(sym);
+
+  // Cross-ticker Finviz insider feed (latest Form 4 across all US equities)
+  DataPanels.appendFinvizInsiders(document.getElementById('finviz-insider-feed'));
 }
 
 async function searchInsiders() {
@@ -6936,6 +6947,196 @@ const DataPanels = {
         <div style="font-size:9px;color:var(--text-dim);margin-top:8px">Polarity = positive-keyword count − negative-keyword count. Coarse vibe-check, not a true sentiment model.</div>`;
     } catch (e) {
       parent.innerHTML = `<div class="empty-state"><span class="col-negative">HN fetch failed: ${this._esc(e.message)}</span></div>`;
+    }
+  },
+
+  // ── Macro: CFTC Commitments of Traders — weekly positioning ─────
+  async appendCftcSnapshot(parent) {
+    if (!parent) return;
+    const wrap = document.createElement('div');
+    wrap.style.marginTop = '8px';
+    parent.appendChild(wrap);
+    wrap.innerHTML = `<div class="panel"><div class="panel-header"><span class="panel-title">CFTC COMMITMENTS OF TRADERS — WEEKLY POSITIONING</span></div><div class="panel-body"><div class="loading"><div class="spinner"></div> Loading CFTC futures positioning ...</div></div></div>`;
+    try {
+      const data = await API.get('/api/macro/cftc/snapshot');
+      const rows = (data && data.snapshot) || [];
+      if (!rows.length) {
+        wrap.querySelector('.panel-body').innerHTML = '<div class="empty-state">CFTC snapshot unavailable</div>';
+        return;
+      }
+      // Group by category
+      const byCat = {};
+      rows.forEach(r => { (byCat[r.category] = byCat[r.category] || []).push(r); });
+      const catLabels = { equity:'EQUITY INDICES', rates:'INTEREST RATES', fx:'CURRENCIES', energy:'ENERGY', metals:'METALS', ag:'AGRICULTURE' };
+      const order = ['equity','rates','fx','energy','metals','ag'];
+      const fmtNum = (n) => n == null ? '—' : (Math.abs(n) >= 1000 ? n.toLocaleString(undefined,{maximumFractionDigits:0}) : String(n));
+      const rowHtml = (r) => {
+        const d = r.net_delta_wow;
+        const dColor = d == null ? 'var(--text-dim)' : d > 0 ? 'var(--green)' : d < 0 ? 'var(--red)' : 'var(--text-dim)';
+        const netColor = r.net == null ? 'var(--text-dim)' : r.net > 0 ? 'var(--green)' : 'var(--red)';
+        const dStr = d == null ? '—' : `${d >= 0 ? '+' : ''}${fmtNum(d)}`;
+        const pctOi = r.net_pct_of_oi;
+        const pctStr = pctOi == null ? '—' : `${pctOi >= 0 ? '+' : ''}${pctOi.toFixed(1)}%`;
+        return `<tr>
+          <td style="font-size:11px">${this._esc(r.label)}</td>
+          <td style="font-size:10px;color:var(--text-dim)">${this._esc(r.trader_cohort||'').replace('_',' ')}</td>
+          <td style="font-size:11px;text-align:right;color:var(--text-secondary)">${fmtNum(r.long)}</td>
+          <td style="font-size:11px;text-align:right;color:var(--text-secondary)">${fmtNum(r.short)}</td>
+          <td style="font-size:11px;text-align:right;font-weight:600;color:${netColor}">${fmtNum(r.net)}</td>
+          <td style="font-size:11px;text-align:right;color:${dColor}">${dStr}</td>
+          <td style="font-size:10px;text-align:right;color:var(--text-dim)">${pctStr}</td>
+          <td style="font-size:10px;text-align:right;color:var(--text-dim)">${this._esc(r.report_date||'')}</td>
+        </tr>`;
+      };
+      let html = '<div style="font-size:10px;color:var(--text-dim);margin-bottom:8px">Net = long − short. Δ WoW = week-over-week change. TFF (financials) shows leveraged-fund positioning; Legacy (commodities) shows non-commercial.</div>';
+      for (const cat of order) {
+        if (!byCat[cat]) continue;
+        html += `<div class="macro-section-label" style="margin-top:8px">${catLabels[cat] || cat.toUpperCase()}</div>`;
+        html += `<div style="overflow-x:auto"><table class="data-table"><thead><tr>
+          <th style="text-align:left">CONTRACT</th><th>COHORT</th>
+          <th style="text-align:right">LONG</th><th style="text-align:right">SHORT</th>
+          <th style="text-align:right">NET</th><th style="text-align:right">Δ WoW</th>
+          <th style="text-align:right">% OI</th><th style="text-align:right">REPORT</th>
+        </tr></thead><tbody>${byCat[cat].map(r => rowHtml(r)).join('')}</tbody></table></div>`;
+      }
+      html += `<div style="font-size:9px;color:var(--text-dim);margin-top:8px">Source: <a href="https://publicreporting.cftc.gov" target="_blank" rel="noopener" style="color:var(--blue)">publicreporting.cftc.gov</a> · fetched ${this._esc((data.fetched_at||'').slice(0,19))}Z</div>`;
+      wrap.innerHTML = `<div class="panel"><div class="panel-header"><span class="panel-title">CFTC COMMITMENTS OF TRADERS — WEEKLY POSITIONING</span></div><div class="panel-body">${html}</div></div>`;
+    } catch (e) {
+      wrap.innerHTML = `<div class="empty-state"><span class="col-negative">CFTC panel error: ${this._esc(e.message)}</span></div>`;
+    }
+  },
+
+  // ── Research: Wikidata corporate facts ─────────────────────────
+  async appendWikidataFacts(parent, symbol) {
+    if (!parent || !symbol) return;
+    const wrap = document.createElement('div');
+    wrap.style.marginTop = '8px';
+    parent.appendChild(wrap);
+    wrap.innerHTML = `<div class="panel"><div class="panel-header"><span class="panel-title">CORPORATE PROFILE — WIKIDATA</span></div><div class="panel-body"><div class="loading"><div class="spinner"></div> Resolving Wikidata entity for ${this._esc(symbol)}...</div></div></div>`;
+    try {
+      const d = await API.get(`/api/research/wikidata/${encodeURIComponent(symbol)}`);
+      if (!d || !d.found) {
+        wrap.querySelector('.panel-body').innerHTML = `<div class="empty-state">${this._esc(d && d.note || 'No Wikidata entity for this ticker')}</div>`;
+        return;
+      }
+      const dash = '—';
+      const fmtEmp = d.employees == null ? dash : d.employees.toLocaleString();
+      const fmtSite = d.website ? `<a href="${this._esc(d.website)}" target="_blank" rel="noopener" style="color:var(--blue)">${this._esc(d.website.replace(/^https?:\/\//,'').replace(/\/$/,''))} ↗</a>` : dash;
+      const wikiLink = d.wikidata_url ? `<a href="${this._esc(d.wikidata_url)}" target="_blank" rel="noopener" style="color:var(--blue)">${this._esc(d.qid)} ↗</a>` : dash;
+      const cell = (label, val) => `
+        <div style="background:var(--bg-secondary);padding:10px;border:1px solid var(--border)">
+          <div style="font-size:9px;color:var(--text-dim);letter-spacing:.1em;margin-bottom:4px">${label}</div>
+          <div style="font-size:12px;color:var(--text-primary)">${val}</div>
+        </div>`;
+      wrap.innerHTML = `<div class="panel"><div class="panel-header"><span class="panel-title">CORPORATE PROFILE — WIKIDATA · ${this._esc(d.name || symbol)}</span></div><div class="panel-body">
+        <div class="panel-grid grid-4" style="gap:6px">
+          ${cell('INDUSTRY', this._esc(d.industry || dash))}
+          ${cell('HEADQUARTERS', this._esc(d.headquarters || dash))}
+          ${cell('COUNTRY', this._esc(d.country || dash))}
+          ${cell('INCEPTION', this._esc(d.inception || dash))}
+          ${cell('EMPLOYEES', fmtEmp)}
+          ${cell('CEO', this._esc(d.ceo || dash))}
+          ${cell('PARENT', this._esc(d.parent || dash))}
+          ${cell('WEBSITE', fmtSite)}
+        </div>
+        <div style="font-size:9px;color:var(--text-dim);margin-top:8px">Source: ${wikiLink} · community-curated, coverage varies</div>
+      </div></div>`;
+    } catch (e) {
+      wrap.innerHTML = `<div class="empty-state"><span class="col-negative">Wikidata panel error: ${this._esc(e.message)}</span></div>`;
+    }
+  },
+
+  // ── Markets: Finviz sector heatmap ─────────────────────────────
+  async appendFinvizSectors(parent) {
+    if (!parent) return;
+    const wrap = document.createElement('div');
+    wrap.style.marginTop = '8px';
+    parent.appendChild(wrap);
+    wrap.innerHTML = `<div class="panel"><div class="panel-header"><span class="panel-title">FINVIZ SECTOR HEATMAP — 1W PERFORMANCE</span></div><div class="panel-body"><div class="loading"><div class="spinner"></div> Loading Finviz sector data ...</div></div></div>`;
+    try {
+      const data = await API.get('/api/market/finviz/sectors');
+      const rows = (data && data.sectors) || [];
+      if (!rows.length) {
+        wrap.querySelector('.panel-body').innerHTML = '<div class="empty-state">Finviz sectors unavailable</div>';
+        return;
+      }
+      // Backend returns `change_1w` as a decimal fraction (0.0144 = 1.44%)
+      const cells = rows.map(s => {
+        const frac = (typeof s.change_1w === 'number') ? s.change_1w : null;
+        const pct = frac == null ? null : frac * 100;
+        const intensity = pct == null ? 0 : Math.min(Math.abs(pct) * 25, 80);
+        const bg = pct == null ? 'var(--bg-secondary)' :
+          pct >= 0 ? `rgba(0,255,159,${intensity/300})` : `rgba(255,51,85,${intensity/300})`;
+        const border = pct == null ? 'var(--border)' :
+          pct >= 0 ? `rgba(0,255,159,${intensity/200})` : `rgba(255,51,85,${intensity/200})`;
+        const pctStr = pct == null ? '—' : `${pct >= 0 ? '+' : ''}${pct.toFixed(2)}%`;
+        const pctColor = pct == null ? 'var(--text-dim)' : pct >= 0 ? 'var(--green)' : 'var(--red)';
+        const peStr = s.pe == null ? '—' : s.pe.toFixed(1);
+        return `<div style="background:${bg};border:1px solid ${border};padding:10px;border-radius:2px">
+          <div style="font-size:11px;font-weight:600;color:var(--text-primary)">${this._esc(s.name || '—')}</div>
+          <div style="font-size:16px;font-weight:700;margin-top:4px;color:${pctColor}">${pctStr}</div>
+          <div style="font-size:9px;color:var(--text-dim);margin-top:4px">${s.stocks ?? '—'} stocks · P/E ${peStr}</div>
+        </div>`;
+      }).join('');
+      wrap.innerHTML = `<div class="panel"><div class="panel-header"><span class="panel-title">FINVIZ SECTOR HEATMAP — 1W PERFORMANCE</span></div><div class="panel-body">
+        <div class="panel-grid grid-4" style="gap:4px">${cells}</div>
+        <div style="font-size:9px;color:var(--text-dim);margin-top:8px">Source: <a href="https://finviz.com" target="_blank" rel="noopener" style="color:var(--blue)">finviz.com</a> via finvizfinance · fetched ${this._esc((data.fetched_at||'').slice(0,19))}Z</div>
+      </div></div>`;
+    } catch (e) {
+      wrap.innerHTML = `<div class="empty-state"><span class="col-negative">Finviz sectors error: ${this._esc(e.message)}</span></div>`;
+    }
+  },
+
+  // ── Intel: Finviz cross-ticker insider trades ──────────────────
+  async appendFinvizInsiders(parent) {
+    if (!parent) return;
+    const wrap = document.createElement('div');
+    wrap.style.marginTop = '12px';
+    parent.appendChild(wrap);
+    wrap.innerHTML = `<div class="panel"><div class="panel-header"><span class="panel-title">FINVIZ CROSS-TICKER INSIDER FEED — LATEST FORM 4 ACROSS ALL US EQUITIES</span></div><div class="panel-body"><div class="loading"><div class="spinner"></div> Loading Finviz insider feed ...</div></div></div>`;
+    try {
+      const data = await API.get('/api/intel/finviz/insiders');
+      const trades = (data && data.trades) || [];
+      if (!trades.length) {
+        wrap.querySelector('.panel-body').innerHTML = '<div class="empty-state">Finviz insider feed unavailable</div>';
+        return;
+      }
+      const fmtCompact = (n) => {
+        if (n == null || isNaN(n)) return '—';
+        const abs = Math.abs(n);
+        if (abs >= 1e9) return (n/1e9).toFixed(2) + 'B';
+        if (abs >= 1e6) return (n/1e6).toFixed(2) + 'M';
+        if (abs >= 1e3) return (n/1e3).toFixed(1) + 'K';
+        return n.toLocaleString(undefined, {maximumFractionDigits: 0});
+      };
+      const rows = trades.slice(0, 40).map(t => {
+        const action = String(t.transaction || '').toUpperCase();
+        const isBuy = action.includes('BUY');
+        const isSell = action.includes('SALE') || action.includes('SELL') || action.includes('DISPOSITION');
+        const actColor = isBuy ? 'var(--green)' : isSell ? 'var(--red)' : 'var(--text-dim)';
+        const sym = t.ticker || '';
+        return `<tr>
+          <td style="font-size:10px;color:var(--text-dim);white-space:nowrap">${this._esc(t.date || '')}</td>
+          <td><span class="col-symbol" style="cursor:pointer" onclick="openResearch('${this._esc(sym)}')">${this._esc(sym)}</span></td>
+          <td style="font-size:11px">${this._esc(t.owner || '—')}</td>
+          <td style="font-size:10px;color:var(--text-dim)">${this._esc(t.relationship || '—')}</td>
+          <td style="font-size:11px;font-weight:600;color:${actColor}">${this._esc(t.transaction || '—')}</td>
+          <td style="font-size:11px;text-align:right">${t.cost == null ? '—' : '$' + t.cost.toFixed(2)}</td>
+          <td style="font-size:11px;text-align:right">${fmtCompact(t.shares)}</td>
+          <td style="font-size:11px;text-align:right;color:${actColor}">${t.value == null ? '—' : '$' + fmtCompact(t.value)}</td>
+          <td><a href="https://finviz.com/quote.ashx?t=${this._esc(sym)}" target="_blank" rel="noopener" style="font-size:10px;color:var(--blue)">FINVIZ ↗</a></td>
+        </tr>`;
+      }).join('');
+      wrap.innerHTML = `<div class="panel"><div class="panel-header"><span class="panel-title">FINVIZ CROSS-TICKER INSIDER FEED — LATEST FORM 4 ACROSS ALL US EQUITIES</span></div><div class="panel-body">
+        <div style="font-size:10px;color:var(--text-dim);margin-bottom:8px">Most recent insider transactions across the entire US equity universe (not filtered to portfolio). ${trades.length} loaded · showing first 40.</div>
+        <div style="overflow-x:auto"><table class="data-table"><thead><tr>
+          <th>DATE</th><th>TICKER</th><th>INSIDER</th><th>RELATIONSHIP</th><th>ACTION</th>
+          <th style="text-align:right">PRICE</th><th style="text-align:right">SHARES</th><th style="text-align:right">VALUE</th><th></th>
+        </tr></thead><tbody>${rows}</tbody></table></div>
+        <div style="font-size:9px;color:var(--text-dim);margin-top:8px">Source: <a href="https://finviz.com/insidertrading.ashx" target="_blank" rel="noopener" style="color:var(--blue)">finviz.com/insidertrading</a> via finvizfinance</div>
+      </div></div>`;
+    } catch (e) {
+      wrap.innerHTML = `<div class="empty-state"><span class="col-negative">Finviz insiders error: ${this._esc(e.message)}</span></div>`;
     }
   },
 };
