@@ -95,37 +95,19 @@ def _is_failed_crypto_quote(q: dict) -> bool:
 
 
 # ─── TTL Cache ───────────────────────────────────────────────────────────────
-# Simple in-memory cache. Stores (value, expiry_ts) so each entry honours the
-# TTL it was written with. Mutations are guarded by _cache_lock because the
-# snapshot worker thread and Flask request threads share this dict.
+# Delegates to cache_store, which adds SQLite write-through (so the cache
+# survives app restarts and we don't cold-start hammer Yahoo on every launch)
+# and request coalescing (so simultaneous requests for the same key don't
+# fire duplicate upstream calls). The thin _cached / _set_cache shims below
+# keep the rest of fetcher.py unchanged.
 
-_cache = {}
-_cache_lock = threading.Lock()
+import cache_store
 
 def _cached(key, ttl=60):
-    """Return cached value if fresh, else None. ttl arg kept for backwards compat but ignored — the writer's TTL is authoritative."""
-    entry = _cache.get(key)
-    if entry is None:
-        return None
-    value, expiry = entry
-    if time.time() < expiry:
-        return value
-    return None
+    return cache_store.cache_get(key, ttl)
 
 def _set_cache(key, value, ttl=60):
-    expiry = time.time() + ttl
-    with _cache_lock:
-        _cache[key] = (value, expiry)
-        if len(_cache) > 500:
-            now = time.time()
-            stale = [k for k, (_, exp) in _cache.items() if exp < now]
-            for k in stale:
-                _cache.pop(k, None)
-            # If still oversize after expiry sweep, drop oldest by expiry
-            if len(_cache) > 500:
-                ordered = sorted(_cache.items(), key=lambda kv: kv[1][1])
-                for k, _ in ordered[: len(_cache) - 500]:
-                    _cache.pop(k, None)
+    cache_store.cache_set(key, value, ttl)
 
 # ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -614,7 +596,10 @@ def get_quotes_batch(symbols: list) -> dict:
 
 def get_fundamentals(symbol: str) -> dict:
     ck = ("fundamentals", symbol.upper())
-    hit = _cached(ck, ttl=300)
+    # Fundamentals (PE / sector / margins / employees / etc.) move slowly —
+    # caching for 24h means we hit Yahoo/Finviz at most once per ticker per
+    # day, which keeps us well under their rate limits.
+    hit = _cached(ck, ttl=86400)
     if hit is not None:
         return hit
     try:
@@ -672,15 +657,15 @@ def get_fundamentals(symbol: str) -> dict:
         if not result.get("name") and result.get("pe_ratio") is None and result.get("market_cap") is None:
             fb = _finviz_fundamentals_fallback(symbol)
             if "error" not in fb:
-                _set_cache(ck, fb, ttl=300)
+                _set_cache(ck, fb, ttl=86400)
                 return fb
-        _set_cache(ck, result, ttl=300)
+        _set_cache(ck, result, ttl=86400)
         return result
     except Exception as e:
         # Yahoo blew up — try Finviz before giving up.
         fb = _finviz_fundamentals_fallback(symbol)
         if "error" not in fb:
-            _set_cache(ck, fb, ttl=300)
+            _set_cache(ck, fb, ttl=86400)
             return fb
         return {"symbol": symbol.upper(), "error": str(e)}
 
@@ -696,26 +681,37 @@ def is_valid_ticker(symbol) -> bool:
 
 def get_chart_data(symbol: str, period: str = "6mo", interval: str = "1d") -> list:
     """Returns OHLCV list suitable for Lightweight Charts."""
-    try:
-        t = yf.Ticker(symbol)
-        hist = t.history(period=period, interval=interval, auto_adjust=True)
-        if hist.empty:
+    ck = ("chart", symbol.upper(), period, interval)
+    # Intraday intervals refresh fast; daily and above are cached aggressively
+    # since they only get one new bar at most per day.
+    ttl = 600 if interval in ("1m","5m","15m","30m","1h","60m","90m") else 12 * 3600
+    hit = _cached(ck, ttl=ttl)
+    if hit is not None:
+        return hit
+
+    def _fetch():
+        try:
+            t = yf.Ticker(symbol)
+            hist = t.history(period=period, interval=interval, auto_adjust=True)
+            if hist.empty:
+                return _yahoo_chart_history(symbol, period, interval)
+            result = []
+            for ts, row in hist.iterrows():
+                ts_unix = int(ts.timestamp())
+                result.append({
+                    "time": ts_unix,
+                    "open": round(float(row["Open"]), 4),
+                    "high": round(float(row["High"]), 4),
+                    "low": round(float(row["Low"]), 4),
+                    "close": round(float(row["Close"]), 4),
+                    "volume": int(row["Volume"]) if not pd.isna(row["Volume"]) else 0,
+                })
+            return result
+        except Exception:
             return _yahoo_chart_history(symbol, period, interval)
-        result = []
-        for ts, row in hist.iterrows():
-            ts_unix = int(ts.timestamp())
-            result.append({
-                "time": ts_unix,
-                "open": round(float(row["Open"]), 4),
-                "high": round(float(row["High"]), 4),
-                "low": round(float(row["Low"]), 4),
-                "close": round(float(row["Close"]), 4),
-                "volume": int(row["Volume"]) if not pd.isna(row["Volume"]) else 0,
-            })
-        return result
-    except Exception:
-        # yfinance failed (rate-limit / crumb); go direct to Yahoo's chart API
-        return _yahoo_chart_history(symbol, period, interval)
+
+    result = cache_store.coalesce(ck, ttl, _fetch)
+    return result or []
 
 
 def _finviz_news_fallback(symbol: str, limit: int = 15) -> list:
@@ -741,6 +737,10 @@ def _finviz_news_fallback(symbol: str, limit: int = 15) -> list:
 
 
 def get_news(symbol: str, limit: int = 15) -> list:
+    ck = ("news", symbol.upper(), limit)
+    hit = _cached(ck, ttl=900)  # 15 min — news doesn't change minute-to-minute
+    if hit is not None:
+        return hit
     try:
         t = yf.Ticker(symbol)
         news = t.news or []
@@ -762,10 +762,15 @@ def get_news(symbol: str, limit: int = 15) -> list:
                 "published": pub_date,
             })
         if not result:
-            return _finviz_news_fallback(symbol, limit)
+            result = _finviz_news_fallback(symbol, limit)
+        if result:
+            _set_cache(ck, result, ttl=900)
         return result
     except Exception:
-        return _finviz_news_fallback(symbol, limit)
+        fb = _finviz_news_fallback(symbol, limit)
+        if fb:
+            _set_cache(ck, fb, ttl=900)
+        return fb
 
 
 def _yahoo_search_direct(query: str, limit: int = 12) -> list:
@@ -799,6 +804,10 @@ def _yahoo_search_direct(query: str, limit: int = 12) -> list:
 
 def search_symbol(query: str) -> list:
     """Use yfinance search with Yahoo's direct /finance/search as a fallback."""
+    ck = ("search", query.lower())
+    hit = _cached(ck, ttl=86400)  # search results barely change day-to-day
+    if hit is not None:
+        return hit
     try:
         results = yf.Search(query, max_results=12)
         quotes = results.quotes or []
@@ -811,11 +820,16 @@ def search_symbol(query: str) -> list:
                 "type": q.get("quoteType", ""),
                 "sector": q.get("sector", ""),
             })
+        if not out:
+            out = _yahoo_search_direct(query)
         if out:
-            return out
-        return _yahoo_search_direct(query)
+            _set_cache(ck, out, ttl=86400)
+        return out
     except Exception:
-        return _yahoo_search_direct(query)
+        out = _yahoo_search_direct(query)
+        if out:
+            _set_cache(ck, out, ttl=86400)
+        return out
 
 
 def get_market_indices() -> list:
@@ -1287,6 +1301,10 @@ def get_risk_metrics(symbols: list, period: str = "1y") -> dict:
 
 def get_benchmark_history(symbol: str = "SPY", period: str = "1y", base_value: float = None) -> list:
     """Return benchmark price history, optionally normalized to base_value."""
+    ck = ("bench", symbol.upper(), period, base_value)
+    hit = _cached(ck, ttl=12 * 3600)
+    if hit is not None:
+        return hit
     def _normalize(bars):
         if not bars:
             return []
@@ -1308,9 +1326,14 @@ def get_benchmark_history(symbol: str = "SPY", period: str = "1y", base_value: f
             ts_unix = int(ts.timestamp())
             normalized = (float(price) / first_close) * (base_value if base_value else 1.0)
             result.append({"time": ts_unix, "value": round(normalized, 4)})
+        if result:
+            _set_cache(ck, result, ttl=12 * 3600)
         return result
     except Exception:
-        return _normalize(_yahoo_chart_history(symbol, period, "1d"))
+        bars = _normalize(_yahoo_chart_history(symbol, period, "1d"))
+        if bars:
+            _set_cache(ck, bars, ttl=12 * 3600)
+        return bars
 
 
 def compute_indicators(ohlcv: list) -> dict:
@@ -1593,6 +1616,10 @@ def get_macro_indicators() -> dict:
     Fetch key macro indicators from yfinance.
     Returns current value + 1-day change for each indicator.
     """
+    ck = ("macro_indicators",)
+    hit = _cached(ck, ttl=300)  # 5 min — macro doesn't tick faster than daily
+    if hit is not None:
+        return hit
     tickers = {
         "vix":        "^VIX",
         "sp500":      "^GSPC",
@@ -1655,6 +1682,7 @@ def get_macro_indicators() -> dict:
     except Exception:
         result["yield_curve_spread"] = None
 
+    _set_cache(ck, result, ttl=300)
     return result
 
 

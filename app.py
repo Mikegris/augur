@@ -102,6 +102,22 @@ except ImportError:
 
 db.init_db()
 
+# Hydrate the persistent API cache from disk so the first navigation after
+# launch reads from the cache instead of hammering Yahoo/Finviz cold. The
+# warmer thread is then responsible for keeping the cache fresh in the
+# background — see cache_warmer.py for the cadence policy.
+try:
+    import cache_store
+    cache_store.init()
+except Exception as _cache_err:
+    log.warning("cache_store init failed: %s", _cache_err)
+
+try:
+    import cache_warmer
+    cache_warmer.start()
+except Exception as _warmer_err:
+    log.warning("cache_warmer start failed: %s", _warmer_err)
+
 
 # ─── Portfolio Snapshot Background Thread ─────────────────────────────────────
 
@@ -2120,6 +2136,35 @@ def ideas_warmer_status():
         return jsonify(idea_pool_warmer.warmer_status())
     except Exception as e:
         return jsonify({"error": str(e), "running": False, "warmed_total": 0}), 200
+
+
+@app.route("/api/system/cache/stats")
+def cache_stats():
+    """Persistent-cache + warmer-thread diagnostics. Powers the future
+    Settings → Cache panel; also handy for ad-hoc curl debugging."""
+    out = {}
+    try:
+        import cache_store
+        out["cache"] = cache_store.stats()
+    except Exception as e:
+        out["cache"] = {"error": str(e)}
+    try:
+        import cache_warmer
+        out["warmer"] = cache_warmer.status()
+    except Exception as e:
+        out["warmer"] = {"error": str(e)}
+    return jsonify(out)
+
+
+@app.route("/api/system/cache/clear", methods=["POST"])
+def cache_clear():
+    """Manual cache flush (used by a future Settings button)."""
+    try:
+        import cache_store
+        n = cache_store.clear()
+        return jsonify({"cleared": n})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 
 def _start_idea_warmer():
