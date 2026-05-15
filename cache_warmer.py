@@ -42,6 +42,7 @@ QUOTES_INTERVAL = 300
 FUNDAMENTALS_INTERVAL = 6 * 3600
 NEWS_INTERVAL = 6 * 3600
 BENCHMARK_INTERVAL = 12 * 3600
+CHART_INTERVAL = 12 * 3600         # default research charts (6mo daily)
 INTER_REQUEST_DELAY = 1.2          # spacing between requests within a cycle
 
 # Cap how many portfolio symbols we warm per cycle so an unusually large
@@ -146,6 +147,20 @@ def _loop():
         if now - _last_cycle.get("benchmark", 0) >= BENCHMARK_INTERVAL:
             _safe("benchmark", fetcher.get_benchmark_history, "SPY", "1y")
             time.sleep(INTER_REQUEST_DELAY)
+
+        # Chart history for portfolio + watchlist symbols at the Research
+        # view's default period (6mo / 1d). Without this, the first time a
+        # user clicks Research the chart panel is empty until they wait for
+        # a fresh yfinance fetch — which is the exact moment we don't want
+        # to pile on rate-limited upstreams.
+        if now - _last_cycle.get("chart", 0) >= CHART_INTERVAL:
+            eq, _ = _portfolio_symbols()
+            wl = _watchlist_symbols()
+            symbols = list(dict.fromkeys(eq + wl))[:PORTFOLIO_WARM_CAP]
+            for sym in symbols:
+                _safe("chart", fetcher.get_chart_data, sym, "6mo", "1d")
+                time.sleep(INTER_REQUEST_DELAY)
+            _last_cycle["chart"] = time.time()
 
         # Sleep until the next eligible cycle. 15s granularity keeps the
         # thread responsive without burning CPU.

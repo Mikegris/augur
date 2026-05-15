@@ -118,11 +118,16 @@
       <div class="empty-state">
         <span class="empty-icon" style="font-size:40px">⊕</span>
         <span style="color:var(--green);font-size:16px">RESEARCH TERMINAL</span>
-        <span style="color:var(--text-secondary)">Search for a symbol in the command bar above</span>
+        <span style="color:var(--text-secondary)">Pick a symbol below or type one in the search bar (⌘K)</span>
         <div style="margin-top:16px;display:flex;flex-wrap:wrap;gap:6px;justify-content:center">
-          ${['AAPL','MSFT','NVDA','TSLA','AMZN','GOOGL','META','BTC-USD'].map(s =>
-            `<button class="btn btn-ghost btn-sm" onclick="openResearch('${s}')">${s}</button>`
-          ).join('')}
+          <button class="btn btn-ghost btn-sm" onclick="openResearch('AAPL')">AAPL</button>
+          <button class="btn btn-ghost btn-sm" onclick="openResearch('MSFT')">MSFT</button>
+          <button class="btn btn-ghost btn-sm" onclick="openResearch('NVDA')">NVDA</button>
+          <button class="btn btn-ghost btn-sm" onclick="openResearch('TSLA')">TSLA</button>
+          <button class="btn btn-ghost btn-sm" onclick="openResearch('AMZN')">AMZN</button>
+          <button class="btn btn-ghost btn-sm" onclick="openResearch('GOOGL')">GOOGL</button>
+          <button class="btn btn-ghost btn-sm" onclick="openResearch('META')">META</button>
+          <button class="btn btn-ghost btn-sm" onclick="openCryptoResearch('bitcoin','BTC')">BTC</button>
         </div>
       </div>
     </div>

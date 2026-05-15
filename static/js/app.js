@@ -406,6 +406,7 @@ function navigate(view) {
     case 'news':         loadGlobalNews(); break;
     case 'screener':     loadScreener(); break;
     case 'settings':     loadSettings(); break;
+    case 'research':     loadResearchDefault(); break;
     case 'analytics':    loadAnalyticsView(); break;
     case 'intel':        loadIntelView(); break;
     case 'earnings':     loadEarningsView(); break;
@@ -1322,6 +1323,29 @@ async function openResearch(symbol) {
   navigate('research');
   State.researchSymbol = symbol;
   loadResearchFor(symbol);
+}
+
+// Called when the user clicks the "Research" menu item without an explicit
+// symbol. Reuse the last-viewed symbol, or pick the first portfolio holding,
+// or fall back to AAPL. Without this the user would see the empty splash
+// every time they navigated to the tab from elsewhere.
+async function loadResearchDefault() {
+  if (State.researchSymbol) {
+    loadResearchFor(State.researchSymbol);
+    return;
+  }
+  let sym = null;
+  try {
+    const p = await API.get('/api/portfolio');
+    const holdings = (p && p.holdings) || [];
+    const first = holdings.find(h => h.asset_type !== 'crypto');
+    if (first) sym = first.symbol;
+  } catch (e) {}
+  if (sym) {
+    State.researchSymbol = sym;
+    loadResearchFor(sym);
+  }
+  // else: leave the empty-state splash visible so the user can pick a symbol.
 }
 
 async function loadResearchFor(symbol) {
