@@ -62,6 +62,42 @@ _local = threading.local()
 _PERSIST_MIN_TTL = 60.0
 
 
+def _looks_like_failure(value) -> bool:
+    """Heuristic: would caching this value freeze a broken state in place?
+
+    Returns True for the shapes that indicate "upstream said no":
+      - single-dict error envelopes ({"symbol": "X", "error": "..."})
+      - empty lists (chart with 0 bars, news with 0 items, …)
+      - lists where every dict entry has an "error" field (indices/movers
+        when every upstream call rate-limited)
+      - empty dicts (correlation matrix {}, fundamentals {} …)
+
+    Real-data responses always have something useful in them, so this is
+    safe-by-default: false negatives (caching something that turns out to
+    be junk) are bounded by TTL; false positives (refusing to cache real
+    data) just mean one extra upstream call per TTL window."""
+    if value is None:
+        return True
+    if isinstance(value, dict):
+        if not value:
+            return True
+        # Single-symbol error envelope: {"symbol": "X", "error": "..."}
+        if "error" in value and len(value) <= 3:
+            return True
+        # A dict whose every value is None/empty is uselessly cached
+        if all(v is None or v == {} or v == [] for v in value.values()):
+            return True
+        return False
+    if isinstance(value, list):
+        if not value:
+            return True
+        # All dict entries are error envelopes → don't cache
+        if all(isinstance(x, dict) and "error" in x for x in value):
+            return True
+        return False
+    return False
+
+
 def _conn():
     c = getattr(_local, "c", None)
     if c is None:
@@ -163,9 +199,7 @@ def cache_set(key, value, ttl: float) -> None:
 
     if ttl < _PERSIST_MIN_TTL:
         return
-    # Skip persisting error envelopes — there's no point hydrating a stale
-    # "Too Many Requests" string on the next session.
-    if isinstance(value, dict) and "error" in value and len(value) <= 3:
+    if _looks_like_failure(value):
         return
     try:
         raw = json.dumps(value, default=str)
@@ -217,9 +251,7 @@ def coalesce(key, ttl: float, fetch_fn: Callable[[], Any]) -> Any:
 
     try:
         value = fetch_fn()
-        # Don't cache None / error envelopes — they'd freeze a broken state
-        # in place. Caller's existing error handling is still in effect.
-        if value is not None and not (isinstance(value, dict) and "error" in value and len(value) <= 3):
+        if not _looks_like_failure(value):
             cache_set(key, value, ttl)
         return value
     finally:
