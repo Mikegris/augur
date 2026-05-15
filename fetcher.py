@@ -145,6 +145,160 @@ def _safe(val):
     return val
 
 
+# ─── Yahoo direct-API fallback ────────────────────────────────────────────────
+# yfinance 1.2.0 depends on fc.yahoo.com to mint a "crumb" cookie. That host
+# started returning 404 in 2026 — yfinance interprets the failure as
+# YFRateLimitError and returns "Too Many Requests" for every call, even
+# though Yahoo's underlying chart endpoint still serves data fine without
+# any auth. We bypass the broken crumb flow by hitting v8/finance/chart
+# directly. Result is shaped to match get_quote()'s output.
+# Bumping yfinance to 1.2.1+ would fix this but requires Python 3.10
+# (curl_cffi>=0.15 dependency); we're pinned to 3.9 for Xcode CLT compat.
+
+_YAHOO_CHART_BASE = "https://query1.finance.yahoo.com/v8/finance/chart"
+_YAHOO_DIRECT_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                  "AppleWebKit/537.36 (KHTML, like Gecko) "
+                  "Chrome/120.0.0.0 Safari/537.36",
+    "Accept": "application/json",
+}
+
+
+def _yahoo_chart_direct(symbol: str) -> dict:
+    """Fetch a quote via Yahoo's chart endpoint, bypassing yfinance. Returns
+    a dict in get_quote()'s shape, or {'error': ...} on failure."""
+    sym = symbol.upper()
+    try:
+        r = requests.get(
+            f"{_YAHOO_CHART_BASE}/{sym}",
+            params={"interval": "1d", "range": "5d"},
+            headers=_YAHOO_DIRECT_HEADERS,
+            timeout=8,
+        )
+        r.raise_for_status()
+        payload = r.json()
+    except Exception as e:
+        return {"symbol": sym, "error": f"yahoo-direct: {e}"}
+
+    chart = (payload or {}).get("chart") or {}
+    if chart.get("error"):
+        return {"symbol": sym, "error": str(chart["error"])}
+    results = chart.get("result") or []
+    if not results:
+        return {"symbol": sym, "error": "yahoo-direct: empty result"}
+    meta = results[0].get("meta") or {}
+
+    price = meta.get("regularMarketPrice")
+    prev = meta.get("chartPreviousClose") or meta.get("previousClose")
+    chg = round(price - prev, 4) if (price is not None and prev) else None
+    chg_pct = round((chg / prev) * 100, 4) if (chg is not None and prev) else None
+
+    return {
+        "symbol": sym,
+        "price": price,
+        "prev_close": prev,
+        "change": chg,
+        "change_pct": chg_pct,
+        "volume": meta.get("regularMarketVolume"),
+        "market_cap": None,  # not exposed by chart endpoint
+        "currency": meta.get("currency", "USD"),
+        "exchange": meta.get("exchangeName", ""),
+        "day_high": meta.get("regularMarketDayHigh"),
+        "day_low": meta.get("regularMarketDayLow"),
+        "fifty_two_week_high": meta.get("fiftyTwoWeekHigh"),
+        "fifty_two_week_low": meta.get("fiftyTwoWeekLow"),
+        "source": "yahoo-direct",
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+# When Yahoo's API is down, indices/futures map to liquid ETF proxies that
+# Finviz tracks. The proxy's price isn't identical (small tracking error /
+# leverage / scale) but the change% is close, which is what the UI relies on.
+_INDEX_TO_FINVIZ_PROXY = {
+    "^GSPC": "SPY",       # S&P 500 → SPY
+    "^NDX": "QQQ",        # NASDAQ 100 → QQQ
+    "^DJI": "DIA",        # DOW → DIA
+    "^RUT": "IWM",        # Russell 2000 → IWM
+    "^VIX": "VIXY",       # VIX → VIXY (rough; volatility ETN)
+    "^TNX": "IEF",        # 10Y yield → IEF (7-10Y treasury ETF)
+    "GC=F":  "GLD",       # Gold futures → GLD
+    "CL=F":  "USO",       # WTI futures → USO
+    "DX-Y.NYB": "UUP",    # DXY → UUP
+    "^FTSE": "EWU",       # FTSE 100 → EWU (UK ETF)
+    "^N225": "EWJ",       # Nikkei → EWJ (Japan ETF)
+}
+
+
+def _finviz_quote_fallback(symbol: str) -> dict:
+    """Per-ticker quote via finvizfinance — last resort when Yahoo is hard
+    rate-limiting us. Slower (HTML scrape) but unrelated to Yahoo's quota.
+    For indices/futures, we substitute a liquid ETF proxy and preserve the
+    original symbol in the response."""
+    sym = symbol.upper()
+    finviz_sym = sym
+    proxy_used = None
+    if sym in _INDEX_TO_FINVIZ_PROXY:
+        finviz_sym = _INDEX_TO_FINVIZ_PROXY[sym]
+        proxy_used = finviz_sym
+    elif sym.startswith("^") or "=" in sym or "." in sym.replace("-", ""):
+        return {"symbol": sym, "error": "finviz: unsupported ticker shape"}
+    try:
+        from finvizfinance.quote import finvizfinance as _Q
+        fund = _Q(finviz_sym).ticker_fundament() or {}
+    except Exception as e:
+        return {"symbol": sym, "error": f"finviz: {e}"}
+
+    def _num(v):
+        if v is None: return None
+        s = str(v).strip().rstrip("%").replace(",", "")
+        if s in ("", "-", "—"): return None
+        # Finviz uses suffixes K/M/B/T for compact numbers
+        mult = 1
+        if s and s[-1] in "KMBT":
+            mult = {"K": 1e3, "M": 1e6, "B": 1e9, "T": 1e12}[s[-1]]
+            s = s[:-1]
+        try:
+            return float(s) * mult
+        except ValueError:
+            return None
+
+    price = _num(fund.get("Price"))
+    if price is None:
+        return {"symbol": sym, "error": "finviz: no Price field"}
+    prev = _num(fund.get("Prev Close"))
+    chg_pct = _num(fund.get("Change"))
+    chg = round(price - prev, 4) if (price is not None and prev) else None
+    return {
+        "symbol": sym,
+        "price": price,
+        "prev_close": prev,
+        "change": chg,
+        "change_pct": chg_pct,
+        "volume": _num(fund.get("Volume")),
+        "market_cap": _num(fund.get("Market Cap")),
+        "currency": "USD",
+        "exchange": fund.get("Exchange", ""),
+        "day_high": None,
+        "day_low": None,
+        "fifty_two_week_high": _num((fund.get("52W High") or "").split()[0] if fund.get("52W High") else None),
+        "fifty_two_week_low":  _num((fund.get("52W Low")  or "").split()[0] if fund.get("52W Low")  else None),
+        "source": f"finviz-via-{proxy_used}" if proxy_used else "finviz",
+        "proxy_symbol": proxy_used,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+def _is_rate_limit_error(exc) -> bool:
+    """yfinance 1.2.0 raises YFRateLimitError as the user-facing error when
+    its crumb flow fails — match on the class name (the type is module-private)
+    plus the string for older paths."""
+    if exc is None:
+        return False
+    name = type(exc).__name__
+    return name == "YFRateLimitError" or "rate limit" in str(exc).lower() or "too many requests" in str(exc).lower()
+
+
 # ─── Equity / ETF ─────────────────────────────────────────────────────────────
 
 def _try_crypto_fallback(symbol, ttl=30):
@@ -208,18 +362,23 @@ def get_quote(symbol: str) -> dict:
             "fifty_two_week_low": _safe(getattr(info, "year_low", None)),
             "timestamp": datetime.now(timezone.utc).isoformat(),
         }
-        # yfinance returned a quote but no price → treat as failure and
-        # try CoinGecko fallback for known crypto symbols.
+        # yfinance returned a quote but no price → fallback chain.
         if result.get("price") is None:
-            fallback = _try_crypto_fallback(symbol)
-            if fallback and "error" not in fallback:
-                return fallback
+            for fb in (_yahoo_chart_direct, _try_crypto_fallback, _finviz_quote_fallback):
+                fbq = fb(symbol) if fb is not _try_crypto_fallback else fb(symbol)
+                if fbq and "error" not in fbq and fbq.get("price") is not None:
+                    _set_cache(ck, fbq, ttl=30)
+                    return fbq
         _set_cache(ck, result, ttl=30)
         return result
     except Exception as e:
-        fallback = _try_crypto_fallback(symbol)
-        if fallback and "error" not in fallback:
-            return fallback
+        # yfinance 1.2.0 trips YFRateLimitError when fc.yahoo.com (crumb host)
+        # 404s. Fallback chain: Yahoo direct → crypto-via-CoinGecko → Finviz.
+        for fb in (_yahoo_chart_direct, _try_crypto_fallback, _finviz_quote_fallback):
+            fbq = fb(symbol)
+            if fbq and "error" not in fbq and fbq.get("price") is not None:
+                _set_cache(ck, fbq, ttl=30)
+                return fbq
         return {"symbol": symbol.upper(), "error": str(e)}
 
 
@@ -234,6 +393,8 @@ def get_quotes_batch(symbols: list) -> dict:
                 info = t.fast_info
                 price = _safe(info.last_price) or _safe(info.regular_market_price)
                 prev = _safe(info.previous_close)
+                if price is None:
+                    raise RuntimeError("no price from yfinance")
                 chg = round(price - prev, 4) if price and prev else None
                 chg_pct = round((chg / prev) * 100, 4) if chg and prev else None
                 results[sym.upper()] = {
@@ -247,7 +408,15 @@ def get_quotes_batch(symbols: list) -> dict:
                     "market_cap": _safe(getattr(info, "market_cap", None)),
                 }
             except Exception as e:
-                results[sym.upper()] = {"symbol": sym.upper(), "error": str(e)}
+                # Mirror get_quote's fallback chain so batch users aren't
+                # left with errors when only yfinance is broken.
+                got = None
+                for fb in (_yahoo_chart_direct, _finviz_quote_fallback):
+                    fbq = fb(sym)
+                    if fbq and "error" not in fbq and fbq.get("price") is not None:
+                        got = fbq
+                        break
+                results[sym.upper()] = got or {"symbol": sym.upper(), "error": str(e)}
     except Exception as e:
         # Fallback: individual fetches
         for sym in symbols:
