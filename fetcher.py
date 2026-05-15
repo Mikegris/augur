@@ -289,6 +289,145 @@ def _finviz_quote_fallback(symbol: str) -> dict:
     }
 
 
+def _yahoo_chart_history(symbol: str, period: str = "6mo", interval: str = "1d") -> list:
+    """OHLCV list for charting via Yahoo's v8/finance/chart endpoint. Bypasses
+    yfinance entirely. Used as a fallback for get_chart_data and _get_returns_df
+    when yfinance trips its broken crumb auth and returns rate-limit errors."""
+    sym = symbol.upper()
+    # Map period+interval to Yahoo's range/interval params. We support the
+    # combinations app.py actually uses; others fall through to defaults.
+    range_map = {"1d":"1d","5d":"5d","1mo":"1mo","3mo":"3mo","6mo":"6mo",
+                 "1y":"1y","2y":"2y","5y":"5y","10y":"10y","ytd":"ytd","max":"max"}
+    yh_range = range_map.get(period, "6mo")
+    try:
+        r = requests.get(
+            f"{_YAHOO_CHART_BASE}/{sym}",
+            params={"interval": interval, "range": yh_range,
+                    "includePrePost": "false", "events": "div,split"},
+            headers=_YAHOO_DIRECT_HEADERS,
+            timeout=10,
+        )
+        r.raise_for_status()
+        payload = r.json()
+    except Exception:
+        return []
+    chart = (payload or {}).get("chart") or {}
+    if chart.get("error"):
+        return []
+    results = chart.get("result") or []
+    if not results:
+        return []
+    res0 = results[0]
+    timestamps = res0.get("timestamp") or []
+    ind = (res0.get("indicators") or {}).get("quote") or [{}]
+    q = ind[0] if ind else {}
+    opens  = q.get("open") or []
+    highs  = q.get("high") or []
+    lows   = q.get("low") or []
+    closes = q.get("close") or []
+    vols   = q.get("volume") or []
+    out = []
+    for i, ts in enumerate(timestamps):
+        c = closes[i] if i < len(closes) else None
+        if c is None:
+            continue  # Yahoo includes null bars for non-trading windows
+        out.append({
+            "time": int(ts),
+            "open":  round(float(opens[i]),  4) if i < len(opens)  and opens[i]  is not None else c,
+            "high":  round(float(highs[i]),  4) if i < len(highs)  and highs[i]  is not None else c,
+            "low":   round(float(lows[i]),   4) if i < len(lows)   and lows[i]   is not None else c,
+            "close": round(float(c), 4),
+            "volume": int(vols[i]) if i < len(vols) and vols[i] is not None else 0,
+        })
+    return out
+
+
+def _finviz_fundamentals_fallback(symbol: str) -> dict:
+    """Map finvizfinance.ticker_fundament() into get_fundamentals()'s shape.
+    Finviz has nearly every metric we report (PE, PEG, margins, sector,
+    industry, employees, beta, 52w, target price, dividend) — coverage gaps
+    are filled with None rather than crashing."""
+    sym = symbol.upper()
+    try:
+        from finvizfinance.quote import finvizfinance as _Q
+        fund = _Q(sym).ticker_fundament() or {}
+    except Exception as e:
+        return {"symbol": sym, "error": f"finviz fundamentals: {e}"}
+
+    def _num(v):
+        if v is None: return None
+        s = str(v).strip().replace(",", "")
+        # strip trailing % so percentage fields become plain floats
+        had_pct = s.endswith("%")
+        if had_pct: s = s[:-1]
+        if s in ("", "-", "—"): return None
+        mult = 1
+        if s and s[-1] in "KMBT":
+            mult = {"K":1e3,"M":1e6,"B":1e9,"T":1e12}[s[-1]]
+            s = s[:-1]
+        try:
+            n = float(s) * mult
+            return n / 100 if had_pct else n
+        except ValueError:
+            return None
+
+    # Some fields combine value + percent in a single string (e.g. "1.05 (0.35%)")
+    def _first_num(v):
+        if v is None: return None
+        head = str(v).split()[0] if str(v).strip() else ""
+        return _num(head)
+
+    target = _num(fund.get("Target Price"))
+    result = {
+        "symbol": sym,
+        "name": fund.get("Company", ""),
+        "sector": fund.get("Sector", ""),
+        "industry": fund.get("Industry", ""),
+        "description": "",
+        "website": "",
+        "country": fund.get("Country", ""),
+        "employees": int(_num(fund.get("Employees"))) if _num(fund.get("Employees")) else None,
+        "market_cap": _num(fund.get("Market Cap")),
+        "enterprise_value": _num(fund.get("Enterprise Value")),
+        "pe_ratio":   _num(fund.get("P/E")),
+        "forward_pe": _num(fund.get("Forward P/E")),
+        "peg_ratio":  _num(fund.get("PEG")),
+        "ps_ratio":   _num(fund.get("P/S")),
+        "pb_ratio":   _num(fund.get("P/B")),
+        "ev_ebitda":  _num(fund.get("EV/EBITDA")),
+        "debt_equity":   _num(fund.get("Debt/Eq")),
+        "current_ratio": _num(fund.get("Current Ratio")),
+        "return_on_equity": _num(fund.get("ROE")),
+        "return_on_assets": _num(fund.get("ROA")),
+        "profit_margin":   _num(fund.get("Profit Margin")),
+        "gross_margin":    _num(fund.get("Gross Margin")),
+        "operating_margin":_num(fund.get("Oper. Margin")),
+        "revenue":         _num(fund.get("Sales")),
+        "revenue_growth":  _num(fund.get("Sales Q/Q")),
+        "earnings_growth": _num(fund.get("EPS Q/Q")),
+        "free_cashflow":   None,
+        "dividend_yield":  _num(fund.get("Dividend %")) or _first_num(fund.get("Dividend TTM")),
+        "dividend_rate":   _first_num(fund.get("Dividend Est.")),
+        "payout_ratio":    _num(fund.get("Payout")),
+        "beta":            _num(fund.get("Beta")),
+        "shares_outstanding": _num(fund.get("Shs Outstand")),
+        "float_shares":       _num(fund.get("Shs Float")),
+        "short_ratio":        _num(fund.get("Short Ratio")),
+        "short_percent_float":_num(fund.get("Short Float")),
+        "52w_high":   _first_num(fund.get("52W High")),
+        "52w_low":    _first_num(fund.get("52W Low")),
+        "50d_avg":    None,
+        "200d_avg":   None,
+        "analyst_target": target,
+        "analyst_low":    None,
+        "analyst_high":   None,
+        "recommendation": fund.get("Recom", ""),
+        "num_analysts":   None,
+        "source": "finviz",
+    }
+    return result
+
+
 def _is_rate_limit_error(exc) -> bool:
     """yfinance 1.2.0 raises YFRateLimitError as the user-facing error when
     its crumb flow fails — match on the class name (the type is module-private)
@@ -527,9 +666,22 @@ def get_fundamentals(symbol: str) -> dict:
             "recommendation": info.get("recommendationKey", ""),
             "num_analysts": _safe(info.get("numberOfAnalystOpinions")),
         }
+        # yfinance returned an `info` dict but most fields are None/empty —
+        # that happens when fast_info is reused under rate-limit. Treat
+        # "no name and no PE" as a soft failure and try Finviz.
+        if not result.get("name") and result.get("pe_ratio") is None and result.get("market_cap") is None:
+            fb = _finviz_fundamentals_fallback(symbol)
+            if "error" not in fb:
+                _set_cache(ck, fb, ttl=300)
+                return fb
         _set_cache(ck, result, ttl=300)
         return result
     except Exception as e:
+        # Yahoo blew up — try Finviz before giving up.
+        fb = _finviz_fundamentals_fallback(symbol)
+        if "error" not in fb:
+            _set_cache(ck, fb, ttl=300)
+            return fb
         return {"symbol": symbol.upper(), "error": str(e)}
 
 
@@ -548,7 +700,7 @@ def get_chart_data(symbol: str, period: str = "6mo", interval: str = "1d") -> li
         t = yf.Ticker(symbol)
         hist = t.history(period=period, interval=interval, auto_adjust=True)
         if hist.empty:
-            return []
+            return _yahoo_chart_history(symbol, period, interval)
         result = []
         for ts, row in hist.iterrows():
             ts_unix = int(ts.timestamp())
@@ -561,8 +713,31 @@ def get_chart_data(symbol: str, period: str = "6mo", interval: str = "1d") -> li
                 "volume": int(row["Volume"]) if not pd.isna(row["Volume"]) else 0,
             })
         return result
-    except Exception as e:
+    except Exception:
+        # yfinance failed (rate-limit / crumb); go direct to Yahoo's chart API
+        return _yahoo_chart_history(symbol, period, interval)
+
+
+def _finviz_news_fallback(symbol: str, limit: int = 15) -> list:
+    """Per-ticker news via Finviz HTML scrape — works when Yahoo's news
+    endpoint is rate-limited."""
+    try:
+        from finvizfinance.quote import finvizfinance as _Q
+        df = _Q(symbol).ticker_news()
+    except Exception:
         return []
+    if df is None or df.empty:
+        return []
+    out = []
+    for _, r in df.head(limit).iterrows():
+        out.append({
+            "title":    r.get("Title") or "",
+            "summary":  "",
+            "source":   r.get("Source") or "",
+            "url":      r.get("Link") or "",
+            "published": str(r.get("Date", "")),
+        })
+    return out
 
 
 def get_news(symbol: str, limit: int = 15) -> list:
@@ -586,13 +761,44 @@ def get_news(symbol: str, limit: int = 15) -> list:
                 "url": url,
                 "published": pub_date,
             })
+        if not result:
+            return _finviz_news_fallback(symbol, limit)
         return result
     except Exception:
+        return _finviz_news_fallback(symbol, limit)
+
+
+def _yahoo_search_direct(query: str, limit: int = 12) -> list:
+    """Yahoo's /v1/finance/search endpoint is keyless and doesn't go through
+    the broken crumb flow that breaks yf.Search. Public, no auth."""
+    try:
+        r = requests.get(
+            "https://query1.finance.yahoo.com/v1/finance/search",
+            params={"q": query, "quotesCount": limit, "newsCount": 0},
+            headers=_YAHOO_DIRECT_HEADERS,
+            timeout=8,
+        )
+        r.raise_for_status()
+        data = r.json() or {}
+    except Exception:
         return []
+    out = []
+    for q in (data.get("quotes") or [])[:limit]:
+        sym = q.get("symbol", "")
+        if not sym:
+            continue
+        out.append({
+            "symbol": sym,
+            "name": q.get("longname") or q.get("shortname") or "",
+            "exchange": q.get("exchDisp") or q.get("exchange") or "",
+            "type": q.get("quoteType") or "",
+            "sector": q.get("sector") or "",
+        })
+    return out
 
 
 def search_symbol(query: str) -> list:
-    """Use yfinance search."""
+    """Use yfinance search with Yahoo's direct /finance/search as a fallback."""
     try:
         results = yf.Search(query, max_results=12)
         quotes = results.quotes or []
@@ -605,9 +811,11 @@ def search_symbol(query: str) -> list:
                 "type": q.get("quoteType", ""),
                 "sector": q.get("sector", ""),
             })
-        return out
+        if out:
+            return out
+        return _yahoo_search_direct(query)
     except Exception:
-        return []
+        return _yahoo_search_direct(query)
 
 
 def get_market_indices() -> list:
@@ -924,6 +1132,23 @@ def get_option_chain(symbol: str, date: str = None) -> dict:
 
 # ─── Analytics — Risk & Correlation ───────────────────────────────────────────
 
+def _yahoo_direct_closes_df(symbols: list, period: str) -> "pd.DataFrame":
+    """Build a closes DataFrame by hitting Yahoo's chart endpoint per symbol.
+    Used when yf.download trips its broken-crumb rate-limit path. Returns
+    a DataFrame indexed by datetime with one column per symbol; missing
+    symbols are simply omitted."""
+    series = {}
+    for sym in symbols:
+        bars = _yahoo_chart_history(sym, period=period, interval="1d")
+        if not bars:
+            continue
+        idx = pd.to_datetime([b["time"] for b in bars], unit="s")
+        series[sym] = pd.Series([b["close"] for b in bars], index=idx)
+    if not series:
+        return pd.DataFrame()
+    return pd.DataFrame(series).sort_index()
+
+
 def _get_returns_df(symbols: list, period: str = "1y") -> "pd.DataFrame":
     """Download adjusted closes for symbols and return daily returns DataFrame."""
     if not symbols:
@@ -936,7 +1161,8 @@ def _get_returns_df(symbols: list, period: str = "1y") -> "pd.DataFrame":
             auto_adjust=True,
         )
         if raw.empty:
-            return pd.DataFrame()
+            closes = _yahoo_direct_closes_df(symbols, period)
+            return closes.pct_change().dropna() if not closes.empty else pd.DataFrame()
 
         # Handle single symbol (flat) vs multi-symbol (MultiIndex)
         if len(symbols) == 1:
@@ -956,9 +1182,13 @@ def _get_returns_df(symbols: list, period: str = "1y") -> "pd.DataFrame":
                 closes = raw[["Close"]]
 
         returns = closes.pct_change().dropna()
+        if returns.empty:
+            closes = _yahoo_direct_closes_df(symbols, period)
+            return closes.pct_change().dropna() if not closes.empty else pd.DataFrame()
         return returns
     except Exception:
-        return pd.DataFrame()
+        closes = _yahoo_direct_closes_df(symbols, period)
+        return closes.pct_change().dropna() if not closes.empty else pd.DataFrame()
 
 
 def get_correlation_matrix(symbols: list, period: str = "3mo") -> dict:
@@ -1057,11 +1287,20 @@ def get_risk_metrics(symbols: list, period: str = "1y") -> dict:
 
 def get_benchmark_history(symbol: str = "SPY", period: str = "1y", base_value: float = None) -> list:
     """Return benchmark price history, optionally normalized to base_value."""
+    def _normalize(bars):
+        if not bars:
+            return []
+        first_close = float(bars[0]["close"])
+        out = []
+        for b in bars:
+            normalized = (float(b["close"]) / first_close) * (base_value if base_value else 1.0)
+            out.append({"time": int(b["time"]), "value": round(normalized, 4)})
+        return out
     try:
         t = yf.Ticker(symbol)
         hist = t.history(period=period, interval="1d", auto_adjust=True)
         if hist.empty:
-            return []
+            return _normalize(_yahoo_chart_history(symbol, period, "1d"))
         closes = hist["Close"]
         result = []
         first_close = float(closes.iloc[0])
@@ -1071,7 +1310,7 @@ def get_benchmark_history(symbol: str = "SPY", period: str = "1y", base_value: f
             result.append({"time": ts_unix, "value": round(normalized, 4)})
         return result
     except Exception:
-        return []
+        return _normalize(_yahoo_chart_history(symbol, period, "1d"))
 
 
 def compute_indicators(ohlcv: list) -> dict:
@@ -1263,7 +1502,7 @@ def get_dividend_data(symbol: str) -> dict:
         except Exception:
             pass
 
-        return {
+        result = {
             "symbol": symbol.upper(),
             "name": info.get("shortName") or info.get("longName") or symbol,
             "price": price,
@@ -1276,8 +1515,75 @@ def get_dividend_data(symbol: str) -> dict:
             "payout_ratio": _safe(info.get("payoutRatio")),
             "history": history,
         }
+        # If yfinance succeeded but produced no dividend signal at all (likely
+        # rate-limited info dict), try Finviz for at least the static fields.
+        if div_rate is None and div_yield is None and not history:
+            fb = _finviz_dividend_fallback(symbol)
+            if "error" not in fb:
+                # Preserve any price we already have
+                if price is not None and fb.get("price") is None:
+                    fb["price"] = price
+                return fb
+        return result
     except Exception as e:
+        fb = _finviz_dividend_fallback(symbol)
+        if "error" not in fb:
+            return fb
         return {"symbol": symbol.upper(), "error": str(e), "div_yield": None, "div_rate": None}
+
+
+def _finviz_dividend_fallback(symbol: str) -> dict:
+    """Map Finviz dividend fields into get_dividend_data()'s shape. Finviz
+    exposes Dividend %, Dividend TTM, Dividend Est., Dividend Ex-Date,
+    Payout, and the Price field needed for the dashboard."""
+    sym = symbol.upper()
+    try:
+        from finvizfinance.quote import finvizfinance as _Q
+        fund = _Q(sym).ticker_fundament() or {}
+    except Exception as e:
+        return {"symbol": sym, "error": f"finviz dividend: {e}"}
+
+    def _num(v):
+        if v is None: return None
+        s = str(v).strip().replace(",","")
+        had_pct = s.endswith("%")
+        if had_pct: s = s[:-1]
+        if s in ("","-","—"): return None
+        try:
+            n = float(s.split()[0])
+            return n / 100 if had_pct else n
+        except (ValueError, IndexError):
+            return None
+
+    # Finviz "Dividend TTM" is shaped like "1.05 (0.35%)" — first num is $, second is yield
+    div_ttm_raw = fund.get("Dividend TTM") or ""
+    parts = div_ttm_raw.replace("(", " ").replace(")", "").replace("%", "").split()
+    div_rate = None
+    div_yield = None
+    if len(parts) >= 1:
+        try: div_rate = float(parts[0])
+        except ValueError: pass
+    if len(parts) >= 2:
+        try: div_yield = float(parts[1])
+        except ValueError: pass
+    if div_yield is None:
+        # Some Finviz pages use "Dividend %" directly
+        div_yield = _num(fund.get("Dividend %"))
+
+    return {
+        "symbol": sym,
+        "name": fund.get("Company", "") or sym,
+        "price": _num(fund.get("Price")),
+        "div_rate": div_rate,
+        "div_yield": div_yield,
+        "ex_date": fund.get("Dividend Ex-Date", None),
+        "pay_date": None,
+        "frequency": "Quarterly",  # Finviz doesn't expose; safe US-equity default
+        "div_growth_5y": None,
+        "payout_ratio": _num(fund.get("Payout")),
+        "history": [],
+        "source": "finviz",
+    }
 
 
 # ─── Macro Indicators ─────────────────────────────────────────────────────────
@@ -1300,13 +1606,25 @@ def get_macro_indicators() -> dict:
         "btc":        "BTC-USD",
     }
 
+    def _bars_to_value(bars):
+        closes = [b["close"] for b in bars if b.get("close") is not None]
+        if not closes:
+            return {"value": None, "change_pct": None, "prev": None}
+        if len(closes) < 2:
+            return {"value": round(closes[-1], 4), "change_pct": None, "prev": None}
+        cur, prev = closes[-1], closes[-2]
+        chg_pct = round((cur - prev) / prev * 100, 3) if prev else None
+        return {"value": round(cur, 4), "prev": round(prev, 4), "change_pct": chg_pct}
+
     result = {}
     for key, ticker_sym in tickers.items():
         try:
             t = yf.Ticker(ticker_sym)
             hist = t.history(period="5d", interval="1d")
             if hist.empty:
-                result[key] = {"value": None, "change_pct": None, "prev": None}
+                # yfinance returned empty (crumb broken / rate-limited) — go
+                # direct to Yahoo's chart endpoint as a fallback.
+                result[key] = _bars_to_value(_yahoo_chart_history(ticker_sym, "5d", "1d"))
                 continue
             closes = hist["Close"].dropna()
             if len(closes) < 2:
@@ -1321,7 +1639,8 @@ def get_macro_indicators() -> dict:
                 "change_pct": chg_pct,
             }
         except Exception:
-            result[key] = {"value": None, "change_pct": None, "prev": None}
+            # Last resort: hit Yahoo direct; if that also fails the slot is null.
+            result[key] = _bars_to_value(_yahoo_chart_history(ticker_sym, "5d", "1d"))
 
     # Yield curve spread (10Y - 2Y) — inverted = recession warning
     try:
