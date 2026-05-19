@@ -1281,7 +1281,7 @@ def get_risk_metrics(symbols: list, period: str = "1y") -> dict:
             # Sortino
             downside = r[r < 0]
             sortino_denom = float(downside.std() * (trading_days ** 0.5)) if len(downside) > 1 else None
-            sortino = float((r.mean() - rf_daily) * trading_days / (downside.std() * (trading_days ** 0.5))) if sortino_denom and sortino_denom > 0 else None
+            sortino = float((r.mean() - rf_daily) * (trading_days ** 0.5) / downside.std()) if sortino_denom and sortino_denom > 0 else None
 
             # Max drawdown
             cum = (1 + r).cumprod()
