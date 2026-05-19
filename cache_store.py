@@ -62,6 +62,39 @@ _local = threading.local()
 _PERSIST_MIN_TTL = 60.0
 
 
+_IDENT_KEYS = {"symbol", "name", "id", "label", "source", "exchange", "currency"}
+
+
+def _is_null_value(v) -> bool:
+    """Treat as "no signal" anything that won't render usefully in the UI.
+
+    Recurses into dicts/lists so a nested wrapper like
+    ``{value: None, prev: None, change_pct: None}`` is detected as null even
+    though its *outer* shape is non-empty. Identifier-only payloads (just a
+    `symbol` echoed back with nothing else) also count as null."""
+    if v is None or v == "" or v == {} or v == []:
+        return True
+    if isinstance(v, dict):
+        # error envelope → null
+        if "error" in v and len(v) <= 3:
+            return True
+        # all sub-values are themselves null-ish
+        non_ident = {k: vv for k, vv in v.items() if k not in _IDENT_KEYS}
+        if non_ident and all(_is_null_value(vv) for vv in non_ident.values()):
+            return True
+        if not non_ident:
+            # value carried only identifier fields → no data
+            return True
+        return False
+    if isinstance(v, list):
+        if not v:
+            return True
+        if all(_is_null_value(x) for x in v):
+            return True
+        return False
+    return False
+
+
 def _looks_like_failure(value) -> bool:
     """Heuristic: would caching this value freeze a broken state in place?
 
@@ -71,6 +104,7 @@ def _looks_like_failure(value) -> bool:
       - lists where every dict entry has an "error" field (indices/movers
         when every upstream call rate-limited)
       - empty dicts (correlation matrix {}, fundamentals {} …)
+      - dicts of nested null-shaped dicts (macro={vix:{value:None,…},…})
 
     Real-data responses always have something useful in them, so this is
     safe-by-default: false negatives (caching something that turns out to
@@ -81,18 +115,17 @@ def _looks_like_failure(value) -> bool:
     if isinstance(value, dict):
         if not value:
             return True
-        # Single-symbol error envelope: {"symbol": "X", "error": "..."}
         if "error" in value and len(value) <= 3:
             return True
-        # A dict whose every value is None/empty is uselessly cached
-        if all(v is None or v == {} or v == [] for v in value.values()):
+        if all(_is_null_value(v) for v in value.values()):
             return True
         return False
     if isinstance(value, list):
         if not value:
             return True
-        # All dict entries are error envelopes → don't cache
         if all(isinstance(x, dict) and "error" in x for x in value):
+            return True
+        if all(_is_null_value(x) for x in value):
             return True
         return False
     return False
@@ -145,8 +178,12 @@ def init() -> None:
     except Exception:
         pass
 
-    # Hydrate
+    # Hydrate, skipping rows that look like cached failures from a prior
+    # broken session. Otherwise a transient upstream outage at one boot would
+    # serve blank panels for the full TTL window across every subsequent boot.
     loaded = 0
+    skipped = 0
+    poisoned_keys = []
     try:
         rows = c.execute("SELECT key, value, expiry FROM api_cache").fetchall()
         with _mem_lock:
@@ -155,16 +192,31 @@ def init() -> None:
                     val = json.loads(raw)
                 except Exception:
                     continue
+                if _looks_like_failure(val):
+                    poisoned_keys.append(key)
+                    skipped += 1
+                    continue
                 _mem[key] = (val, expiry)
                 loaded += 1
     except Exception as e:
         log.warning("cache hydrate failed: %s", e)
-    log.info("cache hydrated %d entries from disk", loaded)
+    if poisoned_keys:
+        try:
+            c.executemany("DELETE FROM api_cache WHERE key=?", [(k,) for k in poisoned_keys])
+            c.commit()
+        except Exception:
+            pass
+    log.info("cache hydrated %d entries from disk (skipped %d cached failures)",
+             loaded, skipped)
 
 
 def cache_get(key, ttl: Optional[float] = None):
     """Return value if fresh, else None. The `ttl` kwarg is decorative
-    (kept for compat with the old helper) — the writer's expiry wins."""
+    (kept for compat with the old helper) — the writer's expiry wins.
+
+    A defensive failure check runs at read time too, so even if some legacy
+    code path slipped a null-shaped value into the map, we treat it as a
+    miss and let the caller refetch."""
     k = _serialize_key(key)
     hit = _mem.get(k)
     if hit is None:
@@ -174,13 +226,23 @@ def cache_get(key, ttl: Optional[float] = None):
         with _mem_lock:
             _mem.pop(k, None)
         return None
+    if _looks_like_failure(value):
+        with _mem_lock:
+            _mem.pop(k, None)
+        return None
     return value
 
 
 def cache_set(key, value, ttl: float) -> None:
     """Store in memory + (if ttl >= _PERSIST_MIN_TTL) write through to disk.
-    Cheap and best-effort — persistence failures are logged at debug and
-    swallowed so they never break the calling request path."""
+
+    Refuses to cache values that look like upstream failures — neither in
+    memory nor on disk. A previous version stored failures in memory and
+    only blocked the disk write, which caused a transient rate-limit on the
+    first request after boot to freeze blank panels for the full TTL window.
+    """
+    if _looks_like_failure(value):
+        return
     k = _serialize_key(key)
     expiry = time.time() + float(ttl)
     with _mem_lock:
@@ -198,8 +260,6 @@ def cache_set(key, value, ttl: float) -> None:
                     _mem.pop(kk, None)
 
     if ttl < _PERSIST_MIN_TTL:
-        return
-    if _looks_like_failure(value):
         return
     try:
         raw = json.dumps(value, default=str)

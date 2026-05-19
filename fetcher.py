@@ -651,14 +651,28 @@ def get_fundamentals(symbol: str) -> dict:
             "recommendation": info.get("recommendationKey", ""),
             "num_analysts": _safe(info.get("numberOfAnalystOpinions")),
         }
-        # yfinance returned an `info` dict but most fields are None/empty —
-        # that happens when fast_info is reused under rate-limit. Treat
-        # "no name and no PE" as a soft failure and try Finviz.
-        if not result.get("name") and result.get("pe_ratio") is None and result.get("market_cap") is None:
+        # When yfinance's crumb auth is broken, `t.info` silently falls back
+        # to a thin payload — we still get price-derived fields (50d_avg,
+        # market_cap, PE from fast_info) but the .info-only modules
+        # (description, sector, industry, employees, beta, country, margins,
+        # analyst targets) all come back empty. Detect that signature by
+        # counting how many .info-only slots are present, and if they're
+        # mostly missing, fill the gaps from Finviz instead of caching a
+        # half-empty result for 24 hours.
+        _info_only = (
+            "sector", "industry", "country", "description", "employees",
+            "beta", "profit_margin", "operating_margin", "return_on_equity",
+        )
+        present = sum(1 for k in _info_only if result.get(k) not in (None, ""))
+        if present <= 2:
             fb = _finviz_fundamentals_fallback(symbol)
             if "error" not in fb:
-                _set_cache(ck, fb, ttl=86400)
-                return fb
+                # Prefer yfinance values where it has them (the price-derived
+                # fields are more accurate); fill remaining gaps from Finviz.
+                for k, v in fb.items():
+                    if result.get(k) in (None, "") and v not in (None, ""):
+                        result[k] = v
+                result["source"] = "yfinance+finviz"
         _set_cache(ck, result, ttl=86400)
         return result
     except Exception as e:
