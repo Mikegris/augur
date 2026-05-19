@@ -154,8 +154,18 @@ const MacroBar = {
     main.insertBefore(bar, main.firstChild);
     this.el = bar;
     this.refresh();
-    this._timer = setInterval(() => this.refresh(), 300000);  // 5 min
+    this._startTimer();
   },
+  _startTimer() {
+    if (this._timer) clearInterval(this._timer);
+    // MacroBar refreshes at 5× the user's refresh_interval (so a 60s
+    // refresh becomes 5min — matches the server-side cache window for
+    // macro data), with a 300s floor for legacy behaviour.
+    const sec = parseInt((State.settings && State.settings.refresh_interval) || 60, 10);
+    const ms = Math.max(sec * 5 * 1000, 60000);
+    this._timer = setInterval(() => this.refresh(), ms);
+  },
+  restart() { this._startTimer(); },
   _latestPerSecurity(rates) {
     const out = {};
     (rates || []).forEach(r => {
@@ -2541,9 +2551,24 @@ async function _pollTriggeredAlerts() {
   } catch(e) {}
 }
 
-setInterval(_pollTriggeredAlerts, 60000);
+let _alertPollTimer = null;
+function _startAlertPollTimer() {
+  if (_alertPollTimer) clearInterval(_alertPollTimer);
+  const sec = parseInt((State.settings && State.settings.refresh_interval) || 60, 10);
+  const ms = Math.max(sec * 1000, 15000); // never poll faster than 15s
+  _alertPollTimer = setInterval(_pollTriggeredAlerts, ms);
+}
+_startAlertPollTimer();
 // Run once on load so the user sees pending alerts immediately
 setTimeout(_pollTriggeredAlerts, 2000);
+
+// Restart all user-configurable timers so a settings change takes
+// effect immediately (no page reload needed).
+function restartTimers() {
+  _startAlertPollTimer();
+  if (typeof MacroBar !== 'undefined' && MacroBar.restart) MacroBar.restart();
+  if (typeof startAutoRefresh === 'function') startAutoRefresh();
+}
 
 
 // ── Dividend Income Tracker ────────────────────────────────────────────────────
@@ -3357,6 +3382,9 @@ async function saveSettings() {
       payload.openai_api_key = keyField.value.trim();
     }
     await API.post('/api/settings', payload);
+    // Pull the freshly-saved settings back so timers see the new interval.
+    try { State.settings = await API.get('/api/settings'); } catch(e) {}
+    if (typeof restartTimers === 'function') restartTimers();
     Toast.success('Settings saved');
     // Reload to refresh key status indicator
     loadSettings();
