@@ -2243,9 +2243,22 @@ def ideas_warmer_status():
     """Diagnostic — show the pre-warmer's state for the UI badge."""
     try:
         import idea_pool_warmer
-        return jsonify(idea_pool_warmer.warmer_status())
+        status = idea_pool_warmer.warmer_status() or {}
+        # `warmer_status()` doesn't currently return the thread-liveness it
+        # already computes internally; surface the actual thread state from
+        # the warmer's module-level _thread so callers can distinguish
+        # "started but dead" from "running normally" without forcing an
+        # edit to idea_pool_warmer.py.
+        try:
+            t = getattr(idea_pool_warmer, "_thread", None)
+            status["thread_alive"] = bool(t and t.is_alive())
+            status["started"] = bool(getattr(idea_pool_warmer, "_thread_started", False))
+        except Exception:
+            status["thread_alive"] = None
+        return jsonify(status)
     except Exception as e:
-        return jsonify({"error": str(e), "running": False, "warmed_total": 0}), 200
+        return jsonify({"error": str(e), "running": False, "warmed_total": 0,
+                        "started": False, "thread_alive": False}), 200
 
 
 @app.route("/api/system/cache/stats")
@@ -2260,7 +2273,17 @@ def cache_stats():
         out["cache"] = {"error": str(e)}
     try:
         import cache_warmer
-        out["warmer"] = cache_warmer.status()
+        status = cache_warmer.status() or {}
+        # `status()` reports started=True forever once the boot path ran,
+        # even if the thread later died (e.g. an exception escaped _loop).
+        # Surface the actual thread liveness so the UI / curl probes can
+        # distinguish "scheduled to run" from "still running".
+        try:
+            t = getattr(cache_warmer, "_thread", None)
+            status["thread_alive"] = bool(t and t.is_alive())
+        except Exception:
+            status["thread_alive"] = None
+        out["warmer"] = status
     except Exception as e:
         out["warmer"] = {"error": str(e)}
     return jsonify(out)
