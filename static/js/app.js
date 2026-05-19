@@ -4324,24 +4324,27 @@ function toggleFilingExpand(rowId) {
 
 // ── Insider Tracker ───────────────────────────────────────────────────────────
 
+// Pick a sensible default symbol for ticker-driven panels: the first
+// non-crypto holding in the user's portfolio, falling back to AAPL
+// only when the portfolio is empty or unavailable.
+function _firstPortfolioSymbol() {
+  try {
+    const holdings = (State.portfolio && State.portfolio.holdings) || [];
+    const first = holdings.find(h => h.asset_type !== 'crypto');
+    if (first && first.symbol) return first.symbol;
+  } catch(e) {}
+  return 'AAPL';
+}
+
 async function loadIntelInsiders() {
   const panel = document.getElementById('intel-panel-insiders');
   if (!panel) return;
 
-  // Get portfolio symbols
-  let defaultSymbols = [];
-  try {
-    if (State.portfolio && State.portfolio.holdings) {
-      defaultSymbols = State.portfolio.holdings
-        .filter(h => h.asset_type !== 'crypto')
-        .slice(0, 8)
-        .map(h => h.symbol);
-    }
-  } catch(e) {}
+  const defaultSym = _firstPortfolioSymbol();
 
   panel.innerHTML = `
     <div class="sec-symbol-search">
-      <input class="form-input sec-symbol-input" id="insider-symbol-input" placeholder="Enter symbol e.g. AAPL, MSFT..." value="${defaultSymbols[0] || 'AAPL'}">
+      <input class="form-input sec-symbol-input" id="insider-symbol-input" placeholder="Enter symbol e.g. AAPL, MSFT..." value="${defaultSym}">
       <button class="btn btn-green btn-sm" onclick="searchInsiders()">SEARCH</button>
     </div>
     <div id="insider-results">
@@ -4354,8 +4357,7 @@ async function loadIntelInsiders() {
   });
 
   // Auto-load first symbol
-  const sym = defaultSymbols[0] || 'AAPL';
-  await loadInsidersFor(sym);
+  await loadInsidersFor(defaultSym);
 
   // Cross-ticker Finviz insider feed (latest Form 4 across all US equities)
   DataPanels.appendFinvizInsiders(document.getElementById('finviz-insider-feed'));
@@ -4363,7 +4365,7 @@ async function loadIntelInsiders() {
 
 async function searchInsiders() {
   const input = document.getElementById('insider-symbol-input');
-  const sym = (input ? input.value.trim().toUpperCase() : '') || 'AAPL';
+  const sym = (input ? input.value.trim().toUpperCase() : '') || _firstPortfolioSymbol();
   await loadInsidersFor(sym);
 }
 
