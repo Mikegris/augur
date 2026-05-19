@@ -95,7 +95,7 @@ def _score_text(text: str) -> int:
 
 def _algolia_search(query: str, hours: int = 168, hits: int = 50):
     """Search HN stories/comments matching query within the time window."""
-    cutoff = int((datetime.utcnow() - timedelta(hours=hours)).timestamp())
+    cutoff = int(time.time() - hours * 3600)
     try:
         resp = requests.get(HN_SEARCH, params={
             "query": query,
