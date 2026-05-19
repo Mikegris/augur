@@ -176,12 +176,24 @@ def init_db():
     c.execute("CREATE INDEX IF NOT EXISTS idx_scanner_history_symbol ON scanner_history(symbol)")
     c.execute("CREATE INDEX IF NOT EXISTS idx_scanner_history_scanned_at ON scanner_history(scanned_at)")
 
+    # Per-day OpenAI call counter — backs the daily cap in ai_summarizer.
+    # Persisted in SQLite so the cap survives process restarts (Flask reloads,
+    # desktop bundle relaunches). Keyed on the local YYYY-MM-DD date string.
+    c.execute("""CREATE TABLE IF NOT EXISTS ai_call_log (
+        date TEXT PRIMARY KEY,
+        count INTEGER NOT NULL DEFAULT 0
+    )""")
+
     # ── Indexes for performance ──
     c.execute("CREATE INDEX IF NOT EXISTS idx_portfolio_symbol ON portfolio(symbol)")
     c.execute("CREATE INDEX IF NOT EXISTS idx_transactions_symbol ON transactions(symbol)")
     c.execute("CREATE INDEX IF NOT EXISTS idx_transactions_date ON transactions(date)")
     c.execute("CREATE INDEX IF NOT EXISTS idx_alerts_symbol ON price_alerts(symbol)")
     c.execute("CREATE INDEX IF NOT EXISTS idx_alerts_triggered ON price_alerts(triggered)")
+    # `get_price_alerts` always sorts by `created_at DESC` (and the trigger-loop
+    # variant pre-filters on triggered=0 then orders by created_at). Without
+    # this index SQLite does a full table scan + filesort every alert refresh.
+    c.execute("CREATE INDEX IF NOT EXISTS idx_price_alerts_created ON price_alerts(created_at)")
     c.execute("CREATE INDEX IF NOT EXISTS idx_filings_cache_ticker ON sec_filings_cache(ticker)")
     c.execute("CREATE INDEX IF NOT EXISTS idx_insider_cache_ticker ON insider_transactions_cache(ticker)")
     c.execute("CREATE INDEX IF NOT EXISTS idx_insider_cache_ticker_date ON insider_transactions_cache(ticker, cached_at)")
@@ -485,6 +497,40 @@ def set_setting(key, value):
     conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", (key, str(value)))
     conn.commit()
     # connection reused (thread-local pool)
+
+
+# ── AI Call Log (daily counter) ───────────────────────────────────────────────
+#
+# Backs the AUGUR_AI_DAILY_CAP enforcement in ai_summarizer. Persisted so the
+# cap survives Flask reloads / desktop relaunches — a fresh process must not
+# silently reset the budget.
+
+def _today_str():
+    return datetime.now().strftime("%Y-%m-%d")
+
+
+def get_ai_call_count(date=None):
+    """Return today's AI call count (or count for explicit date)."""
+    conn = get_conn()
+    d = date or _today_str()
+    row = conn.execute("SELECT count FROM ai_call_log WHERE date=?", (d,)).fetchone()
+    return int(row["count"]) if row else 0
+
+
+def increment_ai_call_count(date=None, by=1):
+    """Atomically bump today's counter and return the new value."""
+    with _write_lock:
+        conn = get_conn()
+        d = date or _today_str()
+        # UPSERT keeps this race-safe under threaded callers.
+        conn.execute(
+            "INSERT INTO ai_call_log(date, count) VALUES(?, ?) "
+            "ON CONFLICT(date) DO UPDATE SET count = count + ?",
+            (d, by, by),
+        )
+        conn.commit()
+        row = conn.execute("SELECT count FROM ai_call_log WHERE date=?", (d,)).fetchone()
+        return int(row["count"]) if row else 0
 
 
 # ── Portfolio Snapshots ────────────────────────────────────────────────────────

@@ -18,7 +18,20 @@ try:
 except ImportError:
     _PDF_OK = False
 
+try:
+    import cache_store
+except Exception:  # pragma: no cover — import safety only
+    cache_store = None
+
 log = logging.getLogger(__name__)
+
+# PTR PDFs are immutable once filed — cache the parse output for 30 days.
+# pdfplumber on a multi-page PTR is the slowest single operation in AUGUR.
+_PTR_CACHE_TTL = 30 * 24 * 3600
+
+# pdfplumber occasionally hangs on malformed PDFs. Bound any single parse to
+# 20 s — past that we abandon the PDF rather than starve the pool.
+_PDF_PARSE_TIMEOUT_S = 20
 
 HOUSE_FD_BASE = "https://disclosures-clerk.house.gov"
 HOUSE_PTR_PDF = HOUSE_FD_BASE + "/public_disc/ptr-pdfs/{year}/{doc_id}.pdf"
@@ -336,21 +349,66 @@ def get_recent_trades(days=90, max_pdfs=100, tickers=None):
     all_ptrs = all_ptrs[:max_pdfs]
 
     # Parse PDFs in parallel (5 concurrent downloads)
-    from concurrent.futures import ThreadPoolExecutor, as_completed
+    from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError as FutTimeoutError
+
+    def _rehydrate_dt(trades):
+        """Cache round-trip drops datetime objects to strings (json.dumps
+        default=str). Re-derive txn_dt from txn_date so downstream sort
+        comparisons stay homogenous."""
+        for t in trades:
+            td = t.get("txn_date")
+            if td:
+                try:
+                    t["txn_dt"] = datetime.strptime(td, "%m/%d/%Y")
+                except Exception:
+                    t["txn_dt"] = None
+            else:
+                t["txn_dt"] = None
+        return trades
 
     def _fetch_one(ptr):
         doc_id = ptr["doc_id"]
         year   = ptr["year"]
         member = f"{ptr['first']} {ptr['last']}"
         url    = HOUSE_PTR_PDF.format(year=year, doc_id=doc_id)
+
+        # PDFs are immutable once filed — serve the parse output from cache
+        # whenever possible. Skips the download + pdfplumber pass entirely.
+        cache_key = ("congress_ptr", doc_id, year)
+        if cache_store is not None:
+            cached = cache_store.cache_get(cache_key)
+            if cached is not None:
+                return _rehydrate_dt(cached)
+
         try:
             resp = requests.get(url, timeout=15)
             if resp.status_code != 200:
                 return []
-            return _parse_ptr_pdf(resp.content, member, doc_id, year)
         except Exception as e:
             log.warning("PTR fetch error for %s: %s", doc_id, e)
             return []
+
+        # Bound the pdfplumber parse so a single malformed PDF can't stall
+        # the whole batch. Run in a single-slot executor so we can hard-cap
+        # with future.result(timeout=…); the worker thread leaks if it
+        # hangs, but it's a daemon and we'll have already returned.
+        parse_pool = ThreadPoolExecutor(max_workers=1)
+        try:
+            fut = parse_pool.submit(_parse_ptr_pdf, resp.content, member, doc_id, year)
+            try:
+                trades = fut.result(timeout=_PDF_PARSE_TIMEOUT_S)
+            except FutTimeoutError:
+                log.warning("PTR parse timeout for %s — abandoning", doc_id)
+                return []
+        finally:
+            parse_pool.shutdown(wait=False)
+
+        if cache_store is not None and trades:
+            try:
+                cache_store.cache_set(cache_key, trades, _PTR_CACHE_TTL)
+            except Exception:
+                pass
+        return trades
 
     all_trades = []
     with ThreadPoolExecutor(max_workers=5) as pool:

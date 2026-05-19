@@ -1,14 +1,70 @@
 """
 AI Filing Summarizer — uses OpenAI gpt-4o-mini.
 Falls back to rule-based extraction if no API key configured.
+
+Caching & daily cap:
+  - Functions with *immutable* inputs (filing accession, ticker+date) are
+    wrapped in cache_store.coalesce so we never pay twice for the same
+    summary. Filing summaries get 7d, portfolio analyses 1d.
+  - A SQLite-persisted daily counter (ai_call_log) caps total OpenAI calls
+    per local day. Default 200; override via AUGUR_AI_DAILY_CAP. Past the
+    cap we return a structured error envelope rather than spending more.
 """
+import os
 import re
 import json
+import logging
+
+try:
+    import cache_store
+except Exception:  # pragma: no cover
+    cache_store = None
+
+log = logging.getLogger(__name__)
+
+# Cache TTLs (seconds)
+_FILING_SUMMARY_TTL    = 7 * 24 * 3600    # accession is immutable
+_INSIDER_PATTERN_TTL   = 6 * 3600         # txn list shifts within a day
+_PORTFOLIO_TTL         = 24 * 3600        # holdings change but slowly
+_EARNINGS_BRIEF_TTL    = 6 * 3600         # dossier evolves intraday (price, IV)
+_IDEA_THESIS_TTL       = 12 * 3600        # picks change but inputs are stable
+
+
+def _daily_cap() -> int:
+    try:
+        return int(os.environ.get("AUGUR_AI_DAILY_CAP", "200"))
+    except (TypeError, ValueError):
+        return 200
+
+
+def _cap_exceeded() -> bool:
+    """True if today's persisted counter has reached the daily cap."""
+    try:
+        import database as db
+        return db.get_ai_call_count() >= _daily_cap()
+    except Exception:
+        return False
+
+
+def _record_ai_call() -> None:
+    """Bump the daily counter — best-effort, never raises."""
+    try:
+        import database as db
+        db.increment_ai_call_count()
+    except Exception as e:
+        log.debug("ai_call_log increment failed: %s", e)
+
+
+def _cap_error_envelope(context: str) -> dict:
+    return {
+        "error": "Daily AI request cap reached",
+        "context": context,
+        "ai_powered": False,
+    }
 
 
 def get_openai_key():
     """Check env var first, then DB setting."""
-    import os
     key = os.environ.get("OPENAI_API_KEY", "")
     if not key:
         try:
@@ -40,11 +96,21 @@ def summarize_filing(filing_text, form_type, ticker, description=""):
 
 
 def _openai_summarize(text, form_type, ticker, description, api_key):
-    try:
-        from openai import OpenAI
-        client = OpenAI(api_key=api_key)
+    # Filing inputs are immutable (a filing accession's text never changes),
+    # so cache the AI summary keyed on a content hash. Fall back to rule-based
+    # if the daily cap is reached.
+    import hashlib
+    text_hash = hashlib.sha256((text or "")[:10000].encode("utf-8", "ignore")).hexdigest()[:16]
+    cache_key = ("ai_summarize_filing", form_type, ticker, text_hash)
 
-        system_prompt = """You are a senior equity analyst. Analyze SEC filings and return ONLY valid JSON.
+    def _call():
+        if _cap_exceeded():
+            return _cap_error_envelope("summarize_filing")
+        try:
+            from openai import OpenAI
+            client = OpenAI(api_key=api_key)
+
+            system_prompt = """You are a senior equity analyst. Analyze SEC filings and return ONLY valid JSON.
 Always return this exact structure:
 {
   "signal": "BULLISH" or "BEARISH" or "NEUTRAL" or "MATERIAL",
@@ -55,7 +121,7 @@ Always return this exact structure:
 }
 signal meanings: BULLISH=positive for stock, BEARISH=negative, NEUTRAL=informational, MATERIAL=significant event requiring attention."""
 
-        user_prompt = f"""Analyze this {form_type} filing for {ticker}.
+            user_prompt = f"""Analyze this {form_type} filing for {ticker}.
 Description: {description}
 
 Filing text (excerpt):
@@ -63,21 +129,26 @@ Filing text (excerpt):
 
 Return JSON only."""
 
-        resp = client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
-            ],
-            response_format={"type": "json_object"},
-            temperature=0.1,
-            max_tokens=500,
-        )
-        result = json.loads(resp.choices[0].message.content)
-        result["ai_powered"] = True
-        return result
-    except Exception as e:
-        return _rule_based_summarize(text, form_type, ticker, description)
+            resp = client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+                response_format={"type": "json_object"},
+                temperature=0.1,
+                max_tokens=500,
+            )
+            _record_ai_call()
+            result = json.loads(resp.choices[0].message.content)
+            result["ai_powered"] = True
+            return result
+        except Exception:
+            return _rule_based_summarize(text, form_type, ticker, description)
+
+    if cache_store is None:
+        return _call()
+    return cache_store.coalesce(cache_key, _FILING_SUMMARY_TTL, _call)
 
 
 def _rule_based_summarize(text, form_type, ticker, description):
@@ -146,6 +217,29 @@ def analyze_portfolio(holdings, summary, model="gpt-4o"):
     if not key:
         return _rule_based_portfolio_analysis(holdings, summary)
 
+    # Cache key reflects positions + total state so the same portfolio
+    # snapshot doesn't pay twice in a day. Sorted to be order-independent.
+    import hashlib
+    sig_parts = sorted(
+        f"{p.get('symbol','')}:{p.get('shares','')}:{round(p.get('market_value') or 0)}"
+        for p in holdings
+    )
+    sig = hashlib.sha256(
+        ("|".join(sig_parts) + f"|{round(summary.get('total_value') or 0)}|{model}").encode("utf-8")
+    ).hexdigest()[:16]
+    cache_key = ("ai_analyze_portfolio", sig)
+
+    def _do_call():
+        if _cap_exceeded():
+            return _cap_error_envelope("analyze_portfolio")
+        return _analyze_portfolio_uncached(holdings, summary, model, key)
+
+    if cache_store is not None:
+        return cache_store.coalesce(cache_key, _PORTFOLIO_TTL, _do_call)
+    return _do_call()
+
+
+def _analyze_portfolio_uncached(holdings, summary, model, key):
     try:
         from openai import OpenAI
         client = OpenAI(api_key=key)
@@ -208,6 +302,7 @@ Return this exact JSON structure:
             temperature=0.2,
             max_tokens=2000,
         )
+        _record_ai_call()
         result = json.loads(resp.choices[0].message.content)
         result["ai_powered"] = True
         result["model_used"] = model
@@ -312,6 +407,30 @@ def generate_earnings_brief(dossier, model="gpt-4o"):
     symbol = dossier.get("symbol", "")
     name = dossier.get("name", symbol)
 
+    # Cache on (symbol, earnings_date, model) — dossier price/IV evolve
+    # intraday but a 6h TTL gives a useful budget shield while still picking
+    # up meaningful refreshes the same day.
+    cache_key = (
+        "ai_earnings_brief",
+        symbol,
+        str(dossier.get("earnings_date", "")),
+        model,
+    )
+
+    def _do_call():
+        if _cap_exceeded():
+            return _cap_error_envelope("generate_earnings_brief")
+        return _earnings_brief_uncached(dossier, model, key)
+
+    if cache_store is not None:
+        return cache_store.coalesce(cache_key, _EARNINGS_BRIEF_TTL, _do_call)
+    return _do_call()
+
+
+def _earnings_brief_uncached(dossier, model, key):
+    symbol = dossier.get("symbol", "")
+    name = dossier.get("name", symbol)
+
     # Build context string for the prompt
     history_lines = "\n".join([
         f"  {r['date']}: estimate ${r['estimate']}, actual ${r['actual']}, surprise {r['surprise_pct']:+.1f}%"
@@ -382,6 +501,7 @@ Return this exact JSON:
             temperature=0.2,
             max_tokens=800,
         )
+        _record_ai_call()
         result = json.loads(resp.choices[0].message.content)
         result["ai_powered"] = True
         result["model_used"] = model
@@ -450,6 +570,40 @@ def generate_idea_thesis(idea, model="gpt-4o-mini"):
     if not key:
         return _rule_based_idea_thesis(idea)
 
+    symbol = idea.get("symbol", "")
+    name = idea.get("name", symbol)
+
+    # Cache on the inputs that materially change the prompt — same idea
+    # surfaced twice in a 12h window should reuse the thesis.
+    cache_key = (
+        "ai_idea_thesis",
+        symbol,
+        str(idea.get("signal", "")),
+        round(float(idea.get("composite") or 0), 1),
+        str(idea.get("strategy", "")),
+        model,
+    )
+
+    if _cap_exceeded():
+        # Don't fall through into the inner builder when we've already spent
+        # the day's budget — return the cap envelope so the UI can surface it.
+        if cache_store is not None:
+            cached = cache_store.cache_get(cache_key)
+            if cached is not None:
+                return cached
+        return _cap_error_envelope("generate_idea_thesis")
+
+    def _do_call():
+        if _cap_exceeded():
+            return _cap_error_envelope("generate_idea_thesis")
+        return _generate_idea_thesis_uncached(idea, model, key)
+
+    if cache_store is not None:
+        return cache_store.coalesce(cache_key, _IDEA_THESIS_TTL, _do_call)
+    return _do_call()
+
+
+def _generate_idea_thesis_uncached(idea, model, key):
     symbol = idea.get("symbol", "")
     name = idea.get("name", symbol)
 
@@ -578,6 +732,7 @@ Return this exact JSON:
             temperature=0.4,
             max_tokens=600,
         )
+        _record_ai_call()
         result = json.loads(resp.choices[0].message.content)
         result["ai_powered"] = True
         result["model_used"] = model
@@ -717,27 +872,44 @@ def analyze_insider_pattern(transactions, ticker):
             "ai_powered": False,
         }
 
-    try:
-        from openai import OpenAI
-        client = OpenAI(api_key=key)
-        txn_summary = json.dumps(transactions[:10], default=str)
-        resp = client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[{
-                "role": "user",
-                "content": f"""Analyze insider transactions for {ticker}. Return JSON only:
+    txn_summary = json.dumps(transactions[:10], default=str)
+    # Cache key reflects the actual prompt input — same txn list shouldn't
+    # be re-analysed twice in a 6h window.
+    import hashlib
+    sig = hashlib.sha256(txn_summary.encode("utf-8", "ignore")).hexdigest()[:16]
+    cache_key = ("ai_insider_pattern", ticker, sig)
+
+    def _do_call():
+        if _cap_exceeded():
+            env = _cap_error_envelope("analyze_insider_pattern")
+            env.update({"signal": "NEUTRAL", "summary": env["error"],
+                        "buy_value": total_buy_value, "sell_value": total_sell_value})
+            return env
+        try:
+            from openai import OpenAI
+            client = OpenAI(api_key=key)
+            resp = client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[{
+                    "role": "user",
+                    "content": f"""Analyze insider transactions for {ticker}. Return JSON only:
 {{"signal": "BULLISH/BEARISH/NEUTRAL", "summary": "2 sentence analysis", "key_insight": "most important observation"}}
 
 Transactions: {txn_summary}""",
-            }],
-            response_format={"type": "json_object"},
-            temperature=0.1,
-            max_tokens=200,
-        )
-        result = json.loads(resp.choices[0].message.content)
-        result["ai_powered"] = True
-        result["buy_value"] = total_buy_value
-        result["sell_value"] = total_sell_value
-        return result
-    except Exception:
-        return {"signal": "NEUTRAL", "summary": "Analysis unavailable.", "ai_powered": False}
+                }],
+                response_format={"type": "json_object"},
+                temperature=0.1,
+                max_tokens=200,
+            )
+            _record_ai_call()
+            result = json.loads(resp.choices[0].message.content)
+            result["ai_powered"] = True
+            result["buy_value"] = total_buy_value
+            result["sell_value"] = total_sell_value
+            return result
+        except Exception:
+            return {"signal": "NEUTRAL", "summary": "Analysis unavailable.", "ai_powered": False}
+
+    if cache_store is not None:
+        return cache_store.coalesce(cache_key, _INSIDER_PATTERN_TTL, _do_call)
+    return _do_call()
