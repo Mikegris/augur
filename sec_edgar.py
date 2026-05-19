@@ -8,12 +8,18 @@ import os
 import time
 import json
 import logging
+import threading
 import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta
 
 import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
+
+try:
+    import cache_store
+except Exception:  # pragma: no cover — import-time safety only
+    cache_store = None
 
 logger = logging.getLogger(__name__)
 
@@ -73,12 +79,102 @@ def _get_session():
     return _SESSION
 
 
+# SEC's documented limit is 10 req/sec/IP. The 0.12s in-thread sleep below
+# would enforce that on a serial caller, but `get_form4_transactions` fans
+# requests out across a ThreadPoolExecutor, so each thread sleeps in parallel
+# and the actual request rate can spike. A module-level semaphore bounds the
+# number of concurrent SEC requests across *all* callers/threads. 8 leaves
+# headroom under SEC's 10/sec cap once you factor in the 0.12s spacing per
+# slot.
+_EDGAR_CONCURRENCY = threading.Semaphore(8)
+
+
+def _edgar_ttl_for(url: str) -> float:
+    """Pick a cache TTL based on the URL pattern.
+
+    - Form 4 / 13F XML files (under /Archives/edgar/data/) are immutable once
+      filed; cap at 24h so we still re-sweep occasionally for safety.
+    - Filing index pages (-index.html, directory listings) update only when
+      the SEC posts amendments — 6h is fine.
+    - Submissions JSON (/submissions/CIK*.json) lists new filings as they
+      come in; 6h keeps us close to fresh without hammering on every page
+      load.
+    """
+    u = url.lower()
+    if "/archives/edgar/data/" in u and (u.endswith(".xml") or "/primary_doc" in u):
+        return 24 * 3600.0
+    if "/submissions/cik" in u:
+        return 6 * 3600.0
+    if "-index.html" in u or u.endswith(".json") or u.endswith("/"):
+        return 6 * 3600.0
+    # Other archive fetches (filing text HTM, exhibit pages) are immutable
+    # too — give them the 24h cap.
+    if "/archives/edgar/data/" in u:
+        return 24 * 3600.0
+    return 6 * 3600.0
+
+
+class _CachedResp:
+    """Minimal stand-in for a requests.Response — just enough surface for
+    the callers in this module: .text / .json() / .status_code / .content."""
+
+    def __init__(self, payload):
+        self.status_code = payload.get("status_code", 200)
+        self.text = payload.get("text", "")
+        self._json = payload.get("json")
+        content = payload.get("content")
+        # cache_store JSON-serialises everything; bytes round-trip as str via
+        # default=str, so .content is only available if it was set originally.
+        self.content = content.encode("utf-8") if isinstance(content, str) else content
+
+    def json(self):
+        if self._json is not None:
+            return self._json
+        return json.loads(self.text)
+
+    def raise_for_status(self):
+        if self.status_code >= 400:
+            raise requests.HTTPError(f"HTTP {self.status_code}")
+
+
 def _edgar_get(url, params=None, timeout=30):
-    """GET from EDGAR with rate limiting."""
-    time.sleep(0.12)
-    session = _get_session()
-    resp = session.get(url, params=params, timeout=timeout)
-    resp.raise_for_status()
+    """GET from EDGAR with rate limiting + persistent caching.
+
+    Cached on the full (url, params) tuple via `cache_store`. TTL is picked
+    by URL pattern (see `_edgar_ttl_for`). Concurrency across threads is
+    bounded by `_EDGAR_CONCURRENCY` so the parallel Form 4 fetcher can't
+    burst past SEC's 10 req/sec limit.
+    """
+    cache_key = ("edgar_get", url, json.dumps(params, sort_keys=True) if params else "")
+    ttl = _edgar_ttl_for(url)
+
+    if cache_store is not None:
+        cached = cache_store.cache_get(cache_key)
+        if cached is not None:
+            return _CachedResp(cached)
+
+    with _EDGAR_CONCURRENCY:
+        time.sleep(0.12)
+        session = _get_session()
+        resp = session.get(url, params=params, timeout=timeout)
+        resp.raise_for_status()
+
+    # Persist the response. Store .text always; record parsed JSON when the
+    # server actually returned it so callers that use .json() don't pay a
+    # re-parse. Only cache 2xx — error envelopes are filtered upstream by
+    # cache_store anyway, but checking explicitly keeps intent clear.
+    if cache_store is not None and 200 <= resp.status_code < 300:
+        payload = {"status_code": resp.status_code, "text": resp.text}
+        ctype = (resp.headers.get("Content-Type") or "").lower()
+        if "json" in ctype:
+            try:
+                payload["json"] = resp.json()
+            except Exception:
+                pass
+        try:
+            cache_store.cache_set(cache_key, payload, ttl)
+        except Exception:
+            pass
     return resp
 
 
