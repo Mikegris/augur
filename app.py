@@ -112,11 +112,25 @@ try:
 except Exception as _cache_err:
     log.warning("cache_store init failed: %s", _cache_err)
 
-try:
-    import cache_warmer
-    cache_warmer.start()
-except Exception as _warmer_err:
-    log.warning("cache_warmer start failed: %s", _warmer_err)
+# Guard against Flask reloader double-start: when running `python app.py`
+# with debug=True, Werkzeug spawns a reloader child. Both parent and child
+# import this module, and `cache_warmer.start()` would run in BOTH processes
+# — they'd hammer SQLite and upstream APIs in parallel. Detect the reloader
+# parent (running as __main__ with WERKZEUG_RUN_MAIN unset) and skip there.
+# When imported by desktop.py / py2app, __name__ != "__main__" so we still
+# start normally.
+_IS_RELOADER_PARENT = (
+    __name__ == "__main__"
+    and os.environ.get("WERKZEUG_RUN_MAIN") != "true"
+)
+if not _IS_RELOADER_PARENT:
+    try:
+        import cache_warmer
+        cache_warmer.start()
+    except Exception as _warmer_err:
+        log.warning("cache_warmer start failed: %s", _warmer_err)
+else:
+    log.info("Skipping cache_warmer start in reloader parent process")
 
 
 # ─── Portfolio Snapshot Background Thread ─────────────────────────────────────
@@ -2212,16 +2226,22 @@ def cache_clear():
         return jsonify({"error": str(e)}), 500
 
 
-def _start_idea_warmer():
-    """Boot the pre-warmer thread (idempotent). Skip during Flask reloader's
-    parent process to avoid running twice."""
-    if os.environ.get("WERKZEUG_RUN_MAIN") != "true" and os.environ.get("FLASK_DEBUG") != "0":
-        # Flask reloader spawns a child with WERKZEUG_RUN_MAIN=true; only the
-        # child should host the background work. Skip in the parent.
-        if os.environ.get("WERKZEUG_RUN_MAIN") is None and os.environ.get("DISABLE_WARMER") != "1":
-            pass  # Not under reloader; proceed
-        elif os.environ.get("WERKZEUG_RUN_MAIN") != "true":
-            return
+def _start_idea_warmer(debug_mode: bool = False):
+    """Boot the pre-warmer thread (idempotent). Skip during the Flask
+    reloader's parent process — otherwise both parent and child would each
+    spawn a warmer and hammer SQLite + upstream APIs in parallel.
+
+    Werkzeug sets WERKZEUG_RUN_MAIN="true" only in the child after a reload;
+    in the parent the variable is unset. When not under the reloader at all
+    (production / py2app), `debug_mode=False` and we always start.
+    """
+    if debug_mode and os.environ.get("WERKZEUG_RUN_MAIN") != "true":
+        # Reloader parent — child will start the warmer when it spawns.
+        log.info("Skipping idea-pool warmer start in reloader parent process")
+        return
+    if os.environ.get("DISABLE_WARMER") == "1":
+        log.info("Idea pool warmer disabled via DISABLE_WARMER=1")
+        return
     try:
         import idea_pool_warmer
         idea_pool_warmer.start_warmer_thread(target_count=200, interval_seconds=6 * 3600)
@@ -2237,5 +2257,8 @@ if __name__ == "__main__":
     print("  AUGUR // WEALTH INTELLIGENCE SYSTEM")
     print(f"  http://localhost:{port}")
     print("=" * 60 + "\n")
-    _start_idea_warmer()
+    # debug_mode=True here matches the `debug=True` passed to app.run below;
+    # the warmer guard inside _start_idea_warmer() needs to know we're under
+    # the Werkzeug reloader to suppress the start in the parent process.
+    _start_idea_warmer(debug_mode=True)
     app.run(debug=True, host="127.0.0.1", port=port)
