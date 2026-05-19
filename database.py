@@ -182,6 +182,10 @@ def init_db():
     c.execute("CREATE INDEX IF NOT EXISTS idx_transactions_date ON transactions(date)")
     c.execute("CREATE INDEX IF NOT EXISTS idx_alerts_symbol ON price_alerts(symbol)")
     c.execute("CREATE INDEX IF NOT EXISTS idx_alerts_triggered ON price_alerts(triggered)")
+    # `get_price_alerts` always sorts by `created_at DESC` (and the trigger-loop
+    # variant pre-filters on triggered=0 then orders by created_at). Without
+    # this index SQLite does a full table scan + filesort every alert refresh.
+    c.execute("CREATE INDEX IF NOT EXISTS idx_price_alerts_created ON price_alerts(created_at)")
     c.execute("CREATE INDEX IF NOT EXISTS idx_filings_cache_ticker ON sec_filings_cache(ticker)")
     c.execute("CREATE INDEX IF NOT EXISTS idx_insider_cache_ticker ON insider_transactions_cache(ticker)")
     c.execute("CREATE INDEX IF NOT EXISTS idx_insider_cache_ticker_date ON insider_transactions_cache(ticker, cached_at)")
