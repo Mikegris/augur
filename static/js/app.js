@@ -2614,7 +2614,15 @@ async function loadDividendsView() {
               <span class="col-symbol" style="min-width:60px" onclick="openResearch('${p.symbol}')">${p.symbol}</span>
               <span style="font-size:11px;color:var(--text-secondary);min-width:100px">${fmt.date(p.ex_date)}</span>
               <span style="font-size:10px;color:${urgColor}">${daysUntil <= 0 ? 'PASSED' : daysUntil + 'd away'}</span>
-              <span style="font-size:10px;color:var(--green)">$${p.div_rate ? (p.div_rate / (p.frequency === 'Monthly' ? 12 : p.frequency === 'Quarterly' ? 4 : 2)).toFixed(4) : '—'} / share</span>
+              ${(() => {
+                if (!p.div_rate) return `<span style="font-size:10px;color:var(--green)">$— / share</span>`;
+                const freqMap = { 'Monthly': 12, 'Quarterly': 4, 'Semi-Annual': 2, 'Annual': 1 };
+                const freq = p.frequency;
+                const divisor = freqMap[freq] != null ? freqMap[freq] : 4; // unknown/null/Irregular → quarterly
+                const perShare = (p.div_rate / divisor).toFixed(4);
+                const note = freqMap[freq] == null ? ' <small style="color:var(--text-dim)">(approx, freq unknown)</small>' : '';
+                return `<span style="font-size:10px;color:var(--green)">$${perShare} / share${note}</span>`;
+              })()}
               ${p.pay_date ? `<span style="font-size:10px;color:var(--text-dim)">pays ${fmt.date(p.pay_date)}</span>` : ''}
             </div>`;
           }).join('')}
