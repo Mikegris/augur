@@ -452,9 +452,10 @@ def _score_equity(symbol, profile, weights):
         div_yield = div_data.get("div_yield") or 0
         if div_yield > 0:
             # Scale: 0% = 0, 3% = 50, 6%+ = 100
-            div_score = min(100, round(div_yield / 0.06 * 100))
+            # div_yield is already in percent units (e.g. 1.8 == 1.8%)
+            div_score = min(100, round(div_yield / 6.0 * 100))
             result["details"]["dividend"] = {
-                "yield_pct": round(div_yield * 100, 2),
+                "yield_pct": round(div_yield, 2),
                 "annual_rate": div_data.get("div_rate"),
                 "ex_date": div_data.get("ex_date"),
             }
