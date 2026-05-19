@@ -8,9 +8,17 @@ beat probability.
 """
 
 import logging
+import math
 import time
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime
 from typing import Dict, List, Optional
+
+try:
+    from zoneinfo import ZoneInfo  # Python 3.9+
+    _ET = ZoneInfo("America/New_York")
+except Exception:  # pragma: no cover - fallback if tzdata missing
+    _ET = None
 
 import fetcher
 
@@ -213,12 +221,22 @@ def _score_options_implied(symbol, current_price):
 
     implied_move_pct = (call_price + put_price) / current_price * 100
 
-    # Compute historical average move from ATR
+    # Days to expiration — options trade ET, so use NY date for "today".
+    try:
+        today_et = datetime.now(_ET).date() if _ET else datetime.utcnow().date()
+        expiry_dt = datetime.strptime(nearest_date[:10], "%Y-%m-%d").date()
+        dte = max(1, (expiry_dt - today_et).days)
+    except Exception:
+        dte = 30  # safe fallback
+
+    # Compute historical average move from ATR. ATR is a *daily* range while
+    # the straddle premium is the implied move over the option's full life,
+    # so scale daily ATR by sqrt(dte) to compare like-for-like.
     chart = fetcher.get_chart_data(symbol, period="3mo", interval="1d")
     indicators = fetcher.compute_indicators(chart) if chart else {}
     atr = indicators.get("ATR")
     if atr and current_price > 0:
-        historical_avg_pct = float(atr) / current_price * 100
+        historical_avg_pct = float(atr) / current_price * 100 * math.sqrt(dte)
     else:
         historical_avg_pct = implied_move_pct  # fallback: treat as normal
 
