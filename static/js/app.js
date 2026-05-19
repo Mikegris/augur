@@ -1405,9 +1405,11 @@ async function loadResearchFor(symbol) {
                 `<button class="chart-btn ${p === State.chartPeriod ? 'active' : ''}" onclick="setChartPeriod('${p}')">${p.toUpperCase()}</button>`
               ).join('')}
               <span style="margin-left:8px"></span>
-              ${['1m','5m','15m','1h','1d','1wk'].map(iv =>
-                `<button class="chart-btn ${iv === State.chartInterval ? 'active' : ''}" onclick="setChartInterval('${iv}')">${iv}</button>`
-              ).join('')}
+              ${['1m','5m','15m','30m','1h','1d','1wk','1mo'].map(iv => {
+                const allowed = CHART_INTERVALS_FOR[State.chartPeriod] || ['1d'];
+                const disabled = allowed.indexOf(iv) === -1;
+                return `<button class="chart-btn chart-interval-btn ${iv === State.chartInterval ? 'active' : ''}" data-interval="${iv}" ${disabled ? 'disabled' : ''} onclick="setChartInterval('${iv}')">${iv}</button>`;
+              }).join('')}
             </div>
           </div>
           <div id="price-chart-container" style="height:400px"></div>
@@ -1625,16 +1627,58 @@ async function loadPriceChart(symbol, period = '6mo', interval = '1d') {
   }
 }
 
+// Map each period to the set of intervals yfinance accepts as sensible
+// combinations. Anything outside this list returns empty data, so we
+// gate the UI rather than letting the user shoot themselves.
+const CHART_INTERVALS_FOR = {
+  '1d':  ['1m','5m','15m','30m','1h'],
+  '5d':  ['1m','5m','15m','30m','1h'],
+  '1mo': ['15m','30m','1h','1d'],
+  '3mo': ['15m','30m','1h','1d'],
+  '6mo': ['1h','1d','1wk'],
+  '1y':  ['1h','1d','1wk'],
+  '2y':  ['1d','1wk','1mo'],
+  '5y':  ['1d','1wk','1mo'],
+  '10y': ['1d','1wk','1mo'],
+  'max': ['1d','1wk','1mo'],
+};
+
+function _validIntervalFor(period, currentInterval) {
+  const allowed = CHART_INTERVALS_FOR[period] || ['1d'];
+  if (allowed.indexOf(currentInterval) !== -1) return currentInterval;
+  // Snap to the closest sensible default, preferring '1d'.
+  return allowed.indexOf('1d') !== -1 ? '1d' : allowed[0];
+}
+
+function _refreshIntervalButtons() {
+  const period = State.chartPeriod;
+  const allowed = CHART_INTERVALS_FOR[period] || ['1d'];
+  document.querySelectorAll('#chart-period-btns .chart-interval-btn').forEach(b => {
+    const iv = b.dataset.interval;
+    const valid = allowed.indexOf(iv) !== -1;
+    b.disabled = !valid;
+    b.classList.toggle('active', valid && iv === State.chartInterval);
+  });
+}
+
 function setChartPeriod(p) {
   State.chartPeriod = p;
+  // If the current interval isn't valid for the new period, snap it.
+  const newInterval = _validIntervalFor(p, State.chartInterval);
+  if (newInterval !== State.chartInterval) State.chartInterval = newInterval;
   document.querySelectorAll('#chart-period-btns .chart-btn').forEach(b => {
+    if (b.classList.contains('chart-interval-btn')) return;
     b.classList.toggle('active', b.textContent.toLowerCase() === p.toLowerCase());
   });
+  _refreshIntervalButtons();
   if (State.chartSymbol) loadPriceChart(State.chartSymbol, p, State.chartInterval);
 }
 
 function setChartInterval(iv) {
+  const allowed = CHART_INTERVALS_FOR[State.chartPeriod] || ['1d'];
+  if (allowed.indexOf(iv) === -1) return; // ignore disabled clicks
   State.chartInterval = iv;
+  _refreshIntervalButtons();
   if (State.chartSymbol) loadPriceChart(State.chartSymbol, State.chartPeriod, iv);
 }
 
