@@ -383,18 +383,18 @@ def _build_insider_block(transactions):
     """
     Reduce Form 4 transactions to a compact buy/sell summary for the last 60 days.
     """
-    from datetime import datetime, timedelta
-    cutoff = datetime.utcnow() - timedelta(days=60)
+    from datetime import datetime, timedelta, timezone
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=60)).date()
 
     def _parse(d):
         try:
-            return datetime.strptime(d[:10], "%Y-%m-%d")
+            return datetime.strptime(d[:10], "%Y-%m-%d").date()
         except Exception:
             return None
 
     recent = []
     for t in transactions:
-        dt = _parse(t.get("transaction_date") or t.get("filing_date") or "")
+        dt = _parse(t.get("date") or t.get("transaction_date") or t.get("filing_date") or "")
         if dt and dt >= cutoff:
             recent.append(t)
 
@@ -415,7 +415,7 @@ def _build_insider_block(transactions):
     sample = []
     for t in recent[:3]:
         sample.append({
-            "date": (t.get("transaction_date") or t.get("filing_date") or "")[:10],
+            "date": (t.get("date") or t.get("transaction_date") or t.get("filing_date") or "")[:10],
             "insider": t.get("insider_name") or t.get("filer_name"),
             "title": t.get("insider_title") or t.get("title"),
             "type": t.get("transaction_type"),
