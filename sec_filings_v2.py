@@ -3,6 +3,12 @@ sec_filings_v2.py — High-level SEC wrapper using edgartools.
 
 Augments the existing sec_edgar.py (raw HTTP) with structured access to
 Form 4, 10-K, 10-Q, and 8-K via dgunning/edgartools.
+
+`edgartools` is an OPTIONAL dependency — it's intentionally NOT pinned in
+requirements.txt because it's heavy and the existing sec_edgar.py (raw HTTP)
+covers the same data. Callers should check `is_available()` and surface a
+503/explicit error envelope when this module is dormant, rather than letting
+the routes return empty lists that look like "no filings found".
 """
 
 import logging
@@ -14,10 +20,29 @@ log = logging.getLogger("augur.sec_v2")
 _lock = threading.Lock()
 _initialized = False
 
+# Probe the optional `edgar` import at module load so callers can early-out
+# without paying the cost of constructing a Company() and catching deep in
+# the call stack. Re-checked on every _ensure_init() call as well.
+try:
+    from edgar import set_identity as _probe_set_identity  # noqa: F401
+    _AVAILABLE = True
+except Exception as _imp_err:
+    _AVAILABLE = False
+    log.info("sec_filings_v2 dormant — optional edgartools not installed: %s", _imp_err)
+
+
+def is_available() -> bool:
+    """Return True iff the optional `edgartools` dep is importable. Routes
+    should branch on this to return an explicit error envelope instead of
+    masquerading missing-dep as empty data."""
+    return _AVAILABLE
+
 
 def _ensure_init():
     """edgartools requires set_identity() to be polite to SEC."""
     global _initialized
+    if not _AVAILABLE:
+        return
     with _lock:
         if _initialized:
             return

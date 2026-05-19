@@ -1961,10 +1961,24 @@ def research_xbrl(symbol):
 
 
 # ── edgartools-backed filings + Form 4 ────────────────────────────
+# `sec_filings_v2` depends on the optional `edgartools` PyPI package which we
+# intentionally don't ship in requirements.txt (heavy dep; the lightweight
+# sec_edgar.py covers the same ground). When unavailable we return a clear
+# 503 with an explanatory error envelope instead of an empty list — see
+# sec_filings_v2.is_available().
+_SEC_V2_DORMANT_ENVELOPE = {
+    "error": "sec_filings_v2 module unavailable — uses optional edgartools dep"
+}
+
+
+def _sec_v2_unavailable():
+    return sec_filings_v2 is None or not sec_filings_v2.is_available()
+
+
 @app.route("/api/intel/filings-v2/<symbol>")
 def intel_filings_v2(symbol):
-    if sec_filings_v2 is None:
-        return jsonify({"error": "edgartools unavailable"}), 503
+    if _sec_v2_unavailable():
+        return jsonify(dict(_SEC_V2_DORMANT_ENVELOPE, symbol=symbol.upper())), 503
     if not _valid_ticker(symbol):
         return jsonify({"error": "Invalid symbol"}), 400
     form = request.args.get("form")
@@ -1977,8 +1991,8 @@ def intel_filings_v2(symbol):
 
 @app.route("/api/intel/form4-v2/<symbol>")
 def intel_form4_v2(symbol):
-    if sec_filings_v2 is None:
-        return jsonify({"error": "edgartools unavailable"}), 503
+    if _sec_v2_unavailable():
+        return jsonify(dict(_SEC_V2_DORMANT_ENVELOPE, symbol=symbol.upper())), 503
     if not _valid_ticker(symbol):
         return jsonify({"error": "Invalid symbol"}), 400
     limit = _safe_int(request.args.get("limit"), 30)
