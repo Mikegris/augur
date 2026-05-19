@@ -2071,8 +2071,19 @@ async function loadGlobalNews() {
   const view = document.getElementById('view-news');
   view.innerHTML = `<div class="loading"><div class="spinner"></div> LOADING MARKET NEWS...</div>`;
   try {
-    // Load news for major tickers
-    const tickers = ['SPY', 'QQQ', 'AAPL', 'MSFT', 'NVDA'];
+    // Prefer the user's actual equity holdings (cap 8) so the feed is
+    // relevant; only fall back to the broad-market defaults if the
+    // portfolio is empty.
+    const defaultTickers = ['SPY', 'QQQ', 'AAPL', 'MSFT', 'NVDA'];
+    let tickers = defaultTickers;
+    try {
+      const holdings = (State.portfolio && State.portfolio.holdings) || [];
+      const equitySyms = holdings
+        .filter(h => h.asset_type !== 'crypto' && h.symbol)
+        .slice(0, 8)
+        .map(h => h.symbol);
+      if (equitySyms.length) tickers = equitySyms;
+    } catch(e) {}
     const newsMap = await Promise.all(tickers.map(t => API.get(`/api/news/${t}?limit=8`)));
     const all = [];
     const seen = new Set();
