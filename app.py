@@ -262,6 +262,10 @@ def market_sectors():
 
 @app.route("/api/market/movers")
 def market_movers():
+    """Top gainers/losers within a curated ~36-name large-cap universe.
+
+    Not a market-wide screen — see fetcher.get_top_movers for the list.
+    """
     return jsonify(fetcher.get_top_movers())
 
 

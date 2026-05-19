@@ -925,7 +925,12 @@ def get_sector_performance() -> list:
 
 
 def get_top_movers() -> dict:
-    """Fetch pre-market movers using a curated list of liquid names."""
+    """Return movers from a curated universe of ~36 large-caps.
+
+    NOTE: This is NOT a market-wide screen. We fetch quotes for a fixed list
+    of liquid large-cap names and re-sort by intraday change_pct within that
+    set. Anything outside the curated universe will never appear here.
+    """
     large_caps = [
         "AAPL", "MSFT", "NVDA", "AMZN", "GOOGL", "META", "TSLA", "BRK-B",
         "JPM", "V", "MA", "UNH", "XOM", "JNJ", "PG", "HD", "LLY", "AVGO",
