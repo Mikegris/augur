@@ -3915,11 +3915,24 @@ async function renderEquityChart(equityData, history) {
   });
   portfolioSeries.setData(equityData);
 
-  // Load benchmark overlay
+  // Load benchmark overlay. Pick the period from the portfolio's actual
+  // history span so multi-year accounts aren't visually clipped to 1y.
   const benchmarkSym = document.getElementById('benchmark-select') ? document.getElementById('benchmark-select').value : 'SPY';
   try {
     const baseVal = history.length ? history[0].total_value : null;
-    const benchResp = await API.get('/api/portfolio/benchmark?symbol=' + benchmarkSym + '&period=1y');
+    let benchPeriod = '1y';
+    if (equityData.length) {
+      const firstT = equityData[0].time;
+      const lastT = equityData[equityData.length - 1].time;
+      // equityData times are seconds-since-epoch (lightweight-charts UTCTimestamp).
+      const spanDays = (Number(lastT) - Number(firstT)) / 86400;
+      if (spanDays < 90)      benchPeriod = '3mo';
+      else if (spanDays < 365) benchPeriod = '1y';
+      else if (spanDays < 730) benchPeriod = '2y';
+      else if (spanDays < 1825) benchPeriod = '5y';
+      else                     benchPeriod = 'max';
+    }
+    const benchResp = await API.get('/api/portfolio/benchmark?symbol=' + benchmarkSym + '&period=' + benchPeriod);
     const benchData = (benchResp.data || []).filter(d => d.time >= equityData[0].time);
     if (benchData.length && baseVal) {
       // Normalize benchmark to first portfolio value
