@@ -12,6 +12,16 @@ import time
 from datetime import datetime, timezone
 from typing import Dict, List, Optional
 
+try:
+    from zoneinfo import ZoneInfo
+    _NY_TZ = ZoneInfo("America/New_York")
+except Exception:  # pragma: no cover
+    try:
+        import pytz
+        _NY_TZ = pytz.timezone("America/New_York")
+    except Exception:
+        _NY_TZ = None
+
 import yfinance as yf
 
 logger = logging.getLogger(__name__)
@@ -129,11 +139,21 @@ def _get_spot_price(ticker):
 
 def _tte_from_expiry(expiry_str):
     # type: (str) -> float
-    """Return time-to-expiry in years from an expiry date string (YYYY-MM-DD)."""
+    """Return time-to-expiry in years from an expiry date string (YYYY-MM-DD).
+
+    Options expire at 16:00 America/New_York on the expiry date; anchor to
+    that wall-clock time and compare in UTC so 0/1DTE doesn't mis-price.
+    """
     try:
         exp_date = datetime.strptime(expiry_str, "%Y-%m-%d")
-        now = datetime.now()
-        diff = (exp_date - now).total_seconds()
+        if _NY_TZ is not None:
+            exp_dt = exp_date.replace(hour=16, minute=0, second=0, tzinfo=_NY_TZ)
+            now = datetime.now(timezone.utc)
+        else:
+            # Fallback if no tz library available: treat expiry as 16:00 UTC
+            exp_dt = exp_date.replace(hour=16, minute=0, second=0, tzinfo=timezone.utc)
+            now = datetime.now(timezone.utc)
+        diff = (exp_dt - now).total_seconds()
         if diff <= 0:
             return 0.0
         return diff / (365.25 * 86400)
