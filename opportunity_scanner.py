@@ -381,7 +381,7 @@ def _score_equity(symbol, profile, weights):
         insider_score = round(insider_comp.get("score", 0) / max(insider_comp.get("max", 1), 1) * 100)
     # Check for cluster buying (early signal)
     try:
-        import edgar
+        import sec_edgar as edgar
         txns = edgar.get_form4_transactions(symbol, limit=15)
         cutoff_30d = (datetime.now() - timedelta(days=30)).strftime("%Y-%m-%d")
         recent_buys = [t for t in txns if t.get("date", "") >= cutoff_30d and t.get("transaction_type") == "BUY"]
@@ -452,9 +452,10 @@ def _score_equity(symbol, profile, weights):
         div_yield = div_data.get("div_yield") or 0
         if div_yield > 0:
             # Scale: 0% = 0, 3% = 50, 6%+ = 100
-            div_score = min(100, round(div_yield / 0.06 * 100))
+            # div_yield is already in percent units (e.g. 1.8 == 1.8%)
+            div_score = min(100, round(div_yield / 6.0 * 100))
             result["details"]["dividend"] = {
-                "yield_pct": round(div_yield * 100, 2),
+                "yield_pct": round(div_yield, 2),
                 "annual_rate": div_data.get("div_rate"),
                 "ex_date": div_data.get("ex_date"),
             }

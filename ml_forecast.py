@@ -481,7 +481,8 @@ def ml_forecast(symbol, bypass_cache=False):
     All models train on the stock's own data — no mock logic.
     Results are cached for 1 hour to avoid expensive retraining.
     """
-    import yfinance as yf
+    import fetcher
+    import pandas as pd
 
     symbol = symbol.upper()
 
@@ -494,9 +495,19 @@ def ml_forecast(symbol, bypass_cache=False):
     import time
     t0 = time.time()
 
+    # Route through fetcher.get_chart_data so we inherit the Yahoo direct-chart
+    # fallback when yfinance's crumb auth breaks.
     try:
-        ticker = yf.Ticker(symbol)
-        hist = ticker.history(period="2y")
+        bars = fetcher.get_chart_data(symbol, period="2y", interval="1d")
+        if not bars:
+            return {"symbol": symbol, "error": "Failed to fetch history"}
+        hist = pd.DataFrame(bars)
+        hist["Date"] = pd.to_datetime(hist["time"], unit="s")
+        hist = hist.set_index("Date")
+        hist = hist.rename(columns={
+            "open": "Open", "high": "High", "low": "Low",
+            "close": "Close", "volume": "Volume",
+        })
     except Exception as e:
         return {"symbol": symbol, "error": f"Failed to fetch history: {e}"}
 

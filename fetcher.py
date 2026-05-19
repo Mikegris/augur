@@ -11,6 +11,16 @@ from datetime import datetime, timedelta, timezone
 import time
 import threading
 
+try:
+    from zoneinfo import ZoneInfo
+    _NY_TZ = ZoneInfo("America/New_York")
+except Exception:  # pragma: no cover
+    try:
+        import pytz
+        _NY_TZ = pytz.timezone("America/New_York")
+    except Exception:
+        _NY_TZ = None
+
 COINGECKO_BASE = "https://api.coingecko.com/api/v3"
 HEADERS = {"User-Agent": "WealthTracker/1.0 (personal)"}
 
@@ -915,7 +925,12 @@ def get_sector_performance() -> list:
 
 
 def get_top_movers() -> dict:
-    """Fetch pre-market movers using a curated list of liquid names."""
+    """Return movers from a curated universe of ~36 large-caps.
+
+    NOTE: This is NOT a market-wide screen. We fetch quotes for a fixed list
+    of liquid large-cap names and re-sort by intraday change_pct within that
+    set. Anything outside the curated universe will never appear here.
+    """
     large_caps = [
         "AAPL", "MSFT", "NVDA", "AMZN", "GOOGL", "META", "TSLA", "BRK-B",
         "JPM", "V", "MA", "UNH", "XOM", "JNJ", "PG", "HD", "LLY", "AVGO",
@@ -1228,14 +1243,23 @@ def get_correlation_matrix(symbols: list, period: str = "3mo") -> dict:
         return {"symbols": [sym], "matrix": {sym: {sym: 1.0}}}
     try:
         returns = _get_returns_df(symbols, period)
+        sym_upper = [s.upper() for s in symbols]
         if returns.empty or returns.shape[1] < 2:
-            return {"symbols": symbols, "matrix": {}}
+            # yf.download can silently truncate at >50 symbols; surface what
+            # the caller asked for vs. what came back so the UI can flag it.
+            returned_upper = [str(c).upper() for c in returns.columns] if not returns.empty else []
+            missing = [s for s, u in zip(symbols, sym_upper) if u not in returned_upper]
+            return {"symbols": symbols, "matrix": {}, "missing_symbols": missing}
 
         # Keep only columns that match our symbols (case-insensitive)
-        sym_upper = [s.upper() for s in symbols]
         available = [c for c in returns.columns if c.upper() in sym_upper]
         if len(available) < 2:
-            return {"symbols": symbols, "matrix": {}}
+            returned_upper = [str(c).upper() for c in returns.columns]
+            missing = [s for s, u in zip(symbols, sym_upper) if u not in returned_upper]
+            out = {"symbols": symbols, "matrix": {}}
+            if missing:
+                out["missing_symbols"] = missing
+            return out
 
         returns = returns[available].dropna(axis=1, how="all")
         corr = returns.corr()
@@ -1247,19 +1271,32 @@ def get_correlation_matrix(symbols: list, period: str = "3mo") -> dict:
                 val = corr.loc[sym, sym2]
                 matrix[sym][sym2] = round(float(val), 4) if not pd.isna(val) else None
 
-        return {"symbols": list(corr.columns), "matrix": matrix}
+        # Report any requested symbols we couldn't price so the UI can show
+        # "partial coverage" instead of silently dropping them.
+        covered_upper = [str(c).upper() for c in corr.columns]
+        missing = [s for s, u in zip(symbols, sym_upper) if u not in covered_upper]
+        result = {"symbols": list(corr.columns), "matrix": matrix}
+        if missing:
+            result["missing_symbols"] = missing
+        return result
     except Exception as e:
         return {"symbols": symbols, "matrix": {}, "error": str(e)}
 
 
 def get_risk_metrics(symbols: list, period: str = "1y") -> dict:
-    """Compute per-symbol risk metrics."""
+    """Compute per-symbol risk metrics.
+
+    Returns a dict keyed by symbol. If yf.download silently truncated (it
+    can with >50 symbols), a "_missing_symbols" key lists the requested
+    symbols that did not come back so the UI can show partial coverage.
+    """
     if not symbols:
         return {}
     try:
         returns = _get_returns_df(symbols, period)
+        sym_upper = [s.upper() for s in symbols]
         if returns.empty:
-            return {}
+            return {"_missing_symbols": list(symbols)}
 
         trading_days = 252
         rf_daily = 0.05 / trading_days  # 5% annual risk-free rate
@@ -1281,7 +1318,7 @@ def get_risk_metrics(symbols: list, period: str = "1y") -> dict:
             # Sortino
             downside = r[r < 0]
             sortino_denom = float(downside.std() * (trading_days ** 0.5)) if len(downside) > 1 else None
-            sortino = float((r.mean() - rf_daily) * trading_days / (downside.std() * (trading_days ** 0.5))) if sortino_denom and sortino_denom > 0 else None
+            sortino = float((r.mean() - rf_daily) * (trading_days ** 0.5) / downside.std()) if sortino_denom and sortino_denom > 0 else None
 
             # Max drawdown
             cum = (1 + r).cumprod()
@@ -1298,7 +1335,7 @@ def get_risk_metrics(symbols: list, period: str = "1y") -> dict:
             # Total return
             total_ret = float((1 + r).prod() - 1) * 100
 
-            result[col_name] = {
+            result[str(col_name)] = {
                 "annualized_return": round(ann_return, 2),
                 "annualized_vol": round(ann_vol, 2),
                 "sharpe_ratio": round(sharpe, 3) if sharpe is not None else None,
@@ -1308,6 +1345,12 @@ def get_risk_metrics(symbols: list, period: str = "1y") -> dict:
                 "var_95": round(var_95, 2),
                 "total_return": round(total_ret, 2),
             }
+        # Surface any requested symbols missing from the returns frame so
+        # the UI can show "partial coverage" instead of silently dropping.
+        covered_upper = [str(c).upper() for c in result.keys()]
+        missing = [s for s, u in zip(symbols, sym_upper) if u not in covered_upper]
+        if missing:
+            result["_missing_symbols"] = missing
         return result
     except Exception as e:
         return {"error": str(e)}
@@ -1913,7 +1956,9 @@ def get_unusual_options_flow(symbol):
     scan_exps = exps[:6]
     unusual = []
 
-    today = datetime.today()
+    # Anchor "today" to 16:00 America/New_York (options-expiry wall clock)
+    # and compare in UTC so 0/1DTE math doesn't drift by a calendar day.
+    now_utc = datetime.now(timezone.utc)
 
     for exp in scan_exps:
         try:
@@ -1922,8 +1967,12 @@ def get_unusual_options_flow(symbol):
             continue
 
         try:
-            exp_dt = datetime.strptime(exp, "%Y-%m-%d")
-            dte = (exp_dt - today).days
+            exp_date = datetime.strptime(exp, "%Y-%m-%d")
+            if _NY_TZ is not None:
+                exp_dt = exp_date.replace(hour=16, minute=0, second=0, tzinfo=_NY_TZ)
+            else:
+                exp_dt = exp_date.replace(hour=16, minute=0, second=0, tzinfo=timezone.utc)
+            dte = int((exp_dt - now_utc).total_seconds() // 86400)
         except Exception:
             dte = 0
 

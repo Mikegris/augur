@@ -47,7 +47,7 @@ def _score_insiders(symbol, days=90):
     Heavy buying → 25, heavy selling → 0, neutral → 12
     """
     try:
-        from edgar import get_form4_transactions
+        from sec_edgar import get_form4_transactions
         txns = get_form4_transactions(symbol)
     except Exception:
         return 12, []
@@ -322,8 +322,8 @@ def _score_momentum(hist):
 def _score_sec_sentiment(symbol):
     """Score based on recent SEC 8-K / 10-Q AI sentiment."""
     try:
-        from edgar import get_recent_filings
-        filings = get_recent_filings(symbol, max_results=5)
+        from sec_edgar import get_recent_filings
+        filings = get_recent_filings(symbol, limit=5)
     except Exception:
         return 5
 

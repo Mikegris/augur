@@ -189,7 +189,21 @@ def get_earnings_dossier(symbol):
     avg_abs_move = None
 
     try:
-        price_hist = t.history(period="3y")
+        # Route price history through fetcher so we inherit the Yahoo
+        # direct-chart fallback when yfinance's crumb auth breaks.
+        import fetcher as _f
+        import pandas as _pd
+        _bars = _f.get_chart_data(symbol, period="3y", interval="1d")
+        if _bars:
+            price_hist = _pd.DataFrame(_bars)
+            price_hist["Date"] = _pd.to_datetime(price_hist["time"], unit="s")
+            price_hist = price_hist.set_index("Date")
+            price_hist = price_hist.rename(columns={
+                "open": "Open", "high": "High", "low": "Low",
+                "close": "Close", "volume": "Volume",
+            })
+        else:
+            price_hist = _pd.DataFrame()
         if not price_hist.empty:
             # Use earnings_dates index for past dates
             ed2 = t.earnings_dates
@@ -273,7 +287,7 @@ def get_earnings_dossier(symbol):
     # ── 5. Insider activity (last 60 days) ────────────────────────────────────
     insider_summary = {"buys": 0, "sells": 0, "net_buy_value": 0, "signal": "NEUTRAL"}
     try:
-        import edgar
+        import sec_edgar as edgar
         transactions = edgar.get_form4_transactions(symbol, limit=20)
         cutoff = (today - datetime.timedelta(days=60)).isoformat()
         recent = [tx for tx in transactions if tx.get("date", "") >= cutoff]
