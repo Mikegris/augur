@@ -1931,9 +1931,15 @@ async function loadTransactions() {
   const view = document.getElementById('view-transactions');
   view.innerHTML = `<div class="loading"><div class="spinner"></div></div>`;
   try {
-    const txns = await API.get('/api/transactions?limit=200');
-    const total_buy  = txns.filter(t=>t.action==='BUY').reduce((s,t)=>s+t.total,0);
-    const total_sell = txns.filter(t=>t.action==='SELL').reduce((s,t)=>s+t.total,0);
+    // KPIs come from the server-side aggregate (covers ALL rows); the table
+    // body still uses the paginated 200-row slice for display.
+    const [txns, summary] = await Promise.all([
+      API.get('/api/transactions?limit=200'),
+      API.get('/api/transactions/summary').catch(() => null),
+    ]);
+    const total_buy  = summary ? summary.total_buy  : txns.filter(t=>t.action==='BUY').reduce((s,t)=>s+t.total,0);
+    const total_sell = summary ? summary.total_sell : txns.filter(t=>t.action==='SELL').reduce((s,t)=>s+t.total,0);
+    const total_count = summary ? summary.count : txns.length;
 
     view.innerHTML = `
       <div class="flex-between mb-8">
@@ -1948,7 +1954,7 @@ async function loadTransactions() {
           </div>
           <div class="kpi-card" style="padding:8px 14px">
             <div class="kpi-label">TRANSACTIONS</div>
-            <div class="kpi-value" style="font-size:16px">${txns.length}</div>
+            <div class="kpi-value" style="font-size:16px">${total_count}</div>
           </div>
         </div>
         <button class="btn btn-green btn-sm" onclick="Modal.open('modal-add-txn')">+ LOG TRADE</button>
