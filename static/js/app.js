@@ -3467,16 +3467,46 @@ function selectSearchResult(symbol) {
 }
 
 // ── Auto-refresh ──────────────────────────────────────────────────────────────
+// Map every refreshable view to its loader function. Views not listed
+// here are considered "static enough" that ticking them on a 60s timer
+// adds noise without value (e.g. terminal, settings, research detail
+// which the user is actively interacting with).
+const VIEW_LOADERS = {
+  overview:     () => loadOverview(),
+  portfolio:    () => loadPortfolio(),
+  crypto:       () => loadCrypto(),
+  watchlist:    () => loadWatchlistView(),
+  markets:      () => loadMarkets(),
+  macro:        () => loadMacroView(),
+  analytics:    () => loadAnalyticsView(),
+  intel:        () => loadIntelView(),
+  earnings:     () => loadEarningsView(),
+  signals:      () => loadSignalsView(),
+  'options-flow': () => loadOptionsFlowView(),
+  congress:     () => loadCongressView(),
+  dividends:    () => loadDividendsView(),
+  scanner:      () => loadScannerView(),
+  news:         () => loadGlobalNews(),
+  alerts:       () => loadAlertsView(),
+  gex:          () => loadGexView(),
+  contagion:    () => loadContagionView(),
+  narrative:    () => loadNarrativeView(),
+  reflexivity:  () => loadReflexivityView(),
+  liquidity:    () => loadLiquidityView(),
+  // Research is intentionally excluded — re-loading would yank the
+  // chart out from under the user mid-interaction.
+};
+
 function startAutoRefresh() {
   if (State.refreshInterval) clearInterval(State.refreshInterval);
   const interval = parseInt(State.settings.refresh_interval || 60) * 1000;
   State.refreshInterval = setInterval(() => {
-    loadTicker();
-    loadSidebarWatchlist();
-    if (State.activeView === 'overview') loadOverview();
-    else if (State.activeView === 'portfolio') loadPortfolio();
-    else if (State.activeView === 'crypto') loadCrypto();
-    else if (State.activeView === 'watchlist') loadWatchlistView();
+    try { loadTicker(); } catch(e) {}
+    try { loadSidebarWatchlist(); } catch(e) {}
+    const loader = VIEW_LOADERS[State.activeView];
+    if (loader) {
+      try { loader(); } catch(e) { /* one broken view shouldn't kill the tick */ }
+    }
   }, interval);
 }
 
