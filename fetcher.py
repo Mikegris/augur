@@ -11,6 +11,16 @@ from datetime import datetime, timedelta, timezone
 import time
 import threading
 
+try:
+    from zoneinfo import ZoneInfo
+    _NY_TZ = ZoneInfo("America/New_York")
+except Exception:  # pragma: no cover
+    try:
+        import pytz
+        _NY_TZ = pytz.timezone("America/New_York")
+    except Exception:
+        _NY_TZ = None
+
 COINGECKO_BASE = "https://api.coingecko.com/api/v3"
 HEADERS = {"User-Agent": "WealthTracker/1.0 (personal)"}
 
@@ -1913,7 +1923,9 @@ def get_unusual_options_flow(symbol):
     scan_exps = exps[:6]
     unusual = []
 
-    today = datetime.today()
+    # Anchor "today" to 16:00 America/New_York (options-expiry wall clock)
+    # and compare in UTC so 0/1DTE math doesn't drift by a calendar day.
+    now_utc = datetime.now(timezone.utc)
 
     for exp in scan_exps:
         try:
@@ -1922,8 +1934,12 @@ def get_unusual_options_flow(symbol):
             continue
 
         try:
-            exp_dt = datetime.strptime(exp, "%Y-%m-%d")
-            dte = (exp_dt - today).days
+            exp_date = datetime.strptime(exp, "%Y-%m-%d")
+            if _NY_TZ is not None:
+                exp_dt = exp_date.replace(hour=16, minute=0, second=0, tzinfo=_NY_TZ)
+            else:
+                exp_dt = exp_date.replace(hour=16, minute=0, second=0, tzinfo=timezone.utc)
+            dte = int((exp_dt - now_utc).total_seconds() // 86400)
         except Exception:
             dte = 0
 
