@@ -42,6 +42,7 @@ import logging
 import re
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 
 import sec_edgar as edgar
@@ -1133,8 +1134,16 @@ def portfolio_ai_analysis():
 
 @app.route("/api/intel/feed")
 def intel_feed():
-    """Filing feed for all portfolio + watchlist symbols."""
+    """Filing feed for all portfolio + watchlist symbols.
+
+    By default returns raw filing metadata (no AI summarization). Pass
+    `ai_powered=1` (or `true`) to run summaries on uncached filings —
+    those are parallelized with a thread pool because cache_store.coalesce
+    (used by ai_summarizer) is thread-safe.
+    """
     refresh = request.args.get("refresh", "false").lower() == "true"
+    ai_flag = (request.args.get("ai_powered") or "").lower()
+    ai_powered = ai_flag in ("1", "true", "yes")
 
     holdings = db.get_portfolio()
     watchlist = db.get_watchlist()
@@ -1151,52 +1160,66 @@ def intel_feed():
         # Default to some well-known symbols if no portfolio/watchlist
         symbols = ["AAPL", "MSFT", "NVDA"]
 
+    # ── Pass 1: collect filings + cache hits, defer uncached for batch ──
     result = []
+    uncached_filings = []  # list of (filing_dict,) entries needing AI
 
     for symbol in symbols[:15]:  # cap at 15 symbols to avoid long waits
         try:
-            filings = edgar.get_recent_filings(symbol, forms=["8-K", "10-K", "10-Q", "S-1"], limit=5)
-            for f in filings:
-                acc = f["accession"]
-                # Check cache first
-                cached = db.get_cached_filing(acc)
-                if cached and not refresh:
-                    result.append({
-                        "ticker": f["ticker"],
-                        "form_type": f["form_type"],
-                        "filing_date": f["filing_date"],
-                        "description": f["description"],
-                        "accession": acc,
-                        "signal": cached.get("ai_signal", "NEUTRAL"),
-                        "summary": cached.get("ai_summary", ""),
-                        "key_points": cached.get("ai_key_points", []),
-                        "event_type": cached.get("ai_event_type", ""),
-                        "ai_powered": bool(cached.get("ai_powered")),
-                        "filing_url": f["document_url"],
-                    })
-                else:
-                    # Do quick summarize without fetching full text (use description only)
+            filings = edgar.get_recent_filings(
+                symbol, forms=["8-K", "10-K", "10-Q", "S-1"], limit=5
+            )
+        except Exception:
+            continue
+        for f in filings:
+            acc = f["accession"]
+            cached = db.get_cached_filing(acc) if not refresh else None
+            if cached:
+                result.append({
+                    "ticker": f["ticker"],
+                    "form_type": f["form_type"],
+                    "filing_date": f["filing_date"],
+                    "description": f["description"],
+                    "accession": acc,
+                    "signal": cached.get("ai_signal", "NEUTRAL"),
+                    "summary": cached.get("ai_summary", ""),
+                    "key_points": cached.get("ai_key_points", []),
+                    "event_type": cached.get("ai_event_type", ""),
+                    "ai_powered": bool(cached.get("ai_powered")),
+                    "filing_url": f["document_url"],
+                })
+            else:
+                uncached_filings.append(f)
+
+    # ── Pass 2: handle uncached filings ──
+    if uncached_filings:
+        if ai_powered:
+            # Parallel AI summarize — caches each result and emits an entry.
+            def _summarize_and_cache(f):
+                try:
                     ai_result = ai_summarizer.summarize_filing(
-                        "",
-                        f["form_type"],
-                        f["ticker"],
-                        f["description"],
+                        "", f["form_type"], f["ticker"], f["description"],
                     )
                     db.cache_filing(
-                        acc,
-                        f["ticker"],
-                        f["form_type"],
-                        f["filing_date"],
-                        f["description"],
-                        "",
-                        ai_result,
+                        f["accession"], f["ticker"], f["form_type"],
+                        f["filing_date"], f["description"], "", ai_result,
                     )
+                    return (f, ai_result)
+                except Exception as exc:
+                    log.warning(
+                        "intel_feed: summarize %s/%s failed: %s",
+                        f.get("ticker"), f.get("accession"), exc,
+                    )
+                    return (f, {})
+
+            with ThreadPoolExecutor(max_workers=8) as pool:
+                for f, ai_result in pool.map(_summarize_and_cache, uncached_filings):
                     result.append({
                         "ticker": f["ticker"],
                         "form_type": f["form_type"],
                         "filing_date": f["filing_date"],
                         "description": f["description"],
-                        "accession": acc,
+                        "accession": f["accession"],
                         "signal": ai_result.get("signal", "NEUTRAL"),
                         "summary": ai_result.get("summary", ""),
                         "key_points": ai_result.get("key_points", []),
@@ -1204,8 +1227,24 @@ def intel_feed():
                         "ai_powered": bool(ai_result.get("ai_powered")),
                         "filing_url": f["document_url"],
                     })
-        except Exception as e:
-            continue
+        else:
+            # No AI requested — return raw filing metadata, empty summary
+            # fields. Don't cache here; let an ai_powered=1 call populate
+            # the cache later.
+            for f in uncached_filings:
+                result.append({
+                    "ticker": f["ticker"],
+                    "form_type": f["form_type"],
+                    "filing_date": f["filing_date"],
+                    "description": f["description"],
+                    "accession": f["accession"],
+                    "signal": "NEUTRAL",
+                    "summary": "",
+                    "key_points": [],
+                    "event_type": "",
+                    "ai_powered": False,
+                    "filing_url": f["document_url"],
+                })
 
     # Sort by filing_date descending
     result.sort(key=lambda x: x.get("filing_date", ""), reverse=True)
