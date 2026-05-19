@@ -154,8 +154,18 @@ const MacroBar = {
     main.insertBefore(bar, main.firstChild);
     this.el = bar;
     this.refresh();
-    this._timer = setInterval(() => this.refresh(), 300000);  // 5 min
+    this._startTimer();
   },
+  _startTimer() {
+    if (this._timer) clearInterval(this._timer);
+    // MacroBar refreshes at 5× the user's refresh_interval (so a 60s
+    // refresh becomes 5min — matches the server-side cache window for
+    // macro data), with a 300s floor for legacy behaviour.
+    const sec = parseInt((State.settings && State.settings.refresh_interval) || 60, 10);
+    const ms = Math.max(sec * 5 * 1000, 60000);
+    this._timer = setInterval(() => this.refresh(), ms);
+  },
+  restart() { this._startTimer(); },
   _latestPerSecurity(rates) {
     const out = {};
     (rates || []).forEach(r => {
@@ -1405,9 +1415,11 @@ async function loadResearchFor(symbol) {
                 `<button class="chart-btn ${p === State.chartPeriod ? 'active' : ''}" onclick="setChartPeriod('${p}')">${p.toUpperCase()}</button>`
               ).join('')}
               <span style="margin-left:8px"></span>
-              ${['1m','5m','15m','1h','1d','1wk'].map(iv =>
-                `<button class="chart-btn ${iv === State.chartInterval ? 'active' : ''}" onclick="setChartInterval('${iv}')">${iv}</button>`
-              ).join('')}
+              ${['1m','5m','15m','30m','1h','1d','1wk','1mo'].map(iv => {
+                const allowed = CHART_INTERVALS_FOR[State.chartPeriod] || ['1d'];
+                const disabled = allowed.indexOf(iv) === -1;
+                return `<button class="chart-btn chart-interval-btn ${iv === State.chartInterval ? 'active' : ''}" data-interval="${iv}" ${disabled ? 'disabled' : ''} onclick="setChartInterval('${iv}')">${iv}</button>`;
+              }).join('')}
             </div>
           </div>
           <div id="price-chart-container" style="height:400px"></div>
@@ -1625,16 +1637,58 @@ async function loadPriceChart(symbol, period = '6mo', interval = '1d') {
   }
 }
 
+// Map each period to the set of intervals yfinance accepts as sensible
+// combinations. Anything outside this list returns empty data, so we
+// gate the UI rather than letting the user shoot themselves.
+const CHART_INTERVALS_FOR = {
+  '1d':  ['1m','5m','15m','30m','1h'],
+  '5d':  ['1m','5m','15m','30m','1h'],
+  '1mo': ['15m','30m','1h','1d'],
+  '3mo': ['15m','30m','1h','1d'],
+  '6mo': ['1h','1d','1wk'],
+  '1y':  ['1h','1d','1wk'],
+  '2y':  ['1d','1wk','1mo'],
+  '5y':  ['1d','1wk','1mo'],
+  '10y': ['1d','1wk','1mo'],
+  'max': ['1d','1wk','1mo'],
+};
+
+function _validIntervalFor(period, currentInterval) {
+  const allowed = CHART_INTERVALS_FOR[period] || ['1d'];
+  if (allowed.indexOf(currentInterval) !== -1) return currentInterval;
+  // Snap to the closest sensible default, preferring '1d'.
+  return allowed.indexOf('1d') !== -1 ? '1d' : allowed[0];
+}
+
+function _refreshIntervalButtons() {
+  const period = State.chartPeriod;
+  const allowed = CHART_INTERVALS_FOR[period] || ['1d'];
+  document.querySelectorAll('#chart-period-btns .chart-interval-btn').forEach(b => {
+    const iv = b.dataset.interval;
+    const valid = allowed.indexOf(iv) !== -1;
+    b.disabled = !valid;
+    b.classList.toggle('active', valid && iv === State.chartInterval);
+  });
+}
+
 function setChartPeriod(p) {
   State.chartPeriod = p;
+  // If the current interval isn't valid for the new period, snap it.
+  const newInterval = _validIntervalFor(p, State.chartInterval);
+  if (newInterval !== State.chartInterval) State.chartInterval = newInterval;
   document.querySelectorAll('#chart-period-btns .chart-btn').forEach(b => {
+    if (b.classList.contains('chart-interval-btn')) return;
     b.classList.toggle('active', b.textContent.toLowerCase() === p.toLowerCase());
   });
+  _refreshIntervalButtons();
   if (State.chartSymbol) loadPriceChart(State.chartSymbol, p, State.chartInterval);
 }
 
 function setChartInterval(iv) {
+  const allowed = CHART_INTERVALS_FOR[State.chartPeriod] || ['1d'];
+  if (allowed.indexOf(iv) === -1) return; // ignore disabled clicks
   State.chartInterval = iv;
+  _refreshIntervalButtons();
   if (State.chartSymbol) loadPriceChart(State.chartSymbol, State.chartPeriod, iv);
 }
 
@@ -1931,9 +1985,15 @@ async function loadTransactions() {
   const view = document.getElementById('view-transactions');
   view.innerHTML = `<div class="loading"><div class="spinner"></div></div>`;
   try {
-    const txns = await API.get('/api/transactions?limit=200');
-    const total_buy  = txns.filter(t=>t.action==='BUY').reduce((s,t)=>s+t.total,0);
-    const total_sell = txns.filter(t=>t.action==='SELL').reduce((s,t)=>s+t.total,0);
+    // KPIs come from the server-side aggregate (covers ALL rows); the table
+    // body still uses the paginated 200-row slice for display.
+    const [txns, summary] = await Promise.all([
+      API.get('/api/transactions?limit=200'),
+      API.get('/api/transactions/summary').catch(() => null),
+    ]);
+    const total_buy  = summary ? summary.total_buy  : txns.filter(t=>t.action==='BUY').reduce((s,t)=>s+t.total,0);
+    const total_sell = summary ? summary.total_sell : txns.filter(t=>t.action==='SELL').reduce((s,t)=>s+t.total,0);
+    const total_count = summary ? summary.count : txns.length;
 
     view.innerHTML = `
       <div class="flex-between mb-8">
@@ -1948,7 +2008,7 @@ async function loadTransactions() {
           </div>
           <div class="kpi-card" style="padding:8px 14px">
             <div class="kpi-label">TRANSACTIONS</div>
-            <div class="kpi-value" style="font-size:16px">${txns.length}</div>
+            <div class="kpi-value" style="font-size:16px">${total_count}</div>
           </div>
         </div>
         <button class="btn btn-green btn-sm" onclick="Modal.open('modal-add-txn')">+ LOG TRADE</button>
@@ -2011,8 +2071,19 @@ async function loadGlobalNews() {
   const view = document.getElementById('view-news');
   view.innerHTML = `<div class="loading"><div class="spinner"></div> LOADING MARKET NEWS...</div>`;
   try {
-    // Load news for major tickers
-    const tickers = ['SPY', 'QQQ', 'AAPL', 'MSFT', 'NVDA'];
+    // Prefer the user's actual equity holdings (cap 8) so the feed is
+    // relevant; only fall back to the broad-market defaults if the
+    // portfolio is empty.
+    const defaultTickers = ['SPY', 'QQQ', 'AAPL', 'MSFT', 'NVDA'];
+    let tickers = defaultTickers;
+    try {
+      const holdings = (State.portfolio && State.portfolio.holdings) || [];
+      const equitySyms = holdings
+        .filter(h => h.asset_type !== 'crypto' && h.symbol)
+        .slice(0, 8)
+        .map(h => h.symbol);
+      if (equitySyms.length) tickers = equitySyms;
+    } catch(e) {}
     const newsMap = await Promise.all(tickers.map(t => API.get(`/api/news/${t}?limit=8`)));
     const all = [];
     const seen = new Set();
@@ -2491,9 +2562,24 @@ async function _pollTriggeredAlerts() {
   } catch(e) {}
 }
 
-setInterval(_pollTriggeredAlerts, 60000);
+let _alertPollTimer = null;
+function _startAlertPollTimer() {
+  if (_alertPollTimer) clearInterval(_alertPollTimer);
+  const sec = parseInt((State.settings && State.settings.refresh_interval) || 60, 10);
+  const ms = Math.max(sec * 1000, 15000); // never poll faster than 15s
+  _alertPollTimer = setInterval(_pollTriggeredAlerts, ms);
+}
+_startAlertPollTimer();
 // Run once on load so the user sees pending alerts immediately
 setTimeout(_pollTriggeredAlerts, 2000);
+
+// Restart all user-configurable timers so a settings change takes
+// effect immediately (no page reload needed).
+function restartTimers() {
+  _startAlertPollTimer();
+  if (typeof MacroBar !== 'undefined' && MacroBar.restart) MacroBar.restart();
+  if (typeof startAutoRefresh === 'function') startAutoRefresh();
+}
 
 
 // ── Dividend Income Tracker ────────────────────────────────────────────────────
@@ -2608,7 +2694,15 @@ async function loadDividendsView() {
               <span class="col-symbol" style="min-width:60px" onclick="openResearch('${p.symbol}')">${p.symbol}</span>
               <span style="font-size:11px;color:var(--text-secondary);min-width:100px">${fmt.date(p.ex_date)}</span>
               <span style="font-size:10px;color:${urgColor}">${daysUntil <= 0 ? 'PASSED' : daysUntil + 'd away'}</span>
-              <span style="font-size:10px;color:var(--green)">$${p.div_rate ? (p.div_rate / (p.frequency === 'Monthly' ? 12 : p.frequency === 'Quarterly' ? 4 : 2)).toFixed(4) : '—'} / share</span>
+              ${(() => {
+                if (!p.div_rate) return `<span style="font-size:10px;color:var(--green)">$— / share</span>`;
+                const freqMap = { 'Monthly': 12, 'Quarterly': 4, 'Semi-Annual': 2, 'Annual': 1 };
+                const freq = p.frequency;
+                const divisor = freqMap[freq] != null ? freqMap[freq] : 4; // unknown/null/Irregular → quarterly
+                const perShare = (p.div_rate / divisor).toFixed(4);
+                const note = freqMap[freq] == null ? ' <small style="color:var(--text-dim)">(approx, freq unknown)</small>' : '';
+                return `<span style="font-size:10px;color:var(--green)">$${perShare} / share${note}</span>`;
+              })()}
               ${p.pay_date ? `<span style="font-size:10px;color:var(--text-dim)">pays ${fmt.date(p.pay_date)}</span>` : ''}
             </div>`;
           }).join('')}
@@ -2660,7 +2754,7 @@ async function loadMacroView() {
       <div class="flex-between mb-8">
         <div>
           <h2 style="font-size:14px;letter-spacing:.12em;color:var(--green);margin:0">⊕ MACRO CONDITIONS DASHBOARD</h2>
-          <div style="font-size:10px;color:var(--text-dim);margin-top:3px">REAL-TIME GLOBAL MACRO INDICATORS</div>
+          <div style="font-size:10px;color:var(--text-dim);margin-top:3px">GLOBAL MACRO INDICATORS</div>
         </div>
         <button class="btn btn-ghost btn-sm" onclick="loadMacroView()">↻ REFRESH</button>
       </div>
@@ -2780,7 +2874,11 @@ async function loadStressTestView() {
 async function runStressTest() {
   const btn = document.getElementById('stress-run-btn');
   const resultsDiv = document.getElementById('stress-results');
-  const customDrop = parseFloat(document.getElementById('stress-custom-drop').value) || -20;
+  // Note: `parseFloat(...) || -20` would treat 0 as "missing" and substitute
+  // -20, hiding a perfectly valid stress test. Use Number.isFinite to
+  // distinguish a real 0 from blank/NaN input.
+  const _rawDrop = parseFloat(document.getElementById('stress-custom-drop').value);
+  const customDrop = Number.isFinite(_rawDrop) ? _rawDrop : -20;
   if (!btn || !resultsDiv) return;
 
   btn.disabled = true;
@@ -3299,6 +3397,9 @@ async function saveSettings() {
       payload.openai_api_key = keyField.value.trim();
     }
     await API.post('/api/settings', payload);
+    // Pull the freshly-saved settings back so timers see the new interval.
+    try { State.settings = await API.get('/api/settings'); } catch(e) {}
+    if (typeof restartTimers === 'function') restartTimers();
     Toast.success('Settings saved');
     // Reload to refresh key status indicator
     loadSettings();
@@ -3381,16 +3482,50 @@ function selectSearchResult(symbol) {
 }
 
 // ── Auto-refresh ──────────────────────────────────────────────────────────────
+// Map every refreshable view to its loader function. Views not listed
+// here are considered "static enough" that ticking them on a 60s timer
+// adds noise without value (e.g. terminal, settings, research detail
+// which the user is actively interacting with).
+const VIEW_LOADERS = {
+  overview:     () => loadOverview(),
+  portfolio:    () => loadPortfolio(),
+  crypto:       () => loadCrypto(),
+  watchlist:    () => loadWatchlistView(),
+  markets:      () => loadMarkets(),
+  macro:        () => loadMacroView(),
+  analytics:    () => loadAnalyticsView(),
+  intel:        () => loadIntelView(),
+  earnings:     () => loadEarningsView(),
+  signals:      () => loadSignalsView(),
+  'options-flow': () => loadOptionsFlowView(),
+  congress:     () => loadCongressView(),
+  dividends:    () => loadDividendsView(),
+  scanner:      () => loadScannerView(),
+  news:         () => loadGlobalNews(),
+  alerts:       () => loadAlertsView(),
+  gex:          () => loadGexView(),
+  contagion:    () => loadContagionView(),
+  narrative:    () => loadNarrativeView(),
+  reflexivity:  () => loadReflexivityView(),
+  liquidity:    () => loadLiquidityView(),
+  // Research is intentionally excluded — re-loading would yank the
+  // chart out from under the user mid-interaction.
+};
+
 function startAutoRefresh() {
   if (State.refreshInterval) clearInterval(State.refreshInterval);
-  const interval = parseInt(State.settings.refresh_interval || 60) * 1000;
+  const intervalSec = parseInt(State.settings.refresh_interval || 60);
+  const interval = intervalSec * 1000;
+  // Keep the status-bar indicator honest about what "AUTO" means.
+  const nodeEl = document.getElementById('status-node-live');
+  if (nodeEl) nodeEl.title = 'Auto-refresh every ' + intervalSec + 's';
   State.refreshInterval = setInterval(() => {
-    loadTicker();
-    loadSidebarWatchlist();
-    if (State.activeView === 'overview') loadOverview();
-    else if (State.activeView === 'portfolio') loadPortfolio();
-    else if (State.activeView === 'crypto') loadCrypto();
-    else if (State.activeView === 'watchlist') loadWatchlistView();
+    try { loadTicker(); } catch(e) {}
+    try { loadSidebarWatchlist(); } catch(e) {}
+    const loader = VIEW_LOADERS[State.activeView];
+    if (loader) {
+      try { loader(); } catch(e) { /* one broken view shouldn't kill the tick */ }
+    }
   }, interval);
 }
 
@@ -3800,10 +3935,10 @@ async function loadAnalyticsView() {
 
     '<div class="panel mb-8">' +
       '<div class="panel-header"><span class="panel-title">RISK METRICS</span>' +
-        '<div class="flex gap-4">' +
-          '<button class="btn btn-ghost btn-sm" onclick="loadRiskTable(\'3mo\')">3MO</button>' +
-          '<button class="btn btn-ghost btn-sm" onclick="loadRiskTable(\'6mo\')">6MO</button>' +
-          '<button class="btn btn-ghost btn-sm active" onclick="loadRiskTable(\'1y\')">1Y</button>' +
+        '<div class="flex gap-4" id="risk-period-btns">' +
+          '<button class="btn btn-ghost btn-sm" data-period="3mo" onclick="loadRiskTable(\'3mo\')">3MO</button>' +
+          '<button class="btn btn-ghost btn-sm" data-period="6mo" onclick="loadRiskTable(\'6mo\')">6MO</button>' +
+          '<button class="btn btn-ghost btn-sm active" data-period="1y" onclick="loadRiskTable(\'1y\')">1Y</button>' +
         '</div>' +
       '</div>' +
       '<div id="risk-table-body" style="overflow-x:auto">' + renderRiskTable(riskData) + '</div>' +
@@ -3811,11 +3946,11 @@ async function loadAnalyticsView() {
 
     '<div class="panel">' +
       '<div class="panel-header"><span class="panel-title">CORRELATION MATRIX</span>' +
-        '<div class="flex gap-4">' +
-          '<button class="btn btn-ghost btn-sm" onclick="loadCorrMatrix(\'1mo\')">1MO</button>' +
-          '<button class="btn btn-ghost btn-sm active" onclick="loadCorrMatrix(\'3mo\')">3MO</button>' +
-          '<button class="btn btn-ghost btn-sm" onclick="loadCorrMatrix(\'6mo\')">6MO</button>' +
-          '<button class="btn btn-ghost btn-sm" onclick="loadCorrMatrix(\'1y\')">1Y</button>' +
+        '<div class="flex gap-4" id="corr-period-btns">' +
+          '<button class="btn btn-ghost btn-sm" data-period="1mo" onclick="loadCorrMatrix(\'1mo\')">1MO</button>' +
+          '<button class="btn btn-ghost btn-sm active" data-period="3mo" onclick="loadCorrMatrix(\'3mo\')">3MO</button>' +
+          '<button class="btn btn-ghost btn-sm" data-period="6mo" onclick="loadCorrMatrix(\'6mo\')">6MO</button>' +
+          '<button class="btn btn-ghost btn-sm" data-period="1y" onclick="loadCorrMatrix(\'1y\')">1Y</button>' +
         '</div>' +
       '</div>' +
       '<div id="corr-matrix-body" class="panel-body">' + renderCorrMatrix(corrData) + '</div>' +
@@ -3857,11 +3992,24 @@ async function renderEquityChart(equityData, history) {
   });
   portfolioSeries.setData(equityData);
 
-  // Load benchmark overlay
+  // Load benchmark overlay. Pick the period from the portfolio's actual
+  // history span so multi-year accounts aren't visually clipped to 1y.
   const benchmarkSym = document.getElementById('benchmark-select') ? document.getElementById('benchmark-select').value : 'SPY';
   try {
     const baseVal = history.length ? history[0].total_value : null;
-    const benchResp = await API.get('/api/portfolio/benchmark?symbol=' + benchmarkSym + '&period=1y');
+    let benchPeriod = '1y';
+    if (equityData.length) {
+      const firstT = equityData[0].time;
+      const lastT = equityData[equityData.length - 1].time;
+      // equityData times are seconds-since-epoch (lightweight-charts UTCTimestamp).
+      const spanDays = (Number(lastT) - Number(firstT)) / 86400;
+      if (spanDays < 90)      benchPeriod = '3mo';
+      else if (spanDays < 365) benchPeriod = '1y';
+      else if (spanDays < 730) benchPeriod = '2y';
+      else if (spanDays < 1825) benchPeriod = '5y';
+      else                     benchPeriod = 'max';
+    }
+    const benchResp = await API.get('/api/portfolio/benchmark?symbol=' + benchmarkSym + '&period=' + benchPeriod);
     const benchData = (benchResp.data || []).filter(d => d.time >= equityData[0].time);
     if (benchData.length && baseVal) {
       // Normalize benchmark to first portfolio value
@@ -3894,9 +4042,18 @@ async function reloadBenchmark() {
   loadAnalyticsView();
 }
 
+function _setActivePeriodBtn(containerId, period) {
+  const ct = document.getElementById(containerId);
+  if (!ct) return;
+  ct.querySelectorAll('button[data-period]').forEach(b => {
+    b.classList.toggle('active', b.dataset.period === period);
+  });
+}
+
 async function loadRiskTable(period) {
   const el = document.getElementById('risk-table-body');
   if (!el) return;
+  _setActivePeriodBtn('risk-period-btns', period);
   el.innerHTML = '<div class="loading"><div class="spinner"></div></div>';
   try {
     const data = await API.get('/api/analytics/risk?period=' + period);
@@ -3938,6 +4095,7 @@ function renderRiskTable(data) {
 async function loadCorrMatrix(period) {
   const el = document.getElementById('corr-matrix-body');
   if (!el) return;
+  _setActivePeriodBtn('corr-period-btns', period);
   el.innerHTML = '<div class="loading"><div class="spinner"></div></div>';
   try {
     const data = await API.get('/api/analytics/correlation?period=' + period);
@@ -4177,24 +4335,27 @@ function toggleFilingExpand(rowId) {
 
 // ── Insider Tracker ───────────────────────────────────────────────────────────
 
+// Pick a sensible default symbol for ticker-driven panels: the first
+// non-crypto holding in the user's portfolio, falling back to AAPL
+// only when the portfolio is empty or unavailable.
+function _firstPortfolioSymbol() {
+  try {
+    const holdings = (State.portfolio && State.portfolio.holdings) || [];
+    const first = holdings.find(h => h.asset_type !== 'crypto');
+    if (first && first.symbol) return first.symbol;
+  } catch(e) {}
+  return 'AAPL';
+}
+
 async function loadIntelInsiders() {
   const panel = document.getElementById('intel-panel-insiders');
   if (!panel) return;
 
-  // Get portfolio symbols
-  let defaultSymbols = [];
-  try {
-    if (State.portfolio && State.portfolio.holdings) {
-      defaultSymbols = State.portfolio.holdings
-        .filter(h => h.asset_type !== 'crypto')
-        .slice(0, 8)
-        .map(h => h.symbol);
-    }
-  } catch(e) {}
+  const defaultSym = _firstPortfolioSymbol();
 
   panel.innerHTML = `
     <div class="sec-symbol-search">
-      <input class="form-input sec-symbol-input" id="insider-symbol-input" placeholder="Enter symbol e.g. AAPL, MSFT..." value="${defaultSymbols[0] || 'AAPL'}">
+      <input class="form-input sec-symbol-input" id="insider-symbol-input" placeholder="Enter symbol e.g. AAPL, MSFT..." value="${defaultSym}">
       <button class="btn btn-green btn-sm" onclick="searchInsiders()">SEARCH</button>
     </div>
     <div id="insider-results">
@@ -4207,8 +4368,7 @@ async function loadIntelInsiders() {
   });
 
   // Auto-load first symbol
-  const sym = defaultSymbols[0] || 'AAPL';
-  await loadInsidersFor(sym);
+  await loadInsidersFor(defaultSym);
 
   // Cross-ticker Finviz insider feed (latest Form 4 across all US equities)
   DataPanels.appendFinvizInsiders(document.getElementById('finviz-insider-feed'));
@@ -4216,7 +4376,7 @@ async function loadIntelInsiders() {
 
 async function searchInsiders() {
   const input = document.getElementById('insider-symbol-input');
-  const sym = (input ? input.value.trim().toUpperCase() : '') || 'AAPL';
+  const sym = (input ? input.value.trim().toUpperCase() : '') || _firstPortfolioSymbol();
   await loadInsidersFor(sym);
 }
 
@@ -6888,11 +7048,13 @@ const DataPanels = {
   },
 
   // ── Alt-data: Wikipedia pageviews (retail-attention proxy) ─────
-  async renderWikiAttention(parent, symbol) {
+  async renderWikiAttention(parent, symbol, days) {
     if (!parent || !symbol) return;
+    const selectedDays = [7, 30, 90].indexOf(parseInt(days, 10)) !== -1 ? parseInt(days, 10) : 30;
+    const meanLabel = selectedDays + '-day mean';
     parent.innerHTML = `<div class="loading"><div class="spinner"></div> Fetching Wikipedia pageviews for ${this._esc(symbol)}...</div>`;
     try {
-      const data = await API.get(`/api/alt-data/wiki/${encodeURIComponent(symbol)}`);
+      const data = await API.get(`/api/alt-data/wiki/${encodeURIComponent(symbol)}?days=${selectedDays}`);
       if (data.error && (!data.points || !data.points.length)) {
         parent.innerHTML = `<div class="empty-state"><span class="col-negative">${this._esc(data.error)}</span></div>`;
         return;
@@ -6913,10 +7075,24 @@ const DataPanels = {
       }).join(' ');
       const sparkline = `<svg viewBox="0 0 ${w} ${h}" width="${w}" height="${h}" style="display:block"><path d="${path}" fill="none" stroke="var(--green)" stroke-width="1.5" /></svg>`;
 
+      // Ensure parent has a stable id BEFORE we bake it into the inline
+      // onclick handlers below.
+      if (!parent.id) parent.id = 'wiki-root-' + Math.random().toString(36).slice(2, 8);
+      parent.dataset.wikiRoot = '1';
+      const parentId = parent.id;
+      const symAttr = this._esc(symbol);
+      const periodBtns = [7, 30, 90].map(d =>
+        `<button class="btn btn-ghost btn-sm ${d === selectedDays ? 'active' : ''}" onclick="DataPanels.renderWikiAttention(document.getElementById('${parentId}'), '${symAttr}', ${d})">${d}D</button>`
+      ).join('');
+
       parent.innerHTML = `
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
+          <span style="font-size:10px;color:var(--text-dim)">WINDOW</span>
+          <div class="flex gap-4">${periodBtns}</div>
+        </div>
         <div class="kpi-grid" style="display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:16px">
           <div class="kpi-card"><div class="form-label">Latest pageviews</div><div style="font-size:18px;font-weight:700">${(stats.latest || 0).toLocaleString()}</div></div>
-          <div class="kpi-card"><div class="form-label">30-day mean</div><div style="font-size:18px;font-weight:700">${(stats.mean || 0).toLocaleString()}</div></div>
+          <div class="kpi-card"><div class="form-label">${meanLabel}</div><div style="font-size:18px;font-weight:700">${(stats.mean || 0).toLocaleString()}</div></div>
           <div class="kpi-card"><div class="form-label">vs 7-day baseline</div><div style="font-size:18px;font-weight:700;color:${spikeColor}">${spike == null ? '—' : (spike >= 0 ? '+' : '') + spike.toFixed(1) + '%'}</div></div>
           <div class="kpi-card"><div class="form-label">Signal</div><div style="font-size:14px;font-weight:600;color:${spikeColor}">${spikeLabel}</div></div>
         </div>

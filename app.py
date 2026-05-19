@@ -517,6 +517,33 @@ def get_transactions():
     return jsonify(db.get_transactions(symbol=symbol, limit=limit))
 
 
+@app.route("/api/transactions/summary")
+def transactions_summary():
+    """Aggregate KPIs over ALL transactions (no row-limit). Used for the
+    Transactions view's headline strip so totals stay accurate when the
+    table itself only pages in the latest N rows."""
+    # Pull every transaction. The per-row payload is tiny (8 numeric/string
+    # fields) so this is fine for realistic personal-portfolio sizes.
+    txns = db.get_transactions(limit=10**9)
+    total_buy = 0.0
+    total_sell = 0.0
+    for t in txns:
+        try:
+            total = float(t.get("total") or 0)
+        except (TypeError, ValueError):
+            total = 0.0
+        action = (t.get("action") or "").upper()
+        if action == "BUY":
+            total_buy += total
+        elif action == "SELL":
+            total_sell += total
+    return jsonify({
+        "total_buy": total_buy,
+        "total_sell": total_sell,
+        "count": len(txns),
+    })
+
+
 @app.route("/api/transactions/add", methods=["POST"])
 def add_transaction():
     data = request.json
