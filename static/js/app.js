@@ -2863,7 +2863,11 @@ async function loadStressTestView() {
 async function runStressTest() {
   const btn = document.getElementById('stress-run-btn');
   const resultsDiv = document.getElementById('stress-results');
-  const customDrop = parseFloat(document.getElementById('stress-custom-drop').value) || -20;
+  // Note: `parseFloat(...) || -20` would treat 0 as "missing" and substitute
+  // -20, hiding a perfectly valid stress test. Use Number.isFinite to
+  // distinguish a real 0 from blank/NaN input.
+  const _rawDrop = parseFloat(document.getElementById('stress-custom-drop').value);
+  const customDrop = Number.isFinite(_rawDrop) ? _rawDrop : -20;
   if (!btn || !resultsDiv) return;
 
   btn.disabled = true;
