@@ -39,7 +39,13 @@ BOOT_DELAY_SECONDS = 25
 MARKET_INTERVAL = 90
 MACRO_INTERVAL = 180
 QUOTES_INTERVAL = 300
-FUNDAMENTALS_INTERVAL = 6 * 3600
+# Fundamentals TTL in fetcher is 86400 (24h). A 6h warmer cycle would fire
+# 4× per day but only the first cycle hits the upstream — the other 3 just
+# read from cache and look stale in `status()`. Match the warmer to half
+# the TTL so we refresh once per day in the middle of the TTL window.
+FUNDAMENTALS_INTERVAL = 12 * 3600
+# News TTL is 900s (15 min) in fetcher.get_news, so 6h here actually means
+# we refresh well inside the TTL window — leave it alone.
 NEWS_INTERVAL = 6 * 3600
 BENCHMARK_INTERVAL = 12 * 3600
 CHART_INTERVAL = 12 * 3600         # default research charts (6mo daily)
