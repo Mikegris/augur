@@ -381,7 +381,7 @@ def _score_equity(symbol, profile, weights):
         insider_score = round(insider_comp.get("score", 0) / max(insider_comp.get("max", 1), 1) * 100)
     # Check for cluster buying (early signal)
     try:
-        import edgar
+        import sec_edgar as edgar
         txns = edgar.get_form4_transactions(symbol, limit=15)
         cutoff_30d = (datetime.now() - timedelta(days=30)).strftime("%Y-%m-%d")
         recent_buys = [t for t in txns if t.get("date", "") >= cutoff_30d and t.get("transaction_type") == "BUY"]

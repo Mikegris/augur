@@ -273,7 +273,7 @@ def get_earnings_dossier(symbol):
     # ── 5. Insider activity (last 60 days) ────────────────────────────────────
     insider_summary = {"buys": 0, "sells": 0, "net_buy_value": 0, "signal": "NEUTRAL"}
     try:
-        import edgar
+        import sec_edgar as edgar
         transactions = edgar.get_form4_transactions(symbol, limit=20)
         cutoff = (today - datetime.timedelta(days=60)).isoformat()
         recent = [tx for tx in transactions if tx.get("date", "") >= cutoff]
