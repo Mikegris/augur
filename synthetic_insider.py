@@ -269,11 +269,11 @@ def _score_technical_regime(symbol):
         ml_score = data.get("composite_ml_score", 0.5)
         score = int(ml_score * 100)
 
-        regime_label = data.get("regime", {}).get("label", "")
+        regime_label = data.get("regime", {}).get("current_regime", "")
         if regime_label.upper() in ("COMPRESSION", "BREAKOUT"):
             score += 5
 
-        z_score = data.get("mean_reversion", {}).get("z_score", 0.0)
+        z_score = data.get("mean_reversion", {}).get("zscore", 0.0)
         if z_score < -1.5:
             score += 5
 
