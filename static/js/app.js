@@ -3858,10 +3858,10 @@ async function loadAnalyticsView() {
 
     '<div class="panel mb-8">' +
       '<div class="panel-header"><span class="panel-title">RISK METRICS</span>' +
-        '<div class="flex gap-4">' +
-          '<button class="btn btn-ghost btn-sm" onclick="loadRiskTable(\'3mo\')">3MO</button>' +
-          '<button class="btn btn-ghost btn-sm" onclick="loadRiskTable(\'6mo\')">6MO</button>' +
-          '<button class="btn btn-ghost btn-sm active" onclick="loadRiskTable(\'1y\')">1Y</button>' +
+        '<div class="flex gap-4" id="risk-period-btns">' +
+          '<button class="btn btn-ghost btn-sm" data-period="3mo" onclick="loadRiskTable(\'3mo\')">3MO</button>' +
+          '<button class="btn btn-ghost btn-sm" data-period="6mo" onclick="loadRiskTable(\'6mo\')">6MO</button>' +
+          '<button class="btn btn-ghost btn-sm active" data-period="1y" onclick="loadRiskTable(\'1y\')">1Y</button>' +
         '</div>' +
       '</div>' +
       '<div id="risk-table-body" style="overflow-x:auto">' + renderRiskTable(riskData) + '</div>' +
@@ -3869,11 +3869,11 @@ async function loadAnalyticsView() {
 
     '<div class="panel">' +
       '<div class="panel-header"><span class="panel-title">CORRELATION MATRIX</span>' +
-        '<div class="flex gap-4">' +
-          '<button class="btn btn-ghost btn-sm" onclick="loadCorrMatrix(\'1mo\')">1MO</button>' +
-          '<button class="btn btn-ghost btn-sm active" onclick="loadCorrMatrix(\'3mo\')">3MO</button>' +
-          '<button class="btn btn-ghost btn-sm" onclick="loadCorrMatrix(\'6mo\')">6MO</button>' +
-          '<button class="btn btn-ghost btn-sm" onclick="loadCorrMatrix(\'1y\')">1Y</button>' +
+        '<div class="flex gap-4" id="corr-period-btns">' +
+          '<button class="btn btn-ghost btn-sm" data-period="1mo" onclick="loadCorrMatrix(\'1mo\')">1MO</button>' +
+          '<button class="btn btn-ghost btn-sm active" data-period="3mo" onclick="loadCorrMatrix(\'3mo\')">3MO</button>' +
+          '<button class="btn btn-ghost btn-sm" data-period="6mo" onclick="loadCorrMatrix(\'6mo\')">6MO</button>' +
+          '<button class="btn btn-ghost btn-sm" data-period="1y" onclick="loadCorrMatrix(\'1y\')">1Y</button>' +
         '</div>' +
       '</div>' +
       '<div id="corr-matrix-body" class="panel-body">' + renderCorrMatrix(corrData) + '</div>' +
@@ -3965,9 +3965,18 @@ async function reloadBenchmark() {
   loadAnalyticsView();
 }
 
+function _setActivePeriodBtn(containerId, period) {
+  const ct = document.getElementById(containerId);
+  if (!ct) return;
+  ct.querySelectorAll('button[data-period]').forEach(b => {
+    b.classList.toggle('active', b.dataset.period === period);
+  });
+}
+
 async function loadRiskTable(period) {
   const el = document.getElementById('risk-table-body');
   if (!el) return;
+  _setActivePeriodBtn('risk-period-btns', period);
   el.innerHTML = '<div class="loading"><div class="spinner"></div></div>';
   try {
     const data = await API.get('/api/analytics/risk?period=' + period);
@@ -4009,6 +4018,7 @@ function renderRiskTable(data) {
 async function loadCorrMatrix(period) {
   const el = document.getElementById('corr-matrix-body');
   if (!el) return;
+  _setActivePeriodBtn('corr-period-btns', period);
   el.innerHTML = '<div class="loading"><div class="spinner"></div></div>';
   try {
     const data = await API.get('/api/analytics/correlation?period=' + period);
