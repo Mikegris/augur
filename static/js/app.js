@@ -2743,7 +2743,7 @@ async function loadMacroView() {
       <div class="flex-between mb-8">
         <div>
           <h2 style="font-size:14px;letter-spacing:.12em;color:var(--green);margin:0">⊕ MACRO CONDITIONS DASHBOARD</h2>
-          <div style="font-size:10px;color:var(--text-dim);margin-top:3px">REAL-TIME GLOBAL MACRO INDICATORS</div>
+          <div style="font-size:10px;color:var(--text-dim);margin-top:3px">GLOBAL MACRO INDICATORS</div>
         </div>
         <button class="btn btn-ghost btn-sm" onclick="loadMacroView()">↻ REFRESH</button>
       </div>
@@ -3499,7 +3499,11 @@ const VIEW_LOADERS = {
 
 function startAutoRefresh() {
   if (State.refreshInterval) clearInterval(State.refreshInterval);
-  const interval = parseInt(State.settings.refresh_interval || 60) * 1000;
+  const intervalSec = parseInt(State.settings.refresh_interval || 60);
+  const interval = intervalSec * 1000;
+  // Keep the status-bar indicator honest about what "AUTO" means.
+  const nodeEl = document.getElementById('status-node-live');
+  if (nodeEl) nodeEl.title = 'Auto-refresh every ' + intervalSec + 's';
   State.refreshInterval = setInterval(() => {
     try { loadTicker(); } catch(e) {}
     try { loadSidebarWatchlist(); } catch(e) {}
