@@ -308,20 +308,24 @@ def treasury_yield_curve():
 
 
 # ════════════════════════════════════════════════════════════════════
-# CBOE — daily put/call ratio
+# CBOE — VIX history (NOT put/call — see note below)
 # ════════════════════════════════════════════════════════════════════
-CBOE_PUT_CALL = (
+# This URL serves the CBOE VIX daily OHLC CSV. The function used to be
+# misnamed `cboe_put_call_ratio` even though it has never returned P/C data.
+CBOE_VIX = (
     "https://cdn.cboe.com/api/global/us_indices/daily_prices/"
     "VIX_History.csv"
 )
 CBOE_RATIOS = "https://www.cboe.com/us/options/market_statistics/daily/"
 
 
-def cboe_put_call_ratio():
-    """Latest CBOE total options put/call ratio (uses cdn JSON proxy).
-    Falls back to None if unreachable; not all CBOE feeds are stable."""
-    url = "https://cdn.cboe.com/api/global/us_indices/daily_prices/VIX_History.csv"
-    txt = _get(url, ttl=3600, json_resp=False)
+def cboe_vix_history():
+    """Latest CBOE VIX index daily OHLC from cboe.com's CSV feed.
+    Returns the most recent row as {vix_date, vix_close, vix_high, vix_low}
+    or None if the CSV is unreachable. (Note: despite the legacy module
+    name `cboe_put_call_ratio`, this endpoint has never carried put/call
+    ratio data — it's the VIX daily history CSV.)"""
+    txt = _get(CBOE_VIX, ttl=3600, json_resp=False)
     if not txt:
         return None
     last = None
@@ -335,6 +339,18 @@ def cboe_put_call_ratio():
         "vix_high": float(last["HIGH"]) if last.get("HIGH") else None,
         "vix_low": float(last["LOW"]) if last.get("LOW") else None,
     }
+
+
+def cboe_put_call_ratio(*_a, **_kw):
+    """Removed: the old name was a misnomer (it fetched VIX, not the
+    put/call ratio). Use `cboe_vix_history()` instead. Kept as a loud
+    stub so any forgotten caller fails fast rather than silently
+    receiving mislabeled VIX data."""
+    raise NotImplementedError(
+        "cboe_put_call_ratio() was renamed to cboe_vix_history() — it "
+        "never returned put/call ratio data; the old name was misleading. "
+        "Update the caller."
+    )
 
 
 # ════════════════════════════════════════════════════════════════════

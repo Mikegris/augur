@@ -1823,7 +1823,7 @@ def macro_treasury_curve():
 # ── CBOE / VIX history ────────────────────────────────────────────
 @app.route("/api/macro/vix")
 def macro_vix():
-    return jsonify(ds.cboe_put_call_ratio() or {})
+    return jsonify(ds.cboe_vix_history() or {})
 
 
 # ── FRED (Federal Reserve Economic Data) ──────────────────────────
