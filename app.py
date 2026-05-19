@@ -910,6 +910,18 @@ def portfolio_dividends():
     syms = [h["symbol"] for h in holdings if h["asset_type"] != "crypto"]
     prices = fetcher.get_quotes_batch(syms) if syms else {}
 
+    # Parallelize per-symbol yfinance dividend roundtrips. Without this,
+    # 30 positions = 30 sequential network calls. yfinance 1.2.x is
+    # thread-safe with fast_info.
+    equity_syms = [h["symbol"] for h in holdings if h["asset_type"] != "crypto"]
+    div_map = {}
+    if equity_syms:
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            for sym, dd in zip(equity_syms,
+                               pool.map(fetcher.get_dividend_data, equity_syms)):
+                div_map[sym] = dd or {}
+
+    # Walk holdings in original order so the response ordering is stable.
     results = []
     total_annual_income = 0
     total_portfolio_value = 0
@@ -917,7 +929,7 @@ def portfolio_dividends():
     for h in holdings:
         if h["asset_type"] == "crypto":
             continue
-        div_data = fetcher.get_dividend_data(h["symbol"])
+        div_data = div_map.get(h["symbol"], {})
         cur_price = prices.get(h["symbol"], {}).get("price") or h["avg_cost"]
         market_value = cur_price * h["shares"]
         total_portfolio_value += market_value
