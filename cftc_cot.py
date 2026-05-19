@@ -87,10 +87,16 @@ def _fetch_latest_two(dataset_id: str, contract_pattern: str) -> list:
     if cached is not None:
         return cached
     try:
-        # SoQL: filter on contract name + order by date desc, limit 2
+        # SoQL: filter on contract name + order by date desc, limit 2.
+        # Escape single quotes in `contract_pattern` (SoQL string literal
+        # escape is doubling the quote, same as ANSI SQL). Patterns are
+        # hardcoded today, but defending the injection vector now means a
+        # future caller threading user input through here won't break the
+        # query or open a SoQL injection.
+        safe_pattern = contract_pattern.replace("'", "''")
         url = f"{CFTC_BASE}/{dataset_id}.json"
         params = {
-            "$where": f"contract_market_name like '%{contract_pattern}%'",
+            "$where": f"contract_market_name like '%{safe_pattern}%'",
             "$order": "report_date_as_yyyy_mm_dd DESC",
             "$limit": 2,
         }

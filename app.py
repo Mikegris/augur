@@ -42,6 +42,7 @@ import logging
 import re
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 
 import sec_edgar as edgar
@@ -112,11 +113,25 @@ try:
 except Exception as _cache_err:
     log.warning("cache_store init failed: %s", _cache_err)
 
-try:
-    import cache_warmer
-    cache_warmer.start()
-except Exception as _warmer_err:
-    log.warning("cache_warmer start failed: %s", _warmer_err)
+# Guard against Flask reloader double-start: when running `python app.py`
+# with debug=True, Werkzeug spawns a reloader child. Both parent and child
+# import this module, and `cache_warmer.start()` would run in BOTH processes
+# — they'd hammer SQLite and upstream APIs in parallel. Detect the reloader
+# parent (running as __main__ with WERKZEUG_RUN_MAIN unset) and skip there.
+# When imported by desktop.py / py2app, __name__ != "__main__" so we still
+# start normally.
+_IS_RELOADER_PARENT = (
+    __name__ == "__main__"
+    and os.environ.get("WERKZEUG_RUN_MAIN") != "true"
+)
+if not _IS_RELOADER_PARENT:
+    try:
+        import cache_warmer
+        cache_warmer.start()
+    except Exception as _warmer_err:
+        log.warning("cache_warmer start failed: %s", _warmer_err)
+else:
+    log.info("Skipping cache_warmer start in reloader parent process")
 
 
 # ─── Portfolio Snapshot Background Thread ─────────────────────────────────────
@@ -895,6 +910,18 @@ def portfolio_dividends():
     syms = [h["symbol"] for h in holdings if h["asset_type"] != "crypto"]
     prices = fetcher.get_quotes_batch(syms) if syms else {}
 
+    # Parallelize per-symbol yfinance dividend roundtrips. Without this,
+    # 30 positions = 30 sequential network calls. yfinance 1.2.x is
+    # thread-safe with fast_info.
+    equity_syms = [h["symbol"] for h in holdings if h["asset_type"] != "crypto"]
+    div_map = {}
+    if equity_syms:
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            for sym, dd in zip(equity_syms,
+                               pool.map(fetcher.get_dividend_data, equity_syms)):
+                div_map[sym] = dd or {}
+
+    # Walk holdings in original order so the response ordering is stable.
     results = []
     total_annual_income = 0
     total_portfolio_value = 0
@@ -902,7 +929,7 @@ def portfolio_dividends():
     for h in holdings:
         if h["asset_type"] == "crypto":
             continue
-        div_data = fetcher.get_dividend_data(h["symbol"])
+        div_data = div_map.get(h["symbol"], {})
         cur_price = prices.get(h["symbol"], {}).get("price") or h["avg_cost"]
         market_value = cur_price * h["shares"]
         total_portfolio_value += market_value
@@ -1119,8 +1146,16 @@ def portfolio_ai_analysis():
 
 @app.route("/api/intel/feed")
 def intel_feed():
-    """Filing feed for all portfolio + watchlist symbols."""
+    """Filing feed for all portfolio + watchlist symbols.
+
+    By default returns raw filing metadata (no AI summarization). Pass
+    `ai_powered=1` (or `true`) to run summaries on uncached filings —
+    those are parallelized with a thread pool because cache_store.coalesce
+    (used by ai_summarizer) is thread-safe.
+    """
     refresh = request.args.get("refresh", "false").lower() == "true"
+    ai_flag = (request.args.get("ai_powered") or "").lower()
+    ai_powered = ai_flag in ("1", "true", "yes")
 
     holdings = db.get_portfolio()
     watchlist = db.get_watchlist()
@@ -1137,52 +1172,66 @@ def intel_feed():
         # Default to some well-known symbols if no portfolio/watchlist
         symbols = ["AAPL", "MSFT", "NVDA"]
 
+    # ── Pass 1: collect filings + cache hits, defer uncached for batch ──
     result = []
+    uncached_filings = []  # list of (filing_dict,) entries needing AI
 
     for symbol in symbols[:15]:  # cap at 15 symbols to avoid long waits
         try:
-            filings = edgar.get_recent_filings(symbol, forms=["8-K", "10-K", "10-Q", "S-1"], limit=5)
-            for f in filings:
-                acc = f["accession"]
-                # Check cache first
-                cached = db.get_cached_filing(acc)
-                if cached and not refresh:
-                    result.append({
-                        "ticker": f["ticker"],
-                        "form_type": f["form_type"],
-                        "filing_date": f["filing_date"],
-                        "description": f["description"],
-                        "accession": acc,
-                        "signal": cached.get("ai_signal", "NEUTRAL"),
-                        "summary": cached.get("ai_summary", ""),
-                        "key_points": cached.get("ai_key_points", []),
-                        "event_type": cached.get("ai_event_type", ""),
-                        "ai_powered": bool(cached.get("ai_powered")),
-                        "filing_url": f["document_url"],
-                    })
-                else:
-                    # Do quick summarize without fetching full text (use description only)
+            filings = edgar.get_recent_filings(
+                symbol, forms=["8-K", "10-K", "10-Q", "S-1"], limit=5
+            )
+        except Exception:
+            continue
+        for f in filings:
+            acc = f["accession"]
+            cached = db.get_cached_filing(acc) if not refresh else None
+            if cached:
+                result.append({
+                    "ticker": f["ticker"],
+                    "form_type": f["form_type"],
+                    "filing_date": f["filing_date"],
+                    "description": f["description"],
+                    "accession": acc,
+                    "signal": cached.get("ai_signal", "NEUTRAL"),
+                    "summary": cached.get("ai_summary", ""),
+                    "key_points": cached.get("ai_key_points", []),
+                    "event_type": cached.get("ai_event_type", ""),
+                    "ai_powered": bool(cached.get("ai_powered")),
+                    "filing_url": f["document_url"],
+                })
+            else:
+                uncached_filings.append(f)
+
+    # ── Pass 2: handle uncached filings ──
+    if uncached_filings:
+        if ai_powered:
+            # Parallel AI summarize — caches each result and emits an entry.
+            def _summarize_and_cache(f):
+                try:
                     ai_result = ai_summarizer.summarize_filing(
-                        "",
-                        f["form_type"],
-                        f["ticker"],
-                        f["description"],
+                        "", f["form_type"], f["ticker"], f["description"],
                     )
                     db.cache_filing(
-                        acc,
-                        f["ticker"],
-                        f["form_type"],
-                        f["filing_date"],
-                        f["description"],
-                        "",
-                        ai_result,
+                        f["accession"], f["ticker"], f["form_type"],
+                        f["filing_date"], f["description"], "", ai_result,
                     )
+                    return (f, ai_result)
+                except Exception as exc:
+                    log.warning(
+                        "intel_feed: summarize %s/%s failed: %s",
+                        f.get("ticker"), f.get("accession"), exc,
+                    )
+                    return (f, {})
+
+            with ThreadPoolExecutor(max_workers=8) as pool:
+                for f, ai_result in pool.map(_summarize_and_cache, uncached_filings):
                     result.append({
                         "ticker": f["ticker"],
                         "form_type": f["form_type"],
                         "filing_date": f["filing_date"],
                         "description": f["description"],
-                        "accession": acc,
+                        "accession": f["accession"],
                         "signal": ai_result.get("signal", "NEUTRAL"),
                         "summary": ai_result.get("summary", ""),
                         "key_points": ai_result.get("key_points", []),
@@ -1190,8 +1239,24 @@ def intel_feed():
                         "ai_powered": bool(ai_result.get("ai_powered")),
                         "filing_url": f["document_url"],
                     })
-        except Exception as e:
-            continue
+        else:
+            # No AI requested — return raw filing metadata, empty summary
+            # fields. Don't cache here; let an ai_powered=1 call populate
+            # the cache later.
+            for f in uncached_filings:
+                result.append({
+                    "ticker": f["ticker"],
+                    "form_type": f["form_type"],
+                    "filing_date": f["filing_date"],
+                    "description": f["description"],
+                    "accession": f["accession"],
+                    "signal": "NEUTRAL",
+                    "summary": "",
+                    "key_points": [],
+                    "event_type": "",
+                    "ai_powered": False,
+                    "filing_url": f["document_url"],
+                })
 
     # Sort by filing_date descending
     result.sort(key=lambda x: x.get("filing_date", ""), reverse=True)
@@ -1823,7 +1888,7 @@ def macro_treasury_curve():
 # ── CBOE / VIX history ────────────────────────────────────────────
 @app.route("/api/macro/vix")
 def macro_vix():
-    return jsonify(ds.cboe_put_call_ratio() or {})
+    return jsonify(ds.cboe_vix_history() or {})
 
 
 # ── FRED (Federal Reserve Economic Data) ──────────────────────────
@@ -1961,10 +2026,24 @@ def research_xbrl(symbol):
 
 
 # ── edgartools-backed filings + Form 4 ────────────────────────────
+# `sec_filings_v2` depends on the optional `edgartools` PyPI package which we
+# intentionally don't ship in requirements.txt (heavy dep; the lightweight
+# sec_edgar.py covers the same ground). When unavailable we return a clear
+# 503 with an explanatory error envelope instead of an empty list — see
+# sec_filings_v2.is_available().
+_SEC_V2_DORMANT_ENVELOPE = {
+    "error": "sec_filings_v2 module unavailable — uses optional edgartools dep"
+}
+
+
+def _sec_v2_unavailable():
+    return sec_filings_v2 is None or not sec_filings_v2.is_available()
+
+
 @app.route("/api/intel/filings-v2/<symbol>")
 def intel_filings_v2(symbol):
-    if sec_filings_v2 is None:
-        return jsonify({"error": "edgartools unavailable"}), 503
+    if _sec_v2_unavailable():
+        return jsonify(dict(_SEC_V2_DORMANT_ENVELOPE, symbol=symbol.upper())), 503
     if not _valid_ticker(symbol):
         return jsonify({"error": "Invalid symbol"}), 400
     form = request.args.get("form")
@@ -1977,8 +2056,8 @@ def intel_filings_v2(symbol):
 
 @app.route("/api/intel/form4-v2/<symbol>")
 def intel_form4_v2(symbol):
-    if sec_filings_v2 is None:
-        return jsonify({"error": "edgartools unavailable"}), 503
+    if _sec_v2_unavailable():
+        return jsonify(dict(_SEC_V2_DORMANT_ENVELOPE, symbol=symbol.upper())), 503
     if not _valid_ticker(symbol):
         return jsonify({"error": "Invalid symbol"}), 400
     limit = _safe_int(request.args.get("limit"), 30)
@@ -2164,9 +2243,22 @@ def ideas_warmer_status():
     """Diagnostic — show the pre-warmer's state for the UI badge."""
     try:
         import idea_pool_warmer
-        return jsonify(idea_pool_warmer.warmer_status())
+        status = idea_pool_warmer.warmer_status() or {}
+        # `warmer_status()` doesn't currently return the thread-liveness it
+        # already computes internally; surface the actual thread state from
+        # the warmer's module-level _thread so callers can distinguish
+        # "started but dead" from "running normally" without forcing an
+        # edit to idea_pool_warmer.py.
+        try:
+            t = getattr(idea_pool_warmer, "_thread", None)
+            status["thread_alive"] = bool(t and t.is_alive())
+            status["started"] = bool(getattr(idea_pool_warmer, "_thread_started", False))
+        except Exception:
+            status["thread_alive"] = None
+        return jsonify(status)
     except Exception as e:
-        return jsonify({"error": str(e), "running": False, "warmed_total": 0}), 200
+        return jsonify({"error": str(e), "running": False, "warmed_total": 0,
+                        "started": False, "thread_alive": False}), 200
 
 
 @app.route("/api/system/cache/stats")
@@ -2181,7 +2273,17 @@ def cache_stats():
         out["cache"] = {"error": str(e)}
     try:
         import cache_warmer
-        out["warmer"] = cache_warmer.status()
+        status = cache_warmer.status() or {}
+        # `status()` reports started=True forever once the boot path ran,
+        # even if the thread later died (e.g. an exception escaped _loop).
+        # Surface the actual thread liveness so the UI / curl probes can
+        # distinguish "scheduled to run" from "still running".
+        try:
+            t = getattr(cache_warmer, "_thread", None)
+            status["thread_alive"] = bool(t and t.is_alive())
+        except Exception:
+            status["thread_alive"] = None
+        out["warmer"] = status
     except Exception as e:
         out["warmer"] = {"error": str(e)}
     return jsonify(out)
@@ -2198,16 +2300,22 @@ def cache_clear():
         return jsonify({"error": str(e)}), 500
 
 
-def _start_idea_warmer():
-    """Boot the pre-warmer thread (idempotent). Skip during Flask reloader's
-    parent process to avoid running twice."""
-    if os.environ.get("WERKZEUG_RUN_MAIN") != "true" and os.environ.get("FLASK_DEBUG") != "0":
-        # Flask reloader spawns a child with WERKZEUG_RUN_MAIN=true; only the
-        # child should host the background work. Skip in the parent.
-        if os.environ.get("WERKZEUG_RUN_MAIN") is None and os.environ.get("DISABLE_WARMER") != "1":
-            pass  # Not under reloader; proceed
-        elif os.environ.get("WERKZEUG_RUN_MAIN") != "true":
-            return
+def _start_idea_warmer(debug_mode: bool = False):
+    """Boot the pre-warmer thread (idempotent). Skip during the Flask
+    reloader's parent process — otherwise both parent and child would each
+    spawn a warmer and hammer SQLite + upstream APIs in parallel.
+
+    Werkzeug sets WERKZEUG_RUN_MAIN="true" only in the child after a reload;
+    in the parent the variable is unset. When not under the reloader at all
+    (production / py2app), `debug_mode=False` and we always start.
+    """
+    if debug_mode and os.environ.get("WERKZEUG_RUN_MAIN") != "true":
+        # Reloader parent — child will start the warmer when it spawns.
+        log.info("Skipping idea-pool warmer start in reloader parent process")
+        return
+    if os.environ.get("DISABLE_WARMER") == "1":
+        log.info("Idea pool warmer disabled via DISABLE_WARMER=1")
+        return
     try:
         import idea_pool_warmer
         idea_pool_warmer.start_warmer_thread(target_count=200, interval_seconds=6 * 3600)
@@ -2223,5 +2331,8 @@ if __name__ == "__main__":
     print("  AUGUR // WEALTH INTELLIGENCE SYSTEM")
     print(f"  http://localhost:{port}")
     print("=" * 60 + "\n")
-    _start_idea_warmer()
+    # debug_mode=True here matches the `debug=True` passed to app.run below;
+    # the warmer guard inside _start_idea_warmer() needs to know we're under
+    # the Werkzeug reloader to suppress the start in the parent process.
+    _start_idea_warmer(debug_mode=True)
     app.run(debug=True, host="127.0.0.1", port=port)
