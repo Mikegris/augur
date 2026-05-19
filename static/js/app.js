@@ -7037,11 +7037,13 @@ const DataPanels = {
   },
 
   // ── Alt-data: Wikipedia pageviews (retail-attention proxy) ─────
-  async renderWikiAttention(parent, symbol) {
+  async renderWikiAttention(parent, symbol, days) {
     if (!parent || !symbol) return;
+    const selectedDays = [7, 30, 90].indexOf(parseInt(days, 10)) !== -1 ? parseInt(days, 10) : 30;
+    const meanLabel = selectedDays + '-day mean';
     parent.innerHTML = `<div class="loading"><div class="spinner"></div> Fetching Wikipedia pageviews for ${this._esc(symbol)}...</div>`;
     try {
-      const data = await API.get(`/api/alt-data/wiki/${encodeURIComponent(symbol)}`);
+      const data = await API.get(`/api/alt-data/wiki/${encodeURIComponent(symbol)}?days=${selectedDays}`);
       if (data.error && (!data.points || !data.points.length)) {
         parent.innerHTML = `<div class="empty-state"><span class="col-negative">${this._esc(data.error)}</span></div>`;
         return;
@@ -7062,10 +7064,24 @@ const DataPanels = {
       }).join(' ');
       const sparkline = `<svg viewBox="0 0 ${w} ${h}" width="${w}" height="${h}" style="display:block"><path d="${path}" fill="none" stroke="var(--green)" stroke-width="1.5" /></svg>`;
 
+      // Ensure parent has a stable id BEFORE we bake it into the inline
+      // onclick handlers below.
+      if (!parent.id) parent.id = 'wiki-root-' + Math.random().toString(36).slice(2, 8);
+      parent.dataset.wikiRoot = '1';
+      const parentId = parent.id;
+      const symAttr = this._esc(symbol);
+      const periodBtns = [7, 30, 90].map(d =>
+        `<button class="btn btn-ghost btn-sm ${d === selectedDays ? 'active' : ''}" onclick="DataPanels.renderWikiAttention(document.getElementById('${parentId}'), '${symAttr}', ${d})">${d}D</button>`
+      ).join('');
+
       parent.innerHTML = `
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
+          <span style="font-size:10px;color:var(--text-dim)">WINDOW</span>
+          <div class="flex gap-4">${periodBtns}</div>
+        </div>
         <div class="kpi-grid" style="display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:16px">
           <div class="kpi-card"><div class="form-label">Latest pageviews</div><div style="font-size:18px;font-weight:700">${(stats.latest || 0).toLocaleString()}</div></div>
-          <div class="kpi-card"><div class="form-label">30-day mean</div><div style="font-size:18px;font-weight:700">${(stats.mean || 0).toLocaleString()}</div></div>
+          <div class="kpi-card"><div class="form-label">${meanLabel}</div><div style="font-size:18px;font-weight:700">${(stats.mean || 0).toLocaleString()}</div></div>
           <div class="kpi-card"><div class="form-label">vs 7-day baseline</div><div style="font-size:18px;font-weight:700;color:${spikeColor}">${spike == null ? '—' : (spike >= 0 ? '+' : '') + spike.toFixed(1) + '%'}</div></div>
           <div class="kpi-card"><div class="form-label">Signal</div><div style="font-size:14px;font-weight:600;color:${spikeColor}">${spikeLabel}</div></div>
         </div>
