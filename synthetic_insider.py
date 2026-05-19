@@ -12,7 +12,7 @@ Alert levels:  DORMANT -> AWAKENING -> CONVERGING -> CRITICAL
 import logging
 import time
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 import fetcher
 import sec_edgar as edgar
@@ -137,7 +137,7 @@ def _score_insider_cluster(symbol):
         if not txns:
             return {"score": 10, "detail": "no recent Form 4 filings", "firing": False, "weight": 0.25}
 
-        cutoff = datetime.utcnow() - timedelta(days=30)
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=30)).date()
         recent_buys = []
         recent_sells = []
 
@@ -145,9 +145,9 @@ def _score_insider_cluster(symbol):
             tx_date_str = t.get("date", "")
             try:
                 if isinstance(tx_date_str, str):
-                    tx_date = datetime.strptime(tx_date_str[:10], "%Y-%m-%d")
+                    tx_date = datetime.strptime(tx_date_str[:10], "%Y-%m-%d").date()
                 else:
-                    tx_date = tx_date_str
+                    tx_date = tx_date_str.date() if hasattr(tx_date_str, "date") else tx_date_str
             except (ValueError, TypeError):
                 continue
 
