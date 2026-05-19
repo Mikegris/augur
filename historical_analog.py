@@ -233,9 +233,18 @@ def compute_historical_analog(symbol: str) -> dict:
         return cached
 
     try:
-        import yfinance as yf
-        ticker = yf.Ticker(symbol)
-        hist = ticker.history(period=_LOOKBACK_PERIOD, interval="1d")
+        import fetcher
+        bars = fetcher.get_chart_data(symbol, period=_LOOKBACK_PERIOD, interval="1d")
+        if not bars:
+            hist = pd.DataFrame()
+        else:
+            hist = pd.DataFrame(bars)
+            hist["Date"] = pd.to_datetime(hist["time"], unit="s")
+            hist = hist.set_index("Date")
+            hist = hist.rename(columns={
+                "open": "Open", "high": "High", "low": "Low",
+                "close": "Close", "volume": "Volume",
+            })
     except Exception as e:
         logger.warning("historical_analog: failed to fetch %s: %s", symbol, e)
         return {"available": False, "error": "Failed to fetch history: %s" % e}
