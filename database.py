@@ -28,6 +28,12 @@ def get_conn():
         conn.execute("PRAGMA journal_mode=WAL")   # faster concurrent reads
         conn.execute("PRAGMA synchronous=NORMAL")  # safe + faster writes
         conn.execute("PRAGMA busy_timeout=5000")  # 5s before SQLITE_BUSY
+        # SQLite ships with foreign_keys = OFF per-connection. Our schema
+        # declares ON DELETE SET NULL on portfolio.account_id and
+        # transactions.account_id — those clauses are silently no-ops without
+        # this PRAGMA, so dangling account_ids could survive an account row
+        # being deleted by anything other than delete_account(). Enable it.
+        conn.execute("PRAGMA foreign_keys = ON")
         _local.conn = conn
     return conn
 
