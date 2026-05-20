@@ -45,20 +45,27 @@ const fmt = {
   },
   date: (s) => {
     if (!s) return '—';
-    try { return new Date(s).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }); }
-    catch(e) { return s; }
+    try {
+      const d = new Date(s);
+      // `new Date()` silently returns "Invalid Date" rather than throwing for
+      // bad strings like "—" or "None"; the original try/catch was dead code.
+      if (isNaN(d.getTime())) return '—';
+      return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+    } catch(e) { return '—'; }
   },
   timeAgo: (s) => {
     if (!s) return '';
     try {
-      const diff = Date.now() - new Date(s).getTime();
+      const t = new Date(s).getTime();
+      if (isNaN(t)) return '';
+      const diff = Date.now() - t;
       const m = Math.floor(diff / 60000);
       if (m < 1) return 'just now';
       if (m < 60) return `${m}m ago`;
       const h = Math.floor(m / 60);
       if (h < 24) return `${h}h ago`;
       return fmt.date(s);
-    } catch(e) { return s; }
+    } catch(e) { return ''; }
   },
 };
 
@@ -71,6 +78,18 @@ function _esc(s) {
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;')
     .replace(/'/g, '&#39;');
+}
+
+// ── JS-string escape (for strings interpolated INSIDE single-quoted JS string
+// arguments in onclick="..." attributes — e.g. tickers like "Domino's" would
+// otherwise produce a SyntaxError and the button silently no-ops).
+function _jesc(s) {
+  if (s == null) return '';
+  return String(s)
+    .replace(/\\/g, '\\\\')
+    .replace(/'/g, "\\'")
+    .replace(/\n/g, '\\n')
+    .replace(/\r/g, '\\r');
 }
 
 // ── Color helpers ─────────────────────────────────────────────────────────────
@@ -1358,8 +1377,14 @@ async function loadResearchDefault() {
   // else: leave the empty-state splash visible so the user can pick a symbol.
 }
 
+let _researchGen = 0;
 async function loadResearchFor(symbol) {
   const view = document.getElementById('view-research');
+  // Generation token: if the user clicks a second symbol before the first
+  // request lands, the older (slower) response must NOT overwrite the newer
+  // view. Each call gets a monotonically-increasing gen; the await-then-write
+  // points below bail when their gen no longer matches the latest.
+  const gen = ++_researchGen;
   view.innerHTML = `<div class="loading"><div class="spinner"></div> FETCHING ${symbol}...</div>`;
 
   try {
@@ -1367,6 +1392,7 @@ async function loadResearchFor(symbol) {
       API.get(`/api/quote/${symbol}`),
       API.get(`/api/fundamentals/${symbol}`),
     ]);
+    if (gen !== _researchGen) return;
 
     const chgCls = col.pnl(quote.change);
 
@@ -1387,8 +1413,8 @@ async function loadResearchFor(symbol) {
           </div>
         </div>
         <div style="display:flex;flex-direction:column;gap:4px;margin-left:16px">
-          <button class="btn btn-green btn-sm" onclick="quickAddToPortfolio('${symbol}', '${fund.name || ''}')">+ PORTFOLIO</button>
-          <button class="btn btn-blue btn-sm" onclick="quickAddToWatchlist('${symbol}', '${fund.name || ''}')">+ WATCHLIST</button>
+          <button class="btn btn-green btn-sm" onclick="quickAddToPortfolio('${symbol}', '${_jesc(fund.name || '')}')">+ PORTFOLIO</button>
+          <button class="btn btn-blue btn-sm" onclick="quickAddToWatchlist('${symbol}', '${_jesc(fund.name || '')}')">+ WATCHLIST</button>
         </div>
       </div>
 
@@ -1506,6 +1532,7 @@ async function loadResearchFor(symbol) {
     DataPanels.appendWikidataFacts(view, symbol);
 
   } catch(e) {
+    if (gen !== _researchGen) return;
     view.innerHTML = `<div class="empty-state"><span class="empty-icon">⚠</span><span class="text-red">${e.message}</span></div>`;
   }
 }
@@ -1596,9 +1623,15 @@ async function loadNewsFor(symbol, containerId) {
   }
 }
 
+let _priceChartGen = 0;
 async function loadPriceChart(symbol, period = '6mo', interval = '1d') {
+  // Rapid period/interval clicks can race — guard with a generation token so
+  // the older (slower) /api/chart response can't overwrite the chart that
+  // matches the user's current selection.
+  const gen = ++_priceChartGen;
   try {
     const data = await API.get(`/api/chart/${symbol}?period=${period}&interval=${interval}`);
+    if (gen !== _priceChartGen) return;
     const chartRef = ChartEngine.createPriceChart('price-chart-container', data.data, { height: 400 });
     State.chartRef = chartRef;
 
@@ -1831,8 +1864,8 @@ async function openCryptoResearch(coinId, symbol) {
           </div>
         </div>
         <div style="display:flex;flex-direction:column;gap:4px;margin-left:16px">
-          <button class="btn btn-green btn-sm" onclick="quickAddToPortfolio('${coin.symbol}', '${coin.name}', 'crypto')">+ PORTFOLIO</button>
-          <button class="btn btn-blue btn-sm" onclick="quickAddToWatchlist('${coin.symbol}', '${coin.name}')">+ WATCHLIST</button>
+          <button class="btn btn-green btn-sm" onclick="quickAddToPortfolio('${coin.symbol}', '${_jesc(coin.name)}', 'crypto')">+ PORTFOLIO</button>
+          <button class="btn btn-blue btn-sm" onclick="quickAddToWatchlist('${coin.symbol}', '${_jesc(coin.name)}')">+ WATCHLIST</button>
         </div>
       </div>
 
@@ -3372,7 +3405,7 @@ async function loadSettings() {
                 ['DATA SOURCE', 'YAHOO FINANCE + COINGECKO'],
                 ['DATABASE', 'SQLITE3 (LOCAL)'],
                 ['BACKEND', 'PYTHON / FLASK'],
-                ['LAST REFRESH', State.lastRefresh ? State.lastRefresh.toLocaleTimeString() : '—'],
+                ['LAST REFRESH', State.lastRefresh ? State.lastRefresh.toLocaleTimeString('en-US') : '—'],
               ].map(([k,v])=>`<div class="fund-item"><span class="fund-key">${k}</span><span class="fund-val">${v}</span></div>`).join('')}
             </div>
             <div style="margin-top:12px">
@@ -3424,7 +3457,7 @@ function quickAddToWatchlist(symbol, name) {
 // ── Status bar ────────────────────────────────────────────────────────────────
 function updateStatusBar() {
   const el = document.getElementById('status-last-refresh');
-  if (el) el.textContent = State.lastRefresh ? State.lastRefresh.toLocaleTimeString() : '—';
+  if (el) el.textContent = State.lastRefresh ? State.lastRefresh.toLocaleTimeString('en-US') : '—';
 
   const portEl = document.getElementById('status-portfolio-value');
   if (portEl && State.portfolio?.summary?.total_value) {
@@ -3617,6 +3650,11 @@ async function init() {
   loadSidebarWatchlist().catch(() => {});
 
   startAutoRefresh();
+  // Re-pin the alert-poll cadence now that State.settings is populated.
+  // The module-init _startAlertPollTimer() at line ~2572 fires before
+  // settings have loaded, so without this restart the user's saved
+  // refresh_interval was ignored until they opened Settings.
+  if (typeof _startAlertPollTimer === 'function') _startAlertPollTimer();
   updateStatusBar();
 }
 
@@ -3825,13 +3863,18 @@ async function loadOptionsForSymbol(symbol) {
   }
 }
 
+let _optionsChainGen = 0;
 async function loadOptionsChain(symbol, date) {
   const bodyEl = document.getElementById('options-chain-body');
   if (!bodyEl) return;
+  // Guard against expiry-dropdown thrash overwriting the latest chain with a
+  // slow earlier response.
+  const gen = ++_optionsChainGen;
   bodyEl.innerHTML = '<div class="loading"><div class="spinner"></div> Loading chain...</div>';
   try {
     const url = '/api/options/' + symbol + '/chain' + (date ? '?date=' + encodeURIComponent(date) : '');
     const chain = await API.get(url);
+    if (gen !== _optionsChainGen) return;
     if (chain.error && !chain.calls.length) {
       bodyEl.innerHTML = '<div class="empty-state"><span class="text-red">' + chain.error + '</span></div>';
       return;
@@ -3875,6 +3918,7 @@ async function loadOptionsChain(symbol, date) {
       }).join('') +
       '</tbody></table>';
   } catch(e) {
+    if (gen !== _optionsChainGen) return;
     bodyEl.innerHTML = '<div class="empty-state"><span class="text-red">Failed to load chain: ' + e.message + '</span></div>';
   }
 }
@@ -5910,7 +5954,7 @@ function _scannerSignalCard(o) {
 
 function _fmtScanPrice(price) {
   if (price == null) return '—';
-  return '$' + Number(price).toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2});
+  return '$' + Number(price).toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2});
 }
 
 function _fmtScanScore(scores, key) {
@@ -5950,7 +5994,7 @@ function _alphaQuickPicks(inputId, fn, symbols) {
 function _alphaFmtNum(val, decimals) {
   if (val == null || isNaN(val)) return '—';
   var d = decimals != null ? decimals : 2;
-  return Number(val).toLocaleString(undefined, {minimumFractionDigits: d, maximumFractionDigits: d});
+  return Number(val).toLocaleString('en-US', {minimumFractionDigits: d, maximumFractionDigits: d});
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -7025,7 +7069,7 @@ const DataPanels = {
         const d = s.delta_pct;
         const dColor = d == null ? 'var(--text-dim)' : d > 0 ? 'var(--green)' : 'var(--red)';
         const dStr = d == null ? '—' : `${d >= 0 ? '+' : ''}${d.toFixed(2)}%`;
-        const valStr = v == null ? '—' : (Math.abs(v) >= 1000 ? v.toLocaleString(undefined, {maximumFractionDigits: 0}) : v.toFixed(2));
+        const valStr = v == null ? '—' : (Math.abs(v) >= 1000 ? v.toLocaleString('en-US', {maximumFractionDigits: 0}) : v.toFixed(2));
         return `
           <div class="macro-card">
             <div class="macro-card-label">${this._esc(s.label || s.id)}</div>
@@ -7091,8 +7135,8 @@ const DataPanels = {
           <div class="flex gap-4">${periodBtns}</div>
         </div>
         <div class="kpi-grid" style="display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:16px">
-          <div class="kpi-card"><div class="form-label">Latest pageviews</div><div style="font-size:18px;font-weight:700">${(stats.latest || 0).toLocaleString()}</div></div>
-          <div class="kpi-card"><div class="form-label">${meanLabel}</div><div style="font-size:18px;font-weight:700">${(stats.mean || 0).toLocaleString()}</div></div>
+          <div class="kpi-card"><div class="form-label">Latest pageviews</div><div style="font-size:18px;font-weight:700">${(stats.latest || 0).toLocaleString('en-US')}</div></div>
+          <div class="kpi-card"><div class="form-label">${meanLabel}</div><div style="font-size:18px;font-weight:700">${(stats.mean || 0).toLocaleString('en-US')}</div></div>
           <div class="kpi-card"><div class="form-label">vs 7-day baseline</div><div style="font-size:18px;font-weight:700;color:${spikeColor}">${spike == null ? '—' : (spike >= 0 ? '+' : '') + spike.toFixed(1) + '%'}</div></div>
           <div class="kpi-card"><div class="form-label">Signal</div><div style="font-size:14px;font-weight:600;color:${spikeColor}">${spikeLabel}</div></div>
         </div>
@@ -7169,7 +7213,7 @@ const DataPanels = {
       rows.forEach(r => { (byCat[r.category] = byCat[r.category] || []).push(r); });
       const catLabels = { equity:'EQUITY INDICES', rates:'INTEREST RATES', fx:'CURRENCIES', energy:'ENERGY', metals:'METALS', ag:'AGRICULTURE' };
       const order = ['equity','rates','fx','energy','metals','ag'];
-      const fmtNum = (n) => n == null ? '—' : (Math.abs(n) >= 1000 ? n.toLocaleString(undefined,{maximumFractionDigits:0}) : String(n));
+      const fmtNum = (n) => n == null ? '—' : (Math.abs(n) >= 1000 ? n.toLocaleString('en-US',{maximumFractionDigits:0}) : String(n));
       const rowHtml = (r) => {
         const d = r.net_delta_wow;
         const dColor = d == null ? 'var(--text-dim)' : d > 0 ? 'var(--green)' : d < 0 ? 'var(--red)' : 'var(--text-dim)';
@@ -7220,7 +7264,7 @@ const DataPanels = {
         return;
       }
       const dash = '—';
-      const fmtEmp = d.employees == null ? dash : d.employees.toLocaleString();
+      const fmtEmp = d.employees == null ? dash : d.employees.toLocaleString('en-US');
       const fmtSite = d.website ? `<a href="${this._esc(d.website)}" target="_blank" rel="noopener" style="color:var(--blue)">${this._esc(d.website.replace(/^https?:\/\//,'').replace(/\/$/,''))} ↗</a>` : dash;
       const wikiLink = d.wikidata_url ? `<a href="${this._esc(d.wikidata_url)}" target="_blank" rel="noopener" style="color:var(--blue)">${this._esc(d.qid)} ↗</a>` : dash;
       const cell = (label, val) => `
@@ -7307,7 +7351,7 @@ const DataPanels = {
         if (abs >= 1e9) return (n/1e9).toFixed(2) + 'B';
         if (abs >= 1e6) return (n/1e6).toFixed(2) + 'M';
         if (abs >= 1e3) return (n/1e3).toFixed(1) + 'K';
-        return n.toLocaleString(undefined, {maximumFractionDigits: 0});
+        return n.toLocaleString('en-US', {maximumFractionDigits: 0});
       };
       const rows = trades.slice(0, 40).map(t => {
         const action = String(t.transaction || '').toUpperCase();
@@ -7597,7 +7641,7 @@ const Ideas = {
 
           <div style="display:flex;gap:8px;margin-top:12px;flex-wrap:wrap">
             <button class="btn btn-green" onclick="Ideas.roll()">⚄ ROLL AGAIN</button>
-            <button class="btn btn-blue btn-sm" onclick="quickAddToWatchlist('${_esc(d.symbol)}', '${_esc(snap.name || '')}')">+ WATCHLIST</button>
+            <button class="btn btn-blue btn-sm" onclick="quickAddToWatchlist('${_esc(d.symbol)}', '${_jesc(snap.name || '')}')">+ WATCHLIST</button>
             <button class="btn btn-ghost btn-sm" onclick="openResearch('${_esc(d.symbol)}')">OPEN RESEARCH ↗</button>
             <div style="flex:1"></div>
             <span style="font-size:9px;color:var(--text-dim);align-self:center">

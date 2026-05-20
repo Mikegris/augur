@@ -51,6 +51,13 @@ const ChartEngine = (() => {
 
   function destroyChart(id) {
     if (instances[id]) {
+      // Disconnect the ResizeObserver attached in createPriceChart before
+      // .remove(); otherwise the RO keeps observing the (now-detached)
+      // container and fires applyOptions on a removed chart on next resize.
+      try {
+        const ro = instances[id]._resizeObserver;
+        if (ro && typeof ro.disconnect === 'function') ro.disconnect();
+      } catch(e) {}
       try { instances[id].remove(); } catch(e) {}
       delete instances[id];
     }
