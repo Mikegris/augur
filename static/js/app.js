@@ -3393,7 +3393,7 @@ async function loadSettings() {
                 ['DATA SOURCE', 'YAHOO FINANCE + COINGECKO'],
                 ['DATABASE', 'SQLITE3 (LOCAL)'],
                 ['BACKEND', 'PYTHON / FLASK'],
-                ['LAST REFRESH', State.lastRefresh ? State.lastRefresh.toLocaleTimeString() : '—'],
+                ['LAST REFRESH', State.lastRefresh ? State.lastRefresh.toLocaleTimeString('en-US') : '—'],
               ].map(([k,v])=>`<div class="fund-item"><span class="fund-key">${k}</span><span class="fund-val">${v}</span></div>`).join('')}
             </div>
             <div style="margin-top:12px">
@@ -3445,7 +3445,7 @@ function quickAddToWatchlist(symbol, name) {
 // ── Status bar ────────────────────────────────────────────────────────────────
 function updateStatusBar() {
   const el = document.getElementById('status-last-refresh');
-  if (el) el.textContent = State.lastRefresh ? State.lastRefresh.toLocaleTimeString() : '—';
+  if (el) el.textContent = State.lastRefresh ? State.lastRefresh.toLocaleTimeString('en-US') : '—';
 
   const portEl = document.getElementById('status-portfolio-value');
   if (portEl && State.portfolio?.summary?.total_value) {
@@ -5942,7 +5942,7 @@ function _scannerSignalCard(o) {
 
 function _fmtScanPrice(price) {
   if (price == null) return '—';
-  return '$' + Number(price).toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2});
+  return '$' + Number(price).toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2});
 }
 
 function _fmtScanScore(scores, key) {
@@ -5982,7 +5982,7 @@ function _alphaQuickPicks(inputId, fn, symbols) {
 function _alphaFmtNum(val, decimals) {
   if (val == null || isNaN(val)) return '—';
   var d = decimals != null ? decimals : 2;
-  return Number(val).toLocaleString(undefined, {minimumFractionDigits: d, maximumFractionDigits: d});
+  return Number(val).toLocaleString('en-US', {minimumFractionDigits: d, maximumFractionDigits: d});
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -7057,7 +7057,7 @@ const DataPanels = {
         const d = s.delta_pct;
         const dColor = d == null ? 'var(--text-dim)' : d > 0 ? 'var(--green)' : 'var(--red)';
         const dStr = d == null ? '—' : `${d >= 0 ? '+' : ''}${d.toFixed(2)}%`;
-        const valStr = v == null ? '—' : (Math.abs(v) >= 1000 ? v.toLocaleString(undefined, {maximumFractionDigits: 0}) : v.toFixed(2));
+        const valStr = v == null ? '—' : (Math.abs(v) >= 1000 ? v.toLocaleString('en-US', {maximumFractionDigits: 0}) : v.toFixed(2));
         return `
           <div class="macro-card">
             <div class="macro-card-label">${this._esc(s.label || s.id)}</div>
@@ -7123,8 +7123,8 @@ const DataPanels = {
           <div class="flex gap-4">${periodBtns}</div>
         </div>
         <div class="kpi-grid" style="display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:16px">
-          <div class="kpi-card"><div class="form-label">Latest pageviews</div><div style="font-size:18px;font-weight:700">${(stats.latest || 0).toLocaleString()}</div></div>
-          <div class="kpi-card"><div class="form-label">${meanLabel}</div><div style="font-size:18px;font-weight:700">${(stats.mean || 0).toLocaleString()}</div></div>
+          <div class="kpi-card"><div class="form-label">Latest pageviews</div><div style="font-size:18px;font-weight:700">${(stats.latest || 0).toLocaleString('en-US')}</div></div>
+          <div class="kpi-card"><div class="form-label">${meanLabel}</div><div style="font-size:18px;font-weight:700">${(stats.mean || 0).toLocaleString('en-US')}</div></div>
           <div class="kpi-card"><div class="form-label">vs 7-day baseline</div><div style="font-size:18px;font-weight:700;color:${spikeColor}">${spike == null ? '—' : (spike >= 0 ? '+' : '') + spike.toFixed(1) + '%'}</div></div>
           <div class="kpi-card"><div class="form-label">Signal</div><div style="font-size:14px;font-weight:600;color:${spikeColor}">${spikeLabel}</div></div>
         </div>
@@ -7201,7 +7201,7 @@ const DataPanels = {
       rows.forEach(r => { (byCat[r.category] = byCat[r.category] || []).push(r); });
       const catLabels = { equity:'EQUITY INDICES', rates:'INTEREST RATES', fx:'CURRENCIES', energy:'ENERGY', metals:'METALS', ag:'AGRICULTURE' };
       const order = ['equity','rates','fx','energy','metals','ag'];
-      const fmtNum = (n) => n == null ? '—' : (Math.abs(n) >= 1000 ? n.toLocaleString(undefined,{maximumFractionDigits:0}) : String(n));
+      const fmtNum = (n) => n == null ? '—' : (Math.abs(n) >= 1000 ? n.toLocaleString('en-US',{maximumFractionDigits:0}) : String(n));
       const rowHtml = (r) => {
         const d = r.net_delta_wow;
         const dColor = d == null ? 'var(--text-dim)' : d > 0 ? 'var(--green)' : d < 0 ? 'var(--red)' : 'var(--text-dim)';
@@ -7252,7 +7252,7 @@ const DataPanels = {
         return;
       }
       const dash = '—';
-      const fmtEmp = d.employees == null ? dash : d.employees.toLocaleString();
+      const fmtEmp = d.employees == null ? dash : d.employees.toLocaleString('en-US');
       const fmtSite = d.website ? `<a href="${this._esc(d.website)}" target="_blank" rel="noopener" style="color:var(--blue)">${this._esc(d.website.replace(/^https?:\/\//,'').replace(/\/$/,''))} ↗</a>` : dash;
       const wikiLink = d.wikidata_url ? `<a href="${this._esc(d.wikidata_url)}" target="_blank" rel="noopener" style="color:var(--blue)">${this._esc(d.qid)} ↗</a>` : dash;
       const cell = (label, val) => `
@@ -7339,7 +7339,7 @@ const DataPanels = {
         if (abs >= 1e9) return (n/1e9).toFixed(2) + 'B';
         if (abs >= 1e6) return (n/1e6).toFixed(2) + 'M';
         if (abs >= 1e3) return (n/1e3).toFixed(1) + 'K';
-        return n.toLocaleString(undefined, {maximumFractionDigits: 0});
+        return n.toLocaleString('en-US', {maximumFractionDigits: 0});
       };
       const rows = trades.slice(0, 40).map(t => {
         const action = String(t.transaction || '').toUpperCase();
