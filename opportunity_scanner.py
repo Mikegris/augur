@@ -549,8 +549,10 @@ def _score_crypto(symbol, profile, weights):
 
             # Volume spike detection
             vol = cdata.get("volume_24h") or 0
-            mcap = cdata.get("market_cap") or 1
-            vol_ratio = vol / mcap if mcap > 0 else 0
+            mcap = cdata.get("market_cap")
+            # mcap None/0 means we can't normalize — skip rather than fall back
+            # to a fake "1" denominator that turns every quote into a huge ratio.
+            vol_ratio = (vol / mcap) if (mcap and mcap > 0) else 0
             if vol_ratio > 0.15:
                 result["early_signals"].append("High volume/mcap ratio — unusual activity")
         else:
