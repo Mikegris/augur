@@ -45,20 +45,27 @@ const fmt = {
   },
   date: (s) => {
     if (!s) return '—';
-    try { return new Date(s).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }); }
-    catch(e) { return s; }
+    try {
+      const d = new Date(s);
+      // `new Date()` silently returns "Invalid Date" rather than throwing for
+      // bad strings like "—" or "None"; the original try/catch was dead code.
+      if (isNaN(d.getTime())) return '—';
+      return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+    } catch(e) { return '—'; }
   },
   timeAgo: (s) => {
     if (!s) return '';
     try {
-      const diff = Date.now() - new Date(s).getTime();
+      const t = new Date(s).getTime();
+      if (isNaN(t)) return '';
+      const diff = Date.now() - t;
       const m = Math.floor(diff / 60000);
       if (m < 1) return 'just now';
       if (m < 60) return `${m}m ago`;
       const h = Math.floor(m / 60);
       if (h < 24) return `${h}h ago`;
       return fmt.date(s);
-    } catch(e) { return s; }
+    } catch(e) { return ''; }
   },
 };
 
