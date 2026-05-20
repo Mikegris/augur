@@ -3839,13 +3839,18 @@ async function loadOptionsForSymbol(symbol) {
   }
 }
 
+let _optionsChainGen = 0;
 async function loadOptionsChain(symbol, date) {
   const bodyEl = document.getElementById('options-chain-body');
   if (!bodyEl) return;
+  // Guard against expiry-dropdown thrash overwriting the latest chain with a
+  // slow earlier response.
+  const gen = ++_optionsChainGen;
   bodyEl.innerHTML = '<div class="loading"><div class="spinner"></div> Loading chain...</div>';
   try {
     const url = '/api/options/' + symbol + '/chain' + (date ? '?date=' + encodeURIComponent(date) : '');
     const chain = await API.get(url);
+    if (gen !== _optionsChainGen) return;
     if (chain.error && !chain.calls.length) {
       bodyEl.innerHTML = '<div class="empty-state"><span class="text-red">' + chain.error + '</span></div>';
       return;
@@ -3889,6 +3894,7 @@ async function loadOptionsChain(symbol, date) {
       }).join('') +
       '</tbody></table>';
   } catch(e) {
+    if (gen !== _optionsChainGen) return;
     bodyEl.innerHTML = '<div class="empty-state"><span class="text-red">Failed to load chain: ' + e.message + '</span></div>';
   }
 }
