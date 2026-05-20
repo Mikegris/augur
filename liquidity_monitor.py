@@ -198,13 +198,24 @@ def _compute_sector_dispersion():
     changes = []
     for s in sectors:
         val = s.get("change_pct") if isinstance(s, dict) else None
-        if val is not None:
-            changes.append(float(val))
+        if val is None:
+            continue
+        try:
+            f = float(val)
+        except (TypeError, ValueError):
+            continue
+        # NaN values would propagate through np.std and the score comparisons
+        # below would all evaluate to False, dumping us into the low-stress
+        # default branch. Drop them so a partial sector feed reports
+        # "unavailable" instead of fake low stress.
+        if f != f:  # NaN check (NaN != NaN by IEEE-754)
+            continue
+        changes.append(f)
 
     if len(changes) < 3:
         return _neutral_indicator("Sector dispersion")
 
-    std = float(np.std(changes, ddof=1)) if len(changes) > 1 else 0.0
+    std = float(np.std(changes, ddof=1))
 
     # Inverted: low dispersion = high stress (herding)
     if std < 0.3:
