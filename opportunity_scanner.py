@@ -304,17 +304,26 @@ def _score_equity(symbol, profile, weights):
     components = sm_data.get("components", {})
 
     # 2. ML Forecast
+    # ml_forecast.ml_forecast() returns nested components — not the flat
+    # keys we used to read here. Pull each value from its real nest;
+    # missing/None components fall back to neutral defaults so partial
+    # signal sets don't zero out the whole channel.
     ml_score = 0
     try:
         import ml_forecast as mlf
         ml_data = mlf.ml_forecast(symbol)
         if not ml_data.get("error"):
-            prob_up = ml_data.get("rf_prob_up", 0.5)
+            rf = ml_data.get("rf_classifier") or {}
+            trend = ml_data.get("trend_forecast") or {}
+            regime_obj = ml_data.get("regime") or {}
+            mr = ml_data.get("mean_reversion") or {}
+
+            prob_up = rf.get("prob_up_20d", 0.5)
             ml_score = round(prob_up * 100)
-            regime = ml_data.get("regime", "UNKNOWN")
-            mr_signal = ml_data.get("mr_signal", "NEUTRAL")
-            trend_dir = ml_data.get("trend_direction", "NEUTRAL")
-            forecast_pct = ml_data.get("trend_forecast_pct", 0)
+            regime = regime_obj.get("current_regime", "UNKNOWN")
+            mr_signal = mr.get("signal", "NEUTRAL")
+            trend_dir = trend.get("trend_short", "NEUTRAL")
+            forecast_pct = trend.get("forecast_pct", 0)
 
             result["details"]["ml_forecast"] = {
                 "prob_up": round(prob_up, 3),
@@ -322,7 +331,7 @@ def _score_equity(symbol, profile, weights):
                 "trend": trend_dir,
                 "forecast_pct": round(forecast_pct, 2),
                 "mr_signal": mr_signal,
-                "mr_zscore": round(ml_data.get("mr_zscore", 0), 2),
+                "mr_zscore": round(mr.get("zscore", 0), 2),
             }
 
             # Early signal: compression regime (pre-breakout)
@@ -569,15 +578,19 @@ def _score_crypto(symbol, profile, weights):
         yf_sym = symbol + "-USD"
         ml_data = mlf.ml_forecast(yf_sym)
         if not ml_data.get("error"):
-            prob_up = ml_data.get("rf_prob_up", 0.5)
+            rf = ml_data.get("rf_classifier") or {}
+            trend = ml_data.get("trend_forecast") or {}
+            regime_obj = ml_data.get("regime") or {}
+            prob_up = rf.get("prob_up_20d", 0.5)
             ml_score = round(prob_up * 100)
+            regime = regime_obj.get("current_regime", "UNKNOWN")
             result["details"]["ml_forecast"] = {
                 "prob_up": round(prob_up, 3),
-                "regime": ml_data.get("regime", "UNKNOWN"),
-                "trend": ml_data.get("trend_direction", "NEUTRAL"),
-                "forecast_pct": round(ml_data.get("trend_forecast_pct", 0), 2),
+                "regime": regime,
+                "trend": trend.get("trend_short", "NEUTRAL"),
+                "forecast_pct": round(trend.get("forecast_pct", 0), 2),
             }
-            if ml_data.get("regime") == "COMPRESSION":
+            if regime == "COMPRESSION":
                 result["early_signals"].append("Crypto compression regime — breakout potential")
     except Exception:
         pass
