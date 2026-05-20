@@ -3631,6 +3631,11 @@ async function init() {
   loadSidebarWatchlist().catch(() => {});
 
   startAutoRefresh();
+  // Re-pin the alert-poll cadence now that State.settings is populated.
+  // The module-init _startAlertPollTimer() at line ~2572 fires before
+  // settings have loaded, so without this restart the user's saved
+  // refresh_interval was ignored until they opened Settings.
+  if (typeof _startAlertPollTimer === 'function') _startAlertPollTimer();
   updateStatusBar();
 }
 
