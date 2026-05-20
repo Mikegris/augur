@@ -172,12 +172,15 @@ def _make_loop_result(loop_type, detected=False, strength=0, direction="NEUTRAL"
                       proximity=0.0, timeline="N/A", detail="", metrics=None):
     # type: (str, bool, int, str, float, str, str, Optional[dict]) -> dict
     """Build a consistent loop result dict."""
+    # Several call sites compute proximity as `100 - pct_below_high`, which
+    # exceeds 100 when price has just broken to a new high (pct_below_high
+    # is negative). Clamp here so the UI's 0–100 progress bar stays in range.
     return {
         "type": loop_type,
         "detected": detected,
         "strength": min(max(strength, 0), 100),
         "direction": direction,
-        "proximity_to_trigger_pct": round(proximity, 2),
+        "proximity_to_trigger_pct": round(min(max(proximity, 0.0), 100.0), 2),
         "acceleration_timeline": timeline,
         "detail": detail,
         "metrics": metrics or {},
