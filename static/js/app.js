@@ -1604,9 +1604,15 @@ async function loadNewsFor(symbol, containerId) {
   }
 }
 
+let _priceChartGen = 0;
 async function loadPriceChart(symbol, period = '6mo', interval = '1d') {
+  // Rapid period/interval clicks can race — guard with a generation token so
+  // the older (slower) /api/chart response can't overwrite the chart that
+  // matches the user's current selection.
+  const gen = ++_priceChartGen;
   try {
     const data = await API.get(`/api/chart/${symbol}?period=${period}&interval=${interval}`);
+    if (gen !== _priceChartGen) return;
     const chartRef = ChartEngine.createPriceChart('price-chart-container', data.data, { height: 400 });
     State.chartRef = chartRef;
 
