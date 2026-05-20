@@ -1358,8 +1358,14 @@ async function loadResearchDefault() {
   // else: leave the empty-state splash visible so the user can pick a symbol.
 }
 
+let _researchGen = 0;
 async function loadResearchFor(symbol) {
   const view = document.getElementById('view-research');
+  // Generation token: if the user clicks a second symbol before the first
+  // request lands, the older (slower) response must NOT overwrite the newer
+  // view. Each call gets a monotonically-increasing gen; the await-then-write
+  // points below bail when their gen no longer matches the latest.
+  const gen = ++_researchGen;
   view.innerHTML = `<div class="loading"><div class="spinner"></div> FETCHING ${symbol}...</div>`;
 
   try {
@@ -1367,6 +1373,7 @@ async function loadResearchFor(symbol) {
       API.get(`/api/quote/${symbol}`),
       API.get(`/api/fundamentals/${symbol}`),
     ]);
+    if (gen !== _researchGen) return;
 
     const chgCls = col.pnl(quote.change);
 
@@ -1506,6 +1513,7 @@ async function loadResearchFor(symbol) {
     DataPanels.appendWikidataFacts(view, symbol);
 
   } catch(e) {
+    if (gen !== _researchGen) return;
     view.innerHTML = `<div class="empty-state"><span class="empty-icon">⚠</span><span class="text-red">${e.message}</span></div>`;
   }
 }
