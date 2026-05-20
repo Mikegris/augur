@@ -80,6 +80,18 @@ function _esc(s) {
     .replace(/'/g, '&#39;');
 }
 
+// ── JS-string escape (for strings interpolated INSIDE single-quoted JS string
+// arguments in onclick="..." attributes — e.g. tickers like "Domino's" would
+// otherwise produce a SyntaxError and the button silently no-ops).
+function _jesc(s) {
+  if (s == null) return '';
+  return String(s)
+    .replace(/\\/g, '\\\\')
+    .replace(/'/g, "\\'")
+    .replace(/\n/g, '\\n')
+    .replace(/\r/g, '\\r');
+}
+
 // ── Color helpers ─────────────────────────────────────────────────────────────
 const col = {
   pnl: (v) => v > 0 ? 'col-positive' : v < 0 ? 'col-negative' : 'col-neutral',
@@ -1401,8 +1413,8 @@ async function loadResearchFor(symbol) {
           </div>
         </div>
         <div style="display:flex;flex-direction:column;gap:4px;margin-left:16px">
-          <button class="btn btn-green btn-sm" onclick="quickAddToPortfolio('${symbol}', '${fund.name || ''}')">+ PORTFOLIO</button>
-          <button class="btn btn-blue btn-sm" onclick="quickAddToWatchlist('${symbol}', '${fund.name || ''}')">+ WATCHLIST</button>
+          <button class="btn btn-green btn-sm" onclick="quickAddToPortfolio('${symbol}', '${_jesc(fund.name || '')}')">+ PORTFOLIO</button>
+          <button class="btn btn-blue btn-sm" onclick="quickAddToWatchlist('${symbol}', '${_jesc(fund.name || '')}')">+ WATCHLIST</button>
         </div>
       </div>
 
@@ -1852,8 +1864,8 @@ async function openCryptoResearch(coinId, symbol) {
           </div>
         </div>
         <div style="display:flex;flex-direction:column;gap:4px;margin-left:16px">
-          <button class="btn btn-green btn-sm" onclick="quickAddToPortfolio('${coin.symbol}', '${coin.name}', 'crypto')">+ PORTFOLIO</button>
-          <button class="btn btn-blue btn-sm" onclick="quickAddToWatchlist('${coin.symbol}', '${coin.name}')">+ WATCHLIST</button>
+          <button class="btn btn-green btn-sm" onclick="quickAddToPortfolio('${coin.symbol}', '${_jesc(coin.name)}', 'crypto')">+ PORTFOLIO</button>
+          <button class="btn btn-blue btn-sm" onclick="quickAddToWatchlist('${coin.symbol}', '${_jesc(coin.name)}')">+ WATCHLIST</button>
         </div>
       </div>
 
@@ -7629,7 +7641,7 @@ const Ideas = {
 
           <div style="display:flex;gap:8px;margin-top:12px;flex-wrap:wrap">
             <button class="btn btn-green" onclick="Ideas.roll()">⚄ ROLL AGAIN</button>
-            <button class="btn btn-blue btn-sm" onclick="quickAddToWatchlist('${_esc(d.symbol)}', '${_esc(snap.name || '')}')">+ WATCHLIST</button>
+            <button class="btn btn-blue btn-sm" onclick="quickAddToWatchlist('${_esc(d.symbol)}', '${_jesc(snap.name || '')}')">+ WATCHLIST</button>
             <button class="btn btn-ghost btn-sm" onclick="openResearch('${_esc(d.symbol)}')">OPEN RESEARCH ↗</button>
             <div style="flex:1"></div>
             <span style="font-size:9px;color:var(--text-dim);align-self:center">
