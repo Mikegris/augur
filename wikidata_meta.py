@@ -90,9 +90,16 @@ def _entity_for_ticker(symbol: str) -> Optional[str]:
     """Resolve ticker → Wikidata QID. Tries the hardcoded map first (covers
     top US names where Wikidata's P249 is missing), then falls back to
     label search via wbsearchentities for anything else."""
-    sym = symbol.upper().split("-")[0]
-    if sym in TICKER_TO_QID:
-        return TICKER_TO_QID[sym]
+    sym_upper = symbol.upper()
+    # Try the raw symbol and a "-"->"." swap so we accept both yfinance form
+    # (BRK-B) and Bloomberg/SEC form (BRK.B) — the map is keyed on dots and
+    # the previous "strip after dash" stripping turned BRK-B into BRK, which
+    # missed the BRK.B entry entirely.
+    candidates = [sym_upper, sym_upper.replace("-", "."), sym_upper.split("-")[0]]
+    for cand in candidates:
+        if cand in TICKER_TO_QID:
+            return TICKER_TO_QID[cand]
+    sym = candidates[-1]
     # Fallback: search for the ticker as a literal — sometimes the symbol
     # appears in an alias or description.
     try:
