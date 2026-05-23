@@ -155,7 +155,11 @@ def insider_trades(option: str = "latest") -> dict:
             "shares":       _safe_float(r.get("#Shares")),
             "value":        _safe_float(r.get("Value ($)")),
             "shares_total": _safe_float(r.get("#Shares Total")),
-            "sec_form4":    r.get("SEC Form 4"),
+            # finvizfinance's insider DataFrame ships two columns:
+            #   "SEC Form 4"      -> the timestamp text ("May 22 09:47 PM")
+            #   "SEC Form 4 Link" -> the actual sec.gov filing URL
+            # The field name implies a link, so use the link column.
+            "sec_form4":    r.get("SEC Form 4 Link"),
         })
     out = {
         "option": option,
