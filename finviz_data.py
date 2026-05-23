@@ -73,8 +73,11 @@ def _safe_float(v):
 
 
 def sector_heatmap() -> dict:
-    """All 11 GICS sectors with valuation + 1w change. Maps directly to a
-    grid layout in the UI."""
+    """All 11 GICS sectors with valuation + day change. Maps directly to a
+    grid layout in the UI. The ``change_1w`` field name is preserved for
+    consumer compatibility but the underlying Finviz group-overview "Change"
+    column is the current-day percent change (decimal fraction), not a
+    weekly performance number."""
     cache_key = ("finviz", "sectors")
     cached = _cache_get(cache_key)
     if cached is not None:
@@ -102,6 +105,9 @@ def sector_heatmap() -> dict:
             "fwd_pe":       _safe_float(r.get("Fwd P/E")),
             "peg":          _safe_float(r.get("PEG")),
             "float_short":  _safe_float(r.get("Float Short")),
+            # Despite the field name, this is the current-day change (decimal
+            # fraction) from Finviz's sector-overview "Change" column, not a
+            # 1-week return. Name retained for UI-consumer compatibility.
             "change_1w":    _safe_float(r.get("Change")),
             "volume":       _safe_float(r.get("Volume")),
             "recom":        _safe_float(r.get("Recom")),
@@ -149,7 +155,11 @@ def insider_trades(option: str = "latest") -> dict:
             "shares":       _safe_float(r.get("#Shares")),
             "value":        _safe_float(r.get("Value ($)")),
             "shares_total": _safe_float(r.get("#Shares Total")),
-            "sec_form4":    r.get("SEC Form 4"),
+            # finvizfinance's insider DataFrame ships two columns:
+            #   "SEC Form 4"      -> the timestamp text ("May 22 09:47 PM")
+            #   "SEC Form 4 Link" -> the actual sec.gov filing URL
+            # The field name implies a link, so use the link column.
+            "sec_form4":    r.get("SEC Form 4 Link"),
         })
     out = {
         "option": option,

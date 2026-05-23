@@ -517,8 +517,10 @@ def _compute_lag_correlation(symbol1, symbol2, max_lag=5):
         for lag in range(0, max_lag + 1):
             pairs_x = []
             pairs_y = []
-            for pos in range(lag, len(returns1)):
-                shifted_pos = pos - lag
+            # For "symbol2 follows symbol1 by `lag` days" we pair returns1
+            # at time t with returns2 at time t+lag.
+            for pos in range(0, len(returns1) - lag):
+                shifted_pos = pos + lag
                 if shifted_pos in returns2_by_pos:
                     pairs_x.append(returns1[pos])
                     pairs_y.append(returns2_by_pos[shifted_pos])
