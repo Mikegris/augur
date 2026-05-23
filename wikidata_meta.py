@@ -115,9 +115,12 @@ def _entity_for_ticker(symbol: str) -> Optional[str]:
             # Prefer entries that look like a company
             if any(w in desc for w in ("company", "corporation", "inc.", "holdings", "group")):
                 return hit.get("id")
-        # No company-shaped match — return the first hit if any
-        first = resp.json().get("search", [])
-        return first[0].get("id") if first else None
+        # No company-shaped match — return None rather than a random first hit.
+        # wbsearchentities on a literal ticker symbol returns arbitrary entities
+        # (e.g. "SPLK" → an unrelated 19th-century person). A random match would
+        # populate the Research panel with junk facts; returning None lets the
+        # UI show "no Wikidata entity" honestly.
+        return None
     except Exception as e:
         log.debug("wikidata search failed for %s: %s", sym, e)
         return None
