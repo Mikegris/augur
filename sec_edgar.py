@@ -56,20 +56,34 @@ TRACKED_FUNDS = {
     "Elliott Investment": "0001791786",
 }
 
-# Module-level cache
+# Module-level cache. `_CIK_CACHE` stores `(value_or_none, expiry_unix_ts)`.
+# Negative entries (value=None) get a short TTL so transient SEC 429s don't
+# permanently mark a ticker as un-resolvable, but long enough to absorb
+# repeated lookups during a single page load without re-hammering SEC.
 _CIK_CACHE = {}
+_CIK_NEGATIVE_TTL = 300.0  # 5 minutes
+_CIK_POSITIVE_TTL = 24 * 3600.0  # CIKs almost never change
 _SESSION = None
 
 
 def _get_session():
-    """Return a requests Session with retry logic."""
+    """Return a requests Session with retry logic.
+
+    Note: 429 is deliberately NOT in `status_forcelist`. urllib3 retries 429
+    with backoff_factor=1 means each blocked call burns ~7s (1+2+4) before
+    giving up — and when N parallel threads each burn 7s waiting on SEC,
+    the cache_store.coalesce wait timeout (15s) expires and every waiter
+    falls through to its own retry storm. Fail fast on 429 instead and let
+    the caller's negative cache (see _CIK_CACHE TTL) absorb repeated
+    failures.
+    """
     global _SESSION
     if _SESSION is None:
         session = requests.Session()
         retry = Retry(
-            total=3,
-            backoff_factor=1,
-            status_forcelist=[429, 500, 502, 503, 504],
+            total=2,
+            backoff_factor=0.5,
+            status_forcelist=[500, 502, 503, 504],  # 429 deliberately omitted
         )
         adapter = HTTPAdapter(max_retries=retry)
         session.mount("https://", adapter)
@@ -190,10 +204,21 @@ def get_cik(ticker):
     """
     Look up 10-digit zero-padded CIK for a ticker symbol.
     Returns string or None.
+
+    Both positive and negative results are cached with TTLs (positive 24h,
+    negative 5min). The negative cache prevents the cluster / peerdiv /
+    divmap multi-symbol scans from re-hammering SEC's 429-prone
+    /files/company_tickers.json endpoint when a transient outage marks a
+    ticker as un-resolvable.
     """
     ticker_upper = ticker.upper()
-    if ticker_upper in _CIK_CACHE:
-        return _CIK_CACHE[ticker_upper]
+    now = time.time()
+    hit = _CIK_CACHE.get(ticker_upper)
+    if hit is not None:
+        value, expiry = hit
+        if expiry > now:
+            return value
+        # expired — fall through and refetch
 
     try:
         resp = _edgar_get("https://www.sec.gov/files/company_tickers.json")
@@ -202,7 +227,7 @@ def get_cik(ticker):
             if entry.get("ticker", "").upper() == ticker_upper:
                 cik_int = entry["cik_str"]
                 cik_padded = str(cik_int).zfill(10)
-                _CIK_CACHE[ticker_upper] = cik_padded
+                _CIK_CACHE[ticker_upper] = (cik_padded, now + _CIK_POSITIVE_TTL)
                 return cik_padded
     except Exception as e:
         logger.warning("CIK bulk lookup failed for %s: %s", ticker, e)
@@ -217,11 +242,15 @@ def get_cik(ticker):
             entity_id = src.get("entity_id") or src.get("cik")
             if entity_id:
                 cik_padded = str(entity_id).zfill(10)
-                _CIK_CACHE[ticker_upper] = cik_padded
+                _CIK_CACHE[ticker_upper] = (cik_padded, now + _CIK_POSITIVE_TTL)
                 return cik_padded
     except Exception as e:
         logger.warning("CIK fallback search failed for %s: %s", ticker, e)
 
+    # Both lookups failed — negative-cache for 5 minutes so concurrent and
+    # follow-up callers don't immediately re-hammer SEC. After the TTL we
+    # try again in case SEC has recovered.
+    _CIK_CACHE[ticker_upper] = (None, now + _CIK_NEGATIVE_TTL)
     return None
 
 
