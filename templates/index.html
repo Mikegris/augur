@@ -252,6 +252,28 @@
       <div class="loading"><div class="spinner"></div></div>
     </div>
 
+    <!-- ── v0.2.0 RESEARCH PANELS ─────────────────────────────── -->
+
+    <!-- BACKTEST -->
+    <div id="view-backtest" class="view">
+      <div class="loading"><div class="spinner"></div></div>
+    </div>
+
+    <!-- PORTFOLIO OPTIMIZER -->
+    <div id="view-optimizer" class="view">
+      <div class="loading"><div class="spinner"></div></div>
+    </div>
+
+    <!-- MONTE CARLO -->
+    <div id="view-montecarlo" class="view">
+      <div class="loading"><div class="spinner"></div></div>
+    </div>
+
+    <!-- RESEARCH LAB (AI Hypothesis) -->
+    <div id="view-research-lab" class="view">
+      <div id="research-lab-root"></div>
+    </div>
+
     <!-- NEWS -->
     <div id="view-news" class="view">
       <div class="loading"><div class="spinner"></div></div>
@@ -607,6 +629,19 @@
 <!-- Scripts -->
 <script src="/static/js/charts.js?v=2"></script>
 <script src="/static/js/app.js?v=9"></script>
+
+<!-- v0.2.0 research modules — each registers window.render* globals. Loaded
+     after app.js so they can read State / API / fmt helpers if needed. -->
+<script src="/static/js/research_backtest.js?v=1"></script>
+<script src="/static/js/research_eventstudy.js?v=1"></script>
+<script src="/static/js/research_factors.js?v=1"></script>
+<script src="/static/js/research_hypothesis.js?v=1"></script>
+<script src="/static/js/research_iv_density.js?v=1"></script>
+<script src="/static/js/research_montecarlo.js?v=1"></script>
+<script src="/static/js/research_multihorizon.js?v=1"></script>
+<script src="/static/js/research_optimizer.js?v=1"></script>
+<script src="/static/js/research_probforecast.js?v=1"></script>
+<script src="/static/js/research_tracker.js?v=1"></script>
 
 <!-- Inline: pre-populate research quick buttons -->
 <script>
