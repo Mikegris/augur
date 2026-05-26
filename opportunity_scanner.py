@@ -22,6 +22,21 @@ import fetcher
 
 logger = logging.getLogger(__name__)
 
+try:
+    from zoneinfo import ZoneInfo
+    _ET = ZoneInfo("America/New_York")
+except Exception:  # pragma: no cover
+    _ET = None
+
+
+def _now_et() -> datetime:
+    """Naive ET 'now' — anchors window cutoffs to US market wall clock so
+    SEC Form 4 dates, Congress filing dates, and earnings calendars don't
+    drift by a day for callers outside the US time zone."""
+    if _ET is not None:
+        return datetime.now(_ET).replace(tzinfo=None)
+    return datetime.now()
+
 # ── Profile Defaults ─────────────────────────────────────────────────────────
 
 PROFILE_DEFAULTS = {
@@ -392,7 +407,7 @@ def _score_equity(symbol, profile, weights):
     try:
         import sec_edgar as edgar
         txns = edgar.get_form4_transactions(symbol, limit=15)
-        cutoff_30d = (datetime.now() - timedelta(days=30)).strftime("%Y-%m-%d")
+        cutoff_30d = (_now_et() - timedelta(days=30)).strftime("%Y-%m-%d")
         recent_buys = [t for t in txns if t.get("date", "") >= cutoff_30d and t.get("transaction_type") == "BUY"]
         recent_sells = [t for t in txns if t.get("date", "") >= cutoff_30d and t.get("transaction_type") == "SELL"]
         result["details"]["insider"] = {
@@ -423,8 +438,8 @@ def _score_equity(symbol, profile, weights):
                 "members": len(set(t.get("member_name", "") for t in trades)),
             }
             # Early signal: recent congressional buy
-            cutoff_30d = (datetime.now() - timedelta(days=30)).strftime("%m/%d/%Y")
-            recent_cong = [t for t in buys if t.get("txn_date", "") and _parse_date_loose(t["txn_date"]) >= (datetime.now() - timedelta(days=30))]
+            cutoff_30d_dt = _now_et() - timedelta(days=30)
+            recent_cong = [t for t in buys if t.get("txn_date", "") and _parse_date_loose(t["txn_date"]) >= cutoff_30d_dt]
             if recent_cong:
                 result["early_signals"].append(f"Congress: {len(recent_cong)} buy(s) in 30 days")
     except Exception:
