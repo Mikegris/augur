@@ -48,8 +48,10 @@ log = logging.getLogger("augur.cache")
 # Same DB AUGUR uses for everything else — keeps backup / migration simple.
 _DB_PATH = os.environ.get("AUGUR_DB_PATH", "wealth.db")
 
-_mem: dict = {}                    # key -> (value, expiry_ts)
+_mem: dict = {}                    # key -> (value, expiry_ts, last_access_ts)
 _mem_lock = threading.RLock()
+_MEM_SOFT_CAP = 2000
+_MEM_EVICT_TARGET = 1800
 
 # Per-key locking so a stampede on key A doesn't block traffic for key B.
 # key -> (threading.Event, claimed_at_ts). The timestamp lets a periodic
@@ -264,6 +266,7 @@ def init() -> None:
     poisoned_keys = []
     try:
         rows = c.execute("SELECT key, value, expiry FROM api_cache").fetchall()
+        now = time.time()
         with _mem_lock:
             for key, raw, expiry in rows:
                 try:
@@ -274,7 +277,7 @@ def init() -> None:
                     poisoned_keys.append(key)
                     skipped += 1
                     continue
-                _mem[key] = (val, expiry)
+                _mem[key] = (val, expiry, now)
                 loaded += 1
     except Exception as e:
         log.warning("cache hydrate failed: %s", e)
@@ -299,8 +302,14 @@ def cache_get(key, ttl: Optional[float] = None):
     hit = _mem.get(k)
     if hit is None:
         return None
-    value, expiry = hit
-    if time.time() >= expiry:
+    # Hydrate from legacy 2-tuple format if a prior version's _mem leaked in.
+    if len(hit) == 2:
+        value, expiry = hit
+        last_access = expiry  # best effort
+    else:
+        value, expiry, last_access = hit
+    now = time.time()
+    if now >= expiry:
         with _mem_lock:
             _mem.pop(k, None)
         return None
@@ -308,6 +317,10 @@ def cache_get(key, ttl: Optional[float] = None):
         with _mem_lock:
             _mem.pop(k, None)
         return None
+    # Refresh last_access so LRU eviction favors recently-read entries.
+    # Avoid the lock on every read by writing the tuple back directly —
+    # dict item replacement is atomic in CPython.
+    _mem[k] = (value, expiry, now)
     return value
 
 
@@ -322,19 +335,26 @@ def cache_set(key, value, ttl: float) -> None:
     if _looks_like_failure(value):
         return
     k = _serialize_key(key)
-    expiry = time.time() + float(ttl)
+    now = time.time()
+    expiry = now + float(ttl)
     with _mem_lock:
-        _mem[k] = (value, expiry)
-        # Bound in-memory size — same policy as the old helper. Sweeps run
-        # only when we cross the threshold so the hot path stays cheap.
-        if len(_mem) > 2000:
-            now = time.time()
-            for stale_k in [kk for kk, (_, e) in _mem.items() if e < now]:
+        _mem[k] = (value, expiry, now)
+        # Bound in-memory size — sweeps run only when we cross the threshold
+        # so the hot path stays cheap. Eviction is two-stage: (1) drop
+        # already-expired entries; (2) if still over cap, drop the
+        # least-recently-accessed entries (true LRU, not just oldest-by-write).
+        if len(_mem) > _MEM_SOFT_CAP:
+            for stale_k in [kk for kk, t in _mem.items() if t[1] < now]:
                 _mem.pop(stale_k, None)
-            if len(_mem) > 2000:
-                # Drop the oldest 10% by expiry (effectively LRU-by-write).
-                ordered = sorted(_mem.items(), key=lambda kv: kv[1][1])
-                for kk, _ in ordered[: len(_mem) - 1800]:
+            if len(_mem) > _MEM_SOFT_CAP:
+                # Tuple is (value, expiry, last_access); evict by last_access.
+                # Legacy 2-tuples (unlikely after the in-place hydration in
+                # cache_get) fall back to expiry as the access proxy.
+                def _lru_key(kv):
+                    t = kv[1]
+                    return t[2] if len(t) >= 3 else t[1]
+                ordered = sorted(_mem.items(), key=_lru_key)
+                for kk, _ in ordered[: len(_mem) - _MEM_EVICT_TARGET]:
                     _mem.pop(kk, None)
 
     if ttl < _PERSIST_MIN_TTL:
@@ -448,7 +468,8 @@ def stats() -> dict:
     with _mem_lock:
         n_mem = len(_mem)
         now = time.time()
-        fresh = sum(1 for _, exp in _mem.values() if exp > now)
+        # Tuple is (value, expiry, last_access); we only need expiry here.
+        fresh = sum(1 for t in _mem.values() if t[1] > now)
     try:
         c = _conn()
         n_disk = c.execute("SELECT COUNT(*) FROM api_cache").fetchone()[0]
