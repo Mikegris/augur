@@ -229,8 +229,64 @@ def init_db():
     for k, v in defaults.items():
         c.execute("INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)", (k, v))
 
+    # ── Settings schema version ──
+    # Tracks which migration pass has run against the settings table. Old
+    # releases stored typo'd or now-renamed keys (e.g. `show_crypto`
+    # accidentally stored as `showcrypto`); without a version sentinel we
+    # have no way to know whether a given key in the table is a stale
+    # leftover or a legitimate user override. Bump SCHEMA_VERSION below
+    # and add a corresponding case in _migrate_settings() to retire keys.
+    c.execute("INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)",
+              ("__schema_version__", "1"))
+
     conn.commit()
+    # Run settings migrations after defaults so we can prune renamed keys.
+    try:
+        _migrate_settings(conn)
+    except Exception as e:
+        # Migration errors must never block app startup — log and continue
+        # with the un-migrated schema. The app reads settings with
+        # `dict.get(..., default)` so missing keys degrade gracefully.
+        import logging as _logging
+        _logging.getLogger("augur.db").warning("settings migration failed: %s", e)
     # connection reused (thread-local pool)
+
+
+SCHEMA_VERSION = 1
+# List of settings keys retired in past releases. We delete them on init so
+# stale values don't poison new lookups. Append to this when renaming.
+_RETIRED_SETTING_KEYS = []  # type: list
+
+
+def _migrate_settings(conn):
+    """Run idempotent settings migrations. Called at the end of init_db()."""
+    cur = conn.execute("SELECT value FROM settings WHERE key='__schema_version__'")
+    row = cur.fetchone()
+    current = int(row["value"]) if row else 0
+    if current >= SCHEMA_VERSION:
+        # Even at the latest version, sweep retired keys (cheap + safe).
+        if _RETIRED_SETTING_KEYS:
+            with _write_lock:
+                conn.executemany(
+                    "DELETE FROM settings WHERE key=?",
+                    [(k,) for k in _RETIRED_SETTING_KEYS],
+                )
+                conn.commit()
+        return
+    # Future per-version steps go here. Example shape:
+    #   if current < 2: ... rename / coerce ...
+    # For now we just stamp the version forward.
+    with _write_lock:
+        conn.execute(
+            "INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)",
+            ("__schema_version__", str(SCHEMA_VERSION)),
+        )
+        if _RETIRED_SETTING_KEYS:
+            conn.executemany(
+                "DELETE FROM settings WHERE key=?",
+                [(k,) for k in _RETIRED_SETTING_KEYS],
+            )
+        conn.commit()
 
 
 # ── Accounts ──────────────────────────────────────────────────────────────────
@@ -507,7 +563,10 @@ def get_settings():
     conn = get_conn()
     rows = conn.execute("SELECT key, value FROM settings").fetchall()
     # connection reused (thread-local pool)
-    return {r["key"]: r["value"] for r in rows}
+    # Hide internal metadata keys (anything starting with __) from callers —
+    # the frontend settings form would otherwise round-trip them and a stray
+    # JS handler could clobber the schema version on save.
+    return {r["key"]: r["value"] for r in rows if not r["key"].startswith("__")}
 
 
 def set_setting(key, value):
