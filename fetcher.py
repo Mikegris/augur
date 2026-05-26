@@ -1143,6 +1143,12 @@ def get_option_chain(symbol: str, date: str = None) -> dict:
             chain = t.option_chain(t.options[0])
 
         def _df_to_list(df):
+            # yfinance occasionally returns None for one side of the chain
+            # (typically when the ETF doesn't have puts, or under rate-limit
+            # partial responses). Treat as empty so the caller's iteration
+            # doesn't crash.
+            if df is None:
+                return []
             result = []
             for _, row in df.iterrows():
                 iv = _safe(row.get("impliedVolatility"))
