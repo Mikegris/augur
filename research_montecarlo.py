@@ -54,9 +54,9 @@ except Exception:  # pragma: no cover
     cache_store = None  # type: ignore
 
 try:
-    import yfinance as yf  # type: ignore
+    import fetcher  # type: ignore
 except Exception:  # pragma: no cover
-    yf = None  # type: ignore
+    fetcher = None  # type: ignore
 
 
 # Cache TTL (seconds). One hour is enough to absorb panel re-renders + the
@@ -258,37 +258,40 @@ def _empty_response(holdings: List[Dict[str, Any]], horizon_days: int,
 def _fetch_returns(symbol: str, lookback_days: int) -> Optional[pd.Series]:
     """Daily returns Series indexed by date, or None if unavailable.
 
+    Routes through fetcher.get_chart_data so this benefits from the v0.1.6
+    Yahoo-direct fallback chain. A naked yf.Ticker.history call here would
+    silently return empty whenever yfinance's crumb auth is broken, even
+    though the same data is reachable via Yahoo's v8 chart endpoint.
+
     Pulls a slightly longer period than asked so weekends / holidays don't
     starve the matrix after we trim NaNs.
     """
-    if yf is None:
+    if fetcher is None:
         return None
-    # Map calendar window -> yf period strings. Slightly generous: we want
-    # ~504 trading days, that's ~2 calendar years. Use 2y for the safety
-    # margin against API-side calendar quirks.
     period = "2y" if lookback_days >= 400 else "1y"
     try:
-        t = yf.Ticker(symbol)
-        df = t.history(period=period, interval="1d", auto_adjust=True)
+        bars = fetcher.get_chart_data(symbol, period=period, interval="1d")
     except Exception as e:
-        log.debug("yfinance history failed for %s: %s", symbol, e)
+        log.debug("fetcher.get_chart_data failed for %s: %s", symbol, e)
         return None
-    if df is None or df.empty or "Close" not in df.columns:
+    if not bars:
         return None
-    close = df["Close"].dropna()
+    # bars is a list of {time, open, high, low, close, volume}; build a
+    # date-indexed Close series, then convert to daily returns.
+    close = pd.Series(
+        [float(b["close"]) for b in bars if b.get("close") is not None],
+        index=pd.to_datetime(
+            [b["time"] for b in bars if b.get("close") is not None],
+            unit="s", utc=True,
+        ).tz_convert(None),
+        name=symbol.upper(),
+    )
     if len(close) < 30:
         return None
     rets = close.pct_change().dropna()
     if rets.empty:
         return None
-    # Tag the series with the symbol so we can name columns when concat'd.
     rets.name = symbol.upper()
-    # Strip tz so concat with mixed-tz tickers (crypto vs equities) aligns.
-    try:
-        rets.index = rets.index.tz_localize(None)
-    except (AttributeError, TypeError):
-        pass
-    # Cap to the lookback window after the cleanup.
     if len(rets) > lookback_days:
         rets = rets.iloc[-lookback_days:]
     return rets
