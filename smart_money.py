@@ -361,8 +361,12 @@ def _score_ml_forecast(symbol):
 
     score = 10  # neutral baseline
 
-    # RF classifier probability (strongest signal — up to ±6 pts)
-    rf = result.get("rf_classifier", {})
+    # RF classifier probability (strongest signal — up to ±6 pts).
+    # ml_forecast.ml_forecast() explicitly sets each component to None when its
+    # sub-model fails (rf_classifier=None, trend_forecast=None, ...), so
+    # `result.get(key, {})` would still return None on failure. Coerce to {}
+    # via `or {}` so .get() doesn't blow up with AttributeError.
+    rf = result.get("rf_classifier") or {}
     prob_up = rf.get("prob_up_20d", 0.5)
     if prob_up >= 0.70:
         score += 6
@@ -378,7 +382,7 @@ def _score_ml_forecast(symbol):
         score -= 2
 
     # Trend alignment (±3 pts)
-    trend = result.get("trend_forecast", {})
+    trend = result.get("trend_forecast") or {}
     if trend.get("trends_aligned"):
         if trend.get("trend_short") == "UP":
             score += 3
@@ -391,7 +395,7 @@ def _score_ml_forecast(symbol):
             score -= 1
 
     # Mean reversion (±2 pts)
-    mr = result.get("mean_reversion", {})
+    mr = result.get("mean_reversion") or {}
     mr_sig = mr.get("signal", "")
     if mr_sig == "OVERSOLD":
         score += 2
@@ -399,7 +403,7 @@ def _score_ml_forecast(symbol):
         score -= 2
 
     # Regime context (±1 pt)
-    regime = result.get("regime", {})
+    regime = result.get("regime") or {}
     regime_label = regime.get("current_regime", "")
     if regime_label == "COMPRESSION":
         score += 1  # potential breakout setup
@@ -408,7 +412,10 @@ def _score_ml_forecast(symbol):
 
     score = max(0, min(20, score))
 
-    composite = result.get("composite_ml_score", 0.5)
+    # composite_ml_score is explicitly set to None by ml_forecast.ml_forecast()
+    # when every sub-model fails, so the default-via-`get` doesn't kick in.
+    # Fall back to a neutral 0.5 via `or` to keep round() safe below.
+    composite = result.get("composite_ml_score") or 0.5
     composite_signal = result.get("composite_signal", "HOLD")
 
     detail = {
