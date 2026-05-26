@@ -337,12 +337,13 @@ const NAV_GROUPS = {
   markets: {
     label: 'MARKETS',
     items: [
-      { view: 'markets',   label: 'Markets' },
-      { view: 'crypto',    label: 'Crypto' },
-      { view: 'macro',     label: 'Macro' },
-      { view: 'stress',    label: 'Stress Test' },
-      { view: 'liquidity', label: 'Liquidity' },
-      { view: 'news',      label: 'News' },
+      { view: 'markets',     label: 'Markets' },
+      { view: 'sectorflow',  label: 'Sector Flow' },
+      { view: 'crypto',      label: 'Crypto' },
+      { view: 'macro',       label: 'Macro' },
+      { view: 'stress',      label: 'Stress Test' },
+      { view: 'liquidity',   label: 'Liquidity' },
+      { view: 'news',        label: 'News' },
     ],
   },
   research: {
@@ -353,6 +354,8 @@ const NAV_GROUPS = {
       { view: 'backtest',     label: 'Backtest' },
       { view: 'optimizer',    label: 'Optimizer' },
       { view: 'montecarlo',   label: 'Monte Carlo' },
+      { view: 'whatif',       label: 'What-If' },
+      { view: 'catalysts',    label: 'Catalysts' },
       { view: 'research-lab', label: 'Research Lab' },
       { view: 'intel',        label: 'Intel' },
       { view: 'earnings',     label: 'Earnings' },
@@ -365,6 +368,8 @@ const NAV_GROUPS = {
     label: 'ALPHA',
     items: [
       { view: 'signals',           label: 'Signals' },
+      { view: 'cluster',           label: 'Cluster' },
+      { view: 'divergences',       label: 'Divergences' },
       { view: 'ideas',             label: 'Ideas' },
       { view: 'options-flow',      label: 'Options Flow' },
       { view: 'gex',               label: 'GEX' },
@@ -464,6 +469,12 @@ function navigate(view) {
     case 'optimizer':        loadOptimizer(); break;
     case 'montecarlo':       loadMonteCarloView(); break;
     case 'research-lab':     loadHypothesisLab(); break;
+    // ── v0.3.0 synthesis views ──────────────────────────────────
+    case 'catalysts':        loadCatalystsView(); break;
+    case 'cluster':          loadClusterView(); break;
+    case 'divergences':      loadDivergencesView(); break;
+    case 'sectorflow':       loadSectorFlowView(); break;
+    case 'whatif':           loadWhatIfView(); break;
   }
 }
 
@@ -1442,6 +1453,10 @@ async function loadResearchFor(symbol) {
         <button class="research-tab" id="rtab-horizons" onclick="switchResearchTab('horizons','${symbol}')">HORIZONS</button>
         <button class="research-tab" id="rtab-factors" onclick="switchResearchTab('factors','${symbol}')">FACTORS</button>
         <button class="research-tab" id="rtab-eventstudy" onclick="switchResearchTab('eventstudy','${symbol}')">EVENT STUDY</button>
+        <button class="research-tab" id="rtab-consensus" onclick="switchResearchTab('consensus','${symbol}')">CONSENSUS</button>
+        <button class="research-tab" id="rtab-peerdiv" onclick="switchResearchTab('peerdiv','${symbol}')">PEER DIV</button>
+        <button class="research-tab" id="rtab-bayes" onclick="switchResearchTab('bayes','${symbol}')">BAYES SMART</button>
+        <button class="research-tab" id="rtab-groundhyp" onclick="switchResearchTab('groundhyp','${symbol}')">GROUNDED HYP</button>
       </div>
 
       <!-- Chart Tab -->
@@ -1578,6 +1593,26 @@ async function loadResearchFor(symbol) {
       <!-- EVENT STUDY Tab (v0.2.0) -->
       <div id="rpanel-eventstudy" style="display:none">
         <div id="es-container-${symbol}"></div>
+      </div>
+
+      <!-- CONSENSUS Tab (v0.3.0) -->
+      <div id="rpanel-consensus" style="display:none">
+        <div id="consensus-host" class="card"></div>
+      </div>
+
+      <!-- PEER DIVERGENCE Tab (v0.3.0) -->
+      <div id="rpanel-peerdiv" style="display:none">
+        <div id="peerdiv-host" class="card"></div>
+      </div>
+
+      <!-- BAYES SMART MONEY Tab (v0.3.0) -->
+      <div id="rpanel-bayes" style="display:none">
+        <div id="bayes-smart-host" class="card"></div>
+      </div>
+
+      <!-- GROUNDED HYPOTHESIS Tab (v0.3.0) -->
+      <div id="rpanel-groundhyp" style="display:none">
+        <div id="grounded-hyp-host" class="card"></div>
       </div>
     `;
 
@@ -2930,6 +2965,19 @@ async function loadMacroView() {
     DataPanels.appendFredSnapshot(view);
     // CFTC Commitments of Traders — weekly futures positioning
     DataPanels.appendCftcSnapshot(view);
+    // Cross-Asset Macro Translator (v0.3.0) — release impact → portfolio
+    if (typeof window.renderMacroTranslate === 'function') {
+      const mtSection = document.createElement('section');
+      mtSection.id = 'macro-translate';
+      mtSection.className = 'card';
+      mtSection.style.marginTop = '8px';
+      const mtHost = document.createElement('div');
+      mtHost.id = 'macro-translate-host';
+      mtSection.appendChild(mtHost);
+      view.appendChild(mtSection);
+      try { window.renderMacroTranslate(mtHost, 'CPIAUCSL', window._lastPortfolioHoldings || []); }
+      catch(e) { mtHost.innerHTML = '<div style="color:var(--red);padding:12px">' + (e.message||e) + '</div>'; }
+    }
   } catch(e) {
     view.innerHTML = `<div class="empty-state"><span class="text-red">${e.message}</span></div>`;
   }
@@ -3608,8 +3656,14 @@ const VIEW_LOADERS = {
   optimizer:    () => loadOptimizer(),
   montecarlo:   () => loadMonteCarloView(),
   'research-lab': () => loadHypothesisLab(),
-  // Research is intentionally excluded — re-loading would yank the
-  // chart out from under the user mid-interaction.
+  // v0.3.0 synthesis views — heavy fan-out scans server-cached for
+  // 10min–1h, so the auto-refresh just re-renders against cache.
+  catalysts:    () => loadCatalystsView(),
+  cluster:      () => loadClusterView(),
+  divergences:  () => loadDivergencesView(),
+  sectorflow:   () => loadSectorFlowView(),
+  // whatif and research are intentionally excluded — re-loading
+  // would clobber user-entered candidate parameters / charts.
 };
 
 function startAutoRefresh() {
@@ -3731,6 +3785,8 @@ function switchResearchTab(tab, symbol) {
     'chart', 'fundamentals', 'news', 'options', 'sec', 'intel',
     // v0.2.0 research tabs
     'rnd', 'forecast', 'horizons', 'factors', 'eventstudy',
+    // v0.3.0 synthesis tabs
+    'consensus', 'peerdiv', 'bayes', 'groundhyp',
   ];
   tabs.forEach(t => {
     const btn = document.getElementById('rtab-' + t);
@@ -3785,6 +3841,34 @@ function switchResearchTab(tab, symbol) {
     if (esEl && esEl.childElementCount === 0 && typeof window.renderEventStudy === 'function') {
       try { window.renderEventStudy(esEl, symbol, 'earnings'); }
       catch(e) { esEl.innerHTML = '<div style="color:var(--red);padding:12px">' + (e.message||e) + '</div>'; }
+    }
+  } else if (tab === 'consensus') {
+    const cEl = document.getElementById('consensus-host');
+    if (cEl && window.renderConsensus && cEl.dataset.loaded !== '1') {
+      cEl.dataset.loaded = '1';
+      try { window.renderConsensus(cEl, symbol); }
+      catch(e) { cEl.innerHTML = '<div style="color:var(--red);padding:12px">' + (e.message||e) + '</div>'; }
+    }
+  } else if (tab === 'peerdiv') {
+    const pdEl = document.getElementById('peerdiv-host');
+    if (pdEl && window.renderPeerDiv && pdEl.dataset.loaded !== '1') {
+      pdEl.dataset.loaded = '1';
+      try { window.renderPeerDiv(pdEl, symbol, { n: 5 }); }
+      catch(e) { pdEl.innerHTML = '<div style="color:var(--red);padding:12px">' + (e.message||e) + '</div>'; }
+    }
+  } else if (tab === 'bayes') {
+    const bEl = document.getElementById('bayes-smart-host');
+    if (bEl && window.renderBayesSmart && bEl.dataset.loaded !== '1') {
+      bEl.dataset.loaded = '1';
+      try { window.renderBayesSmart(bEl, symbol); }
+      catch(e) { bEl.innerHTML = '<div style="color:var(--red);padding:12px">' + (e.message||e) + '</div>'; }
+    }
+  } else if (tab === 'groundhyp') {
+    const gEl = document.getElementById('grounded-hyp-host');
+    if (gEl && window.renderGroundedHypothesis && gEl.dataset.loaded !== '1') {
+      gEl.dataset.loaded = '1';
+      try { window.renderGroundedHypothesis(gEl, symbol); }
+      catch(e) { gEl.innerHTML = '<div style="color:var(--red);padding:12px">' + (e.message||e) + '</div>'; }
     }
   }
 }
@@ -4240,6 +4324,78 @@ function loadHypothesisLab() {
   } else {
     root.innerHTML = '<div style="padding:24px;color:#e15a5a">research_hypothesis.js not loaded</div>';
   }
+}
+
+// ── v0.3.0 synthesis view loaders ────────────────────────────────────────────
+// Each loader is idempotent — the underlying renderers either skip re-render
+// if their container is already populated (catalysts) or rebuild their own
+// controls in place (cluster, divergences, sector-flow, what-if).
+
+function loadCatalystsView() {
+  const host = document.getElementById('catalysts-host');
+  if (!host) return;
+  if (typeof window.renderCatalystTimeline !== 'function') {
+    host.innerHTML = '<div style="padding:24px;color:#e15a5a">synth_catalyst.js not loaded</div>';
+    return;
+  }
+  // Don't re-render if user is already interacting with the populated panel —
+  // the panel's own RUN button refreshes data in place.
+  if (host.childElementCount === 0) {
+    try { window.renderCatalystTimeline(host, { symbols: null, days_ahead: 60 }); }
+    catch(e) { host.innerHTML = '<div style="color:var(--red);padding:24px">' + (e.message||e) + '</div>'; }
+  }
+}
+
+function loadClusterView() {
+  const el = document.getElementById('cluster-panel');
+  if (!el) return;
+  if (typeof window.renderClusterScan !== 'function') {
+    el.innerHTML = '<div style="padding:24px;color:#e15a5a">synth_cluster.js not loaded</div>';
+    return;
+  }
+  try { window.renderClusterScan(el, { direction: 'bullish', min_sources: 4 }); }
+  catch(e) { el.innerHTML = '<div style="color:var(--red);padding:24px">' + (e.message||e) + '</div>'; }
+}
+
+function loadDivergencesView() {
+  const el = document.getElementById('divergence-map-host');
+  if (!el) return;
+  if (typeof window.renderDivergenceMap !== 'function') {
+    el.innerHTML = '<div style="padding:24px;color:#e15a5a">synth_divmap.js not loaded</div>';
+    return;
+  }
+  try { window.renderDivergenceMap(el, { universe: 'sp500_top100', top_n: 20 }); }
+  catch(e) { el.innerHTML = '<div style="color:var(--red);padding:24px">' + (e.message||e) + '</div>'; }
+}
+
+function loadSectorFlowView() {
+  // synth_sectorflow.js registers window.loadSectorFlow, which targets
+  // #view-sectorflow directly. Fall back to renderSectorFlow if needed.
+  const view = document.getElementById('view-sectorflow');
+  if (typeof window.loadSectorFlow === 'function') {
+    try { window.loadSectorFlow(); return; }
+    catch(e) {
+      if (view) view.innerHTML = '<div style="color:var(--red);padding:24px">' + (e.message||e) + '</div>';
+      return;
+    }
+  }
+  if (view && typeof window.renderSectorFlow === 'function') {
+    try { window.renderSectorFlow(view); }
+    catch(e) { view.innerHTML = '<div style="color:var(--red);padding:24px">' + (e.message||e) + '</div>'; }
+  } else if (view) {
+    view.innerHTML = '<div style="padding:24px;color:#e15a5a">synth_sectorflow.js not loaded</div>';
+  }
+}
+
+function loadWhatIfView() {
+  const el = document.getElementById('whatif-panel');
+  if (!el) return;
+  if (typeof window.renderWhatIf !== 'function') {
+    el.innerHTML = '<div style="padding:24px;color:#e15a5a">synth_whatif.js not loaded</div>';
+    return;
+  }
+  try { window.renderWhatIf(el, { holdings: window._lastPortfolioHoldings || null }); }
+  catch(e) { el.innerHTML = '<div style="color:var(--red);padding:24px">' + (e.message||e) + '</div>'; }
 }
 
 async function renderEquityChart(equityData, history) {
