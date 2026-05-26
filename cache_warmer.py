@@ -51,6 +51,11 @@ BENCHMARK_INTERVAL = 12 * 3600
 CHART_INTERVAL = 12 * 3600         # default research charts (6mo daily)
 SCORE_INTERVAL = 6 * 3600          # research_tracker scoring loop
 HYPOTHESIS_SCORE_INTERVAL = 24 * 3600  # research_hypothesis daily scoring
+# v0.3.0 synthesis: heavy fan-out scans worth pre-warming so the first
+# user click is instant. Each scan covers ~100 symbols × N sources and
+# would otherwise take 30-90s on a cold cache.
+CLUSTER_INTERVAL = 12 * 3600       # synth_cluster bull+bear scans
+DIVMAP_INTERVAL = 6 * 3600         # synth_divmap divergence scan
 INTER_REQUEST_DELAY = 1.2          # spacing between requests within a cycle
 
 # Cap how many portfolio symbols we warm per cycle so an unusually large
@@ -196,6 +201,44 @@ def _loop():
                 log.debug("hypothesis_score skipped: %s", e)
             time.sleep(INTER_REQUEST_DELAY)
 
+        # ── v0.3.0 synth_cluster cadence: every 12h, bull + bear ─────────
+        # A full SP500-top-100 scan takes 30-90s on cold cache; warm both
+        # directions so the first user click on the CLUSTER view is instant.
+        # Offsetting the bear scan after a small delay keeps the EDGAR /
+        # yfinance call burst spread out.
+        if now - _last_cycle.get("cluster_bull", 0) >= CLUSTER_INTERVAL:
+            try:
+                import synth_cluster
+                _safe("cluster_bull", synth_cluster.cluster_scan,
+                      universe=None, direction="bullish", min_sources=4)
+            except Exception as e:
+                log.debug("cluster_bull skipped: %s", e)
+            time.sleep(INTER_REQUEST_DELAY)
+        if now - _last_cycle.get("cluster_bear", 0) >= CLUSTER_INTERVAL:
+            try:
+                import synth_cluster
+                _safe("cluster_bear", synth_cluster.cluster_scan,
+                      universe=None, direction="bearish", min_sources=4)
+            except Exception as e:
+                log.debug("cluster_bear skipped: %s", e)
+            time.sleep(INTER_REQUEST_DELAY)
+
+        # ── v0.3.0 synth_divmap cadence: every 6h ────────────────────────
+        # The divergence map runs ~100 symbols × 5 signal pairs and is
+        # cached server-side for 1h. Warming every 6h keeps the default
+        # SP500-top-100 result fresh for users hitting the DIVERGENCES view.
+        if now - _last_cycle.get("divmap", 0) >= DIVMAP_INTERVAL:
+            try:
+                import synth_divmap
+                if hasattr(synth_divmap, "warm_default_scan"):
+                    _safe("divmap", synth_divmap.warm_default_scan)
+                else:
+                    _safe("divmap", synth_divmap.divergence_map,
+                          universe="sp500_top100", top_n=20)
+            except Exception as e:
+                log.debug("divmap skipped: %s", e)
+            time.sleep(INTER_REQUEST_DELAY)
+
         # Sleep until the next eligible cycle. 15s granularity keeps the
         # thread responsive without burning CPU.
         time.sleep(15)
@@ -229,5 +272,7 @@ def status() -> dict:
             "benchmark_interval": BENCHMARK_INTERVAL,
             "score_interval": SCORE_INTERVAL,
             "hypothesis_score_interval": HYPOTHESIS_SCORE_INTERVAL,
+            "cluster_interval": CLUSTER_INTERVAL,
+            "divmap_interval": DIVMAP_INTERVAL,
         },
     }
