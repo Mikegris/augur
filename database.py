@@ -254,42 +254,45 @@ def get_account(account_id):
 
 
 def add_account(name, account_type="brokerage", institution="", notes="", color=""):
-    conn = get_conn()
-    cur = conn.execute(
-        "INSERT INTO accounts (name, account_type, institution, notes, color) VALUES (?,?,?,?,?)",
-        (name, account_type, institution, notes, color)
-    )
-    conn.commit()
-    return cur.lastrowid
+    with _write_lock:
+        conn = get_conn()
+        cur = conn.execute(
+            "INSERT INTO accounts (name, account_type, institution, notes, color) VALUES (?,?,?,?,?)",
+            (name, account_type, institution, notes, color)
+        )
+        conn.commit()
+        return cur.lastrowid
 
 
 def update_account(account_id, name=None, account_type=None, institution=None, notes=None, color=None):
-    conn = get_conn()
-    acct = conn.execute("SELECT * FROM accounts WHERE id = ?", (account_id,)).fetchone()
-    if not acct:
-        return False
-    conn.execute(
-        "UPDATE accounts SET name=?, account_type=?, institution=?, notes=?, color=? WHERE id=?",
-        (
-            name if name is not None else acct["name"],
-            account_type if account_type is not None else acct["account_type"],
-            institution if institution is not None else acct["institution"],
-            notes if notes is not None else acct["notes"],
-            color if color is not None else acct["color"],
-            account_id,
+    with _write_lock:
+        conn = get_conn()
+        acct = conn.execute("SELECT * FROM accounts WHERE id = ?", (account_id,)).fetchone()
+        if not acct:
+            return False
+        conn.execute(
+            "UPDATE accounts SET name=?, account_type=?, institution=?, notes=?, color=? WHERE id=?",
+            (
+                name if name is not None else acct["name"],
+                account_type if account_type is not None else acct["account_type"],
+                institution if institution is not None else acct["institution"],
+                notes if notes is not None else acct["notes"],
+                color if color is not None else acct["color"],
+                account_id,
+            )
         )
-    )
-    conn.commit()
-    return True
+        conn.commit()
+        return True
 
 
 def delete_account(account_id):
-    conn = get_conn()
-    # Nullify portfolio/transaction references first
-    conn.execute("UPDATE portfolio SET account_id = NULL WHERE account_id = ?", (account_id,))
-    conn.execute("UPDATE transactions SET account_id = NULL WHERE account_id = ?", (account_id,))
-    conn.execute("DELETE FROM accounts WHERE id = ?", (account_id,))
-    conn.commit()
+    with _write_lock:
+        conn = get_conn()
+        # Nullify portfolio/transaction references first
+        conn.execute("UPDATE portfolio SET account_id = NULL WHERE account_id = ?", (account_id,))
+        conn.execute("UPDATE transactions SET account_id = NULL WHERE account_id = ?", (account_id,))
+        conn.execute("DELETE FROM accounts WHERE id = ?", (account_id,))
+        conn.commit()
 
 
 # ── Portfolio ──────────────────────────────────────────────────────────────────
@@ -346,26 +349,28 @@ def add_position(symbol, name, shares, avg_cost, asset_type="stock", sector="", 
 
 
 def update_position(pos_id, shares=None, avg_cost=None, notes=None, account_id=None):
-    conn = get_conn()
-    pos = conn.execute("SELECT * FROM portfolio WHERE id = ?", (pos_id,)).fetchone()
-    if not pos:
-        return False
-    new_shares = shares if shares is not None else pos["shares"]
-    new_cost = avg_cost if avg_cost is not None else pos["avg_cost"]
-    new_notes = notes if notes is not None else pos["notes"]
-    new_acct = account_id if account_id is not None else pos["account_id"]
-    conn.execute(
-        "UPDATE portfolio SET shares = ?, avg_cost = ?, notes = ?, account_id = ? WHERE id = ?",
-        (new_shares, new_cost, new_notes, new_acct, pos_id)
-    )
-    conn.commit()
-    return True
+    with _write_lock:
+        conn = get_conn()
+        pos = conn.execute("SELECT * FROM portfolio WHERE id = ?", (pos_id,)).fetchone()
+        if not pos:
+            return False
+        new_shares = shares if shares is not None else pos["shares"]
+        new_cost = avg_cost if avg_cost is not None else pos["avg_cost"]
+        new_notes = notes if notes is not None else pos["notes"]
+        new_acct = account_id if account_id is not None else pos["account_id"]
+        conn.execute(
+            "UPDATE portfolio SET shares = ?, avg_cost = ?, notes = ?, account_id = ? WHERE id = ?",
+            (new_shares, new_cost, new_notes, new_acct, pos_id)
+        )
+        conn.commit()
+        return True
 
 
 def delete_position(pos_id):
-    conn = get_conn()
-    conn.execute("DELETE FROM portfolio WHERE id = ?", (pos_id,))
-    conn.commit()
+    with _write_lock:
+        conn = get_conn()
+        conn.execute("DELETE FROM portfolio WHERE id = ?", (pos_id,))
+        conn.commit()
 
 
 # ── Watchlist ──────────────────────────────────────────────────────────────────
@@ -378,31 +383,33 @@ def get_watchlist():
 
 
 def add_to_watchlist(symbol, name="", asset_type="stock", alert_high=None, alert_low=None, notes=""):
-    conn = get_conn()
-    try:
-        conn.execute(
-            "INSERT INTO watchlist (symbol, name, asset_type, alert_high, alert_low, notes) VALUES (?,?,?,?,?,?)",
-            (symbol.upper(), name, asset_type, alert_high, alert_low, notes)
-        )
-        conn.commit()
-        result = True
-    except sqlite3.IntegrityError:
-        # Update alerts if already exists
-        conn.execute(
-            "UPDATE watchlist SET alert_high = ?, alert_low = ?, notes = ? WHERE symbol = ?",
-            (alert_high, alert_low, notes, symbol.upper())
-        )
-        conn.commit()
-        result = False
-    # connection reused (thread-local pool)
-    return result
+    with _write_lock:
+        conn = get_conn()
+        try:
+            conn.execute(
+                "INSERT INTO watchlist (symbol, name, asset_type, alert_high, alert_low, notes) VALUES (?,?,?,?,?,?)",
+                (symbol.upper(), name, asset_type, alert_high, alert_low, notes)
+            )
+            conn.commit()
+            result = True
+        except sqlite3.IntegrityError:
+            # Update alerts if already exists
+            conn.execute(
+                "UPDATE watchlist SET alert_high = ?, alert_low = ?, notes = ? WHERE symbol = ?",
+                (alert_high, alert_low, notes, symbol.upper())
+            )
+            conn.commit()
+            result = False
+        # connection reused (thread-local pool)
+        return result
 
 
 def delete_from_watchlist(wl_id):
-    conn = get_conn()
-    conn.execute("DELETE FROM watchlist WHERE id = ?", (wl_id,))
-    conn.commit()
-    # connection reused (thread-local pool)
+    with _write_lock:
+        conn = get_conn()
+        conn.execute("DELETE FROM watchlist WHERE id = ?", (wl_id,))
+        conn.commit()
+        # connection reused (thread-local pool)
 
 
 # ── Transactions ───────────────────────────────────────────────────────────────
@@ -426,15 +433,16 @@ def get_transactions(symbol=None, limit=100, account_id=None):
 
 
 def add_transaction(symbol, action, shares, price, fees=0, date=None, notes="", account_id=None):
-    conn = get_conn()
-    total = shares * price
-    if not date:
-        date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    conn.execute(
-        "INSERT INTO transactions (symbol, action, shares, price, total, fees, date, notes, account_id) VALUES (?,?,?,?,?,?,?,?,?)",
-        (symbol.upper(), action.upper(), shares, price, total, fees, date, notes, account_id)
-    )
-    conn.commit()
+    with _write_lock:
+        conn = get_conn()
+        total = shares * price
+        if not date:
+            date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        conn.execute(
+            "INSERT INTO transactions (symbol, action, shares, price, total, fees, date, notes, account_id) VALUES (?,?,?,?,?,?,?,?,?)",
+            (symbol.upper(), action.upper(), shares, price, total, fees, date, notes, account_id)
+        )
+        conn.commit()
 
 
 # ── Price Alerts ──────────────────────────────────────────────────────────────
@@ -454,39 +462,43 @@ def get_price_alerts(include_triggered=False):
 
 
 def add_price_alert(symbol, alert_type, price, note=""):
-    conn = get_conn()
-    cur = conn.execute(
-        "INSERT INTO price_alerts (symbol, alert_type, price, triggered) VALUES (?,?,?,0)",
-        (symbol.upper(), alert_type, price)
-    )
-    row_id = cur.lastrowid
-    conn.commit()
-    # connection reused (thread-local pool)
-    return row_id
+    with _write_lock:
+        conn = get_conn()
+        cur = conn.execute(
+            "INSERT INTO price_alerts (symbol, alert_type, price, triggered) VALUES (?,?,?,0)",
+            (symbol.upper(), alert_type, price)
+        )
+        row_id = cur.lastrowid
+        conn.commit()
+        # connection reused (thread-local pool)
+        return row_id
 
 
 def delete_price_alert(alert_id):
-    conn = get_conn()
-    conn.execute("DELETE FROM price_alerts WHERE id=?", (alert_id,))
-    conn.commit()
-    # connection reused (thread-local pool)
+    with _write_lock:
+        conn = get_conn()
+        conn.execute("DELETE FROM price_alerts WHERE id=?", (alert_id,))
+        conn.commit()
+        # connection reused (thread-local pool)
 
 
 def mark_alert_triggered(alert_id):
-    conn = get_conn()
-    conn.execute(
-        "UPDATE price_alerts SET triggered=1, triggered_at=CURRENT_TIMESTAMP WHERE id=?",
-        (alert_id,)
-    )
-    conn.commit()
-    # connection reused (thread-local pool)
+    with _write_lock:
+        conn = get_conn()
+        conn.execute(
+            "UPDATE price_alerts SET triggered=1, triggered_at=CURRENT_TIMESTAMP WHERE id=?",
+            (alert_id,)
+        )
+        conn.commit()
+        # connection reused (thread-local pool)
 
 
 def clear_triggered_alerts():
-    conn = get_conn()
-    conn.execute("DELETE FROM price_alerts WHERE triggered=1")
-    conn.commit()
-    # connection reused (thread-local pool)
+    with _write_lock:
+        conn = get_conn()
+        conn.execute("DELETE FROM price_alerts WHERE triggered=1")
+        conn.commit()
+        # connection reused (thread-local pool)
 
 
 # ── Settings ───────────────────────────────────────────────────────────────────
@@ -499,10 +511,11 @@ def get_settings():
 
 
 def set_setting(key, value):
-    conn = get_conn()
-    conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", (key, str(value)))
-    conn.commit()
-    # connection reused (thread-local pool)
+    with _write_lock:
+        conn = get_conn()
+        conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", (key, str(value)))
+        conn.commit()
+        # connection reused (thread-local pool)
 
 
 # ── AI Call Log (daily counter) ───────────────────────────────────────────────
@@ -587,25 +600,26 @@ def get_cached_filing(accession):
 
 def cache_filing(accession, ticker, form_type, filing_date, description, filing_text, ai_result):
     """Cache a filing with its AI analysis."""
-    conn = get_conn()
-    key_points = ai_result.get("key_points", [])
-    conn.execute(
-        """INSERT OR REPLACE INTO sec_filings_cache
-           (accession, ticker, form_type, filing_date, description, filing_text,
-            ai_signal, ai_summary, ai_key_points, ai_event_type, ai_powered, cached_at)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP)""",
-        (
-            accession, ticker, form_type, filing_date, description,
-            filing_text[:5000] if filing_text else "",
-            ai_result.get("signal", "NEUTRAL"),
-            ai_result.get("summary", ""),
-            json.dumps(key_points),
-            ai_result.get("event_type", ""),
-            1 if ai_result.get("ai_powered") else 0,
+    with _write_lock:
+        conn = get_conn()
+        key_points = ai_result.get("key_points", [])
+        conn.execute(
+            """INSERT OR REPLACE INTO sec_filings_cache
+               (accession, ticker, form_type, filing_date, description, filing_text,
+                ai_signal, ai_summary, ai_key_points, ai_event_type, ai_powered, cached_at)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP)""",
+            (
+                accession, ticker, form_type, filing_date, description,
+                filing_text[:5000] if filing_text else "",
+                ai_result.get("signal", "NEUTRAL"),
+                ai_result.get("summary", ""),
+                json.dumps(key_points),
+                ai_result.get("event_type", ""),
+                1 if ai_result.get("ai_powered") else 0,
+            )
         )
-    )
-    conn.commit()
-    # connection reused (thread-local pool)
+        conn.commit()
+        # connection reused (thread-local pool)
 
 
 def get_cached_insiders(ticker, days=90):
@@ -626,33 +640,34 @@ def cache_insider_transactions(ticker, transactions):
     """Bulk insert insider transactions, ignoring duplicates."""
     if not transactions:
         return
-    conn = get_conn()
-    for t in transactions:
-        try:
-            conn.execute(
-                """INSERT OR IGNORE INTO insider_transactions_cache
-                   (ticker, accession, insider_name, title, transaction_type, security,
-                    shares, price, value, shares_after, date, form_url, cached_at)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP)""",
-                (
-                    t.get("ticker", ticker).upper(),
-                    t.get("accession", ""),
-                    t.get("insider_name", ""),
-                    t.get("title", ""),
-                    t.get("transaction_type", ""),
-                    t.get("security", ""),
-                    t.get("shares"),
-                    t.get("price"),
-                    t.get("value"),
-                    t.get("shares_after"),
-                    t.get("date", ""),
-                    t.get("form_url", ""),
+    with _write_lock:
+        conn = get_conn()
+        for t in transactions:
+            try:
+                conn.execute(
+                    """INSERT OR IGNORE INTO insider_transactions_cache
+                       (ticker, accession, insider_name, title, transaction_type, security,
+                        shares, price, value, shares_after, date, form_url, cached_at)
+                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP)""",
+                    (
+                        t.get("ticker", ticker).upper(),
+                        t.get("accession", ""),
+                        t.get("insider_name", ""),
+                        t.get("title", ""),
+                        t.get("transaction_type", ""),
+                        t.get("security", ""),
+                        t.get("shares"),
+                        t.get("price"),
+                        t.get("value"),
+                        t.get("shares_after"),
+                        t.get("date", ""),
+                        t.get("form_url", ""),
+                    )
                 )
-            )
-        except Exception:
-            pass
-    conn.commit()
-    # connection reused (thread-local pool)
+            except Exception:
+                pass
+        conn.commit()
+        # connection reused (thread-local pool)
 
 
 def get_cached_institutional(fund_cik):
@@ -680,23 +695,24 @@ def get_cached_institutional(fund_cik):
 
 def cache_institutional(fund_name, fund_cik, data):
     """Save fund holdings data to cache."""
-    conn = get_conn()
-    holdings = data.get("holdings", [])
-    conn.execute(
-        """INSERT OR REPLACE INTO institutional_cache
-           (fund_name, fund_cik, filing_date, period, total_value_usd, holdings_json, cached_at)
-           VALUES (?,?,?,?,?,?,CURRENT_TIMESTAMP)""",
-        (
-            fund_name,
-            str(fund_cik),
-            data.get("filing_date", ""),
-            data.get("period_of_report", ""),
-            data.get("total_value", 0),
-            json.dumps(holdings),
+    with _write_lock:
+        conn = get_conn()
+        holdings = data.get("holdings", [])
+        conn.execute(
+            """INSERT OR REPLACE INTO institutional_cache
+               (fund_name, fund_cik, filing_date, period, total_value_usd, holdings_json, cached_at)
+               VALUES (?,?,?,?,?,?,CURRENT_TIMESTAMP)""",
+            (
+                fund_name,
+                str(fund_cik),
+                data.get("filing_date", ""),
+                data.get("period_of_report", ""),
+                data.get("total_value", 0),
+                json.dumps(holdings),
+            )
         )
-    )
-    conn.commit()
-    # connection reused (thread-local pool)
+        conn.commit()
+        # connection reused (thread-local pool)
 
 
 # ── Earnings Cache ─────────────────────────────────────────────────────────────
@@ -721,13 +737,14 @@ def get_cached_earnings_dossier(symbol, max_age_hours=6):
 
 def cache_earnings_dossier(symbol, dossier):
     """Cache an earnings dossier dict."""
-    conn = get_conn()
-    conn.execute(
-        "INSERT OR REPLACE INTO earnings_cache (symbol, dossier_json, cached_at) VALUES (?,?,CURRENT_TIMESTAMP)",
-        (symbol.upper(), json.dumps(dossier, default=str))
-    )
-    conn.commit()
-    # connection reused (thread-local pool)
+    with _write_lock:
+        conn = get_conn()
+        conn.execute(
+            "INSERT OR REPLACE INTO earnings_cache (symbol, dossier_json, cached_at) VALUES (?,?,CURRENT_TIMESTAMP)",
+            (symbol.upper(), json.dumps(dossier, default=str))
+        )
+        conn.commit()
+        # connection reused (thread-local pool)
 
 
 # ── Scanner History ────────────────────────────────────────────────────────────
