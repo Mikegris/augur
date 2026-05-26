@@ -52,8 +52,17 @@ _mem: dict = {}                    # key -> (value, expiry_ts)
 _mem_lock = threading.RLock()
 
 # Per-key locking so a stampede on key A doesn't block traffic for key B.
-_inflight: dict = {}               # key -> threading.Event
+# key -> (threading.Event, claimed_at_ts). The timestamp lets a periodic
+# sweep release events whose fetch_fn never returned (e.g. a network deadlock
+# inside a third-party HTTP client that ignored our timeout); without the
+# sweep the Event sits in memory forever and any subsequent caller for the
+# same key wastes 15s waiting on it before falling through.
+_inflight: dict = {}
 _inflight_lock = threading.Lock()
+# Events older than this are assumed orphaned and force-released by
+# _sweep_inflight(). The longest legitimate upstream calls (full SEC EDGAR
+# 10-K fetch + AI summary) take 60-90s, so 5min is a comfortable buffer.
+_INFLIGHT_MAX_AGE_SEC = 300.0
 
 # Thread-local sqlite connection so writes from the warmer thread don't
 # fight the request threads for the same connection object.
@@ -369,14 +378,19 @@ def coalesce(key, ttl: float, fetch_fn: Callable[[], Any]) -> Any:
         return cached
     k = _serialize_key(key)
 
+    # Opportunistic sweep of orphaned events so callers don't pay the
+    # full wait timeout on a key whose previous fetch_fn never returned.
+    _sweep_inflight()
+
     # Claim the in-flight slot or wait for the existing fetch.
     with _inflight_lock:
-        ev = _inflight.get(k)
-        if ev is not None:
+        entry = _inflight.get(k)
+        if entry is not None:
+            ev, _claimed_at = entry
             owner = False
         else:
             ev = threading.Event()
-            _inflight[k] = ev
+            _inflight[k] = (ev, time.time())
             owner = True
 
     if not owner:
@@ -398,6 +412,35 @@ def coalesce(key, ttl: float, fetch_fn: Callable[[], Any]) -> Any:
             with _inflight_lock:
                 _inflight.pop(k, None)
             ev.set()
+
+
+def _sweep_inflight() -> int:
+    """Release in-flight events whose fetch_fn appears to have died.
+
+    Returns the number of entries swept. Safe to call from any thread.
+    Cheap (lock-protected dict scan) and idempotent."""
+    now = time.time()
+    swept = 0
+    with _inflight_lock:
+        # Materialize to a list so we can mutate the dict during iteration.
+        stale = [
+            (kk, ev)
+            for kk, (ev, claimed_at) in _inflight.items()
+            if now - claimed_at > _INFLIGHT_MAX_AGE_SEC
+        ]
+        for kk, ev in stale:
+            _inflight.pop(kk, None)
+            swept += 1
+    # Set events OUTSIDE the lock — Event.set() can wake other threads that
+    # may try to re-acquire _inflight_lock immediately.
+    for _, ev in stale:
+        try:
+            ev.set()
+        except Exception:
+            pass
+    if swept:
+        log.info("cache: swept %d orphaned in-flight events", swept)
+    return swept
 
 
 def stats() -> dict:
