@@ -56,6 +56,7 @@ HYPOTHESIS_SCORE_INTERVAL = 24 * 3600  # research_hypothesis daily scoring
 # would otherwise take 30-90s on a cold cache.
 CLUSTER_INTERVAL = 12 * 3600       # synth_cluster bull+bear scans
 DIVMAP_INTERVAL = 6 * 3600         # synth_divmap divergence scan
+SECTORFLOW_INTERVAL = 30 * 60      # synth_sectorflow heatmap (11 ETFs × 12 signals)
 INTER_REQUEST_DELAY = 1.2          # spacing between requests within a cycle
 
 # Cap how many portfolio symbols we warm per cycle so an unusually large
@@ -237,6 +238,19 @@ def _loop():
                           universe="sp500_top100", top_n=20)
             except Exception as e:
                 log.debug("divmap skipped: %s", e)
+            time.sleep(INTER_REQUEST_DELAY)
+
+        # ── v0.3.3 synth_sectorflow cadence: every 30 min ────────────────
+        # The sector-flow heatmap fans 11 sector ETFs against ~12 overlay
+        # signals (price, RS, narrative, insider, congress, options, etc.)
+        # and is cached server-side for 10 min. Cold-cache cost is 20-40s,
+        # so we keep it pre-warm for the MARKETS → SECTOR FLOW view.
+        if now - _last_cycle.get("sectorflow", 0) >= SECTORFLOW_INTERVAL:
+            try:
+                import synth_sectorflow
+                _safe("sectorflow", synth_sectorflow.sector_flow)
+            except Exception as e:
+                log.debug("sectorflow skipped: %s", e)
             time.sleep(INTER_REQUEST_DELAY)
 
         # Sleep until the next eligible cycle. 15s granularity keeps the
