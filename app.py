@@ -3010,7 +3010,16 @@ def synth_divergence_map_route():
         universe = body.get("universe")
         top_n = _safe_int(body.get("top_n"), 20)
     else:
-        universe = request.args.get("universe") or "sp500_top100"
+        # GET accepts the literal "sp500_top100" label OR a comma-separated
+        # symbol list. Without this split, `?universe=AAPL,MSFT` is treated
+        # as an unknown label inside synth_divmap._universe_to_list and
+        # silently falls back to scanning the entire SP500 top-100 — which
+        # times out every browser request.
+        universe_param = request.args.get("universe") or "sp500_top100"
+        if universe_param == "sp500_top100":
+            universe = None
+        else:
+            universe = [s.strip().upper() for s in universe_param.split(",") if s.strip()]
         top_n = _safe_int(request.args.get("top_n"), 20)
     try:
         return jsonify(synth_divmap.divergence_map(universe=universe, top_n=top_n))
