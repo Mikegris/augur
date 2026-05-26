@@ -1435,6 +1435,12 @@ def smart_money_score(symbol):
     import smart_money
     try:
         result = smart_money.compute_score(symbol.upper())
+        # Best-effort tracker log; never let a tracker hiccup break the panel.
+        try:
+            if 'research_tracker' in globals() and research_tracker:
+                research_tracker.log_smart_money(symbol.upper(), result)
+        except Exception:
+            pass
         return jsonify(result)
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -1544,6 +1550,11 @@ def ml_forecast_route(symbol):
         result = mlf.ml_forecast(symbol.upper())
         if "error" in result:
             return jsonify(result), 400
+        try:
+            if 'research_tracker' in globals() and research_tracker:
+                research_tracker.log_ml_forecast(symbol.upper(), result)
+        except Exception:
+            pass
         # Convert numpy/datetime types for JSON serialization
         return Response(
             json.dumps(result, default=str),
@@ -1562,6 +1573,11 @@ def gex_analysis(symbol):
         result = gex_engine.compute_gex(symbol.upper())
         if "error" in result:
             return jsonify(result), 400
+        try:
+            if 'research_tracker' in globals() and research_tracker:
+                research_tracker.log_gex(symbol.upper(), result)
+        except Exception:
+            pass
         return Response(json.dumps(result, default=str), mimetype="application/json")
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -1613,6 +1629,11 @@ def narrative_analysis(symbol):
         result = narrative_engine.analyze_narrative(symbol.upper())
         if "error" in result:
             return jsonify(result), 400
+        try:
+            if 'research_tracker' in globals() and research_tracker:
+                research_tracker.log_narrative(symbol.upper(), result)
+        except Exception:
+            pass
         return Response(json.dumps(result, default=str), mimetype="application/json")
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -2296,6 +2317,514 @@ def cache_clear():
         import cache_store
         n = cache_store.clear()
         return jsonify({"cleared": n})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+# ─── Research modules (v0.2.0) ──────────────────────────────────────
+# All routes below live under /api/research/* and back the 10 new research
+# panels added in v0.2.0. Each module is loaded in a guarded try/except so
+# a single broken import can't take down the entire route table. See the
+# INTEGRATE_*.md files at repo root for the spec each route implements.
+
+try:
+    import research_backtest
+except Exception as _bt_err:
+    research_backtest = None
+    log.warning("research_backtest unavailable: %s", _bt_err)
+
+try:
+    import research_eventstudy
+except Exception as _es_err:
+    research_eventstudy = None
+    log.warning("research_eventstudy unavailable: %s", _es_err)
+
+try:
+    import research_factors
+except Exception as _ff_err:
+    research_factors = None
+    log.warning("research_factors unavailable: %s", _ff_err)
+
+try:
+    import research_hypothesis
+except Exception as _rh_err:
+    research_hypothesis = None
+    log.warning("research_hypothesis unavailable: %s", _rh_err)
+
+try:
+    import research_iv_density
+except Exception as _rnd_err:
+    research_iv_density = None
+    log.warning("research_iv_density unavailable: %s", _rnd_err)
+
+try:
+    import research_montecarlo as _mc_mod
+except Exception as _mc_err:
+    _mc_mod = None
+    log.warning("research_montecarlo unavailable: %s", _mc_err)
+
+try:
+    import research_multihorizon
+except Exception as _mh_err:
+    research_multihorizon = None
+    log.warning("research_multihorizon unavailable: %s", _mh_err)
+
+try:
+    import research_optimizer
+except Exception as _opt_err:
+    research_optimizer = None
+    log.warning("research_optimizer unavailable: %s", _opt_err)
+
+try:
+    import research_probforecast as _pf_mod
+except Exception as _pf_err:
+    _pf_mod = None
+    log.warning("research_probforecast unavailable: %s", _pf_err)
+
+try:
+    import research_tracker
+    research_tracker.init_tracker_db()  # idempotent — creates signal_forecasts table
+except Exception as _rt_err:
+    research_tracker = None
+    log.warning("research_tracker unavailable: %s", _rt_err)
+
+
+# ── 1. Backtest ─────────────────────────────────────────────────────
+@app.route("/api/research/backtest")
+def research_backtest_route():
+    if research_backtest is None:
+        return jsonify({"error": "research_backtest module not available"}), 500
+    symbol = (request.args.get("symbol") or "").upper()
+    if not _valid_ticker(symbol):
+        return jsonify({"error": "Invalid symbol"}), 400
+    signal_name = (request.args.get("signal") or "momentum").strip()
+    signal_fn = research_backtest.get_adapter(signal_name)
+    if signal_fn is None:
+        return jsonify({
+            "error": "Unknown signal '%s'. Available: %s" % (
+                signal_name, ", ".join(research_backtest.ADAPTERS.keys()),
+            ),
+        }), 400
+    start = request.args.get("start") or None
+    end = request.args.get("end") or None
+    horizon_override = _safe_int(request.args.get("horizon_override"), 0) or None
+    try:
+        result = research_backtest.run_backtest(
+            signal_fn, symbol,
+            start=start, end=end, horizon_override=horizon_override,
+        )
+        return jsonify(result)
+    except Exception as e:
+        log.exception("backtest failure")
+        return jsonify({"error": str(e)}), 500
+
+
+# ── 2. Event Study ──────────────────────────────────────────────────
+@app.route("/api/research/event-study/<symbol>")
+def research_event_study_route(symbol):
+    if research_eventstudy is None:
+        return jsonify({"error": "research_eventstudy module not available"}), 500
+    if not _valid_ticker(symbol):
+        return jsonify({"error": "Invalid symbol"}), 400
+    try:
+        event_type = request.args.get("event_type", "earnings")
+        window_days = _safe_int(request.args.get("window_days"), 10)
+        period_years = _safe_int(request.args.get("period_years"), 10)
+        benchmark = request.args.get("benchmark", "SPY")
+        return jsonify(research_eventstudy.event_study(
+            symbol.upper(),
+            event_type=event_type,
+            window_days=window_days,
+            period_years=period_years,
+            benchmark=benchmark,
+        ))
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+# ── 3. Fama-French Factors ─────────────────────────────────────────
+@app.route("/api/research/factors/<symbol>")
+def research_factors_symbol(symbol):
+    if not research_factors:
+        return jsonify({"error": "research_factors module not available"}), 500
+    if not _valid_ticker(symbol):
+        return jsonify({"error": "Invalid symbol"}), 400
+    try:
+        years = _safe_int(request.args.get("years"), 5)
+        return jsonify(research_factors.factor_exposure(symbol.upper(), years))
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/research/factors/portfolio", methods=["GET", "POST"])
+def research_factors_portfolio():
+    if not research_factors:
+        return jsonify({"error": "research_factors module not available"}), 500
+    try:
+        years = _safe_int(request.args.get("years"), 5)
+        holdings = []
+        if request.method == "POST":
+            body = request.get_json(silent=True) or {}
+            holdings = body.get("holdings") or []
+        if not holdings:
+            try:
+                rows = db.get_portfolio() or []
+                holdings = [
+                    {"symbol": h["symbol"], "market_value": h.get("market_value", 0)}
+                    for h in rows
+                ]
+            except Exception:
+                holdings = []
+        return jsonify(research_factors.portfolio_factor_exposure(holdings, years))
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+# ── 4. Hypothesis Lab ───────────────────────────────────────────────
+@app.route("/api/research/hypothesis/generate", methods=["POST"])
+def api_hypothesis_generate():
+    if not research_hypothesis:
+        return jsonify({"error": "research_hypothesis module not available"}), 500
+    try:
+        data = request.get_json(silent=True) or {}
+        symbol = (data.get("symbol") or "").strip().upper()
+        if not symbol:
+            return jsonify({"error": "symbol required"}), 400
+        return jsonify(research_hypothesis.generate_hypothesis(symbol))
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/research/hypothesis/save", methods=["POST"])
+def api_hypothesis_save():
+    if not research_hypothesis:
+        return jsonify({"error": "research_hypothesis module not available"}), 500
+    try:
+        data = request.get_json(silent=True) or {}
+        symbol = (data.get("symbol") or "").strip().upper()
+        hyp = data.get("hypothesis") or {}
+        if not symbol or not isinstance(hyp, dict):
+            return jsonify({"error": "symbol and hypothesis required"}), 400
+        hid = research_hypothesis.save_hypothesis(
+            hyp, symbol, source=data.get("source", "ai"),
+        )
+        return jsonify({"id": hid})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 400
+
+
+@app.route("/api/research/hypothesis", methods=["GET"])
+def api_hypothesis_list():
+    if not research_hypothesis:
+        return jsonify({"error": "research_hypothesis module not available"}), 500
+    try:
+        status = request.args.get("status")
+        symbol = request.args.get("symbol")
+        limit = _safe_int(request.args.get("limit"), 50)
+        return jsonify(research_hypothesis.list_hypotheses(
+            status=status, symbol=symbol, limit=limit,
+        ))
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/research/hypothesis/<int:hid>/status", methods=["POST"])
+def api_hypothesis_set_status(hid):
+    if not research_hypothesis:
+        return jsonify({"error": "research_hypothesis module not available"}), 500
+    try:
+        data = request.get_json(silent=True) or {}
+        status = (data.get("status") or "").strip().upper()
+        ok = research_hypothesis.update_hypothesis_status(hid, status)
+        return jsonify({"ok": ok})
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/research/hypothesis/<int:hid>/score", methods=["POST"])
+def api_hypothesis_score(hid):
+    if not research_hypothesis:
+        return jsonify({"error": "research_hypothesis module not available"}), 500
+    try:
+        return jsonify(research_hypothesis.score_hypothesis(hid))
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/research/hypothesis/stats", methods=["GET"])
+def api_hypothesis_stats():
+    if not research_hypothesis:
+        return jsonify({"error": "research_hypothesis module not available"}), 500
+    try:
+        return jsonify(research_hypothesis.stats())
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+# ── 5. IV Risk-Neutral Density ─────────────────────────────────────
+@app.route("/api/research/rnd/<symbol>")
+def research_rnd_default(symbol):
+    if not research_iv_density:
+        return jsonify({"error": "research_iv_density module not available"}), 500
+    if not _valid_ticker(symbol):
+        return jsonify({"error": "Invalid symbol"}), 400
+    try:
+        return jsonify(research_iv_density.risk_neutral_density(symbol.upper()))
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/research/rnd/<symbol>/<expiry>")
+def research_rnd_with_expiry(symbol, expiry):
+    if not research_iv_density:
+        return jsonify({"error": "research_iv_density module not available"}), 500
+    if not _valid_ticker(symbol):
+        return jsonify({"error": "Invalid symbol"}), 400
+    if not re.match(r"^\d{4}-\d{2}-\d{2}$", expiry or ""):
+        return jsonify({"error": "Expiry must be YYYY-MM-DD"}), 400
+    try:
+        return jsonify(research_iv_density.risk_neutral_density(symbol.upper(), expiry))
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+# ── 6. Monte Carlo ──────────────────────────────────────────────────
+def _mc_holdings_from_portfolio(account_id=None):
+    """Return [{symbol, market_value}, ...] freshly priced from the DB."""
+    try:
+        rows = db.get_portfolio(account_id=account_id) if account_id is not None \
+            else db.get_portfolio()
+    except TypeError:
+        rows = db.get_portfolio() or []
+    if not rows:
+        return []
+    stock_syms = [h["symbol"] for h in rows if h.get("asset_type") != "crypto"]
+    crypto_syms = [h["symbol"] for h in rows if h.get("asset_type") == "crypto"]
+    prices = {}
+    if stock_syms:
+        try:
+            prices.update(fetcher.get_quotes_batch(stock_syms))
+        except Exception:
+            pass
+    if crypto_syms:
+        try:
+            cp = fetcher.get_quotes_batch([s + "-USD" for s in crypto_syms])
+            for s in crypto_syms:
+                v = cp.get((s + "-USD").upper())
+                if v:
+                    prices[s] = v
+        except Exception:
+            pass
+    out = []
+    for h in rows:
+        q = prices.get(h["symbol"]) or {}
+        px = q.get("price")
+        if not px:
+            continue
+        mv = px * h["shares"]
+        if mv <= 0:
+            continue
+        sym = h["symbol"] + "-USD" if h.get("asset_type") == "crypto" else h["symbol"]
+        out.append({"symbol": sym, "market_value": round(mv, 2)})
+    return out
+
+
+@app.route("/api/research/montecarlo", methods=["POST"])
+def research_montecarlo_route():
+    if not _mc_mod:
+        return jsonify({"error": "research_montecarlo module not available"}), 500
+    try:
+        data = request.get_json(force=True, silent=True) or {}
+        holdings = data.get("holdings") or []
+        if not isinstance(holdings, list) or not holdings:
+            return jsonify({"error": "holdings: non-empty list required"}), 400
+        horizon = _safe_int(data.get("horizon_days"), 365)
+        n_paths = _safe_int(data.get("n_paths"), 10000)
+        method = (data.get("method") or "historical_bootstrap").strip()
+        seed = data.get("seed")
+        if seed is not None:
+            try:
+                seed = int(seed)
+            except (TypeError, ValueError):
+                seed = None
+        sim = _mc_mod.simulate_portfolio(
+            holdings, n_paths=n_paths, horizon_days=horizon,
+            method=method, seed=seed,
+        )
+        target = data.get("target_nav")
+        if target is not None:
+            try:
+                pt = _mc_mod.prob_of_target(
+                    holdings, float(target), horizon_days=horizon,
+                    n_paths=n_paths, method=method, seed=seed,
+                )
+                sim["prob_of_target"] = pt
+            except (TypeError, ValueError):
+                pass
+        return jsonify(sim)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/research/montecarlo/portfolio", methods=["GET"])
+def research_montecarlo_portfolio():
+    if not _mc_mod:
+        return jsonify({"error": "research_montecarlo module not available"}), 500
+    try:
+        acct = request.args.get("account_id")
+        holdings = _mc_holdings_from_portfolio(
+            account_id=_safe_int(acct, None) if acct else None
+        )
+        if not holdings:
+            return jsonify({"error": "No portfolio holdings available"}), 400
+        horizon = _safe_int(request.args.get("horizon_days"), 365)
+        n_paths = _safe_int(request.args.get("n_paths"), 10000)
+        method = request.args.get("method") or "historical_bootstrap"
+        sim = _mc_mod.simulate_portfolio(
+            holdings, n_paths=n_paths, horizon_days=horizon, method=method,
+        )
+        return jsonify(sim)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+# ── 7. Multi-Horizon Forecast ──────────────────────────────────────
+@app.route("/api/research/horizons/<symbol>")
+def research_horizons(symbol):
+    if not research_multihorizon:
+        return jsonify({"error": "research_multihorizon module not available"}), 500
+    if not _valid_ticker(symbol):
+        return jsonify({"error": "Invalid symbol"}), 400
+    try:
+        return jsonify(research_multihorizon.multi_horizon_forecast(symbol.upper()))
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+# ── 8. Portfolio Optimizer ─────────────────────────────────────────
+@app.route("/api/research/optimize", methods=["POST"])
+def research_optimize():
+    if not research_optimizer:
+        return jsonify({"error": "research_optimizer module not available"}), 500
+    try:
+        body = request.get_json(silent=True) or {}
+        symbols = [
+            s.strip().upper() for s in (body.get("symbols") or [])
+            if isinstance(s, str) and s.strip()
+        ]
+        if not symbols:
+            return jsonify({"error": "symbols list is required"}), 400
+        objective = (body.get("objective") or "max_sharpe").strip().lower()
+        constraints = body.get("constraints") or {}
+        current_weights = body.get("current_weights") or {}
+
+        if objective == "risk_parity":
+            result = research_optimizer.risk_parity(
+                symbols, period=constraints.get("period", "2y"),
+            )
+        elif objective == "black_litterman":
+            views = body.get("views") or []
+            view_conf = body.get("view_confidence") or []
+            mkt_caps = body.get("mkt_caps") or {}
+            result = research_optimizer.black_litterman(
+                symbols=symbols,
+                mkt_caps=mkt_caps,
+                views=views,
+                view_confidence=view_conf,
+                period=constraints.get("period", "2y"),
+                risk_aversion=float(constraints.get("risk_aversion", 2.5)),
+                tau=float(constraints.get("tau", 0.05)),
+            )
+        else:
+            result = research_optimizer.markowitz_optimize(
+                symbols, objective=objective, constraints=constraints,
+            )
+
+        if isinstance(result, dict) and "error" in result:
+            return jsonify({"error": result["error"]}), 422
+
+        if isinstance(current_weights, dict) and current_weights:
+            try:
+                cmp_out = research_optimizer.compare_to_current(
+                    current_weights={k.upper(): float(v) for k, v in current_weights.items()},
+                    optimal_weights=result["weights"],
+                    period=constraints.get("period", "2y"),
+                )
+            except Exception as ce:
+                log.warning("compare_to_current failed: %s", ce)
+                cmp_out = {"delta": {}, "tracking_error_pct": None, "symbols": []}
+        else:
+            cmp_out = {"delta": {}, "tracking_error_pct": None, "symbols": []}
+
+        return jsonify({"optimal": result, "compare": cmp_out})
+    except Exception as e:
+        log.exception("optimize failed")
+        return jsonify({"error": str(e)}), 500
+
+
+# ── 9. Probabilistic Forecast ──────────────────────────────────────
+@app.route("/api/research/probforecast/<symbol>", methods=["GET"])
+def research_probforecast(symbol):
+    if not _pf_mod:
+        return jsonify({"error": "research_probforecast module not available"}), 500
+    try:
+        horizon = _safe_int(request.args.get("horizon"), 20)
+        n_boot = _safe_int(request.args.get("n"), 2000)
+        return jsonify(_pf_mod.prob_forecast(symbol, horizon_days=horizon, n_bootstrap=n_boot))
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/research/probforecast/<symbol>/vs-point", methods=["GET"])
+def research_probforecast_vs_point(symbol):
+    if not _pf_mod:
+        return jsonify({"error": "research_probforecast module not available"}), 500
+    try:
+        horizon = _safe_int(request.args.get("horizon"), 20)
+        return jsonify(_pf_mod.compare_to_point(symbol, horizon_days=horizon))
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+# ── 10. Signal Tracker ─────────────────────────────────────────────
+@app.route("/api/research/track/<signal_name>")
+def research_track_record(signal_name):
+    if not research_tracker:
+        return jsonify({"error": "research_tracker module not available"}), 500
+    if not signal_name or not signal_name.replace("_", "").isalnum():
+        return jsonify({"error": "Invalid signal name"}), 400
+    try:
+        since = request.args.get("since")
+        symbol = request.args.get("symbol")
+        return jsonify(research_tracker.get_track_record(
+            signal_name, since=since, symbol=symbol,
+        ))
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/research/track/<signal_name>/calls")
+def research_track_calls(signal_name):
+    if not research_tracker:
+        return jsonify({"error": "research_tracker module not available"}), 500
+    if not signal_name or not signal_name.replace("_", "").isalnum():
+        return jsonify({"error": "Invalid signal name"}), 400
+    try:
+        limit = _safe_int(request.args.get("limit"), 20)
+        calls = research_tracker.get_recent_calls(signal_name, limit=limit)
+        return jsonify({"calls": calls, "signal_name": signal_name})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/research/track/_score", methods=["POST"])
+def research_track_score_now():
+    if not research_tracker:
+        return jsonify({"error": "research_tracker module not available"}), 500
+    try:
+        return jsonify(research_tracker.score_due_forecasts())
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
