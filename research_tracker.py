@@ -433,6 +433,27 @@ def get_recent_calls(signal_name: str, limit: int = 20) -> List[Dict[str, Any]]:
     return out
 
 
+def prune_old_forecasts(max_age_days: int = 365) -> int:
+    """Delete signal_forecasts rows older than `max_age_days`.
+
+    Without this, the live-tracker table grows monotonically — fine for
+    a few weeks but unbounded over years of use. 1 year is plenty of
+    history for the hit-rate / Sharpe statistics we compute. Called from
+    the cache_warmer on a daily cadence.
+
+    Returns the number of rows pruned.
+    """
+    init_tracker_db()
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=max_age_days)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    with _write_lock:
+        conn = _get_conn()
+        cur = conn.execute(
+            "DELETE FROM signal_forecasts WHERE issued_at < ?", (cutoff,)
+        )
+        conn.commit()
+        return cur.rowcount or 0
+
+
 # ── per-signal hook integrators ─────────────────────────────────────────────
 # Each is intentionally permissive: it accepts the raw result dict from the
 # upstream module, extracts what it needs, and silently no-ops if the shape

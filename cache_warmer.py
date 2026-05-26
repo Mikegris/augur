@@ -202,6 +202,19 @@ def _loop():
                 log.debug("hypothesis_score skipped: %s", e)
             time.sleep(INTER_REQUEST_DELAY)
 
+        # ── tracker prune cadence: every 24h ────────────────────────────
+        # signal_forecasts grows monotonically as the tracker logs every
+        # signal. 1 year of history is plenty for hit-rate / Sharpe stats;
+        # without this, an active user can accumulate hundreds of MB of
+        # tracker rows over a few years.
+        if now - _last_cycle.get("tracker_prune", 0) >= HYPOTHESIS_SCORE_INTERVAL:
+            try:
+                import research_tracker
+                _safe("tracker_prune", research_tracker.prune_old_forecasts, 365)
+            except Exception as e:
+                log.debug("tracker_prune skipped: %s", e)
+            time.sleep(INTER_REQUEST_DELAY)
+
         # ── v0.3.0 synth_cluster cadence: every 12h, bull + bear ─────────
         # A full SP500-top-100 scan takes 30-90s on cold cache; warm both
         # directions so the first user click on the CLUSTER view is instant.
