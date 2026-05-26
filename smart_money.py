@@ -16,11 +16,29 @@ Components:
 
 import logging
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 import yfinance as yf
 
 import fetcher
+
+try:
+    from zoneinfo import ZoneInfo
+    _ET = ZoneInfo("America/New_York")
+except Exception:  # pragma: no cover — Py3.9 without tzdata
+    _ET = None
+
+
+def _today_et() -> datetime:
+    """Return now anchored to America/New_York (option/market wall clock).
+
+    Falls back to a naive local `datetime.today()` when zoneinfo is unavailable
+    so the module still imports — the underlying date-arithmetic is identical
+    whenever the host is already in ET, and only drifts by ~1 day off-hours
+    in foreign time zones."""
+    if _ET is not None:
+        return datetime.now(_ET).replace(tzinfo=None)
+    return datetime.today()
 
 log = logging.getLogger(__name__)
 
@@ -57,7 +75,9 @@ def _score_insiders(symbol, days=90):
     if not txns:
         return 12, []
 
-    cutoff = datetime.now() - timedelta(days=days)
+    # Anchor cutoff to ET so SEC Form 4 dates (which are filed on US business
+    # days) line up with the same wall-clock window the user sees.
+    cutoff = _today_et() - timedelta(days=days)
     recent = []
     for t in txns:
         try:
@@ -198,8 +218,10 @@ def _score_options(ticker, current_price, hist):
         if not exps:
             return 8
 
-        # Find nearest expiry ~30-45 days out
-        today = datetime.today()
+        # Find nearest expiry ~30-45 days out. Options expire at 16:00 ET on
+        # the listed Friday, so anchor "today" to ET to avoid a 1-day drift
+        # for callers running outside US time zones.
+        today = _today_et()
         target = []
         for exp in exps:
             try:
