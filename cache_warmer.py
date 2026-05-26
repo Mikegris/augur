@@ -57,6 +57,10 @@ HYPOTHESIS_SCORE_INTERVAL = 24 * 3600  # research_hypothesis daily scoring
 CLUSTER_INTERVAL = 12 * 3600       # synth_cluster bull+bear scans
 DIVMAP_INTERVAL = 6 * 3600         # synth_divmap divergence scan
 SECTORFLOW_INTERVAL = 30 * 60      # synth_sectorflow heatmap (11 ETFs × 12 signals)
+# Daily housekeeping: prune monotonically-growing tables + occasional VACUUM.
+# Without this an active user's wealth.db grows without bound (observed 535MB).
+PRUNE_INTERVAL = 24 * 3600
+VACUUM_INTERVAL = 7 * 24 * 3600
 INTER_REQUEST_DELAY = 1.2          # spacing between requests within a cycle
 
 # Cap how many portfolio symbols we warm per cycle so an unusually large
@@ -251,6 +255,28 @@ def _loop():
                           universe="sp500_top100", top_n=20)
             except Exception as e:
                 log.debug("divmap skipped: %s", e)
+            time.sleep(INTER_REQUEST_DELAY)
+
+        # ── daily prune of monotonically-growing tables ─────────────────
+        # Scanner history, snapshots (downsampled), TTL-expired cache rows,
+        # idea_pool, and ai_call_log all grow without bound without this.
+        if now - _last_cycle.get("prune", 0) >= PRUNE_INTERVAL:
+            try:
+                import database as _db
+                _safe("prune", _db.run_daily_prune)
+            except Exception as e:
+                log.debug("prune skipped: %s", e)
+            time.sleep(INTER_REQUEST_DELAY)
+
+        # ── weekly VACUUM to reclaim freed pages ────────────────────────
+        # DELETEs leave SQLite pages fragmented; without VACUUM the file
+        # never shrinks even after a big prune.
+        if now - _last_cycle.get("vacuum", 0) >= VACUUM_INTERVAL:
+            try:
+                import database as _db
+                _safe("vacuum", _db.vacuum_db)
+            except Exception as e:
+                log.debug("vacuum skipped: %s", e)
             time.sleep(INTER_REQUEST_DELAY)
 
         # ── v0.3.3 synth_sectorflow cadence: every 30 min ────────────────
