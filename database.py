@@ -797,3 +797,186 @@ def get_scanner_watchlist(limit=20, days=30):
         (f"-{int(days)} days", limit)
     ).fetchall()
     return [dict(r) for r in rows]
+
+
+# ── Prune helpers ──────────────────────────────────────────────────────────────
+#
+# Every table below grows monotonically with usage. The warmer (cache_warmer.py)
+# calls these on a daily cadence so an active user's wealth.db doesn't balloon
+# past a gigabyte over a few months.
+
+def prune_scanner_history(days=90):
+    """Drop scanner_history rows older than `days`. Returns rows deleted."""
+    with _write_lock:
+        conn = get_conn()
+        cur = conn.execute(
+            "DELETE FROM scanner_history WHERE datetime(scanned_at) < datetime('now', ?)",
+            (f"-{int(days)} days",)
+        )
+        conn.commit()
+        return cur.rowcount or 0
+
+
+def prune_portfolio_snapshots(keep_daily_days=365):
+    """Downsample portfolio_snapshots: keep every daily row within the last
+    `keep_daily_days` days, but for rows older than that keep only the LAST
+    snapshot per calendar month. Returns rows deleted."""
+    with _write_lock:
+        conn = get_conn()
+        # For each (year-month) older than the cutoff, keep only the row with
+        # the maximum date. Delete everything else in that month.
+        cur = conn.execute(
+            """DELETE FROM portfolio_snapshots
+               WHERE date < date('now', ?)
+                 AND date NOT IN (
+                     SELECT MAX(date) FROM portfolio_snapshots
+                     WHERE date < date('now', ?)
+                     GROUP BY substr(date, 1, 7)
+                 )""",
+            (f"-{int(keep_daily_days)} days", f"-{int(keep_daily_days)} days")
+        )
+        conn.commit()
+        return cur.rowcount or 0
+
+
+def prune_insider_cache(days=90):
+    """Drop insider_transactions_cache rows older than `days` by cached_at."""
+    with _write_lock:
+        conn = get_conn()
+        cur = conn.execute(
+            "DELETE FROM insider_transactions_cache WHERE datetime(cached_at) < datetime('now', ?)",
+            (f"-{int(days)} days",)
+        )
+        conn.commit()
+        return cur.rowcount or 0
+
+
+def prune_institutional_cache(days=30):
+    """Drop institutional_cache rows older than `days` by cached_at.
+    The lookup helper already filters to <=7d; older rows are dead weight."""
+    with _write_lock:
+        conn = get_conn()
+        cur = conn.execute(
+            "DELETE FROM institutional_cache WHERE datetime(cached_at) < datetime('now', ?)",
+            (f"-{int(days)} days",)
+        )
+        conn.commit()
+        return cur.rowcount or 0
+
+
+def prune_sec_filings_cache(days=30):
+    """Drop sec_filings_cache rows older than `days` by cached_at.
+    The lookup helper filters to <=24h; older AI-analyzed rows are dead weight."""
+    with _write_lock:
+        conn = get_conn()
+        cur = conn.execute(
+            "DELETE FROM sec_filings_cache WHERE datetime(cached_at) < datetime('now', ?)",
+            (f"-{int(days)} days",)
+        )
+        conn.commit()
+        return cur.rowcount or 0
+
+
+def prune_earnings_cache(hours=48):
+    """Drop earnings_cache rows older than `hours` by cached_at.
+    Lookup helper filters to <=6h; this is a safety net for stale rows."""
+    with _write_lock:
+        conn = get_conn()
+        cur = conn.execute(
+            "DELETE FROM earnings_cache WHERE datetime(cached_at) < datetime('now', ?)",
+            (f"-{int(hours)} hours",)
+        )
+        conn.commit()
+        return cur.rowcount or 0
+
+
+def prune_idea_pool(keep_n=500):
+    """Keep only the most recently warmed `keep_n` idea_pool rows."""
+    with _write_lock:
+        conn = get_conn()
+        # idea_pool may not exist yet on a brand-new DB; tolerate the miss.
+        try:
+            cur = conn.execute(
+                """DELETE FROM idea_pool
+                   WHERE rowid NOT IN (
+                       SELECT rowid FROM idea_pool
+                       ORDER BY warmed_at DESC LIMIT ?
+                   )""",
+                (int(keep_n),)
+            )
+            conn.commit()
+            return cur.rowcount or 0
+        except sqlite3.OperationalError:
+            return 0
+
+
+def prune_ai_call_log(days=90):
+    """Drop ai_call_log rows older than `days`."""
+    with _write_lock:
+        conn = get_conn()
+        cur = conn.execute(
+            "DELETE FROM ai_call_log WHERE date < date('now', ?)",
+            (f"-{int(days)} days",)
+        )
+        conn.commit()
+        return cur.rowcount or 0
+
+
+def vacuum_db():
+    """Reclaim disk pages freed by DELETEs. Cannot run inside a transaction,
+    so we commit any pending writes first. Returns the new file size in bytes
+    (or -1 if the DB path can't be stat'd)."""
+    with _write_lock:
+        conn = get_conn()
+        try:
+            conn.commit()  # close any open implicit txn
+        except Exception:
+            pass
+        try:
+            conn.execute("VACUUM")
+        except sqlite3.OperationalError:
+            # Some SQLite builds reject VACUUM under WAL mode if a reader is
+            # still active. Best-effort — just skip on failure.
+            return -1
+        try:
+            return os.path.getsize(DB_PATH)
+        except OSError:
+            return -1
+
+
+def run_daily_prune():
+    """Run all prune helpers in one go. Returns a dict of rows deleted by table."""
+    out = {}
+    try:
+        out["scanner_history"] = prune_scanner_history(90)
+    except Exception:
+        out["scanner_history"] = -1
+    try:
+        out["portfolio_snapshots"] = prune_portfolio_snapshots(365)
+    except Exception:
+        out["portfolio_snapshots"] = -1
+    try:
+        out["insider_transactions_cache"] = prune_insider_cache(90)
+    except Exception:
+        out["insider_transactions_cache"] = -1
+    try:
+        out["institutional_cache"] = prune_institutional_cache(30)
+    except Exception:
+        out["institutional_cache"] = -1
+    try:
+        out["sec_filings_cache"] = prune_sec_filings_cache(30)
+    except Exception:
+        out["sec_filings_cache"] = -1
+    try:
+        out["earnings_cache"] = prune_earnings_cache(48)
+    except Exception:
+        out["earnings_cache"] = -1
+    try:
+        out["idea_pool"] = prune_idea_pool(500)
+    except Exception:
+        out["idea_pool"] = -1
+    try:
+        out["ai_call_log"] = prune_ai_call_log(90)
+    except Exception:
+        out["ai_call_log"] = -1
+    return out
