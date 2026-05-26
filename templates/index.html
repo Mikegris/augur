@@ -284,6 +284,33 @@
       <div class="loading"><div class="spinner"></div></div>
     </div>
 
+    <!-- ── v0.3.0 SYNTHESIS PANELS ────────────────────────────── -->
+
+    <!-- CATALYSTS (synthesis) -->
+    <div id="view-catalysts" class="view">
+      <div id="catalysts-host"></div>
+    </div>
+
+    <!-- CLUSTER SCAN (synthesis) -->
+    <div id="view-cluster" class="view">
+      <div id="cluster-panel"></div>
+    </div>
+
+    <!-- DIVERGENCE MAP (synthesis) -->
+    <div id="view-divergences" class="view">
+      <div id="divergence-map-host" class="card" style="padding:12px"></div>
+    </div>
+
+    <!-- SECTOR FLOW (synthesis) -->
+    <div id="view-sectorflow" class="view">
+      <div class="loading"><div class="spinner"></div></div>
+    </div>
+
+    <!-- WHAT-IF (synthesis) -->
+    <div id="view-whatif" class="view">
+      <div id="whatif-panel"></div>
+    </div>
+
   </main>
 
   <!-- ── Status Bar ──────────────────────────────────────────── -->
@@ -642,6 +669,19 @@
 <script src="/static/js/research_optimizer.js?v=1"></script>
 <script src="/static/js/research_probforecast.js?v=1"></script>
 <script src="/static/js/research_tracker.js?v=1"></script>
+
+<!-- v0.3.0 synthesis modules — cross-source fusion / what-if / cluster scan.
+     Each registers window.render*  (or loadSectorFlow) globals. -->
+<script src="/static/js/synth_bayessmart.js?v=1"></script>
+<script src="/static/js/synth_catalyst.js?v=1"></script>
+<script src="/static/js/synth_cluster.js?v=1"></script>
+<script src="/static/js/synth_consensus.js?v=1"></script>
+<script src="/static/js/synth_divmap.js?v=1"></script>
+<script src="/static/js/synth_groundhyp.js?v=1"></script>
+<script src="/static/js/synth_macrotranslate.js?v=1"></script>
+<script src="/static/js/synth_peerdiv.js?v=1"></script>
+<script src="/static/js/synth_sectorflow.js?v=1"></script>
+<script src="/static/js/synth_whatif.js?v=1"></script>
 
 <!-- Inline: pre-populate research quick buttons -->
 <script>
