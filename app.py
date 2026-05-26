@@ -2829,6 +2829,344 @@ def research_track_score_now():
         return jsonify({"error": str(e)}), 500
 
 
+# ─── Synthesis modules (v0.3.0) ─────────────────────────────────────
+# Cross-source synthesis layer that fuses signals across the existing
+# research / signals / market modules. Each module is read-only with
+# respect to existing files; all per-module caching is handled inside
+# each `synth_*` module via cache_store.coalesce. Routes are grouped
+# under /api/synth/* and guarded so a single broken import can't take
+# down the rest of the table.
+
+try:
+    import synth_bayessmart
+except Exception as _bs_err:
+    synth_bayessmart = None
+    log.warning("synth_bayessmart unavailable: %s", _bs_err)
+
+try:
+    import synth_catalyst
+except Exception as _sc_err:
+    synth_catalyst = None
+    log.warning("synth_catalyst unavailable: %s", _sc_err)
+
+try:
+    import synth_cluster
+except Exception as _scl_err:
+    synth_cluster = None
+    log.warning("synth_cluster unavailable: %s", _scl_err)
+
+try:
+    import synth_consensus
+except Exception as _scs_err:
+    synth_consensus = None
+    log.warning("synth_consensus unavailable: %s", _scs_err)
+
+try:
+    import synth_divmap
+except Exception as _dm_err:
+    synth_divmap = None
+    log.warning("synth_divmap unavailable: %s", _dm_err)
+
+try:
+    import synth_groundhyp
+except Exception as _sgh_err:
+    synth_groundhyp = None
+    log.warning("synth_groundhyp unavailable: %s", _sgh_err)
+
+try:
+    import synth_macrotranslate
+except Exception as _mt_err:
+    synth_macrotranslate = None
+    log.warning("synth_macrotranslate unavailable: %s", _mt_err)
+
+try:
+    import synth_peerdiv
+except Exception as _pd_err:
+    synth_peerdiv = None
+    log.warning("synth_peerdiv unavailable: %s", _pd_err)
+
+try:
+    import synth_sectorflow
+except Exception as _sf_err:
+    synth_sectorflow = None
+    log.warning("synth_sectorflow unavailable: %s", _sf_err)
+
+try:
+    import synth_whatif
+except Exception as _wif_err:
+    synth_whatif = None
+    log.warning("synth_whatif unavailable: %s", _wif_err)
+
+
+# ── 1. Bayesian-reweighted Smart-Money composite ────────────────────
+@app.route("/api/synth/bayes-smart-money/<symbol>")
+def synth_bayes_smart_money_route(symbol):
+    if not synth_bayessmart:
+        return jsonify({"error": "synth_bayessmart module not available"}), 500
+    if not _valid_ticker(symbol):
+        return jsonify({"error": "Invalid symbol"}), 400
+    try:
+        result = synth_bayessmart.bayes_smart_money(symbol.upper())
+        try:
+            synth_bayessmart.log_bayes_smart_money(symbol.upper(), result)
+        except Exception:
+            pass
+        return jsonify(result)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+# ── 2. Catalyst Timeline ────────────────────────────────────────────
+@app.route("/api/synth/catalyst", methods=["GET"])
+def synth_catalyst_get():
+    if synth_catalyst is None:
+        return jsonify({"error": "synth_catalyst module not available"}), 500
+    days_ahead = _safe_int(request.args.get("days_ahead"), 60)
+    try:
+        return jsonify(synth_catalyst.catalyst_timeline(symbols=None, days_ahead=days_ahead))
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/synth/catalyst", methods=["POST"])
+def synth_catalyst_post():
+    if synth_catalyst is None:
+        return jsonify({"error": "synth_catalyst module not available"}), 500
+    body = request.get_json(silent=True) or {}
+    syms = body.get("symbols") or []
+    if not isinstance(syms, list):
+        return jsonify({"error": "`symbols` must be an array"}), 400
+    syms = [str(s).strip().upper() for s in syms if str(s).strip()]
+    syms = [s for s in syms if _valid_ticker(s)][:25]
+    days_ahead = _safe_int(body.get("days_ahead"), 60)
+    try:
+        return jsonify(synth_catalyst.catalyst_timeline(symbols=syms, days_ahead=days_ahead))
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+# ── 3. Cluster Scan ─────────────────────────────────────────────────
+@app.route("/api/synth/cluster-scan", methods=["GET"])
+def synth_cluster_scan_get():
+    if not synth_cluster:
+        return jsonify({"error": "synth_cluster module not available"}), 500
+    direction = (request.args.get("direction") or "bullish").lower()
+    if direction not in ("bullish", "bearish"):
+        direction = "bullish"
+    min_sources = _safe_int(request.args.get("min_sources"), 4)
+    universe_param = request.args.get("universe") or "sp500_top100"
+    if universe_param == "sp500_top100":
+        universe = None
+    else:
+        universe = [s.strip().upper() for s in universe_param.split(",") if s.strip()]
+    try:
+        return jsonify(synth_cluster.cluster_scan(
+            universe=universe, direction=direction, min_sources=min_sources,
+        ))
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/synth/cluster-scan", methods=["POST"])
+def synth_cluster_scan_post():
+    if not synth_cluster:
+        return jsonify({"error": "synth_cluster module not available"}), 500
+    body = request.get_json(silent=True) or {}
+    direction = (body.get("direction") or "bullish").lower()
+    if direction not in ("bullish", "bearish"):
+        direction = "bullish"
+    min_sources = _safe_int(body.get("min_sources"), 4)
+    universe = body.get("universe")
+    if universe is not None and not isinstance(universe, list):
+        return jsonify({"error": "universe must be a list of symbols"}), 400
+    try:
+        return jsonify(synth_cluster.cluster_scan(
+            universe=universe, direction=direction, min_sources=min_sources,
+        ))
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+# ── 4. Cross-source Consensus ───────────────────────────────────────
+@app.route("/api/synth/consensus/<symbol>")
+def synth_consensus_route(symbol):
+    if not synth_consensus:
+        return jsonify({"error": "synth_consensus module not available"}), 500
+    if not _valid_ticker(symbol):
+        return jsonify({"error": "Invalid symbol"}), 400
+    try:
+        return jsonify(synth_consensus.consensus_score(symbol.upper()))
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+# ── 5. Divergence Map ───────────────────────────────────────────────
+@app.route("/api/synth/divergence-map", methods=["GET", "POST"])
+def synth_divergence_map_route():
+    if not synth_divmap:
+        return jsonify({"error": "synth_divmap module not available"}), 500
+    if request.method == "POST":
+        body = request.get_json(silent=True) or {}
+        universe = body.get("universe")
+        top_n = _safe_int(body.get("top_n"), 20)
+    else:
+        universe = request.args.get("universe") or "sp500_top100"
+        top_n = _safe_int(request.args.get("top_n"), 20)
+    try:
+        return jsonify(synth_divmap.divergence_map(universe=universe, top_n=top_n))
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+# ── 6. Pattern-Grounded Hypothesis ──────────────────────────────────
+@app.route("/api/synth/grounded-hypothesis/<symbol>", methods=["POST"])
+def synth_grounded_hypothesis_route(symbol):
+    if synth_groundhyp is None:
+        return jsonify({"error": "synth_groundhyp module not available"}), 500
+    if not _valid_ticker(symbol):
+        return jsonify({"error": "Invalid symbol"}), 400
+    try:
+        return jsonify(synth_groundhyp.grounded_hypothesis(symbol.upper()))
+    except Exception as e:
+        log.exception("grounded_hypothesis failed")
+        return jsonify({"error": str(e)}), 500
+
+
+# ── 7. Cross-Asset Macro Translator ─────────────────────────────────
+@app.route("/api/synth/macrotranslate/releases")
+def synth_macrotranslate_catalog():
+    if not synth_macrotranslate:
+        return jsonify({"error": "synth_macrotranslate module not available"}), 500
+    try:
+        return jsonify({"releases": synth_macrotranslate.supported_releases()})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/synth/macrotranslate/<release_id>")
+def synth_macrotranslate_get(release_id):
+    if not synth_macrotranslate:
+        return jsonify({"error": "synth_macrotranslate module not available"}), 500
+    surprise = request.args.get("surprise")
+    try:
+        surprise_pct = float(surprise) if surprise not in (None, "") else None
+    except (TypeError, ValueError):
+        surprise_pct = None
+    try:
+        return jsonify(synth_macrotranslate.macro_translate(release_id, surprise_pct=surprise_pct))
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/synth/macrotranslate/<release_id>/portfolio", methods=["POST"])
+def synth_macrotranslate_portfolio(release_id):
+    if not synth_macrotranslate:
+        return jsonify({"error": "synth_macrotranslate module not available"}), 500
+    body = request.get_json(silent=True) or {}
+    holdings = body.get("holdings") or []
+    surprise_pct = body.get("surprise_pct")
+    if not holdings:
+        # Fall back to the current portfolio so a no-body POST works.
+        try:
+            rows = db.get_portfolio() or []
+            holdings = []
+            for h in rows:
+                mv = (h.get("shares") or 0) * (h.get("avg_cost") or 0)
+                if mv > 0:
+                    holdings.append({"symbol": h["symbol"], "market_value": float(mv)})
+        except Exception:
+            holdings = []
+    try:
+        surprise_pct = float(surprise_pct) if surprise_pct not in (None, "") else None
+    except (TypeError, ValueError):
+        surprise_pct = None
+    try:
+        return jsonify(synth_macrotranslate.macro_translate(
+            release_id, surprise_pct=surprise_pct, portfolio_holdings=holdings))
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+# ── 8. Peer Divergence ──────────────────────────────────────────────
+@app.route("/api/synth/peerdiv/<symbol>")
+def synth_peerdiv_route(symbol):
+    if not synth_peerdiv:
+        return jsonify({"error": "synth_peerdiv module not available"}), 500
+    if not _valid_ticker(symbol):
+        return jsonify({"error": "Invalid symbol"}), 400
+    n = _safe_int(request.args.get("n"), 5)
+    n = max(1, min(n, 12))
+    try:
+        return jsonify(synth_peerdiv.peer_divergence(symbol.upper(), n))
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+# ── 9. Sector Flow ──────────────────────────────────────────────────
+@app.route("/api/synth/sectorflow")
+def synth_sectorflow_route():
+    if synth_sectorflow is None:
+        return jsonify({"error": "synth_sectorflow module not available"}), 500
+    try:
+        return jsonify(synth_sectorflow.sector_flow())
+    except Exception as e:
+        log.exception("sectorflow failure")
+        return jsonify({"error": str(e)}), 500
+
+
+# ── 10. Portfolio What-If ───────────────────────────────────────────
+@app.route("/api/synth/whatif", methods=["POST"])
+def synth_whatif_post():
+    if not synth_whatif:
+        return jsonify({"error": "synth_whatif module not available"}), 500
+    body = request.get_json(silent=True) or {}
+    current = body.get("current_holdings") or []
+    candidate = body.get("candidate") or {}
+    if not isinstance(current, list) or not isinstance(candidate, dict):
+        return jsonify({"error": "expected JSON {current_holdings:[...], candidate:{...}}"}), 400
+    try:
+        return jsonify(synth_whatif.whatif(current, candidate))
+    except Exception as e:
+        log.exception("synth_whatif failed")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/synth/whatif", methods=["GET"])
+def synth_whatif_get():
+    """Convenience GET that pulls current_holdings from the DB and accepts
+    candidate parameters via query string (?symbol=...&market_value=...&action=...)."""
+    if not synth_whatif:
+        return jsonify({"error": "synth_whatif module not available"}), 500
+    sym = (request.args.get("symbol") or "").strip().upper()
+    try:
+        mv = float(request.args.get("market_value") or 0.0)
+    except (TypeError, ValueError):
+        mv = 0.0
+    action = (request.args.get("action") or "add").lower()
+    if not sym or mv < 0:
+        return jsonify({"error": "need ?symbol=...&market_value=...&action=add|remove|resize_to"}), 400
+    acct = request.args.get("account_id")
+    holdings_raw = db.get_portfolio(account_id=int(acct) if acct and acct.isdigit() else None)
+    enriched = []
+    for h in holdings_raw or []:
+        mv_h = (h.get("shares") or 0) * (h.get("avg_cost") or 0)
+        if mv_h <= 0:
+            continue
+        enriched.append({
+            "symbol": h["symbol"],
+            "market_value": float(mv_h),
+            "asset_type": h.get("asset_type", "stock"),
+            "shares": h.get("shares"),
+            "avg_cost": h.get("avg_cost"),
+        })
+    try:
+        return jsonify(synth_whatif.whatif(enriched, {
+            "symbol": sym, "market_value": mv, "action": action,
+        }))
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
 def _start_idea_warmer(debug_mode: bool = False):
     """Boot the pre-warmer thread (idempotent). Skip during the Flask
     reloader's parent process — otherwise both parent and child would each
