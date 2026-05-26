@@ -56,6 +56,17 @@ LOCAL_MODULES = [
     "sec_filings_v2",
     "smart_money",
     "synthetic_insider",
+    # ── Synthesis modules (v0.3.0) ───────────────────────────────────
+    "synth_bayessmart",
+    "synth_catalyst",
+    "synth_cluster",
+    "synth_consensus",
+    "synth_divmap",
+    "synth_groundhyp",
+    "synth_macrotranslate",
+    "synth_peerdiv",
+    "synth_sectorflow",
+    "synth_whatif",
 ]
 
 # Third-party packages with dynamic imports or namespace-package quirks that
