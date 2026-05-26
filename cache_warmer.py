@@ -49,6 +49,8 @@ FUNDAMENTALS_INTERVAL = 12 * 3600
 NEWS_INTERVAL = 6 * 3600
 BENCHMARK_INTERVAL = 12 * 3600
 CHART_INTERVAL = 12 * 3600         # default research charts (6mo daily)
+SCORE_INTERVAL = 6 * 3600          # research_tracker scoring loop
+HYPOTHESIS_SCORE_INTERVAL = 24 * 3600  # research_hypothesis daily scoring
 INTER_REQUEST_DELAY = 1.2          # spacing between requests within a cycle
 
 # Cap how many portfolio symbols we warm per cycle so an unusually large
@@ -168,6 +170,32 @@ def _loop():
                 time.sleep(INTER_REQUEST_DELAY)
             _last_cycle["chart"] = time.time()
 
+        # ── score-due forecasts cadence: every 6h ────────────────────────
+        # research_tracker queues a row each time a tracked signal panel
+        # is hit. After `horizon_days` elapse we price each against the
+        # close and compute hit-rate. Module owns its own DB connection;
+        # the scorer is idempotent and capped at 200 rows/call so a long
+        # backlog can't pin the warmer for minutes.
+        if now - _last_cycle.get("tracker_score", 0) >= SCORE_INTERVAL:
+            try:
+                import research_tracker
+                _safe("tracker_score", research_tracker.score_due_forecasts)
+            except Exception as e:
+                log.debug("tracker_score skipped: %s", e)
+            time.sleep(INTER_REQUEST_DELAY)
+
+        # ── score-due hypotheses cadence: every 24h ──────────────────────
+        # research_hypothesis owns its own `hypotheses` table; scoring
+        # walks all open rows whose horizon has elapsed and computes
+        # realized vs predicted return + direction match.
+        if now - _last_cycle.get("hypothesis_score", 0) >= HYPOTHESIS_SCORE_INTERVAL:
+            try:
+                import research_hypothesis
+                _safe("hypothesis_score", research_hypothesis.score_due_hypotheses)
+            except Exception as e:
+                log.debug("hypothesis_score skipped: %s", e)
+            time.sleep(INTER_REQUEST_DELAY)
+
         # Sleep until the next eligible cycle. 15s granularity keeps the
         # thread responsive without burning CPU.
         time.sleep(15)
@@ -199,5 +227,7 @@ def status() -> dict:
             "fundamentals_interval": FUNDAMENTALS_INTERVAL,
             "news_interval": NEWS_INTERVAL,
             "benchmark_interval": BENCHMARK_INTERVAL,
+            "score_interval": SCORE_INTERVAL,
+            "hypothesis_score_interval": HYPOTHESIS_SCORE_INTERVAL,
         },
     }
