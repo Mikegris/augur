@@ -138,32 +138,30 @@ class _CachedResp:
 
 
 def _edgar_get(url, params=None, timeout=30):
-    """GET from EDGAR with rate limiting + persistent caching.
+    """GET from EDGAR with rate limiting + persistent caching + request coalescing.
 
     Cached on the full (url, params) tuple via `cache_store`. TTL is picked
     by URL pattern (see `_edgar_ttl_for`). Concurrency across threads is
     bounded by `_EDGAR_CONCURRENCY` so the parallel Form 4 fetcher can't
     burst past SEC's 10 req/sec limit.
+
+    Uses `cache_store.coalesce` so simultaneous misses for the same URL
+    only result in ONE upstream fetch — the other callers wait on the
+    in-flight Event and read the cached result. Without this, cold-cache
+    multi-symbol scans (peerdiv, divmap, cluster) all hit
+    `/files/company_tickers.json` in parallel and trigger SEC's 429
+    rate-limiter, which then burns through urllib3's Retry budget and
+    stalls every caller for tens of seconds.
     """
     cache_key = ("edgar_get", url, json.dumps(params, sort_keys=True) if params else "")
     ttl = _edgar_ttl_for(url)
 
-    if cache_store is not None:
-        cached = cache_store.cache_get(cache_key)
-        if cached is not None:
-            return _CachedResp(cached)
-
-    with _EDGAR_CONCURRENCY:
-        time.sleep(0.12)
-        session = _get_session()
-        resp = session.get(url, params=params, timeout=timeout)
-        resp.raise_for_status()
-
-    # Persist the response. Store .text always; record parsed JSON when the
-    # server actually returned it so callers that use .json() don't pay a
-    # re-parse. Only cache 2xx — error envelopes are filtered upstream by
-    # cache_store anyway, but checking explicitly keeps intent clear.
-    if cache_store is not None and 200 <= resp.status_code < 300:
+    def _do_fetch():
+        with _EDGAR_CONCURRENCY:
+            time.sleep(0.12)
+            session = _get_session()
+            resp = session.get(url, params=params, timeout=timeout)
+            resp.raise_for_status()
         payload = {"status_code": resp.status_code, "text": resp.text}
         ctype = (resp.headers.get("Content-Type") or "").lower()
         if "json" in ctype:
@@ -171,11 +169,21 @@ def _edgar_get(url, params=None, timeout=30):
                 payload["json"] = resp.json()
             except Exception:
                 pass
+        return payload
+
+    if cache_store is not None:
         try:
-            cache_store.cache_set(cache_key, payload, ttl)
+            payload = cache_store.coalesce(cache_key, ttl, _do_fetch)
+            return _CachedResp(payload)
         except Exception:
+            # If cache_store hiccups, fall through to a direct fetch so the
+            # request still goes out. coalesce should not normally fail
+            # for our key types.
             pass
-    return resp
+
+    # cache_store unavailable — direct fetch.
+    payload = _do_fetch()
+    return _CachedResp(payload)
 
 
 def get_cik(ticker):
