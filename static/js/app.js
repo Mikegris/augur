@@ -348,13 +348,17 @@ const NAV_GROUPS = {
   research: {
     label: 'RESEARCH',
     items: [
-      { view: 'research',  label: 'Research' },
-      { view: 'analytics', label: 'Analytics' },
-      { view: 'intel',     label: 'Intel' },
-      { view: 'earnings',  label: 'Earnings' },
-      { view: 'screener',  label: 'Screener' },
-      { view: 'narrative', label: 'Narrative' },
-      { view: 'alt-data',  label: 'Alt Data' },
+      { view: 'research',     label: 'Research' },
+      { view: 'analytics',    label: 'Analytics' },
+      { view: 'backtest',     label: 'Backtest' },
+      { view: 'optimizer',    label: 'Optimizer' },
+      { view: 'montecarlo',   label: 'Monte Carlo' },
+      { view: 'research-lab', label: 'Research Lab' },
+      { view: 'intel',        label: 'Intel' },
+      { view: 'earnings',     label: 'Earnings' },
+      { view: 'screener',     label: 'Screener' },
+      { view: 'narrative',    label: 'Narrative' },
+      { view: 'alt-data',     label: 'Alt Data' },
     ],
   },
   alpha: {
@@ -456,6 +460,10 @@ function navigate(view) {
     case 'liquidity':        loadLiquidityView(); break;
     case 'alt-data':         loadAltDataView(); break;
     case 'ideas':            loadIdeasView(); break;
+    case 'backtest':         loadBacktest(); break;
+    case 'optimizer':        loadOptimizer(); break;
+    case 'montecarlo':       loadMonteCarloView(); break;
+    case 'research-lab':     loadHypothesisLab(); break;
   }
 }
 
@@ -1421,14 +1429,19 @@ async function loadResearchFor(symbol) {
       <!-- Quick-glance fundamentals strip -->
       ${renderFundamentalsStrip(fund)}
 
-      <!-- Tabs: Chart / Fundamentals / News / Options / SEC / Intel -->
-      <div class="research-tabs" style="display:flex;gap:0;border-bottom:1px solid var(--border);margin-bottom:8px">
+      <!-- Tabs: Chart / Fundamentals / News / Options / SEC / Intel / v0.2.0 -->
+      <div class="research-tabs" style="display:flex;flex-wrap:wrap;gap:0;border-bottom:1px solid var(--border);margin-bottom:8px">
         <button class="research-tab active" id="rtab-chart" onclick="switchResearchTab('chart','${symbol}')">CHART</button>
         <button class="research-tab" id="rtab-fundamentals" onclick="switchResearchTab('fundamentals','${symbol}')">FUNDAMENTALS</button>
         <button class="research-tab" id="rtab-news" onclick="switchResearchTab('news','${symbol}')">NEWS</button>
         <button class="research-tab" id="rtab-options" onclick="switchResearchTab('options','${symbol}')">OPTIONS</button>
+        <button class="research-tab" id="rtab-rnd" onclick="switchResearchTab('rnd','${symbol}')">IV DENSITY</button>
         <button class="research-tab" id="rtab-sec" onclick="switchResearchTab('sec','${symbol}')">SEC</button>
         <button class="research-tab" id="rtab-intel" onclick="switchResearchTab('intel','${symbol}')">⊕ INTEL</button>
+        <button class="research-tab" id="rtab-forecast" onclick="switchResearchTab('forecast','${symbol}')">FORECAST</button>
+        <button class="research-tab" id="rtab-horizons" onclick="switchResearchTab('horizons','${symbol}')">HORIZONS</button>
+        <button class="research-tab" id="rtab-factors" onclick="switchResearchTab('factors','${symbol}')">FACTORS</button>
+        <button class="research-tab" id="rtab-eventstudy" onclick="switchResearchTab('eventstudy','${symbol}')">EVENT STUDY</button>
       </div>
 
       <!-- Chart Tab -->
@@ -1518,6 +1531,53 @@ async function loadResearchFor(symbol) {
             </div>
           </div>
         </div>
+      </div>
+
+      <!-- IV DENSITY Tab (v0.2.0) -->
+      <div id="rpanel-rnd" style="display:none">
+        <div id="rnd-body-${symbol}">
+          <div class="loading"><div class="spinner"></div> Loading implied density…</div>
+        </div>
+      </div>
+
+      <!-- FORECAST Tab (probabilistic forecast — v0.2.0) -->
+      <div id="rpanel-forecast" style="display:none">
+        <section class="panel mb-8">
+          <div class="panel-header">
+            <span class="panel-title">PROBABILISTIC FORECAST</span>
+            <div class="flex gap-8 align-center">
+              <span style="font-size:10px;color:var(--text-dim)">HORIZON:</span>
+              <select class="form-select" data-pf-horizon
+                      style="font-size:11px;padding:2px 6px">
+                <option value="5">5D</option>
+                <option value="20" selected>20D</option>
+                <option value="60">60D</option>
+                <option value="120">120D</option>
+              </select>
+            </div>
+          </div>
+          <div id="probforecast-panel" class="panel-body"></div>
+        </section>
+      </div>
+
+      <!-- HORIZONS Tab (multi-horizon forecast — v0.2.0) -->
+      <div id="rpanel-horizons" style="display:none">
+        <div class="panel" id="mh-panel-wrapper">
+          <div class="panel-header">
+            <div class="panel-title">MULTI-HORIZON FORECAST</div>
+          </div>
+          <div class="panel-body" id="mh-panel"></div>
+        </div>
+      </div>
+
+      <!-- FACTORS Tab (Fama-French — v0.2.0) -->
+      <div id="rpanel-factors" style="display:none">
+        <div id="factor-exposure-host" class="card"></div>
+      </div>
+
+      <!-- EVENT STUDY Tab (v0.2.0) -->
+      <div id="rpanel-eventstudy" style="display:none">
+        <div id="es-container-${symbol}"></div>
       </div>
     `;
 
@@ -3541,6 +3601,13 @@ const VIEW_LOADERS = {
   narrative:    () => loadNarrativeView(),
   reflexivity:  () => loadReflexivityView(),
   liquidity:    () => loadLiquidityView(),
+  // v0.2.0 research views — opt them into auto-refresh. Backtest results
+  // are cached server-side for 6h so this is cheap; optimizer/montecarlo
+  // re-render their own controls and only fire heavy work on user action.
+  backtest:     () => loadBacktest(),
+  optimizer:    () => loadOptimizer(),
+  montecarlo:   () => loadMonteCarloView(),
+  'research-lab': () => loadHypothesisLab(),
   // Research is intentionally excluded — re-loading would yank the
   // chart out from under the user mid-interaction.
 };
@@ -3660,7 +3727,11 @@ async function init() {
 
 // ── Research Tabs ─────────────────────────────────────────────────────────────
 function switchResearchTab(tab, symbol) {
-  const tabs = ['chart', 'fundamentals', 'news', 'options', 'sec', 'intel'];
+  const tabs = [
+    'chart', 'fundamentals', 'news', 'options', 'sec', 'intel',
+    // v0.2.0 research tabs
+    'rnd', 'forecast', 'horizons', 'factors', 'eventstudy',
+  ];
   tabs.forEach(t => {
     const btn = document.getElementById('rtab-' + t);
     const panel = document.getElementById('rpanel-' + t);
@@ -3679,8 +3750,54 @@ function switchResearchTab(tab, symbol) {
     loadResearchSecTab(symbol);
   } else if (tab === 'intel') {
     loadResearchIntelTab(symbol);
+  } else if (tab === 'rnd') {
+    const body = document.getElementById('rnd-body-' + symbol);
+    if (body && body.dataset.loaded !== '1' && window.ResearchIVDensity) {
+      body.dataset.loaded = '1';
+      try { window.ResearchIVDensity.render(body, symbol); }
+      catch(e) { body.innerHTML = '<div style="color:var(--red);padding:12px">' + (e.message||e) + '</div>'; }
+    }
+  } else if (tab === 'forecast') {
+    const pfHost = document.getElementById('probforecast-panel');
+    if (pfHost && window.renderProbForecast && pfHost.dataset.loaded !== '1') {
+      pfHost.dataset.loaded = '1';
+      const sel = document.querySelector('[data-pf-horizon]');
+      const horizon = sel ? (parseInt(sel.value, 10) || 20) : 20;
+      try { window.renderProbForecast(pfHost, symbol, horizon); }
+      catch(e) { pfHost.innerHTML = '<div style="color:var(--red);padding:12px">' + (e.message||e) + '</div>'; }
+    }
+  } else if (tab === 'horizons') {
+    const mhEl = document.getElementById('mh-panel');
+    if (mhEl && window.renderMultiHorizon && mhEl.dataset.loaded !== '1') {
+      mhEl.dataset.loaded = '1';
+      try { window.renderMultiHorizon(mhEl, symbol); }
+      catch(e) { mhEl.innerHTML = '<div style="color:var(--red);padding:12px">' + (e.message||e) + '</div>'; }
+    }
+  } else if (tab === 'factors') {
+    const fEl = document.getElementById('factor-exposure-host');
+    if (fEl && window.renderFactorExposure && fEl.dataset.loaded !== '1') {
+      fEl.dataset.loaded = '1';
+      try { window.renderFactorExposure(fEl, symbol, { years: 3 }); }
+      catch(e) { fEl.innerHTML = '<div style="color:var(--red);padding:12px">' + (e.message||e) + '</div>'; }
+    }
+  } else if (tab === 'eventstudy') {
+    const esEl = document.getElementById('es-container-' + symbol);
+    if (esEl && esEl.childElementCount === 0 && typeof window.renderEventStudy === 'function') {
+      try { window.renderEventStudy(esEl, symbol, 'earnings'); }
+      catch(e) { esEl.innerHTML = '<div style="color:var(--red);padding:12px">' + (e.message||e) + '</div>'; }
+    }
   }
 }
+
+// Re-render probabilistic forecast on horizon select change.
+document.addEventListener('change', (e) => {
+  if (!e.target || !e.target.matches('[data-pf-horizon]')) return;
+  const pfHost = document.getElementById('probforecast-panel');
+  if (!pfHost || !window.renderProbForecast) return;
+  const sym = (State && State.researchSymbol) || 'AAPL';
+  const horizon = parseInt(e.target.value, 10) || 20;
+  try { window.renderProbForecast(pfHost, sym, horizon); } catch(_) {}
+});
 
 // ── Research → INTEL tab (XBRL + GDELT + StockTwits + Form 4 + Senate) ───────
 async function loadResearchIntelTab(symbol) {
@@ -4005,8 +4122,123 @@ async function loadAnalyticsView() {
       renderEquityChart(equityData, history);
     }
 
+    // v0.2.0 — append portfolio Fama-French factor exposure panel.
+    try {
+      if (window.renderPortfolioFactors) {
+        const factorHost = document.createElement('section');
+        factorHost.className = 'panel mb-8';
+        factorHost.id = 'portfolio-factor-exposure';
+        view.appendChild(factorHost);
+        const holdings = (State.portfolio && State.portfolio.holdings) || [];
+        window.renderPortfolioFactors(factorHost, holdings, { years: 3 });
+      }
+    } catch (e) {
+      console.warn('renderPortfolioFactors failed:', e);
+    }
+
   } catch(e) {
     view.innerHTML = '<div class="empty-state"><span class="empty-icon">⚠</span><span class="text-red">' + e.message + '</span></div>';
+  }
+}
+
+// ── v0.2.0 RESEARCH VIEW LOADERS ──────────────────────────────────────────────
+
+async function loadBacktest() {
+  const view = document.getElementById('view-backtest');
+  if (!view) return;
+  const defaultSym = (State && State.researchSymbol) ? State.researchSymbol : 'AAPL';
+
+  view.innerHTML = `
+    <div class="panel mb-8">
+      <div class="panel-header">
+        <span class="panel-title">WALK-FORWARD BACKTEST</span>
+        <div class="flex gap-8 align-center" style="font-size:11px">
+          <label>Ticker:
+            <input type="text" id="bt-view-symbol" value="${defaultSym}"
+              style="background:transparent;color:var(--green);border:1px solid var(--border);padding:2px 6px;font-family:monospace;width:80px;text-transform:uppercase">
+          </label>
+          <button class="btn btn-ghost btn-sm" onclick="reloadBacktestPanel()">↻ LOAD</button>
+        </div>
+      </div>
+      <div class="panel-body" style="font-size:11px;color:var(--text-dim);padding:6px 12px;border-bottom:1px solid var(--border)">
+        Replays a signal-producing function over historical bars and reports hit-rate, Sharpe, drawdown, and the equity curve.
+        Momentum and mean-reversion adapters are leak-free; ml_forecast is best-effort.
+      </div>
+    </div>
+    <div id="backtest-host"></div>
+  `;
+  reloadBacktestPanel();
+}
+
+function reloadBacktestPanel() {
+  const symInput = document.getElementById('bt-view-symbol');
+  const symbol = (symInput && symInput.value ? symInput.value : 'AAPL').toUpperCase().trim();
+  const host = document.getElementById('backtest-host');
+  if (!host) return;
+  if (window.renderBacktest) {
+    const today = new Date();
+    const start = new Date(today.getFullYear() - 2, today.getMonth(), today.getDate())
+                    .toISOString().slice(0, 10);
+    const end = today.toISOString().slice(0, 10);
+    try { window.renderBacktest(host, symbol, 'momentum', { start, end }); }
+    catch(e) { host.innerHTML = '<div style="color:var(--red);padding:12px">' + (e.message||e) + '</div>'; }
+  } else {
+    host.innerHTML = '<div style="color:var(--red);padding:12px">research_backtest.js not loaded</div>';
+  }
+}
+
+async function loadOptimizer() {
+  const view = document.getElementById('view-optimizer');
+  if (!view) return;
+  if (typeof window.renderOptimizer !== 'function') {
+    view.innerHTML = '<div style="padding:24px;color:#e15a5a">research_optimizer.js not loaded</div>';
+    return;
+  }
+  // Seed universe + current weights from the live portfolio.
+  let seedSymbols = [];
+  let currentWeights = {};
+  try {
+    const port = State.portfolio || await API.get('/api/portfolio');
+    if (port && Array.isArray(port.holdings)) {
+      const totalVal = port.holdings.reduce((acc, h) => acc + (Number(h.market_value) || 0), 0);
+      port.holdings.forEach((h) => {
+        if (!h || !h.symbol) return;
+        seedSymbols.push(String(h.symbol).toUpperCase());
+        if (totalVal > 0) {
+          currentWeights[String(h.symbol).toUpperCase()] = (Number(h.market_value) || 0) / totalVal;
+        }
+      });
+    }
+  } catch (e) {
+    console.warn('loadOptimizer: portfolio seed failed', e);
+  }
+  if (!seedSymbols.length) seedSymbols = ['AAPL', 'MSFT', 'GLD', 'SPY', 'TLT'];
+  try { window.renderOptimizer(view, { symbols: seedSymbols, currentWeights }); }
+  catch(e) { view.innerHTML = '<div style="color:var(--red);padding:24px">' + (e.message||e) + '</div>'; }
+}
+
+async function loadMonteCarloView() {
+  const view = document.getElementById('view-montecarlo');
+  if (!view) return;
+  // research_montecarlo.js exports loadMonteCarlo() as a window global.
+  if (typeof window.loadMonteCarlo === 'function') {
+    try { window.loadMonteCarlo(); return; } catch(e) { /* fall through */ }
+  }
+  // Fallback: hand the container to renderMonteCarlo if available.
+  if (typeof window.renderMonteCarlo === 'function') {
+    try { window.renderMonteCarlo(view); return; } catch(e) {}
+  }
+  view.innerHTML = '<div style="padding:24px;color:#e15a5a">research_montecarlo.js not loaded</div>';
+}
+
+function loadHypothesisLab() {
+  const root = document.getElementById('research-lab-root');
+  if (!root) return;
+  if (typeof window.renderHypothesisLab === 'function') {
+    try { window.renderHypothesisLab(root); }
+    catch(e) { root.innerHTML = '<div style="color:var(--red);padding:24px">' + (e.message||e) + '</div>'; }
+  } else {
+    root.innerHTML = '<div style="padding:24px;color:#e15a5a">research_hypothesis.js not loaded</div>';
   }
 }
 
@@ -4834,6 +5066,12 @@ function renderSignalsGrid(scores) {
     return;
   }
   grid.innerHTML = `<div class="signals-grid-inner">${scores.map(s => buildSignalCard(s)).join('')}</div>`;
+  // v0.2.0 — mount Smart Money track-record badges into the placeholders.
+  if (window.renderTrackBadge) {
+    grid.querySelectorAll('.sm-track-badge').forEach(function(el) {
+      try { window.renderTrackBadge(el, 'smart_money'); } catch(_) {}
+    });
+  }
 }
 
 function buildSignalCard(s) {
@@ -4888,6 +5126,7 @@ function buildSignalCard(s) {
           <div style="font-size:10px;color:var(--text-dim);max-width:140px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${s.name || ''}</div>
           <div style="margin-top:6px">
             <span class="signal-badge ${signalColors[s.signal] || ''}" style="font-size:11px">${s.signal}</span>
+            <span class="sm-track-badge" data-signal="smart_money" style="margin-left:6px"></span>
           </div>
           ${s.price ? `<div style="font-size:11px;color:var(--text-secondary);margin-top:4px">$${fmt.price(s.price)}</div>` : ''}
         </div>
@@ -4930,7 +5169,15 @@ async function toggleMLPanel(panelId, symbol) {
     const data = await API.get(`/api/smart-money/ml-forecast/${symbol}`);
     if (data.error) throw new Error(data.error);
     panel.dataset.loaded = '1';
-    panel.innerHTML = renderMLForecastPanel(data);
+    panel.innerHTML = renderMLForecastPanel(data)
+      + '<div style="margin-top:6px;text-align:right" class="ml-track-slot"></div>';
+    // v0.2.0 — mount ML forecast tracker badge.
+    if (window.renderTrackBadge) {
+      const slot = panel.querySelector('.ml-track-slot');
+      if (slot) {
+        try { window.renderTrackBadge(slot, 'ml_forecast'); } catch(_) {}
+      }
+    }
   } catch(e) {
     panel.innerHTML = `<div style="font-size:10px;color:var(--red);padding:8px">ML Error: ${e.message}</div>`;
   }
@@ -6081,7 +6328,12 @@ async function analyzeGex(sym) {
       + 'In <strong>short gamma</strong> regimes, hedging amplifies moves. The gamma flip price marks the transition point.'
       + '</div>';
 
-    results.innerHTML = html;
+    results.innerHTML = '<span class="gex-track-slot" style="float:right"></span>' + html;
+    // v0.2.0 — GEX tracker badge.
+    if (window.renderTrackBadge) {
+      const slot = results.querySelector('.gex-track-slot');
+      if (slot) { try { window.renderTrackBadge(slot, 'gex'); } catch(_) {} }
+    }
   } catch (e) {
     results.innerHTML = '<div class="empty-state"><span class="col-negative">Error: ' + e.message + '</span></div>';
   }
@@ -6307,7 +6559,12 @@ async function analyzeNarrative(sym) {
       html += '</tbody></table></div></div>';
     }
 
-    results.innerHTML = html;
+    results.innerHTML = '<span class="narrative-track-slot" style="float:right"></span>' + html;
+    // v0.2.0 — narrative tracker badge.
+    if (window.renderTrackBadge) {
+      const slot = results.querySelector('.narrative-track-slot');
+      if (slot) { try { window.renderTrackBadge(slot, 'narrative'); } catch(_) {} }
+    }
   } catch (e) {
     results.innerHTML = '<div class="empty-state"><span class="col-negative">Error: ' + _esc(e.message) + '</span></div>';
   }
