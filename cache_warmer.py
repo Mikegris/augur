@@ -74,14 +74,41 @@ _started_lock = threading.Lock()
 _last_cycle: dict = {}              # task -> unix ts of last successful run
 
 
+# Soft watchdog: max wall-clock we'll wait for a single warm call before
+# moving on. If the upstream blocks past this, the orphaned thread keeps
+# running (we can't safely abort a Python thread mid-call) but the warmer
+# loop continues so other cadences don't fall behind.
+WARM_CALL_TIMEOUT = 45.0
+
+
 def _safe(label: str, fn, *args, **kwargs):
     """Wrap a warm call so a single endpoint failure doesn't kill the thread.
-    Records the timestamp on success for the status endpoint."""
-    try:
-        fn(*args, **kwargs)
-        _last_cycle[label] = time.time()
-    except Exception as e:
-        log.debug("warmer %s failed: %s", label, e)
+    Records the timestamp on success for the status endpoint.
+
+    Bounded by WARM_CALL_TIMEOUT — if the call doesn't return in time we log
+    and move on, otherwise one slow upstream (yfinance 60s timeout, SEC
+    EDGAR 90s response) can starve all the other cadences."""
+    holder = {"err": None, "done": False}
+
+    def _runner():
+        try:
+            fn(*args, **kwargs)
+        except Exception as e:
+            holder["err"] = e
+        finally:
+            holder["done"] = True
+
+    t = threading.Thread(target=_runner, name=f"warm-{label}", daemon=True)
+    t.start()
+    t.join(WARM_CALL_TIMEOUT)
+    if not holder["done"]:
+        log.warning("warmer %s exceeded %.0fs soft timeout; moving on",
+                    label, WARM_CALL_TIMEOUT)
+        return
+    if holder["err"] is not None:
+        log.debug("warmer %s failed: %s", label, holder["err"])
+        return
+    _last_cycle[label] = time.time()
 
 
 def _portfolio_symbols():
