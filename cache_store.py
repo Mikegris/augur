@@ -175,10 +175,13 @@ def _looks_like_failure(value) -> bool:
 def _conn():
     c = getattr(_local, "c", None)
     if c is None:
-        c = sqlite3.connect(_DB_PATH, check_same_thread=False, timeout=5.0)
+        c = sqlite3.connect(_DB_PATH, check_same_thread=False, timeout=10.0)
         c.execute("PRAGMA journal_mode=WAL")
         c.execute("PRAGMA synchronous=NORMAL")
-        c.execute("PRAGMA busy_timeout=3000")
+        # Match database.get_conn (5000ms). Previously 3000ms here, which
+        # caused this connection to bail with SQLITE_BUSY while the main
+        # database.py connection on the same file was still happy to wait.
+        c.execute("PRAGMA busy_timeout=5000")
         _local.c = c
     return c
 
