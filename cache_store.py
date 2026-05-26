@@ -33,6 +33,8 @@ Python 3.9 compatible.
 
 from __future__ import annotations
 
+import base64
+import gzip
 import json
 import logging
 import os
@@ -60,6 +62,45 @@ _local = threading.local()
 # Skip persistence for keys with TTL < this — quotes refresh every 30s and
 # would otherwise generate ~120 disk writes per minute per ticker.
 _PERSIST_MIN_TTL = 60.0
+
+# Per-entry cap on what we'll persist. SEC EDGAR XML responses can be
+# 10-20 MB raw; even gzipped, persisting hundreds of them balloons the
+# data dir to a gigabyte. If an entry exceeds this AFTER compression, we
+# skip the disk write and rely on the in-memory cache only.
+_PERSIST_MAX_BYTES = 2 * 1024 * 1024  # 2 MB compressed
+# Aggregate cap on api_cache rows; when init() exceeds this we evict the
+# largest entries first.
+_TOTAL_DISK_TARGET_BYTES = 250 * 1024 * 1024  # 250 MB
+# Compress payloads larger than this — small JSON responses don't benefit
+# meaningfully and the inline base64 prefix costs us a few bytes either way.
+_COMPRESS_MIN_BYTES = 4 * 1024
+# Prefix used to mark gzip+base64 entries so cache_get can transparently
+# decompress legacy + new rows.
+_GZ_PREFIX = "gz:"
+
+
+def _maybe_compress(raw: str) -> str:
+    """Compress a JSON string above the threshold, return as `gz:<b64>`.
+    Below threshold, return the raw string unchanged."""
+    if len(raw) < _COMPRESS_MIN_BYTES:
+        return raw
+    try:
+        gz = gzip.compress(raw.encode("utf-8"), compresslevel=6)
+        return _GZ_PREFIX + base64.b64encode(gz).decode("ascii")
+    except Exception:
+        return raw
+
+
+def _maybe_decompress(raw: str) -> str:
+    """Reverse of _maybe_compress. Transparent for un-prefixed rows so
+    legacy uncompressed cache entries keep working."""
+    if not raw or not raw.startswith(_GZ_PREFIX):
+        return raw
+    try:
+        return gzip.decompress(base64.b64decode(raw[len(_GZ_PREFIX):])).decode("utf-8")
+    except Exception as e:
+        log.warning("cache decompress failed: %s", e)
+        return raw
 
 
 _IDENT_KEYS = {"symbol", "name", "id", "label", "source", "exchange", "currency"}
@@ -178,6 +219,31 @@ def init() -> None:
     except Exception:
         pass
 
+    # Aggregate-size cap: if the cache has grown larger than
+    # _TOTAL_DISK_TARGET_BYTES (default 250 MB), evict the largest rows
+    # until we're under the target. SEC EDGAR filing-text bodies can be
+    # 10-20 MB each; without this an active user can balloon the data dir
+    # past a gigabyte in a day even with TTL-based expiry working.
+    try:
+        total_size = c.execute("SELECT COALESCE(SUM(length(value)), 0) FROM api_cache").fetchone()[0]
+        if total_size and total_size > _TOTAL_DISK_TARGET_BYTES:
+            to_drop = c.execute(
+                "SELECT key, length(value) FROM api_cache ORDER BY length(value) DESC"
+            ).fetchall()
+            dropped = 0
+            dropped_bytes = 0
+            for key_to_drop, sz in to_drop:
+                c.execute("DELETE FROM api_cache WHERE key=?", (key_to_drop,))
+                dropped += 1
+                dropped_bytes += sz
+                if total_size - dropped_bytes <= _TOTAL_DISK_TARGET_BYTES:
+                    break
+            c.commit()
+            log.info("cache size cap evicted %d largest rows (%.1f MB freed)",
+                     dropped, dropped_bytes / 1024.0 / 1024.0)
+    except Exception as e:
+        log.debug("cache size-cap eviction failed: %s", e)
+
     # Hydrate, skipping rows that look like cached failures from a prior
     # broken session. Otherwise a transient upstream outage at one boot would
     # serve blank panels for the full TTL window across every subsequent boot.
@@ -189,7 +255,7 @@ def init() -> None:
         with _mem_lock:
             for key, raw, expiry in rows:
                 try:
-                    val = json.loads(raw)
+                    val = json.loads(_maybe_decompress(raw))
                 except Exception:
                     continue
                 if _looks_like_failure(val):
@@ -265,11 +331,21 @@ def cache_set(key, value, ttl: float) -> None:
         raw = json.dumps(value, default=str)
     except Exception:
         return
+    stored = _maybe_compress(raw)
+    # Hard cap on stored size — SEC filing text bodies, options chains for
+    # high-symbol-count scans, and full equity 10y daily histories can all
+    # blow past a few MB. Caching them on disk pushes the data dir well
+    # over a gigabyte over a day of use (observed: 927MB at v0.3.3). The
+    # in-memory cache already has the value for this session; future
+    # sessions just refetch.
+    if len(stored) > _PERSIST_MAX_BYTES:
+        log.debug("cache persist skipped (too large): %s bytes for %s", len(stored), k[:60])
+        return
     try:
         c = _conn()
         c.execute(
             "INSERT OR REPLACE INTO api_cache(key, value, expiry, written_at) VALUES(?,?,?,?)",
-            (k, raw, expiry, time.time()),
+            (k, stored, expiry, time.time()),
         )
         c.commit()
     except Exception as e:
