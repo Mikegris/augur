@@ -20,6 +20,8 @@ from datetime import datetime, timedelta
 
 import yfinance as yf
 
+import fetcher
+
 log = logging.getLogger(__name__)
 
 
@@ -436,22 +438,52 @@ def compute_score(symbol):
     symbol = symbol.upper()
     start = time.time()
 
-    # Single Ticker instance + single history download shared across all components.
-    # This eliminates 3-4 redundant yfinance HTTP roundtrips per symbol.
+    # Route price + history through `fetcher` so we benefit from the v0.1.6
+    # Yahoo-direct fallback chain. Direct yf.Ticker.history calls die silently
+    # whenever yfinance's crumb auth is rate-limited, even when the same data
+    # is reachable via the v8 chart endpoint or already in `cache_store`. The
+    # ticker object itself is kept around so `_score_options` can still call
+    # ticker.option_chain() — options data has its own separate fallback story
+    # handled inside `_score_options`.
+    ticker = yf.Ticker(symbol)
     try:
-        ticker = yf.Ticker(symbol)
         info = ticker.info or {}
-        hist = ticker.history(period="1y")
+    except Exception:
+        info = {}
+
+    import pandas as pd
+    hist = pd.DataFrame()
+    current_price = None
+
+    try:
+        bars = fetcher.get_chart_data(symbol, "1y", "1d")
+        if bars:
+            hist = pd.DataFrame(bars)
+            hist.index = pd.to_datetime([b["time"] for b in bars], unit="s")
+            hist = hist.rename(columns={
+                "open": "Open", "high": "High", "low": "Low",
+                "close": "Close", "volume": "Volume",
+            })
+            current_price = float(hist["Close"].iloc[-1])
+    except Exception:
+        pass
+
+    if current_price is None:
+        # Last-resort price via fetcher.get_quote (which has its own
+        # Yahoo-direct + Finviz fallback chain).
+        try:
+            q = fetcher.get_quote(symbol)
+            current_price = _safe_float(q.get("price"))
+        except Exception:
+            pass
+
+    # If yfinance .info populated currentPrice but the fetch path didn't,
+    # prefer the info value to avoid a needless "no data" bailout.
+    if current_price is None:
         current_price = _safe_float(
             info.get("currentPrice") or info.get("regularMarketPrice") or
             info.get("navPrice")
         )
-        if current_price is None and not hist.empty:
-            current_price = float(hist["Close"].iloc[-1])
-    except Exception:
-        info = {}
-        hist = None
-        current_price = None
 
     if current_price is None:
         return {
@@ -459,10 +491,6 @@ def compute_score(symbol):
             "error": "No price data",
             "score": None,
         }
-
-    import pandas as pd
-    if hist is None:
-        hist = pd.DataFrame()
 
     # Compute each component — pass shared ticker/info/hist where possible
     insider_score, insider_txns = _score_insiders(symbol)
