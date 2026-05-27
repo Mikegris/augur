@@ -345,25 +345,19 @@ def _implied_move_pct(symbol: str, event_date: datetime.date) -> Optional[float]
     # snap to the next expiry ≥ event_date. The RND module's own
     # _choose_expiry picks the first expiry >7d out, which can sit
     # *before* the event — that would mis-attribute the implied move.
+    #
+    # NOTE: fetcher exports ``get_options_dates`` (not ``get_option_expiries``),
+    # so the original hasattr check was always False and we'd silently fall
+    # through to a bare yf.Ticker(symbol).options — which returns () under
+    # rate-limit (v0.1.6 audit pattern) without ever attempting the Yahoo /
+    # Finviz fallback chain.
     chosen: Optional[str] = None
+    expiries: list = []
     try:
-        if fetcher is not None and hasattr(fetcher, "get_option_expiries"):
-            expiries = fetcher.get_option_expiries(symbol) or []
-        else:
-            expiries = []
+        if fetcher is not None and hasattr(fetcher, "get_options_dates"):
+            expiries = fetcher.get_options_dates(symbol) or []
     except Exception:
         expiries = []
-
-    if not expiries:
-        # Pull via yfinance directly as a fallback (research_iv_density
-        # already does this internally, but we need the list here so we
-        # can target the right one).
-        try:
-            import yfinance as yf
-            expiries = list(yf.Ticker(symbol).options or [])
-        except Exception as e:
-            log.debug("catalyst: option expiries(%s) failed: %s", symbol, e)
-            expiries = []
 
     ev_iso = event_date.isoformat()
     for exp in expiries:
@@ -408,22 +402,17 @@ def _implied_skew(symbol: str, event_date: datetime.date) -> Optional[float]:
     # recomputing — research_iv_density.coalesce caches the full payload
     # so this is essentially free on the second hit.
     try:
-        # Route through fetcher.get_option_expiries first so we inherit the
-        # cache + fallback handling; a naked yf.Ticker(symbol).options call
-        # silently returns () whenever yfinance is rate-limited. Fall back to
-        # yfinance only if fetcher isn't carrying the helper.
+        # Route through fetcher.get_options_dates which carries the cache +
+        # fallback handling. The earlier hasattr() check was looking for a
+        # non-existent ``get_option_expiries`` name so it always fell through
+        # to a naked yf.Ticker(symbol).options — which silently returns ()
+        # whenever yfinance is rate-limited.
         expiries: list = []
         try:
-            if fetcher is not None and hasattr(fetcher, "get_option_expiries"):
-                expiries = fetcher.get_option_expiries(symbol) or []
+            if fetcher is not None and hasattr(fetcher, "get_options_dates"):
+                expiries = fetcher.get_options_dates(symbol) or []
         except Exception:
             expiries = []
-        if not expiries:
-            try:
-                import yfinance as yf
-                expiries = list(yf.Ticker(symbol).options or [])
-            except Exception:
-                expiries = []
         chosen = None
         ev_iso = event_date.isoformat()
         for exp in expiries:
