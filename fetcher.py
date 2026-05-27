@@ -1052,22 +1052,26 @@ def get_crypto_quote(coin_id: str) -> dict:
             "community_data": "false",
             "developer_data": "false",
         })
-        md = data.get("market_data", {})
+        # CoinGecko returns `null` (not omitted) for unpopulated dicts on
+        # newer/obscure coins, so `data.get("description", {})` still yields
+        # None and `.get("en")` would AttributeError. Coerce with `or {}`.
+        md = data.get("market_data") or {}
+        desc = (data.get("description") or {}).get("en") or ""
         return {
             "id": data["id"],
             "symbol": data["symbol"].upper(),
             "name": data["name"],
-            "description": data.get("description", {}).get("en", "")[:500],
-            "price": md.get("current_price", {}).get("usd"),
-            "market_cap": md.get("market_cap", {}).get("usd"),
-            "volume_24h": md.get("total_volume", {}).get("usd"),
+            "description": desc[:500],
+            "price": (md.get("current_price") or {}).get("usd"),
+            "market_cap": (md.get("market_cap") or {}).get("usd"),
+            "volume_24h": (md.get("total_volume") or {}).get("usd"),
             "change_24h": md.get("price_change_percentage_24h"),
             "change_7d": md.get("price_change_percentage_7d"),
             "change_30d": md.get("price_change_percentage_30d"),
             "change_1y": md.get("price_change_percentage_1y"),
-            "ath": md.get("ath", {}).get("usd"),
-            "ath_change_pct": md.get("ath_change_percentage", {}).get("usd"),
-            "atl": md.get("atl", {}).get("usd"),
+            "ath": (md.get("ath") or {}).get("usd"),
+            "ath_change_pct": (md.get("ath_change_percentage") or {}).get("usd"),
+            "atl": (md.get("atl") or {}).get("usd"),
             "circulating_supply": md.get("circulating_supply"),
             "total_supply": md.get("total_supply"),
             "max_supply": md.get("max_supply"),
