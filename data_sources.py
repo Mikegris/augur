@@ -56,10 +56,21 @@ def _cache_set(key, value, ttl):
 _session = None
 
 
+_NEG_SENTINEL = object()  # cached value meaning "upstream failed, don't retry yet"
+
+
 def _get(url, *, ttl=900, params=None, timeout=20, json_resp=True, headers=None):
-    """Cached GET. Returns parsed JSON (default) or raw text."""
+    """Cached GET. Returns parsed JSON (default) or raw text.
+
+    Negative results (5xx, 429, network errors) are cached for a short
+    window so the dashboard's per-second pollers don't hammer providers
+    that are already failing — that's how we used to end up blacklisted
+    from DefiLlama / GDELT for an hour after a single bad minute.
+    """
     cache_key = (url, tuple(sorted((params or {}).items())), json_resp)
     hit = _cache_get(cache_key)
+    if hit is _NEG_SENTINEL:
+        return None
     if hit is not None:
         return hit
     global _session
@@ -68,12 +79,30 @@ def _get(url, *, ttl=900, params=None, timeout=20, json_resp=True, headers=None)
         _session.headers.update(HEADERS)
     try:
         r = _session.get(url, params=params, timeout=timeout, headers=headers)
+        # Distinguish "transient throttle" from "permanent shape change".
+        if r.status_code == 429:
+            ra = r.headers.get("Retry-After")
+            try:
+                neg_ttl = float(ra) if ra else 60.0
+            except (TypeError, ValueError):
+                neg_ttl = 60.0
+            _cache_set(cache_key, _NEG_SENTINEL, min(max(neg_ttl, 30.0), 600.0))
+            log.warning("fetch 429 %s — cooling down %.0fs", url, neg_ttl)
+            return None
+        if r.status_code in (403, 404, 451):
+            # Endpoint moved / removed. Cache longer; a one-minute retry
+            # storm won't fix a renamed protocol slug.
+            _cache_set(cache_key, _NEG_SENTINEL, 1800)
+            log.warning("fetch %d %s", r.status_code, url)
+            return None
         r.raise_for_status()
         out = r.json() if json_resp else r.text
         _cache_set(cache_key, out, ttl)
         return out
     except Exception as e:
         log.warning("fetch failed %s: %s", url, e)
+        # Short TTL on generic failures so transient blips recover quickly.
+        _cache_set(cache_key, _NEG_SENTINEL, 60)
         return None
 
 
