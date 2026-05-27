@@ -22,6 +22,17 @@ def _today_key() -> str:
     """
     return datetime.now(timezone.utc).date().isoformat()
 
+
+def _month_key() -> str:
+    """ISO year-month string used to invalidate per-month caches at month roll.
+
+    Without including the current month in the cache key, IPO calendar
+    helpers would serve last month's NASDAQ results for up to TTL (6h) past
+    the month boundary, which is especially noticeable on the 1st of each
+    month when the page goes empty for hours.
+    """
+    return datetime.now(timezone.utc).strftime("%Y-%m")
+
 _cache = {}
 _lock = threading.Lock()
 
@@ -80,14 +91,14 @@ def ipos_this_month():
     def _build():
         from finance_calendars import finance_calendars as fc
         return _df_to_records(fc.get_priced_ipos_this_month())
-    return _cached(("ipos_priced",), 21600, _build)
+    return _cached(("ipos_priced", _month_key()), 21600, _build)
 
 
 def upcoming_ipos():
     def _build():
         from finance_calendars import finance_calendars as fc
         return _df_to_records(fc.get_upcoming_ipos_this_month())
-    return _cached(("ipos_up",), 21600, _build)
+    return _cached(("ipos_up", _month_key()), 21600, _build)
 
 
 def dividends_today():

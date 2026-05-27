@@ -123,13 +123,24 @@ def fetch_pageviews(symbol: str, days: int = 30) -> dict:
     try:
         resp = requests.get(url, headers=HEADERS, timeout=15)
         if resp.status_code == 404:
-            return {"symbol": symbol.upper(), "article": title, "points": [],
-                    "error": "Wikipedia article not found for this symbol"}
+            # Cache the 404 so we don't hammer Wikimedia for every page load
+            # on tickers without a Wikipedia article (or whose mapped title is
+            # a redirect / sub-article that the pageviews endpoint can't serve).
+            # Use a shorter TTL than success — article titles get created over
+            # time — but long enough to absorb a UI's repeated calls.
+            missing = {"symbol": symbol.upper(), "article": title, "points": [],
+                       "error": "Wikipedia article not found for this symbol"}
+            _cache_set(cache_key, missing, DEFAULT_TTL)
+            return missing
         resp.raise_for_status()
         data = resp.json()
     except Exception as e:
         log.debug("wiki pageviews fetch failed for %s (%s): %s", symbol, title, e)
-        return {"symbol": symbol.upper(), "article": title, "points": [], "error": str(e)}
+        # Cache transient failures briefly so a flapping endpoint doesn't get
+        # retried on every UI render. 5 min is short enough to recover quickly.
+        err = {"symbol": symbol.upper(), "article": title, "points": [], "error": str(e)}
+        _cache_set(cache_key, err, 300)
+        return err
 
     points = []
     for item in data.get("items", []):

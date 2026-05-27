@@ -181,6 +181,21 @@ LIMIT 1
     def g(k):
         return (r.get(k) or {}).get("value")
 
+    def _emp(val):
+        # Wikidata P1128 ("employees") is stored as xsd:decimal — most
+        # company entries are integers ("164000") but a meaningful tail
+        # ships fractional values ("24000.13") or thousand-units ("10.814",
+        # meant as "10,814"). The previous `.isdigit()` guard rejected every
+        # decimal-shaped value as None, silently dropping coverage. Parse
+        # via float and round to int — close enough for a research panel.
+        if not val:
+            return None
+        try:
+            n = float(val)
+            return int(n) if n >= 0 else None
+        except (TypeError, ValueError):
+            return None
+
     result = {
         "symbol": sym,
         "qid": qid,
@@ -190,7 +205,7 @@ LIMIT 1
         "country":      g("countryLabel"),
         "headquarters": g("headquartersLabel"),
         "inception":    (g("inception") or "")[:10] or None,
-        "employees":    int(g("employees")) if g("employees") and g("employees").isdigit() else None,
+        "employees":    _emp(g("employees")),
         "ceo":          g("ceoLabel"),
         "parent":       g("parentLabel"),
         "website":      g("website"),
