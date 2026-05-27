@@ -155,8 +155,19 @@ def _clean_calls(calls: list) -> list:
         bid = c.get("bid")
         ask = c.get("ask")
         last = c.get("lastPrice")
-        vol = c.get("volume") or 0
-        oi = c.get("openInterest") or 0
+        # yfinance routinely returns NaN for volume/openInterest on illiquid
+        # strikes. `x or 0` keeps NaN (NaN is truthy in Python), which later
+        # crashes int(NaN) on the cleaned-dict build below. Coerce defensively.
+        def _num_or_zero(v):
+            try:
+                f = float(v) if v is not None else 0.0
+            except (TypeError, ValueError):
+                return 0
+            if not math.isfinite(f):
+                return 0
+            return int(f)
+        vol = _num_or_zero(c.get("volume"))
+        oi = _num_or_zero(c.get("openInterest"))
         if k is None:
             continue
         # Determine mid: prefer (bid+ask)/2 when both present and ask>=bid,
@@ -169,15 +180,15 @@ def _clean_calls(calls: list) -> list:
             mid = float(last)
         if mid is None or mid <= 0:
             continue
-        if (vol or 0) <= 0 and (oi or 0) <= 0:
+        if vol <= 0 and oi <= 0:
             continue
         cleaned.append({
             "strike": float(k),
             "mid": float(mid),
             "bid": float(bid) if bid is not None else None,
             "ask": float(ask) if ask is not None else None,
-            "volume": int(vol or 0),
-            "oi": int(oi or 0),
+            "volume": int(vol),
+            "oi": int(oi),
         })
     # De-dup strikes (keep most liquid by volume+oi) and sort.
     by_strike: dict[float, dict] = {}
