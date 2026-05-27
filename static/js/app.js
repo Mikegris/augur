@@ -1695,25 +1695,31 @@ function renderFundamentals(fund) {
     </div>`).join('');
 }
 
+let _newsFeedGen = 0;
 async function loadNewsFor(symbol, containerId) {
   const el = document.getElementById(containerId);
   if (!el) return;
+  // Race-guard: if the user clicks a second symbol before the first news
+  // fetch lands, the older response must not overwrite the newer panel.
+  const gen = ++_newsFeedGen;
   try {
     const news = await API.get(`/api/news/${symbol}`);
+    if (gen !== _newsFeedGen) return;
     if (!news.length) {
       el.innerHTML = `<div class="empty-state"><span>No news found</span></div>`;
       return;
     }
     el.innerHTML = news.map(n => `
-      <div class="news-item" onclick="window.open('${n.url}', '_blank')">
-        <div class="news-title">${n.title}</div>
-        <div class="news-summary">${n.summary ? n.summary.substring(0, 120) + '...' : ''}</div>
+      <div class="news-item" onclick="window.open('${_jesc(n.url || '')}', '_blank')">
+        <div class="news-title">${_esc(n.title || '')}</div>
+        <div class="news-summary">${_esc(n.summary ? n.summary.substring(0, 120) + '...' : '')}</div>
         <div class="news-meta">
-          <span class="news-source">${n.source}</span>
-          <span class="news-time">${fmt.timeAgo(n.published)}</span>
+          <span class="news-source">${_esc(n.source || '')}</span>
+          <span class="news-time">${_esc(fmt.timeAgo(n.published))}</span>
         </div>
       </div>`).join('');
   } catch(e) {
+    if (gen !== _newsFeedGen) return;
     el.innerHTML = `<div class="empty-state"><span class="text-red">Failed to load news</span></div>`;
   }
 }
