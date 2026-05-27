@@ -2511,10 +2511,19 @@ def research_factors_portfolio():
         if not holdings:
             try:
                 rows = db.get_portfolio() or []
-                holdings = [
-                    {"symbol": h["symbol"], "market_value": h.get("market_value", 0)}
-                    for h in rows
-                ]
+                # `db.get_portfolio()` doesn't compute market_value — that
+                # only lives on /api/portfolio's enriched response. Use the
+                # cost basis (shares * avg_cost) as the weighting fallback;
+                # otherwise every holding would get weight=0 and the factor
+                # model would return NaN/empty exposures.
+                holdings = []
+                for h in rows:
+                    mv = (h.get("shares") or 0) * (h.get("avg_cost") or 0)
+                    if mv > 0:
+                        holdings.append({
+                            "symbol": h["symbol"],
+                            "market_value": float(mv),
+                        })
             except Exception:
                 holdings = []
         return jsonify(research_factors.portfolio_factor_exposure(holdings, years))
