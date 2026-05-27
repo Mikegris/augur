@@ -224,22 +224,45 @@ def _serialize_key(key) -> str:
         return repr(key)
 
 
+_table_ready = False
+_table_ready_lock = threading.Lock()
+
+
+def _ensure_table() -> bool:
+    """Create the api_cache table if it doesn't exist. Returns True if the
+    table is usable, False otherwise. Called from init() and lazily from
+    cache_set() if init() failed (e.g. DB was momentarily locked at app
+    startup) — so a transient boot-time SQLITE_BUSY doesn't disable the
+    disk cache for the rest of the process lifetime."""
+    global _table_ready
+    if _table_ready:
+        return True
+    with _table_ready_lock:
+        if _table_ready:
+            return True
+        try:
+            c = _conn()
+            c.execute("""CREATE TABLE IF NOT EXISTS api_cache (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL,
+                expiry REAL NOT NULL,
+                written_at REAL NOT NULL
+            )""")
+            c.execute("CREATE INDEX IF NOT EXISTS api_cache_expiry ON api_cache(expiry)")
+            c.commit()
+            _table_ready = True
+            return True
+        except Exception as e:
+            log.warning("cache table init failed: %s", e)
+            return False
+
+
 def init() -> None:
     """Create the cache table and hydrate the in-memory map from disk.
     Idempotent — safe to call multiple times. Called once at app startup."""
-    try:
-        c = _conn()
-        c.execute("""CREATE TABLE IF NOT EXISTS api_cache (
-            key TEXT PRIMARY KEY,
-            value TEXT NOT NULL,
-            expiry REAL NOT NULL,
-            written_at REAL NOT NULL
-        )""")
-        c.execute("CREATE INDEX IF NOT EXISTS api_cache_expiry ON api_cache(expiry)")
-        c.commit()
-    except Exception as e:
-        log.warning("cache table init failed: %s", e)
+    if not _ensure_table():
         return
+    c = _conn()
 
     # Sweep expired rows before loading — keeps the in-memory map lean and
     # the SQLite table from growing without bound across many sessions.
@@ -375,6 +398,11 @@ def cache_set(key, value, ttl: float) -> None:
                     _mem.pop(kk, None)
 
     if ttl < _PERSIST_MIN_TTL:
+        return
+    # Lazy table creation: if init() was called before the DB was writable
+    # (rare boot-time SQLITE_BUSY), retry here so the disk cache doesn't
+    # stay permanently disabled for the rest of the process.
+    if not _ensure_table():
         return
     try:
         raw = json.dumps(value, default=str)
