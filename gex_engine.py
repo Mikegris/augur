@@ -27,11 +27,16 @@ import yfinance as yf
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# Module-level cache
+# Caching: delegate to cache_store so we get
+#   - request coalescing (parallel callers for SPY don't all hit Yahoo)
+#   - persistence across restarts (cold-start doesn't refetch every chain)
+#   - upstream-failure suppression (don't cache a YFRateLimitError shell
+#     for 5 minutes and serve blank panels)
+# The old `_cache` / `_cache_ts` dicts were in-memory only, had no
+# coalescing, and stored failure responses verbatim.
 # ---------------------------------------------------------------------------
-_cache = {}       # type: Dict[str, dict]
-_cache_ts = {}    # type: Dict[str, float]
-_CACHE_TTL = 300  # seconds
+_CACHE_TTL = 300  # seconds — option chains move ~1/sec but UI polls aren't
+                  # the bottleneck; we trade freshness for upstream relief.
 
 
 # ---------------------------------------------------------------------------
@@ -223,11 +228,19 @@ def compute_gex(symbol):
     """
     symbol = symbol.upper().strip()
 
-    # Check cache
-    cache_key = "gex_{}".format(symbol)
-    now = time.time()
-    if cache_key in _cache and (now - _cache_ts.get(cache_key, 0)) < _CACHE_TTL:
-        return _cache[cache_key]
+    # Coalesce concurrent requests for the same symbol through cache_store.
+    # Without this, N parallel /api/gex/SPY callers would each fire their
+    # own option_chain() sweep against Yahoo — easy way to blow the rate
+    # limit when the dashboard polls.
+    try:
+        import cache_store
+        cache_key = ("gex", symbol)
+        hit = cache_store.cache_get(cache_key, ttl=_CACHE_TTL)
+        if hit is not None:
+            return hit
+    except Exception:
+        cache_store = None  # fall through; we still compute, just no cache
+        cache_key = None
 
     try:
         ticker = yf.Ticker(symbol)
@@ -457,9 +470,14 @@ def compute_gex(symbol):
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
 
-    # Cache result
-    _cache[cache_key] = result
-    _cache_ts[cache_key] = time.time()
+    # Persist via cache_store. cache_set() refuses to cache values that look
+    # like upstream failures (empty/error envelopes), so a transient Yahoo
+    # 429 doesn't get pinned for the full TTL window.
+    if cache_store is not None and cache_key is not None:
+        try:
+            cache_store.cache_set(cache_key, result, ttl=_CACHE_TTL)
+        except Exception as e:
+            logger.debug("gex cache_set failed for %s: %s", symbol, e)
 
     return result
 
