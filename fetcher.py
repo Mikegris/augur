@@ -874,7 +874,11 @@ def get_market_indices() -> list:
             results.append(q)
     except Exception:
         pass
-    _set_cache(ck, results, ttl=60)
+    # Don't cache an all-empty/all-error snapshot — a transient yfinance
+    # outage would otherwise pin the dashboard to "no data" for 60s past
+    # the actual recovery.
+    if any(r.get("price") is not None for r in results):
+        _set_cache(ck, results, ttl=60)
     return results
 
 
@@ -912,7 +916,11 @@ def get_sector_performance() -> list:
         results.sort(key=lambda x: (x["change_pct"] if x["change_pct"] is not None else -999), reverse=True)
     except Exception:
         pass
-    _set_cache(ck, results, ttl=60)
+    # Only cache when we have something useful — otherwise a single transient
+    # failure poisons the slot for 60s and downstream UI shows an empty heat
+    # bar even after upstream recovers.
+    if any(r.get("change_pct") is not None for r in results):
+        _set_cache(ck, results, ttl=60)
     return results
 
 
