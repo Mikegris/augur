@@ -411,9 +411,22 @@ def _c_congress(symbol: str) -> Optional[Tuple[Any, float]]:
             val = 0.0
         txn = (t.get("txn_type") or "").upper()
         raw = (t.get("txn_type_raw") or "").upper()
-        if "PURCHASE" in txn or raw == "P" or "PE" in raw:
+        # txn labels via congress.TXN_LABELS: "Buy", "Sell", "Sell (Partial)",
+        # "Purchase (Exercise)", "Sale (Exercise)", "Exchange". Raw codes:
+        # "P", "S", "PE", "SE", "S (partial)", "S (Exchange)", "E (Exchange)".
+        # Use prefix matches so partials/exchanges fall on the right side.
+        if (
+            "PURCHASE" in txn
+            or txn.startswith("BUY")
+            or raw == "P"
+            or raw.startswith("PE")
+        ):
             net += val
-        elif "SALE" in txn or raw == "S" or "SE" in raw:
+        elif (
+            "SALE" in txn
+            or txn.startswith("SELL")
+            or raw.startswith("S")
+        ):
             net -= val
     if net == 0:
         return None
