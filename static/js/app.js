@@ -3613,13 +3613,17 @@ function handleCmdInput(e) {
     try {
       const results = await API.get(`/api/search?q=${encodeURIComponent(q)}`);
       const el = document.getElementById('search-results');
-      if (!results.length) { el.classList.remove('visible'); return; }
+      if (!el) return;
+      if (!Array.isArray(results) || !results.length) {
+        el.classList.remove('visible');
+        return;
+      }
       el.innerHTML = results.map(r => `
-        <div class="search-result-item" onclick="selectSearchResult('${r.symbol}')">
-          <span class="sr-symbol">${r.symbol}</span>
-          <span class="sr-name">${r.name}</span>
-          <span class="sr-type">${r.type}</span>
-          <span class="sr-exch">${r.exchange}</span>
+        <div class="search-result-item" onclick="selectSearchResult('${_jesc(r.symbol)}')">
+          <span class="sr-symbol">${_esc(r.symbol)}</span>
+          <span class="sr-name">${_esc(r.name)}</span>
+          <span class="sr-type">${_esc(r.type)}</span>
+          <span class="sr-exch">${_esc(r.exchange)}</span>
         </div>`).join('');
       el.classList.add('visible');
     } catch(e) {}
