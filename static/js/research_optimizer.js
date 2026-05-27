@@ -337,7 +337,14 @@
     // Defer chart creation until after the canvas is inserted into the DOM.
     setTimeout(() => {
       try {
-        new window.Chart(canvas.getContext('2d'), {
+        // Destroy any prior chart bound to this canvas before creating a new
+        // one. Without this, every re-render (each OPTIMIZE click) leaks a
+        // Chart.js instance and the canvas accumulates listeners until the
+        // tab is closed.
+        if (canvas._chart && typeof canvas._chart.destroy === 'function') {
+          try { canvas._chart.destroy(); } catch (e) { /* ignore */ }
+        }
+        canvas._chart = new window.Chart(canvas.getContext('2d'), {
           type: 'scatter',
           data: {
             datasets: [
