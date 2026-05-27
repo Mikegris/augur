@@ -225,6 +225,8 @@ def index():
 
 @app.route("/api/quote/<symbol>")
 def quote(symbol):
+    if not _valid_ticker(symbol):
+        return jsonify({"error": "Invalid symbol"}), 400
     return jsonify(fetcher.get_quote(symbol.upper()))
 
 
@@ -232,18 +234,23 @@ def quote(symbol):
 def quotes_batch():
     symbols_param = request.args.get("symbols", "")
     symbols = [s.strip().upper() for s in symbols_param.split(",") if s.strip()]
+    symbols = [s for s in symbols if _valid_ticker(s)]
     if not symbols:
-        return jsonify({"error": "No symbols provided"}), 400
+        return jsonify({"error": "No valid symbols provided"}), 400
     return jsonify(fetcher.get_quotes_batch(symbols))
 
 
 @app.route("/api/fundamentals/<symbol>")
 def fundamentals(symbol):
+    if not _valid_ticker(symbol):
+        return jsonify({"error": "Invalid symbol"}), 400
     return jsonify(fetcher.get_fundamentals(symbol.upper()))
 
 
 @app.route("/api/chart/<symbol>")
 def chart(symbol):
+    if not _valid_ticker(symbol):
+        return jsonify({"error": "Invalid symbol"}), 400
     period = request.args.get("period", "6mo")
     interval = request.args.get("interval", "1d")
     data = fetcher.get_chart_data(symbol.upper(), period=period, interval=interval)
@@ -253,6 +260,8 @@ def chart(symbol):
 
 @app.route("/api/news/<symbol>")
 def news(symbol):
+    if not _valid_ticker(symbol):
+        return jsonify({"error": "Invalid symbol"}), 400
     limit = _safe_int(request.args.get("limit"), 15)
     return jsonify(fetcher.get_news(symbol.upper(), limit=limit))
 
@@ -625,12 +634,16 @@ def portfolio_benchmark():
 
 @app.route("/api/options/<symbol>/dates")
 def options_dates(symbol):
+    if not _valid_ticker(symbol):
+        return jsonify({"error": "Invalid symbol"}), 400
     dates = fetcher.get_options_dates(symbol.upper())
     return jsonify(dates)
 
 
 @app.route("/api/options/<symbol>/chain")
 def options_chain(symbol):
+    if not _valid_ticker(symbol):
+        return jsonify({"error": "Invalid symbol"}), 400
     date = request.args.get("date")
     chain = fetcher.get_option_chain(symbol.upper(), date=date)
     return jsonify(chain)
@@ -1069,6 +1082,8 @@ def earnings_dossier(symbol):
     Full pre-earnings dossier for one symbol with AI brief.
     Cached for 6 hours per symbol.
     """
+    if not _valid_ticker(symbol):
+        return jsonify({"error": "Invalid symbol"}), 400
     symbol = symbol.upper()
     refresh = request.args.get("refresh", "false").lower() == "true"
     ai_model = request.args.get("model", "gpt-4o")
