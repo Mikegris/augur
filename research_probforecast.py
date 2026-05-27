@@ -187,7 +187,10 @@ def compare_to_point(symbol: str, horizon_days: int = 20) -> Dict[str, Any]:
                     fp = tf.get("forecast_pct")
                     point["forecast_pct"] = (round(float(fp), 2)
                                              if fp is not None else None)
-                    point["trend"] = tf.get("trend")
+                    # ml_forecast.trend_forecast exposes "trend_short"/"trend_mid"
+                    # (not "trend"). Reading the wrong key just returned None
+                    # forever; prefer the short-term label, fall back to mid.
+                    point["trend"] = tf.get("trend_short") or tf.get("trend_mid")
                     point["source"] = "ml_forecast.trend_forecast"
                 rf = (ml.get("rf_classifier") or {})
                 if rf:
