@@ -762,7 +762,8 @@ def scan_opportunities(profile=None, force_refresh=False):
 
     # Persist top results to scanner_history so we can chart scores over time.
     try:
-        scanned_at = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+        from datetime import timezone as _tz
+        scanned_at = datetime.now(_tz.utc).strftime("%Y-%m-%d %H:%M:%S")
         db.save_scan_history(result["opportunities"], phash, strategy, scanned_at)
     except Exception as e:
         logger.warning("Failed to persist scan history: %s", e)

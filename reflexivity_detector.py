@@ -18,7 +18,7 @@ Python 3.9 compatible (no match/case, no X | Y unions).
 
 import logging
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Dict, List, Optional
 
 import sec_edgar as edgar
@@ -681,7 +681,7 @@ def detect_loops(symbol):
             "dominant_loop": dominant_loop,
             "overall_risk": overall_risk,
             "fundamentals_snapshot": snap,
-            "timestamp": datetime.utcnow().isoformat() + "Z",
+            "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         }
 
         _set_cached(cache_key, result)

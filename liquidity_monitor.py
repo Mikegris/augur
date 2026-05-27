@@ -17,7 +17,7 @@ Sub-indicators (0-100 each):
 
 import logging
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Dict, List, Optional
 
 import numpy as np
@@ -588,7 +588,7 @@ def _compute_stress_score_inner():
         "percentile_rank": round(percentile_rank, 1),
         "history": history[-30:],  # last 30 data points
         "recommendation": recommendation,
-        "timestamp": datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
     }
 
     _cached_set("stress_score", result)

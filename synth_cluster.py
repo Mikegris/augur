@@ -134,7 +134,7 @@ def _component_insider_form4(symbol: str, direction: str) -> Tuple[bool, str, st
     if not txns:
         return (False, "no data", "no Form 4 in 30d")
 
-    cutoff = datetime.utcnow() - timedelta(days=30)
+    cutoff = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=30)
     buys = sells = 0
     buy_val = sell_val = 0.0
     for t in txns:
@@ -176,7 +176,7 @@ def _component_congress_60d(symbol: str, direction: str) -> Tuple[bool, str, str
     if not trades:
         return (False, "no data", "no congressional trades")
 
-    cutoff = datetime.utcnow() - timedelta(days=60)
+    cutoff = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=60)
     buys = sells = 0
     buy_val = sell_val = 0.0
     for t in trades:

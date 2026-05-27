@@ -11,7 +11,7 @@ import logging
 import re
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Dict, List, Optional, Tuple
 
 import sec_edgar as edgar
@@ -683,7 +683,7 @@ def build_graph(symbol):
             "edges": edges,
             "total_connections": len(nodes),
             "filing_date": filing_date or "",
-            "timestamp": datetime.utcnow().isoformat() + "Z",
+            "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         }
 
         _set_cached(cache_key, result)
@@ -723,7 +723,7 @@ def assess_contagion(symbol, event_type="earnings_miss"):
                 "impacted_companies": [],
                 "total_impacted": 0,
                 "high_risk_count": 0,
-                "timestamp": datetime.utcnow().isoformat() + "Z",
+                "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
             }
 
         # Build edge weight lookup
@@ -820,7 +820,7 @@ def assess_contagion(symbol, event_type="earnings_miss"):
             "impacted_companies": impacted,
             "total_impacted": len(impacted),
             "high_risk_count": high_risk_count,
-            "timestamp": datetime.utcnow().isoformat() + "Z",
+            "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         }
 
         _set_cached(cache_key, result)

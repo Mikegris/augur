@@ -30,7 +30,7 @@ from __future__ import annotations
 
 import logging
 import math
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
 import numpy as np
@@ -428,7 +428,7 @@ def _divergence(horizons: Dict[str, Dict[str, Any]]) -> Optional[str]:
 def _compute(symbol: str) -> Dict[str, Any]:
     """The actual work; wrapped by multi_horizon_forecast() with caching."""
     hist = _load_history(symbol)
-    as_of = datetime.utcnow().strftime("%Y-%m-%d")
+    as_of = datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
     if hist is None:
         return {
@@ -485,7 +485,7 @@ def multi_horizon_forecast(symbol: str) -> Dict[str, Any]:
     if not symbol:
         return {
             "symbol": "",
-            "as_of": datetime.utcnow().strftime("%Y-%m-%d"),
+            "as_of": datetime.now(timezone.utc).strftime("%Y-%m-%d"),
             "error": "empty symbol",
             "horizons": {},
             "consensus": {"direction": "UNKNOWN", "agreement_score": 0.0},

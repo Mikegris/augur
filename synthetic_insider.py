@@ -369,7 +369,7 @@ def compute_composite(symbol):
                 "technical_regime": ch_tech,
             },
             "signal": signal,
-            "timestamp": datetime.utcnow().isoformat() + "Z",
+            "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         }
 
         _cache_set(cache_key, result)
