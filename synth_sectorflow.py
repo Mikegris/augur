@@ -209,10 +209,30 @@ def _finviz_to_gics(finviz_sector: Optional[str]) -> Optional[str]:
 
 # ─── component fetchers ──────────────────────────────────────────────
 
-def _price_panel(etf: str) -> Dict[str, Optional[float]]:
+def _spy_bars() -> List[dict]:
+    """Fetch the SPY 1y daily chart exactly once per scan.
+
+    Without this helper, _price_panel pulls SPY once per sector (11×),
+    multiplying the cache_store.coalesce traffic and the cold-cache cost
+    by 11. The underlying fetcher call is cached, but each invocation
+    still serialises through the coalesce machinery and can wake an
+    in-flight event."""
+    if fetcher is None:
+        return []
+    try:
+        return fetcher.get_chart_data("SPY", "1y", "1d") or []
+    except Exception:
+        return []
+
+
+def _price_panel(etf: str, spy_bars: Optional[List[dict]] = None) -> Dict[str, Optional[float]]:
     """1d/5d/1mo price moves for the sector ETF plus relative strength vs SPY.
     Pulls a 1-year daily chart and computes %-from-close-N-days-ago at the
-    last bar. Falls back to None on any miss."""
+    last bar. Falls back to None on any miss.
+
+    ``spy_bars`` lets the caller fetch SPY once and pass it in; if omitted
+    we fetch it here (preserves backward compatibility for callers that
+    use _price_panel in isolation)."""
     out: Dict[str, Optional[float]] = {
         "price_1d_pct":      None,
         "price_5d_pct":      None,
@@ -225,9 +245,9 @@ def _price_panel(etf: str) -> Dict[str, Optional[float]]:
 
     try:
         bars = fetcher.get_chart_data(etf, "1y", "1d") or []
-        spy  = fetcher.get_chart_data("SPY", "1y", "1d") or []
     except Exception:
         return out
+    spy = spy_bars if spy_bars is not None else _spy_bars()
 
     def _pct(arr: List[dict], offset: int) -> Optional[float]:
         # offset = number of trading days back from the last bar to compare.
@@ -632,6 +652,12 @@ def _compute() -> Dict[str, Any]:
     insiders = _insider_index()
     congress = _congress_index()
     factors  = _factor_panel()
+    # Fetch SPY's 1y chart exactly once for the whole scan — every sector's
+    # rs_vs_spy_* computation reuses it. Without this we'd issue 11
+    # cache_store.coalesce(("chart","SPY",…)) calls per scan even though
+    # the chart cache itself dedupes them; the coalesce machinery is
+    # cheap-but-not-free per call (lock, dict lookup, optional Event wait).
+    spy_bars = _spy_bars()
 
     rows: List[Dict[str, Any]] = []
     for spec in SECTORS:
@@ -640,7 +666,7 @@ def _compute() -> Dict[str, Any]:
         row: Dict[str, Any] = {"sector": sector, "etf": etf}
 
         # price + RS
-        row.update(_price_panel(etf))
+        row.update(_price_panel(etf, spy_bars=spy_bars))
 
         # narrative
         row.update(_narrative_panel(etf))
