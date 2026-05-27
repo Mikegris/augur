@@ -834,7 +834,9 @@ def get_settings():
 
 @app.route("/api/settings", methods=["POST"])
 def update_settings():
-    data = request.json
+    data = request.get_json(silent=True) or {}
+    if not isinstance(data, dict):
+        return jsonify({"error": "expected JSON object"}), 400
     for k, v in data.items():
         db.set_setting(k, v)
     return jsonify({"status": "saved"})
