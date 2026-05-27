@@ -523,6 +523,9 @@ async function loadTicker() {
 function renderTicker(items) {
   const el = document.getElementById('header-ticker');
   if (!el) return;
+  // API can return null/undefined or a {error:...} envelope when the
+  // indices endpoint is rate-limited; spreading non-iterable throws.
+  if (!Array.isArray(items) || !items.length) return;
   const html = [...items, ...items].map(item => {
     const chg = item.change_pct;
     const cls = chg == null ? 'flat' : chg > 0 ? 'up' : chg < 0 ? 'down' : 'flat';
@@ -1173,14 +1176,14 @@ async function loadAccountsList() {
     var html = '<table class="data-table" style="font-size:11px">'
       + '<thead><tr><th>NAME</th><th>TYPE</th><th>INSTITUTION</th><th>POSITIONS</th><th></th></tr></thead><tbody>';
     accounts.forEach(function(a) {
-      var colorDot = a.color ? '<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:' + a.color + ';margin-right:6px"></span>' : '';
+      var colorDot = a.color ? '<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:' + _esc(a.color) + ';margin-right:6px"></span>' : '';
       html += '<tr>'
-        + '<td>' + colorDot + a.name + '</td>'
-        + '<td>' + (ACCT_TYPE_LABELS[a.account_type] || a.account_type) + '</td>'
-        + '<td class="text-dim">' + (a.institution || '-') + '</td>'
-        + '<td class="text-dim">' + (a.position_count || '-') + '</td>'
+        + '<td>' + colorDot + _esc(a.name) + '</td>'
+        + '<td>' + _esc(ACCT_TYPE_LABELS[a.account_type] || a.account_type) + '</td>'
+        + '<td class="text-dim">' + _esc(a.institution || '-') + '</td>'
+        + '<td class="text-dim">' + _esc(a.position_count || '-') + '</td>'
         + '<td class="col-actions">'
-        + '<button class="btn btn-red btn-sm" onclick="deleteAccount(' + a.id + ', \'' + a.name.replace(/'/g, "\\'") + '\')">DEL</button>'
+        + '<button class="btn btn-red btn-sm" onclick="deleteAccount(' + a.id + ', \'' + _jesc(a.name) + '\')">DEL</button>'
         + '</td></tr>';
     });
     html += '</tbody></table>';
@@ -1695,25 +1698,31 @@ function renderFundamentals(fund) {
     </div>`).join('');
 }
 
+let _newsFeedGen = 0;
 async function loadNewsFor(symbol, containerId) {
   const el = document.getElementById(containerId);
   if (!el) return;
+  // Race-guard: if the user clicks a second symbol before the first news
+  // fetch lands, the older response must not overwrite the newer panel.
+  const gen = ++_newsFeedGen;
   try {
     const news = await API.get(`/api/news/${symbol}`);
+    if (gen !== _newsFeedGen) return;
     if (!news.length) {
       el.innerHTML = `<div class="empty-state"><span>No news found</span></div>`;
       return;
     }
     el.innerHTML = news.map(n => `
-      <div class="news-item" onclick="window.open('${n.url}', '_blank')">
-        <div class="news-title">${n.title}</div>
-        <div class="news-summary">${n.summary ? n.summary.substring(0, 120) + '...' : ''}</div>
+      <div class="news-item" onclick="window.open('${_jesc(n.url || '')}', '_blank')">
+        <div class="news-title">${_esc(n.title || '')}</div>
+        <div class="news-summary">${_esc(n.summary ? n.summary.substring(0, 120) + '...' : '')}</div>
         <div class="news-meta">
-          <span class="news-source">${n.source}</span>
-          <span class="news-time">${fmt.timeAgo(n.published)}</span>
+          <span class="news-source">${_esc(n.source || '')}</span>
+          <span class="news-time">${_esc(fmt.timeAgo(n.published))}</span>
         </div>
       </div>`).join('');
   } catch(e) {
+    if (gen !== _newsFeedGen) return;
     el.innerHTML = `<div class="empty-state"><span class="text-red">Failed to load news</span></div>`;
   }
 }
@@ -3264,8 +3273,9 @@ async function loadEarningsDossier(symbol) {
     const d = await API.get(`/api/earnings/dossier/${symbol}?model=${model}`);
     renderEarningsDossier(panel, d);
   } catch(e) {
-    panel.querySelector('.panel-body').innerHTML =
-      `<div class="text-red" style="font-size:11px;padding:8px">Failed: ${e.message}</div>`;
+    const body = panel.querySelector('.panel-body');
+    if (body) body.innerHTML =
+      `<div class="text-red" style="font-size:11px;padding:8px">Failed: ${_esc(e.message || String(e))}</div>`;
   }
 }
 
@@ -3603,13 +3613,17 @@ function handleCmdInput(e) {
     try {
       const results = await API.get(`/api/search?q=${encodeURIComponent(q)}`);
       const el = document.getElementById('search-results');
-      if (!results.length) { el.classList.remove('visible'); return; }
+      if (!el) return;
+      if (!Array.isArray(results) || !results.length) {
+        el.classList.remove('visible');
+        return;
+      }
       el.innerHTML = results.map(r => `
-        <div class="search-result-item" onclick="selectSearchResult('${r.symbol}')">
-          <span class="sr-symbol">${r.symbol}</span>
-          <span class="sr-name">${r.name}</span>
-          <span class="sr-type">${r.type}</span>
-          <span class="sr-exch">${r.exchange}</span>
+        <div class="search-result-item" onclick="selectSearchResult('${_jesc(r.symbol)}')">
+          <span class="sr-symbol">${_esc(r.symbol)}</span>
+          <span class="sr-name">${_esc(r.name)}</span>
+          <span class="sr-type">${_esc(r.type)}</span>
+          <span class="sr-exch">${_esc(r.exchange)}</span>
         </div>`).join('');
       el.classList.add('visible');
     } catch(e) {}
@@ -4076,12 +4090,12 @@ async function loadOptionsChain(symbol, date) {
     const url = '/api/options/' + symbol + '/chain' + (date ? '?date=' + encodeURIComponent(date) : '');
     const chain = await API.get(url);
     if (gen !== _optionsChainGen) return;
-    if (chain.error && !chain.calls.length) {
-      bodyEl.innerHTML = '<div class="empty-state"><span class="text-red">' + chain.error + '</span></div>';
-      return;
-    }
     const calls = chain.calls || [];
     const puts = chain.puts || [];
+    if (chain.error && !calls.length) {
+      bodyEl.innerHTML = '<div class="empty-state"><span class="text-red">' + _esc(chain.error) + '</span></div>';
+      return;
+    }
     // Build strike-keyed map
     const allStrikes = Array.from(new Set([...calls.map(c => c.strike), ...puts.map(p => p.strike)])).sort((a,b)=>a-b);
     const callMap = {};
@@ -4902,21 +4916,24 @@ function renderInstitutional(data, panel) {
     return;
   }
 
-  const cards = funds.map(name => {
+  const cards = funds.map((name, i) => {
     const fd = data[name];
     const hasError = fd.error && !fd.holdings?.length;
     const val = fd.total_value ? '$' + fmt.compact(fd.total_value) : '—';
     const numH = fd.num_holdings || fd.holdings?.length || 0;
     const overlap = fd.overlap_with_portfolio?.length || 0;
+    // Use index as the ID suffix; whitespace-collapsing produced collisions
+    // between e.g. "Berkshire Hathaway" and "Berkshire  Hathaway" (double
+    // space), and broke entirely on names with non-alphanumeric chars.
     return `
-      <div class="fund-card" id="fcard-${name.replace(/\s+/g,'_')}" onclick="showFundHoldings('${name}')">
-        <div style="font-size:11px;font-weight:700;color:var(--green);margin-bottom:6px">${name}</div>
+      <div class="fund-card" id="fcard-${i}" onclick="showFundHoldings('${_jesc(name)}')">
+        <div style="font-size:11px;font-weight:700;color:var(--green);margin-bottom:6px">${_esc(name)}</div>
         ${hasError
           ? `<div style="font-size:10px;color:var(--red)">Data unavailable</div>`
           : `
             <div style="font-size:10px;color:var(--text-dim)">AUM: <span style="color:var(--text-primary)">${val}</span></div>
             <div style="font-size:10px;color:var(--text-dim)">Holdings: <span style="color:var(--text-primary)">${numH}</span></div>
-            <div style="font-size:10px;color:var(--text-dim)">Filed: <span style="color:var(--text-primary)">${fd.filing_date || '—'}</span></div>
+            <div style="font-size:10px;color:var(--text-dim)">Filed: <span style="color:var(--text-primary)">${_esc(fd.filing_date || '—')}</span></div>
             ${overlap ? `<div style="font-size:10px;color:var(--amber);margin-top:4px">◈ ${overlap} PORTFOLIO OVERLAP</div>` : ''}
           `
         }
@@ -5594,7 +5611,8 @@ function _termScroll() {
 }
 
 function _escHtml(s) {
-  return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  if (s == null) return '';
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
 }
 
 function _ansiToHtml(text) {
