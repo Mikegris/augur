@@ -151,8 +151,11 @@ _CACHE_TTL = 600  # seconds
 
 
 def _clip(x: float, lo: float, hi: float) -> float:
+    # None means "no signal" — return the midpoint of [lo, hi] (neutral),
+    # not `lo`, which would otherwise bias the consensus aggregate maximally
+    # bearish whenever a defensive caller forwarded a None through.
     if x is None:
-        return lo
+        return (lo + hi) / 2.0
     return max(lo, min(hi, x))
 
 
