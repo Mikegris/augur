@@ -225,6 +225,8 @@ def index():
 
 @app.route("/api/quote/<symbol>")
 def quote(symbol):
+    if not _valid_ticker(symbol):
+        return jsonify({"error": "Invalid symbol"}), 400
     return jsonify(fetcher.get_quote(symbol.upper()))
 
 
@@ -232,18 +234,23 @@ def quote(symbol):
 def quotes_batch():
     symbols_param = request.args.get("symbols", "")
     symbols = [s.strip().upper() for s in symbols_param.split(",") if s.strip()]
+    symbols = [s for s in symbols if _valid_ticker(s)]
     if not symbols:
-        return jsonify({"error": "No symbols provided"}), 400
+        return jsonify({"error": "No valid symbols provided"}), 400
     return jsonify(fetcher.get_quotes_batch(symbols))
 
 
 @app.route("/api/fundamentals/<symbol>")
 def fundamentals(symbol):
+    if not _valid_ticker(symbol):
+        return jsonify({"error": "Invalid symbol"}), 400
     return jsonify(fetcher.get_fundamentals(symbol.upper()))
 
 
 @app.route("/api/chart/<symbol>")
 def chart(symbol):
+    if not _valid_ticker(symbol):
+        return jsonify({"error": "Invalid symbol"}), 400
     period = request.args.get("period", "6mo")
     interval = request.args.get("interval", "1d")
     data = fetcher.get_chart_data(symbol.upper(), period=period, interval=interval)
@@ -253,6 +260,8 @@ def chart(symbol):
 
 @app.route("/api/news/<symbol>")
 def news(symbol):
+    if not _valid_ticker(symbol):
+        return jsonify({"error": "Invalid symbol"}), 400
     limit = _safe_int(request.args.get("limit"), 15)
     return jsonify(fetcher.get_news(symbol.upper(), limit=limit))
 
@@ -318,8 +327,8 @@ def list_accounts():
 
 @app.route("/api/accounts", methods=["POST"])
 def create_account():
-    data = request.json
-    if not data.get("name"):
+    data = request.get_json(silent=True) or {}
+    if not isinstance(data, dict) or not data.get("name"):
         return jsonify({"error": "Account name is required"}), 400
     row_id = db.add_account(
         name=data["name"],
@@ -333,7 +342,9 @@ def create_account():
 
 @app.route("/api/accounts/<int:account_id>", methods=["PUT"])
 def update_account(account_id):
-    data = request.json
+    data = request.get_json(silent=True) or {}
+    if not isinstance(data, dict):
+        return jsonify({"error": "expected JSON object"}), 400
     ok = db.update_account(
         account_id,
         name=data.get("name"),
@@ -422,18 +433,26 @@ def get_portfolio():
 
 @app.route("/api/portfolio/add", methods=["POST"])
 def add_position():
-    data = request.json
+    data = request.get_json(silent=True) or {}
+    if not isinstance(data, dict):
+        return jsonify({"error": "expected JSON object"}), 400
     required = ["symbol", "shares", "avg_cost"]
     if not all(k in data for k in required):
         return jsonify({"error": "Missing required fields"}), 400
     if not _valid_ticker(data["symbol"]):
         return jsonify({"error": "Invalid symbol"}), 400
+    try:
+        shares = float(data["shares"])
+        avg_cost = float(data["avg_cost"])
+        fees = float(data.get("fees", 0))
+    except (TypeError, ValueError):
+        return jsonify({"error": "shares, avg_cost, fees must be numeric"}), 400
     acct_id = _safe_int(data.get("account_id"), None) if data.get("account_id") else None
     row_id = db.add_position(
         symbol=data["symbol"],
         name=data.get("name", ""),
-        shares=float(data["shares"]),
-        avg_cost=float(data["avg_cost"]),
+        shares=shares,
+        avg_cost=avg_cost,
         asset_type=data.get("asset_type", "stock"),
         sector=data.get("sector", ""),
         currency=data.get("currency", "USD"),
@@ -444,9 +463,9 @@ def add_position():
     db.add_transaction(
         symbol=data["symbol"],
         action="BUY",
-        shares=float(data["shares"]),
-        price=float(data["avg_cost"]),
-        fees=float(data.get("fees", 0)),
+        shares=shares,
+        price=avg_cost,
+        fees=fees,
         date=data.get("date"),
         notes=data.get("notes", ""),
         account_id=acct_id,
@@ -456,12 +475,17 @@ def add_position():
 
 @app.route("/api/portfolio/<int:pos_id>", methods=["PUT"])
 def update_position(pos_id):
-    data = request.json
+    data = request.get_json(silent=True) or {}
+    if not isinstance(data, dict):
+        return jsonify({"error": "expected JSON object"}), 400
     acct_id = data.get("account_id")
-    if acct_id == "":
+    if acct_id == "" or acct_id is None:
         acct_id = None
-    elif acct_id is not None:
-        acct_id = int(acct_id)
+    else:
+        try:
+            acct_id = int(acct_id)
+        except (TypeError, ValueError):
+            return jsonify({"error": "account_id must be an integer"}), 400
     ok = db.update_position(
         pos_id,
         shares=data.get("shares"),
@@ -501,8 +525,8 @@ def get_watchlist():
 
 @app.route("/api/watchlist/add", methods=["POST"])
 def add_watchlist():
-    data = request.json
-    if "symbol" not in data:
+    data = request.get_json(silent=True) or {}
+    if not isinstance(data, dict) or "symbol" not in data:
         return jsonify({"error": "symbol required"}), 400
     if not _valid_ticker(data["symbol"]):
         return jsonify({"error": "Invalid symbol"}), 400
@@ -561,18 +585,26 @@ def transactions_summary():
 
 @app.route("/api/transactions/add", methods=["POST"])
 def add_transaction():
-    data = request.json
+    data = request.get_json(silent=True) or {}
+    if not isinstance(data, dict):
+        return jsonify({"error": "expected JSON object"}), 400
     required = ["symbol", "action", "shares", "price"]
     if not all(k in data for k in required):
         return jsonify({"error": "Missing required fields"}), 400
     if not _valid_ticker(data["symbol"]):
         return jsonify({"error": "Invalid symbol"}), 400
+    try:
+        shares = float(data["shares"])
+        price = float(data["price"])
+        fees = float(data.get("fees", 0))
+    except (TypeError, ValueError):
+        return jsonify({"error": "shares, price, fees must be numeric"}), 400
     db.add_transaction(
         symbol=data["symbol"],
         action=data["action"],
-        shares=float(data["shares"]),
-        price=float(data["price"]),
-        fees=float(data.get("fees", 0)),
+        shares=shares,
+        price=price,
+        fees=fees,
         date=data.get("date"),
         notes=data.get("notes", ""),
     )
@@ -589,7 +621,9 @@ def portfolio_history():
 
 @app.route("/api/portfolio/benchmark")
 def portfolio_benchmark():
-    symbol = request.args.get("symbol", "SPY")
+    symbol = (request.args.get("symbol") or "SPY").upper().strip()
+    if not _valid_ticker(symbol):
+        return jsonify({"error": "Invalid symbol"}), 400
     period = request.args.get("period", "1y")
     # Get first snapshot value to normalize benchmark to same starting value
     snapshots = db.get_snapshots()
@@ -602,12 +636,16 @@ def portfolio_benchmark():
 
 @app.route("/api/options/<symbol>/dates")
 def options_dates(symbol):
+    if not _valid_ticker(symbol):
+        return jsonify({"error": "Invalid symbol"}), 400
     dates = fetcher.get_options_dates(symbol.upper())
     return jsonify(dates)
 
 
 @app.route("/api/options/<symbol>/chain")
 def options_chain(symbol):
+    if not _valid_ticker(symbol):
+        return jsonify({"error": "Invalid symbol"}), 400
     date = request.args.get("date")
     chain = fetcher.get_option_chain(symbol.upper(), date=date)
     return jsonify(chain)
@@ -834,7 +872,9 @@ def get_settings():
 
 @app.route("/api/settings", methods=["POST"])
 def update_settings():
-    data = request.json
+    data = request.get_json(silent=True) or {}
+    if not isinstance(data, dict):
+        return jsonify({"error": "expected JSON object"}), 400
     for k, v in data.items():
         db.set_setting(k, v)
     return jsonify({"status": "saved"})
@@ -862,7 +902,9 @@ def get_alerts():
 
 @app.route("/api/alerts", methods=["POST"])
 def add_alert():
-    data = request.json
+    data = request.get_json(silent=True) or {}
+    if not isinstance(data, dict):
+        return jsonify({"error": "expected JSON object"}), 400
     symbol    = (data.get("symbol", "") or "").upper().strip()
     alert_type = data.get("alert_type", "above")   # "above" or "below"
     try:
@@ -1042,6 +1084,8 @@ def earnings_dossier(symbol):
     Full pre-earnings dossier for one symbol with AI brief.
     Cached for 6 hours per symbol.
     """
+    if not _valid_ticker(symbol):
+        return jsonify({"error": "Invalid symbol"}), 400
     symbol = symbol.upper()
     refresh = request.args.get("refresh", "false").lower() == "true"
     ai_model = request.args.get("model", "gpt-4o")
@@ -2469,10 +2513,19 @@ def research_factors_portfolio():
         if not holdings:
             try:
                 rows = db.get_portfolio() or []
-                holdings = [
-                    {"symbol": h["symbol"], "market_value": h.get("market_value", 0)}
-                    for h in rows
-                ]
+                # `db.get_portfolio()` doesn't compute market_value — that
+                # only lives on /api/portfolio's enriched response. Use the
+                # cost basis (shares * avg_cost) as the weighting fallback;
+                # otherwise every holding would get weight=0 and the factor
+                # model would return NaN/empty exposures.
+                holdings = []
+                for h in rows:
+                    mv = (h.get("shares") or 0) * (h.get("avg_cost") or 0)
+                    if mv > 0:
+                        holdings.append({
+                            "symbol": h["symbol"],
+                            "market_value": float(mv),
+                        })
             except Exception:
                 holdings = []
         return jsonify(research_factors.portfolio_factor_exposure(holdings, years))
@@ -2769,10 +2822,12 @@ def research_optimize():
 def research_probforecast(symbol):
     if not _pf_mod:
         return jsonify({"error": "research_probforecast module not available"}), 500
+    if not _valid_ticker(symbol):
+        return jsonify({"error": "Invalid symbol"}), 400
     try:
         horizon = _safe_int(request.args.get("horizon"), 20)
         n_boot = _safe_int(request.args.get("n"), 2000)
-        return jsonify(_pf_mod.prob_forecast(symbol, horizon_days=horizon, n_bootstrap=n_boot))
+        return jsonify(_pf_mod.prob_forecast(symbol.upper(), horizon_days=horizon, n_bootstrap=n_boot))
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
@@ -2781,9 +2836,11 @@ def research_probforecast(symbol):
 def research_probforecast_vs_point(symbol):
     if not _pf_mod:
         return jsonify({"error": "research_probforecast module not available"}), 500
+    if not _valid_ticker(symbol):
+        return jsonify({"error": "Invalid symbol"}), 400
     try:
         horizon = _safe_int(request.args.get("horizon"), 20)
-        return jsonify(_pf_mod.compare_to_point(symbol, horizon_days=horizon))
+        return jsonify(_pf_mod.compare_to_point(symbol.upper(), horizon_days=horizon))
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
@@ -3154,6 +3211,10 @@ def synth_whatif_get():
     action = (request.args.get("action") or "add").lower()
     if not sym or mv < 0:
         return jsonify({"error": "need ?symbol=...&market_value=...&action=add|remove|resize_to"}), 400
+    if not _valid_ticker(sym):
+        return jsonify({"error": "Invalid symbol"}), 400
+    if action not in ("add", "remove", "resize_to"):
+        return jsonify({"error": "action must be add|remove|resize_to"}), 400
     acct = request.args.get("account_id")
     holdings_raw = db.get_portfolio(account_id=int(acct) if acct and acct.isdigit() else None)
     enriched = []
