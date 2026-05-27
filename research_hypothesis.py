@@ -121,11 +121,16 @@ def _gather_context(symbol: str) -> Dict[str, Any]:
             trend = ml.get("trend_forecast") or {}
             regime = ml.get("regime") or {}
             mr = ml.get("mean_reversion") or {}
+            # ml_forecast's trend_forecast surfaces "trend_short" / "trend_mid"
+            # (not "direction"), and regime surfaces "current_regime" (not
+            # "regime"). Reading the wrong key just returned None for every
+            # call, so the synthesised hypothesis context was always blank
+            # on those two fields.
             ctx["ml_forecast"] = {
                 "prob_up_20d": rf.get("prob_up_20d"),
-                "trend_direction": trend.get("direction"),
+                "trend_direction": trend.get("trend_short"),
                 "trend_forecast_pct": trend.get("forecast_pct"),
-                "regime": regime.get("regime") if isinstance(regime, dict) else None,
+                "regime": regime.get("current_regime") if isinstance(regime, dict) else None,
                 "mean_reversion_signal": mr.get("signal") if isinstance(mr, dict) else None,
             }
     except Exception:
