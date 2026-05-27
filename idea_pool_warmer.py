@@ -405,9 +405,11 @@ def warm_pool(target_count: int = 200) -> Dict[str, Any]:
         )
         # Force a WAL checkpoint so the WAL file doesn't grow unbounded across
         # passes and so subsequent reader connections don't spend time over
-        # the freshly-written WAL pages.
+        # the freshly-written WAL pages. Holds _write_lock so no concurrent
+        # writer races against the checkpoint's brief exclusive grab.
         try:
-            db.get_conn().execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            with db._write_lock:
+                db.get_conn().execute("PRAGMA wal_checkpoint(TRUNCATE)")
         except Exception as exc:  # noqa: BLE001
             logger.warning("idea_pool: WAL checkpoint failed: %s", exc)
 
