@@ -169,12 +169,18 @@ def get_earnings_dossier(symbol):
 
                 # Last 8 quarters for table
                 for idx, row in past.head(8).iterrows():
+                    _actual = _safe_float(row["Reported EPS"])
+                    _est = _safe_float(row["EPS Estimate"])
                     history_rows.append({
                         "date": _date_str(idx),
-                        "estimate": _safe_float(row["EPS Estimate"]),
-                        "actual": _safe_float(row["Reported EPS"]),
+                        "estimate": _est,
+                        "actual": _actual,
                         "surprise_pct": _safe_float(row["Surprise(%)"]),
-                        "beat": bool(_safe_float(row["Reported EPS"]) or 0 > _safe_float(row["EPS Estimate"]) or 0),
+                        # Parenthesize the comparison — the previous expression
+                        # `bool(actual or 0 > estimate or 0)` parsed as
+                        # `bool(actual or (0 > estimate) or 0)`, which is True
+                        # whenever actual is truthy regardless of the estimate.
+                        "beat": (_actual or 0) > (_est or 0),
                     })
     except Exception as e:
         logger.error("dossier history %s: %s", symbol, e)
