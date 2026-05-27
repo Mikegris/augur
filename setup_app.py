@@ -140,8 +140,8 @@ PLIST = {
     "CFBundleName":            "AUGUR",
     "CFBundleDisplayName":     "AUGUR",
     "CFBundleIdentifier":      "com.augur.wealth",
-    "CFBundleShortVersionString": "0.3.4",
-    "CFBundleVersion":         "0.3.4",
+    "CFBundleShortVersionString": "0.3.5",
+    "CFBundleVersion":         "0.3.5",
     "LSMinimumSystemVersion":  "10.13",
     "NSHighResolutionCapable": True,
     # We want a Dock icon + menubar; LSUIElement=0 keeps the app visible.
