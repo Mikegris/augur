@@ -203,7 +203,9 @@ def _rf_predict(hist):
         "signal": "BULLISH" if prob_up > 0.6 else ("BEARISH" if prob_up < 0.4 else "NEUTRAL"),
         "confidence": round(abs(prob_up - 0.5) * 200, 1),  # 0-100 scale
         "train_samples": len(train),
-        "accuracy_recent": round(accuracy, 3) if accuracy else None,
+        # Use `is not None` instead of truthiness: 0.0 (a perfectly wrong
+        # model) is a valid accuracy value but `if accuracy` would drop it.
+        "accuracy_recent": round(accuracy, 3) if accuracy is not None else None,
         "class_balance": round(class_balance, 3),
         "top_features": [{"name": n, "importance": round(v, 4)} for n, v in top_features],
     }
