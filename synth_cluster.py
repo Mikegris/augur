@@ -146,12 +146,16 @@ def _component_insider_form4(symbol: str, direction: str) -> Tuple[bool, str, st
         if d < cutoff:
             continue
         val = float(t.get("value") or 0)
-        if t.get("transaction_type") == "BUY":
+        ttype = (t.get("transaction_type") or "").upper()
+        if ttype == "BUY":
             buys += 1
             buy_val += val
-        else:
+        elif ttype == "SELL":
             sells += 1
             sell_val += val
+        # Unknown/blank transaction codes (e.g. derivative grants, exchanges)
+        # are intentionally skipped — they used to fall through to the sell
+        # bucket and bias the bearish branch.
     net_val = buy_val - sell_val
     if direction == "bullish":
         fired = buys > sells and net_val > 0
