@@ -344,7 +344,11 @@ def _summary_stats(curves: np.ndarray, dates: List[str],
     post_idx = min(t0 + 5, curves.shape[1] - 1)
     rel = curves[:, post_idx] - curves[:, t0]
     avg_post5 = float(np.nanmean(rel)) * 100.0
-    hit = float(np.mean(rel > 0))
+    # NaN-aware hit rate. `np.mean(rel > 0)` treats `nan > 0` as False, so
+    # any windows with missing data depress the rate. Filter NaNs first so
+    # the rate reflects only events with usable post-event returns.
+    finite_rel = rel[np.isfinite(rel)]
+    hit = float(np.mean(finite_rel > 0)) if finite_rel.size else 0.0
 
     # Best/worst individual end-of-window cumulative
     end_rets = curves[:, -1]
@@ -384,8 +388,15 @@ def _compute(symbol: str, event_type: str, window_days: int,
     """Core computation, wrapped by event_study() for caching."""
     symbol = (symbol or "").upper().strip()
     benchmark = (benchmark or _BENCHMARK_DEFAULT).upper().strip()
-    today = datetime.date.today()
-    start = datetime.date(today.year - int(period_years), today.month, today.day)
+    today = datetime.datetime.now(datetime.timezone.utc).date()
+    # Build the lookback start defensively — naively subtracting `period_years`
+    # from `today.year` crashes on Feb 29 of a leap year because the target
+    # year usually isn't a leap year ("day is out of range for month"). Bump
+    # the day down to Feb 28 in that case rather than letting the route error.
+    try:
+        start = datetime.date(today.year - int(period_years), today.month, today.day)
+    except ValueError:
+        start = datetime.date(today.year - int(period_years), today.month, 28)
 
     # 1. Bars
     sym_df = _load_bars_df(symbol, period_years)
