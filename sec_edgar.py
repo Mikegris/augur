@@ -612,7 +612,27 @@ def get_form4_transactions(ticker, limit=30):
                 txn_date = txn.findtext("transactionDate/value") or txn.findtext("transactionDate") or filing["filing_date"]
                 shares_text = txn.findtext("transactionAmounts/transactionShares/value") or txn.findtext("transactionAmounts/transactionShares") or "0"
                 price_text = txn.findtext("transactionAmounts/transactionPricePerShare/value") or txn.findtext("transactionAmounts/transactionPricePerShare") or "0"
-                code_text = txn.findtext("transactionAmounts/transactionAcquiredDisposedCode/value") or txn.findtext("transactionAmounts/transactionAcquiredDisposedCode") or ""
+                # transactionCode is the *action* (P=Open-Market Purchase,
+                # S=Open-Market Sale, M=Exercise of derivative, F=Tax payment,
+                # A=Grant/award, G=Gift, D=Disposition to issuer, etc.).
+                # transactionAcquiredDisposedCode is just A/D ("Acquired" vs
+                # "Disposed") — derived from the action but ambiguous on its
+                # own: an RSU grant has A/A (Acquired via Award), which the
+                # old code mis-labelled BUY; an M-exercise typically has
+                # multiple sub-transactions including a D, which got labelled
+                # SELL. Use the real action code for the buy/sell decision,
+                # fall back to A/D direction only when transactionCode is
+                # absent.
+                action_code = (
+                    txn.findtext("transactionCoding/transactionCode")
+                    or txn.findtext(".//transactionCode")
+                    or ""
+                ).strip().upper()
+                direction_code = (
+                    txn.findtext("transactionAmounts/transactionAcquiredDisposedCode/value")
+                    or txn.findtext("transactionAmounts/transactionAcquiredDisposedCode")
+                    or ""
+                ).strip().upper()
                 shares_after_text = txn.findtext("postTransactionAmounts/sharesOwnedFollowingTransaction/value") or txn.findtext("postTransactionAmounts/sharesOwnedFollowingTransaction") or "0"
                 try:
                     shares = float(shares_text.replace(",", ""))
@@ -626,7 +646,21 @@ def get_form4_transactions(ticker, limit=30):
                     shares_after = float(shares_after_text.replace(",", ""))
                 except (ValueError, AttributeError):
                     shares_after = 0.0
-                txn_type = "BUY" if code_text.strip().upper() == "A" else "SELL"
+                # Classify by action code first (open-market only counts as
+                # a real signal); everything else is "OTHER" so downstream
+                # filters (smart-money, opportunity_scanner) don't count
+                # grants and tax-withholding withholdings as insider buys.
+                if action_code == "P":
+                    txn_type = "BUY"
+                elif action_code == "S":
+                    txn_type = "SELL"
+                elif action_code:
+                    # Tag with the code so callers can decide (A=Award,
+                    # M=Exercise, F=Tax-paid, G=Gift, D=Disposition, etc.)
+                    txn_type = "OTHER:" + action_code
+                else:
+                    # No action code at all — fall back to A/D direction.
+                    txn_type = "BUY" if direction_code == "A" else "SELL"
                 value = shares * price if shares and price else 0.0
                 if derivative and shares <= 0:
                     return None
@@ -634,7 +668,8 @@ def get_form4_transactions(ticker, limit=30):
                 return {
                     "ticker": ticker.upper(), "insider_name": owner_name,
                     "title": title_str, "is_director": is_director, "is_officer": is_officer,
-                    "transaction_type": txn_type, "security": security,
+                    "transaction_type": txn_type, "transaction_code": action_code,
+                    "security": security,
                     "shares": shares, "price": price, "value": value,
                     "shares_after": shares_after, "date": txn_date,
                     "accession": acc, "form_url": form_url,
