@@ -7,9 +7,20 @@ without an API key.
 import logging
 import threading
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 log = logging.getLogger("augur.calendar_v2")
+
+
+def _today_key() -> str:
+    """ISO date string used to invalidate per-day caches at the date roll.
+
+    Without including today's date in the cache key, the static
+    ("earn_today",) / ("div_today",) / ("splits_today",) keys would serve
+    yesterday's NASDAQ results for up to TTL (30 min) past midnight UTC.
+    Anchored to UTC so the roll happens at a predictable moment.
+    """
+    return datetime.now(timezone.utc).date().isoformat()
 
 _cache = {}
 _lock = threading.Lock()
@@ -53,7 +64,7 @@ def earnings_today():
     def _build():
         from finance_calendars import finance_calendars as fc
         return _df_to_records(fc.get_earnings_today())
-    return _cached(("earn_today",), 1800, _build)
+    return _cached(("earn_today", _today_key()), 1800, _build)
 
 
 def earnings_for(date_str):
@@ -83,11 +94,11 @@ def dividends_today():
     def _build():
         from finance_calendars import finance_calendars as fc
         return _df_to_records(fc.get_dividends_today())
-    return _cached(("div_today",), 1800, _build)
+    return _cached(("div_today", _today_key()), 1800, _build)
 
 
 def splits_today():
     def _build():
         from finance_calendars import finance_calendars as fc
         return _df_to_records(fc.get_splits_today())
-    return _cached(("splits_today",), 1800, _build)
+    return _cached(("splits_today", _today_key()), 1800, _build)
