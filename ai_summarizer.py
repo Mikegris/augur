@@ -108,7 +108,11 @@ def _openai_summarize(text, form_type, ticker, description, api_key):
             return _cap_error_envelope("summarize_filing")
         try:
             from openai import OpenAI
-            client = OpenAI(api_key=api_key)
+            # Bound request time — the SDK's default is 10 min, which is too
+            # long for any user-facing call. 30s is enough for any of our
+            # short JSON-mode prompts; failures fall through to the rule-based
+            # path so the UI never hangs.
+            client = OpenAI(api_key=api_key, timeout=30.0)
 
             system_prompt = """You are a senior equity analyst. Analyze SEC filings and return ONLY valid JSON.
 Always return this exact structure:
@@ -242,7 +246,9 @@ def analyze_portfolio(holdings, summary, model="gpt-4o"):
 def _analyze_portfolio_uncached(holdings, summary, model, key):
     try:
         from openai import OpenAI
-        client = OpenAI(api_key=key)
+        # 60s for the larger gpt-4o portfolio call; still bounded, just
+        # roomier than the small JSON-mode prompts.
+        client = OpenAI(api_key=key, timeout=60.0)
 
         # Build compact portfolio representation
         positions_text = "\n".join([
@@ -452,7 +458,7 @@ def _earnings_brief_uncached(dossier, model, key):
 
     try:
         from openai import OpenAI
-        client = OpenAI(api_key=key)
+        client = OpenAI(api_key=key, timeout=60.0)
 
         system_prompt = """You are a senior equity analyst at a top-tier hedge fund specializing in earnings events.
 Your pre-earnings briefs are known for being specific, data-driven, and actionable.
@@ -676,7 +682,7 @@ def _generate_idea_thesis_uncached(idea, model, key):
 
     try:
         from openai import OpenAI
-        client = OpenAI(api_key=key)
+        client = OpenAI(api_key=key, timeout=45.0)
 
         system_prompt = """You are a senior portfolio manager generating a concise, actionable
 investment thesis for a *randomly surfaced* idea. Be specific. Reference the data
@@ -895,7 +901,7 @@ def analyze_insider_pattern(transactions, ticker):
             return env
         try:
             from openai import OpenAI
-            client = OpenAI(api_key=key)
+            client = OpenAI(api_key=key, timeout=30.0)
             resp = client.chat.completions.create(
                 model="gpt-4o-mini",
                 messages=[{
