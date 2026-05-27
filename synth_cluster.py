@@ -242,11 +242,13 @@ def _component_13f_institutional(symbol: str, direction: str) -> Tuple[bool, str
         except Exception as e:
             return (False, "error", f"{type(e).__name__}: {e}")
     if not info:
-        try:
-            import yfinance as yf
-            info = yf.Ticker(symbol).info or {}
-        except Exception as e:
-            return (False, "error", f"{type(e).__name__}: {e}")
+        # No direct yf.Ticker(symbol).info fallback: that path silently fails
+        # whenever Yahoo's crumb auth is rate-limited (v0.1.6 audit pattern,
+        # called out in the comment above). If fetcher.get_fundamentals
+        # already returned empty, every fallback inside it (Yahoo HTML +
+        # Finviz scrape) has also missed; firing the raw yfinance call here
+        # just adds another 429 to the budget without producing data.
+        return (False, "no data", "fundamentals unavailable from fetcher chain")
 
     inst = (
         info.get("heldPercentInstitutions")
