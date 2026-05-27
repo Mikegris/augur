@@ -345,6 +345,32 @@ def _warm_one(target: Dict[str, str]) -> bool:
         return False
 
 
+def _warm_one_with_cleanup(target: Dict[str, str]) -> bool:
+    """ThreadPoolExecutor wrapper that closes thread-local sqlite connections
+    on the way out. Without this, each pool worker thread opens (lazily, via
+    database.get_conn() / cache_store._conn() inside _build_dossier and
+    _persist_dossier) thread-local sqlite handles. The ThreadPoolExecutor
+    is recreated every warm_pool() call via the `with` block, so its
+    worker threads terminate when the pool exits — but Python's
+    threading.local cleanup runs only when the thread object is GC'd,
+    which can be arbitrarily delayed. In the meantime the sqlite FDs stay
+    open and a long-lived process accumulates them across passes (every
+    6h × N workers per process lifetime). On macOS the default per-process
+    FD soft limit is 256; with two workers we'd hit it after ~120 passes."""
+    try:
+        return _warm_one(target)
+    finally:
+        try:
+            db.close_thread_conn()
+        except Exception:
+            pass
+        try:
+            import cache_store
+            cache_store.close_thread_conn()
+        except Exception:
+            pass
+
+
 # ── Warming pass ─────────────────────────────────────────────────────────────
 
 def warm_pool(target_count: int = 200) -> Dict[str, Any]:
@@ -369,7 +395,7 @@ def warm_pool(target_count: int = 200) -> Dict[str, Any]:
                     len(targets), _WARM_MAX_WORKERS)
 
         with ThreadPoolExecutor(max_workers=_WARM_MAX_WORKERS) as pool:
-            futures = {pool.submit(_warm_one, t): t for t in targets}
+            futures = {pool.submit(_warm_one_with_cleanup, t): t for t in targets}
             for fut in as_completed(futures):
                 try:
                     ok = fut.result()
