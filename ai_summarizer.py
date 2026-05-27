@@ -459,11 +459,19 @@ Your pre-earnings briefs are known for being specific, data-driven, and actionab
 You help investors decide how to position BEFORE earnings: stay long, trim, hedge, or avoid.
 Return ONLY valid JSON."""
 
+        # Pre-format revenue estimate — f-string conditional inside a format
+        # spec is not valid Python. The previous expression
+        # `${dossier.get('revenue_estimate', 'N/A'):,.0f if ...}` raised
+        # `TypeError: unsupported format string passed to NoneType.__format__`
+        # whenever revenue_estimate was missing, killing the entire brief.
+        _rev = dossier.get('revenue_estimate')
+        _rev_str = f"${_rev:,.0f}" if isinstance(_rev, (int, float)) else "N/A"
+
         user_prompt = f"""Generate a pre-earnings brief for {symbol} ({name}).
 
 EARNINGS DATE: {dossier.get('earnings_date', 'Unknown')} ({dossier.get('days_until', '?')} days away)
 EPS CONSENSUS: ${dossier.get('eps_estimate', 'N/A')} (range: ${dossier.get('eps_low')} - ${dossier.get('eps_high')})
-REVENUE ESTIMATE: ${dossier.get('revenue_estimate', 'N/A'):,.0f if isinstance(dossier.get('revenue_estimate'), (int, float)) else 'N/A'}
+REVENUE ESTIMATE: {_rev_str}
 CURRENT PRICE: ${dossier.get('current_price', 'N/A')}
 
 BEAT/MISS HISTORY ({dossier.get('beat_rate', '?')}% beat rate over last quarters):

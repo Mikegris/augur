@@ -39,7 +39,15 @@ def is_available() -> bool:
 
 
 def _ensure_init():
-    """edgartools requires set_identity() to be polite to SEC."""
+    """edgartools requires set_identity() to be polite to SEC.
+
+    SEC filters User-Agents that look spoofed or contain reserved TLDs.
+    `.local` is the mDNS reserved TLD (RFC 6762) and gets flagged as
+    suspicious — sec_edgar.py already migrated away from `research@augur.local`
+    for this exact reason. Match its contact (with the AUGUR_SEC_UA override)
+    so both code paths look like the same polite client to SEC.
+    """
+    import os
     global _initialized
     if not _AVAILABLE:
         return
@@ -48,7 +56,11 @@ def _ensure_init():
             return
         try:
             from edgar import set_identity
-            set_identity("AUGUR research@augur.local")
+            ua = os.environ.get(
+                "AUGUR_SEC_UA",
+                "AUGUR Research Bot research@augur-app.org",
+            )
+            set_identity(ua)
             _initialized = True
         except Exception as e:
             log.warning("edgartools init failed: %s", e)

@@ -37,6 +37,14 @@ HOUSE_FD_BASE = "https://disclosures-clerk.house.gov"
 HOUSE_PTR_PDF = HOUSE_FD_BASE + "/public_disc/ptr-pdfs/{year}/{doc_id}.pdf"
 HOUSE_FD_ZIP  = HOUSE_FD_BASE + "/public_disc/financial-pdfs/{year}FD.ZIP"
 
+# disclosures-clerk.house.gov's WAF intermittently returns 403/empty bodies
+# for the default `python-requests/X.Y` UA. Always identify ourselves with a
+# real-looking UA + contact so the firewall lets the bytes through.
+_HOUSE_HEADERS = {
+    "User-Agent": "AUGUR Research Bot research@augur-app.org",
+    "Accept": "application/zip, application/pdf, */*",
+}
+
 # Amount range midpoints for sorting/display
 AMOUNT_MIDPOINTS = {
     "$1,001 - $15,000":      8000,
@@ -72,7 +80,7 @@ def _fetch_fd_index(year):
     Returns list of PTR dicts: {last, first, state, date_str, doc_id, year}"""
     url = HOUSE_FD_ZIP.format(year=year)
     try:
-        resp = requests.get(url, timeout=20)
+        resp = requests.get(url, headers=_HOUSE_HEADERS, timeout=20)
         if resp.status_code != 200:
             return []
         zdata = zipfile.ZipFile(io.BytesIO(resp.content))
@@ -385,7 +393,7 @@ def get_recent_trades(days=90, max_pdfs=100, tickers=None):
                 return _rehydrate_dt(cached)
 
         try:
-            resp = requests.get(url, timeout=15)
+            resp = requests.get(url, headers=_HOUSE_HEADERS, timeout=15)
             if resp.status_code != 200:
                 return []
         except Exception as e:
