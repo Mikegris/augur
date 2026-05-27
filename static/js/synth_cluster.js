@@ -237,13 +237,20 @@
       ? cluster.composite_score.toFixed(2)
       : '—';
 
+    // Derive the source-count denominator from the payload itself rather
+    // than hard-coding "10" — and guard the numerator so we never show
+    // "undefined/10 sources firing" when the backend omits the field.
+    const nFiring = (cluster.n_sources_firing != null) ? cluster.n_sources_firing : 0;
+    const nTotal = (Array.isArray(cluster.sources) && cluster.sources.length)
+      ? cluster.sources.length
+      : (cluster.n_sources_total != null ? cluster.n_sources_total : 10);
     return `
       <div class="sc-card ${dirClass}" data-symbol="${escHtml(cluster.symbol)}">
         <div class="sc-card-head">
           <span class="sc-symbol">${escHtml(cluster.symbol)}</span>
           <span class="sc-score ${dirClass}">${composite}</span>
         </div>
-        <div class="sc-n-fired">${cluster.n_sources_firing}/10 sources firing</div>
+        <div class="sc-n-fired">${nFiring}/${nTotal} sources firing</div>
         <div class="sc-sources">${sourceRows}</div>
       </div>`;
   }
@@ -267,13 +274,17 @@
         <div class="sc-src-note">${escHtml(s.note || '')}</div>`;
     }).join('');
 
+    const nFiring = (cluster.n_sources_firing != null) ? cluster.n_sources_firing : 0;
+    const nTotal = (Array.isArray(cluster.sources) && cluster.sources.length)
+      ? cluster.sources.length
+      : (cluster.n_sources_total != null ? cluster.n_sources_total : 10);
     return `
       <div class="sc-card ${dirClass} expanded" data-symbol="${escHtml(cluster.symbol)}" data-expanded="1">
         <div class="sc-card-head">
           <span class="sc-symbol">${escHtml(cluster.symbol)} — detail</span>
           <span class="sc-score ${dirClass}">${composite}</span>
         </div>
-        <div class="sc-n-fired">${cluster.n_sources_firing}/10 sources firing — click to collapse</div>
+        <div class="sc-n-fired">${nFiring}/${nTotal} sources firing — click to collapse</div>
         <div class="sc-sources">${sourceRows}</div>
       </div>`;
   }
