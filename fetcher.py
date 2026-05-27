@@ -527,7 +527,7 @@ def get_quotes_batch(symbols: list) -> dict:
                 if price is None:
                     raise RuntimeError("no price from yfinance")
                 chg = round(price - prev, 4) if price and prev else None
-                chg_pct = round((chg / prev) * 100, 4) if chg and prev else None
+                chg_pct = round((chg / prev) * 100, 4) if (chg is not None and prev) else None
                 results[sym.upper()] = {
                     "symbol": sym.upper(),
                     "price": price,
