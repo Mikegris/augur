@@ -272,14 +272,18 @@ def _score_institutional_signal(symbol):
 def _score_technical_regime(symbol):
     try:
         data = ml_forecast.ml_forecast(symbol)
-        ml_score = data.get("composite_ml_score", 0.5)
+        # ml_forecast.ml_forecast() explicitly sets sub-results to None when a
+        # sub-model fails (regime=None, mean_reversion=None, composite_ml_score=None)
+        # so dict.get(key, default) returns None, not the default — `or` falls
+        # through to a neutral value, and `or {}` keeps the nested .get() safe.
+        ml_score = data.get("composite_ml_score") or 0.5
         score = int(ml_score * 100)
 
-        regime_label = data.get("regime", {}).get("current_regime", "")
+        regime_label = (data.get("regime") or {}).get("current_regime", "")
         if regime_label.upper() in ("COMPRESSION", "BREAKOUT"):
             score += 5
 
-        z_score = data.get("mean_reversion", {}).get("zscore", 0.0)
+        z_score = (data.get("mean_reversion") or {}).get("zscore", 0.0)
         if z_score < -1.5:
             score += 5
 
