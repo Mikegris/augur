@@ -201,14 +201,24 @@
       byType[e.type].push(e);
     });
 
+    const knownTypes = Object.keys(TYPE_META);
     const datasets = Object.keys(byType).map(t => {
       const meta = _typeMeta(t);
+      // Stable y-stagger per type so re-renders don't jitter. Also fix the
+      // earlier `indexOf(t) || 0` bug — for unknown types indexOf returns
+      // -1, which is truthy, so the marker landed at y=-0.9 (below the
+      // visible y-axis min of -0.5).
+      let typeIdx = knownTypes.indexOf(t);
+      if (typeIdx < 0) typeIdx = knownTypes.length; // unknown types stack above the known ones
+      const yBase = typeIdx * 0.9;
       return {
         label: meta.label,
-        data: byType[t].map(e => ({
+        data: byType[t].map((e, i) => ({
           x: e.date,
-          y: Math.random() * 0.6 + (Object.keys(TYPE_META).indexOf(t) || 0) * 0.9,
-          // ^^ stagger by type so markers don't overlap on shared OPEX/FOMC dates
+          // Spread events within a type using a deterministic fractional
+          // offset based on their index so two earnings on the same day
+          // don't sit on top of each other but stay put across re-renders.
+          y: yBase + ((i * 0.13) % 0.6),
           symbol: e.symbol,
           edge: e.edge_score,
           implied: e.implied_move_pct,
@@ -447,6 +457,13 @@
   function renderCatalystTimeline(containerEl, options) {
     if (!containerEl) return;
     const opts = Object.assign({ symbols: null, days_ahead: 60 }, options || {});
+
+    // Reset module-level UI state so a re-render doesn't carry over the
+    // previous panel's sort direction, filter chips, or stale events.
+    _STATE.events = [];
+    _STATE.sort = { key: 'date', dir: 'asc' };
+    _STATE.typeFilter = new Set(['earnings', 'fed_fomc', 'opex', 'ex_dividend']);
+    _STATE.symbolFilter = new Set();
 
     _buildSkeleton(containerEl, opts);
     _bindSortHandlers();
