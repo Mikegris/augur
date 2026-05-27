@@ -311,12 +311,23 @@ def _score_momentum(hist):
         }
         weights = {"1m": 0.4, "3m": 0.3, "6m": 0.2, "12m": 0.1}
 
-        composite = 0.0
+        # Weighted average of horizons that actually have enough history.
+        # The previous code accumulated the weighted sum but didn't renormalize
+        # by the fired weights, so a 100-bar history (only 1m + 3m available)
+        # was scored against thresholds calibrated for the full weight sum of
+        # 1.0 — a real 10% 3m gain registered as 0.03, dropping into "score 6"
+        # instead of the intended "score 7+" bucket.
+        composite_num = 0.0
+        composite_den = 0.0
         for label, bars in periods.items():
             if len(hist) >= bars + 5:
                 past_price = float(hist["Close"].iloc[-bars])
+                if past_price <= 0:
+                    continue
                 ret = (current - past_price) / past_price
-                composite += ret * weights[label]
+                composite_num += ret * weights[label]
+                composite_den += weights[label]
+        composite = (composite_num / composite_den) if composite_den > 0 else 0.0
 
         if composite > 0.30:
             score = 10
@@ -333,12 +344,16 @@ def _score_momentum(hist):
         else:
             score = 1
 
-        ma50  = hist["Close"].tail(50).mean()
+        # `tail(50).mean()` silently returned a 25-bar mean when called with
+        # 25 bars of history, mislabelled as "ma50" — so the comparison was
+        # essentially "current > recent-mean", a trivially true tautology for
+        # any up-trending stock. Only compute MAs when enough bars exist.
+        ma50  = hist["Close"].tail(50).mean() if len(hist) >= 50 else None
         ma200 = hist["Close"].tail(200).mean() if len(hist) >= 200 else None
 
-        if current > ma50:
+        if ma50 is not None and current > ma50:
             score = min(10, score + 1)
-        if ma200 and current > ma200:
+        if ma200 is not None and current > ma200:
             score = min(10, score + 1)
 
         return max(0, min(10, score))

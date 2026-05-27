@@ -122,8 +122,9 @@ def _build_features(hist):
 def _rf_predict(hist):
     """
     Train a Random Forest on the stock's own history to predict
-    P(positive 20-day forward return). Uses walk-forward: train on
-    all data except last 20 bars, predict on last row.
+    P(positive 20-day forward return). The reported `accuracy_recent`
+    is a true out-of-sample score on the most-recent 60 labelled rows
+    (re-fit on everything before that holdout).
 
     Returns dict with probability, confidence, feature importances.
     """
@@ -175,7 +176,14 @@ def _rf_predict(hist):
     # Predict probability
     proba = rf.predict_proba(X_latest)
     if proba.shape[1] < 2:
-        prob_up = float(proba[0][0]) if y_train[0] == 1 else 1.0 - float(proba[0][0])
+        # Single-class training set — predict_proba returns one column for
+        # whatever the only class is. Inspect rf.classes_ (the sklearn-known
+        # set of classes), NOT y_train[0]: y_train[0] is just the first
+        # training sample, which happens to coincide with the unique class
+        # only because there *is* only one — but reading classes_ is the
+        # correct contract and removes the implicit assumption.
+        only_class = rf.classes_[0]
+        prob_up = float(proba[0][0]) if only_class == 1 else 1.0 - float(proba[0][0])
     else:
         class_idx = list(rf.classes_).index(1) if 1 in rf.classes_ else 0
         prob_up = float(proba[0][class_idx])
@@ -184,13 +192,27 @@ def _rf_predict(hist):
     importances = dict(zip(feature_cols, rf.feature_importances_))
     top_features = sorted(importances.items(), key=lambda x: x[1], reverse=True)[:8]
 
-    # Walk-forward accuracy (last 60 predictions)
-    test_start = max(0, len(train) - 60)
-    test_df = train.iloc[test_start:]
-    if len(test_df) >= 20:
-        X_test = scaler.transform(test_df[feature_cols].values)
-        preds = rf.predict(X_test)
-        accuracy = float(np.mean(preds == test_df["target"].values))
+    # Out-of-sample accuracy on the most recent 60 labelled rows. The old
+    # implementation re-predicted on the tail of `train` — but those rows
+    # were already in the training set, so the score was in-sample and
+    # tended to ~95-100% regardless of real predictive ability. Re-fit on
+    # everything *before* the holdout, then predict on the held-out tail.
+    if len(train) >= 80 + 20:
+        holdout = train.iloc[-60:] if len(train) >= 60 else train.iloc[-20:]
+        train_oos = train.iloc[: len(train) - len(holdout)]
+        if len(train_oos) >= 60 and len(holdout) >= 20:
+            scaler_oos = StandardScaler()
+            X_tr_oos = scaler_oos.fit_transform(train_oos[feature_cols].values)
+            rf_oos = RandomForestClassifier(
+                n_estimators=200, max_depth=6, min_samples_leaf=10,
+                random_state=42, n_jobs=1,
+            )
+            rf_oos.fit(X_tr_oos, train_oos["target"].values)
+            X_te = scaler_oos.transform(holdout[feature_cols].values)
+            preds = rf_oos.predict(X_te)
+            accuracy = float(np.mean(preds == holdout["target"].values))
+        else:
+            accuracy = None
     else:
         accuracy = None
 
