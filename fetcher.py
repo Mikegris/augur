@@ -838,7 +838,15 @@ def _yahoo_search_direct(query: str, limit: int = 12) -> list:
 
 def search_symbol(query: str) -> list:
     """Use yfinance search with Yahoo's direct /finance/search as a fallback."""
-    ck = ("search", query.lower())
+    # Normalize the cache key: strip surrounding whitespace, collapse internal
+    # runs of whitespace, lowercase. Otherwise " AAPL", "AAPL ", "AAPL\t" and
+    # "AAPL" all produce distinct cache rows for the same logical query, and
+    # the auto-complete UI sometimes feeds us a trailing-space query on each
+    # keystroke — guaranteed cache miss per keystroke.
+    norm_q = " ".join((query or "").split()).lower()
+    if not norm_q:
+        return []
+    ck = ("search", norm_q)
     hit = _cached(ck, ttl=86400)  # search results barely change day-to-day
     if hit is not None:
         return hit
