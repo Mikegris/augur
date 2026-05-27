@@ -468,7 +468,11 @@ def get_quote(symbol: str) -> dict:
     try:
         t = yf.Ticker(symbol)
         info = t.fast_info
-        hist = t.history(period="2d", interval="1d")
+        # NOTE: do not call t.history() here — fast_info already carries
+        # last_price / previous_close. The old code fetched a 2-day daily
+        # history then never read it, burning one yfinance round trip per
+        # cache miss (which on Yahoo's broken-crumb fast path costs us
+        # rate-limit budget for nothing).
 
         price = _safe(info.last_price) or _safe(info.regular_market_price)
         prev_close = _safe(info.previous_close)
