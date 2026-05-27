@@ -197,9 +197,17 @@ def _compute_velocity(windows):
     pct_14d = w14.get("dominant_pct", 0.0)
 
     if dominant_7d != dominant_14d:
-        # Narrative shifted -- negative velocity proportional to how strong
-        # the new narrative is
-        velocity = -int(pct_7d * 1.0)
+        # A genuine narrative-to-narrative shift gives negative velocity
+        # (the old story is collapsing). A NEUTRAL -> narrative or
+        # narrative -> NEUTRAL transition is *emergence/dissipation*, not
+        # reversal, so we treat it as positive (a new story building up)
+        # or zero (a narrative fading into background) instead.
+        if dominant_14d == "NEUTRAL" and dominant_7d != "NEUTRAL":
+            velocity = int(pct_7d * 1.0)
+        elif dominant_7d == "NEUTRAL":
+            velocity = 0
+        else:
+            velocity = -int(pct_7d * 1.0)
     else:
         velocity = int((pct_7d - pct_14d) * 2)
 
@@ -228,8 +236,17 @@ def _detect_phase(windows, velocity, total_count):
     if dom_7 == "INSUFFICIENT DATA":
         return ("DEVELOPING", "Insufficient recent articles to determine narrative phase.")
 
-    # REVERSAL: 7d dominant differs from 14d dominant
-    if dom_14 != "INSUFFICIENT DATA" and dom_7 != dom_14:
+    # REVERSAL: 7d dominant differs from 14d dominant *and* the prior
+    # 14d dominant was a real narrative (not NEUTRAL). A NEUTRAL-to-real
+    # transition is emergence, not reversal -- bucketing it as REVERSAL
+    # incorrectly fires the contrarian "crowded trade" warning when in
+    # fact the trade has *just started* getting attention.
+    if (
+        dom_14 != "INSUFFICIENT DATA"
+        and dom_14 != "NEUTRAL"
+        and dom_7 != "NEUTRAL"
+        and dom_7 != dom_14
+    ):
         return (
             "REVERSAL",
             "Narrative shifted from {} (14d) to {} (7d).".format(dom_14, dom_7),
