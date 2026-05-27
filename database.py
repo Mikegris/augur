@@ -8,7 +8,16 @@ from datetime import datetime, timezone
 # the desktop bundle overrides this via AUGUR_DB_PATH to point at the user's
 # Application Support directory (which is the only writable place once the
 # app is launched as a .app bundle from /Applications).
-DB_PATH = os.environ.get("AUGUR_DB_PATH", "wealth.db")
+#
+# Resolve to an absolute path at import time. If anything in-process later
+# calls os.chdir() (some plotting / data-science libs do this in test
+# fixtures, and pywebview backends sometimes shift cwd on macOS), subsequent
+# threads opening a fresh connection would otherwise create a SECOND
+# wealth.db in the new working directory — silent data fork. The thread-local
+# connection pool means the original thread keeps writing to the first file
+# while new threads write to the second; portfolios appear to vanish.
+_DB_PATH_RAW = os.environ.get("AUGUR_DB_PATH", "wealth.db")
+DB_PATH = os.path.abspath(_DB_PATH_RAW)
 
 # Thread-local connection pool — reuse connections per thread instead of
 # opening/closing on every call. Saves ~1-5ms per DB operation.
@@ -43,9 +52,21 @@ def close_thread_conn():
     threads (the snapshot worker on each cycle, a one-shot prune call from
     a CLI script, etc.) should call this before exiting so the FD is
     released immediately rather than waiting for GC. No-op if no
-    connection was opened on this thread."""
+    connection was opened on this thread.
+
+    Commits before close: sqlite3.Connection.close() ROLLS BACK any open
+    implicit transaction rather than committing it. If a code path
+    finished a successful sequence of writes but skipped the explicit
+    commit (e.g., an early return in a future helper), close_thread_conn
+    would silently discard those writes. Defensive commit ensures we
+    persist whatever was staged before releasing the FD.
+    """
     conn = getattr(_local, "conn", None)
     if conn is not None:
+        try:
+            conn.commit()
+        except Exception:
+            pass
         try:
             conn.close()
         except Exception:

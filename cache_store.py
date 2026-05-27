@@ -46,7 +46,11 @@ from typing import Any, Callable, Optional, Tuple
 log = logging.getLogger("augur.cache")
 
 # Same DB AUGUR uses for everything else — keeps backup / migration simple.
-_DB_PATH = os.environ.get("AUGUR_DB_PATH", "wealth.db")
+# Resolved to absolute at import time so an in-process os.chdir() can't cause
+# a thread spawned later to open a SECOND wealth.db in the new working dir.
+# Must mirror database.py's resolution exactly so both modules hit the same
+# file regardless of subsequent cwd changes.
+_DB_PATH = os.path.abspath(os.environ.get("AUGUR_DB_PATH", "wealth.db"))
 
 _mem: dict = {}                    # key -> (value, expiry_ts, last_access_ts)
 _mem_lock = threading.RLock()
@@ -193,6 +197,15 @@ def _conn():
         # caused this connection to bail with SQLITE_BUSY while the main
         # database.py connection on the same file was still happy to wait.
         c.execute("PRAGMA busy_timeout=5000")
+        # foreign_keys is a per-connection PRAGMA. database.get_conn enables
+        # it so ON DELETE SET NULL on portfolio.account_id fires correctly.
+        # Without the same setting here, this connection can issue writes
+        # against the same DB file with FK enforcement OFF — any future
+        # cache_store helper that touches portfolio/transactions (or any code
+        # path that runs cross-table cleanup through this connection) would
+        # silently leave dangling FKs. Keep PRAGMAs aligned across every
+        # connection opened against wealth.db.
+        c.execute("PRAGMA foreign_keys = ON")
         _local.c = c
     return c
 
@@ -201,9 +214,19 @@ def close_thread_conn():
     """Explicitly close this thread's cache_store connection. Short-lived
     worker threads should call this before exiting so the FD is released
     immediately rather than waiting for GC. No-op if no connection was
-    opened on this thread."""
+    opened on this thread.
+
+    Commits before close: sqlite3.Connection.close() rolls back any open
+    implicit transaction. cache_set writes inside an explicit commit
+    today, but the defensive commit here guards against a future helper
+    that buffers a write through this connection without committing
+    (the api_cache row would otherwise vanish on thread exit)."""
     c = getattr(_local, "c", None)
     if c is not None:
+        try:
+            c.commit()
+        except Exception:
+            pass
         try:
             c.close()
         except Exception:
@@ -475,7 +498,17 @@ def coalesce(key, ttl: float, fetch_fn: Callable[[], Any]) -> Any:
     finally:
         if owner:
             with _inflight_lock:
-                _inflight.pop(k, None)
+                # Only remove the slot if it still belongs to *this* owner.
+                # Race scenario this guards against: _sweep_inflight()
+                # declared us orphaned and dropped our entry, then a fresh
+                # caller claimed the same key and installed a NEW (Event,
+                # ts) tuple. A blind pop(k) here would delete that fresh
+                # caller's slot, letting a third caller stampede with a
+                # duplicate fetch_fn while the second waiter blocks until
+                # its 15s wait timeout.
+                cur = _inflight.get(k)
+                if cur is not None and cur[0] is ev:
+                    _inflight.pop(k, None)
             ev.set()
 
 
