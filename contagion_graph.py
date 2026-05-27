@@ -293,9 +293,12 @@ _HIGH_WEIGHT_SECTIONS = re.compile(
 )
 
 # Revenue percentage patterns
+# Capture the entire number (incl. optional decimal) in a single group so
+# "represented 12.5% of revenue" is parsed as 12.5 rather than truncated
+# to 12.0 by a non-capturing decimal tail.
 _REVENUE_PCT_RE = re.compile(
     r"(?:approximately|about|roughly|represented|accounted\s+for|constituted)?\s*"
-    r"(\d{1,3})(?:\.\d+)?\s*%\s*"
+    r"(\d{1,3}(?:\.\d+)?)\s*%\s*"
     r"(?:of\s+(?:our\s+)?(?:total\s+)?(?:net\s+)?(?:revenue|sales|net\s+revenue|"
     r"total\s+revenue|consolidated\s+revenue|accounts\s+receivable))",
     re.IGNORECASE,
