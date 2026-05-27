@@ -283,8 +283,10 @@ def score_due_forecasts(max_rows: int = 200) -> Dict[str, int]:
             continue
         due_at = issued + timedelta(days=int(row["horizon_days"]))
         if due_at > now:
-            # Sorted by issued_at ASC, so anything past this is also not due.
-            break
+            # NOTE: rows arrive sorted by issued_at, *not* by due_at, so we
+            # can't `break` here — a later-issued forecast with a shorter
+            # horizon could still be due. Skip just this row and keep going.
+            continue
 
         issue_price = _safe_float(row["issue_price"])
         if issue_price is None:

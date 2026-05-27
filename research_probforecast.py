@@ -45,6 +45,7 @@ import datetime as _dt
 import logging
 import math
 import time
+from datetime import timezone as _timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
@@ -186,7 +187,10 @@ def compare_to_point(symbol: str, horizon_days: int = 20) -> Dict[str, Any]:
                     fp = tf.get("forecast_pct")
                     point["forecast_pct"] = (round(float(fp), 2)
                                              if fp is not None else None)
-                    point["trend"] = tf.get("trend")
+                    # ml_forecast.trend_forecast exposes "trend_short"/"trend_mid"
+                    # (not "trend"). Reading the wrong key just returned None
+                    # forever; prefer the short-term label, fall back to mid.
+                    point["trend"] = tf.get("trend_short") or tf.get("trend_mid")
                     point["source"] = "ml_forecast.trend_forecast"
                 rf = (ml.get("rf_classifier") or {})
                 if rf:
@@ -395,7 +399,7 @@ def _run_uncached(symbol: str, horizon_days: int,
         "n_paths": int(n_bootstrap),
         "input_window_days": int(rets.size),
         "elapsed_ms": int(elapsed * 1000),
-        "as_of": _dt.date.today().isoformat(),
+        "as_of": _dt.datetime.now(_timezone.utc).date().isoformat(),
     }
 
 
