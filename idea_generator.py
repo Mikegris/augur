@@ -612,11 +612,15 @@ def _build_fast_dossier(symbol: str, asset_class: str, source: str, strategy: st
 
     snapshot = _build_snapshot_block(symbol, asset_class, quote, fundamentals)
     opportunity = _build_opportunity_block(narrative)
+    # fetcher.get_risk_metrics emits `annualized_return` / `annualized_vol` /
+    # `sharpe_ratio` / `sortino_ratio` — the old shorter aliases never existed,
+    # so the risk_block was effectively all-None and downstream callers (trade
+    # plan / sizing) silently fell back to a hardcoded 25% vol for every name.
     risk_block = {
-        "annual_return_pct": risk.get("annual_return"),
-        "annual_volatility_pct": risk.get("annual_volatility"),
-        "sharpe": risk.get("sharpe"),
-        "sortino": risk.get("sortino"),
+        "annual_return_pct": risk.get("annualized_return"),
+        "annual_volatility_pct": risk.get("annualized_vol"),
+        "sharpe": risk.get("sharpe_ratio"),
+        "sortino": risk.get("sortino_ratio"),
         "max_drawdown": risk.get("max_drawdown"),
     }
     social = _build_social_block(symbol, stwits, reddit_mentions)
