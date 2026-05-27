@@ -149,15 +149,37 @@ def _sum_to_one_constraint() -> Dict:
 
 
 def _initial_weights(n: int, bounds: List[Tuple[float, float]]) -> np.ndarray:
-    # Equal weight, then clip into bounds and renormalize. If bounds make this
-    # infeasible the optimizer will surface the failure.
+    # Equal weight, then clip into bounds. If the clipped vector doesn't sum
+    # to 1 (e.g. n=2 with max_weight=0.3 — equal weights of 0.5 get clipped
+    # to 0.3 each, summing to 0.6) we distribute the residual into the slack
+    # of each component instead of normalising. Plain renormalisation would
+    # scale the clipped values back up above max_weight, handing SLSQP a
+    # starting point that already violates the box constraints — the
+    # optimiser then often fails ("Inequality constraints incompatible").
     w = np.full(n, 1.0 / n)
     lo = np.array([b[0] for b in bounds])
     hi = np.array([b[1] for b in bounds])
     w = np.clip(w, lo, hi)
     s = w.sum()
-    if s > EPS:
-        w = w / s
+    # Push residual into headroom (hi - w_i) or pull from cushion (w_i - lo)
+    # until sum ≈ 1 or no slack remains in any direction.
+    for _ in range(64):
+        diff = 1.0 - float(w.sum())
+        if abs(diff) < 1e-9:
+            break
+        if diff > 0:
+            slack = hi - w
+            tot = float(slack.sum())
+            if tot <= EPS:
+                break
+            w = w + slack * (diff / tot)
+        else:
+            cushion = w - lo
+            tot = float(cushion.sum())
+            if tot <= EPS:
+                break
+            w = w + cushion * (diff / tot)  # diff < 0 shrinks
+        w = np.clip(w, lo, hi)
     return w
 
 
