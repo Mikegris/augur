@@ -917,7 +917,9 @@ def get_sector_performance() -> list:
                 "change_pct": q.get("change_pct"),
                 "price": q.get("price"),
             })
-        results.sort(key=lambda x: (x["change_pct"] or -999), reverse=True)
+        # `x["change_pct"] or -999` collapses a real 0% reading to -999 and
+        # would bury a flat sector at the bottom; only fall back when None.
+        results.sort(key=lambda x: (x["change_pct"] if x["change_pct"] is not None else -999), reverse=True)
     except Exception:
         pass
     _set_cache(ck, results, ttl=60)
