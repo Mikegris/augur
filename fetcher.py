@@ -94,16 +94,6 @@ def _coingecko_quote(coin_id: str, yf_symbol: str) -> dict:
     }
 
 
-def _is_failed_crypto_quote(q: dict) -> bool:
-    """True if a quote dict looks like a yfinance failure we can recover
-    from via CoinGecko (no price, error string, or rate-limited)."""
-    if not isinstance(q, dict):
-        return True
-    if "error" in q:
-        return True
-    return q.get("price") is None
-
-
 # ─── TTL Cache ───────────────────────────────────────────────────────────────
 # Delegates to cache_store, which adds SQLite write-through (so the cache
 # survives app restarts and we don't cold-start hammer Yahoo on every launch)
