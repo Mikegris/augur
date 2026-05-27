@@ -136,7 +136,13 @@
       tile('HIT RATE',    data.hit_rate != null && isFinite(data.hit_rate)
                             ? (data.hit_rate * 100).toFixed(1) + '%'
                             : '—',
-                          data.hit_rate >= 0.55 ? 'pnl-pos' : (data.hit_rate <= 0.45 ? 'pnl-neg' : '')),
+                          // Guard against null/undefined: null <= 0.45 evaluates to true
+                          // (coerces to 0), which would paint the tile red when there's
+                          // simply no data. Only colour when we actually have a number.
+                          (data.hit_rate == null || !isFinite(data.hit_rate))
+                            ? ''
+                            : (data.hit_rate >= 0.55 ? 'pnl-pos'
+                               : (data.hit_rate <= 0.45 ? 'pnl-neg' : ''))),
       tile('AVG / SIG',   _fmtPct(data.avg_return_per_signal), _pnlClass(data.avg_return_per_signal)),
       tile('TOTAL RET',   _fmtPct(data.total_return_pct),       _pnlClass(data.total_return_pct)),
       tile('SHARPE',      _fmtNum(data.sharpe, 2),              _pnlClass(data.sharpe)),
