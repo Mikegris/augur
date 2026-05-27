@@ -3273,8 +3273,9 @@ async function loadEarningsDossier(symbol) {
     const d = await API.get(`/api/earnings/dossier/${symbol}?model=${model}`);
     renderEarningsDossier(panel, d);
   } catch(e) {
-    panel.querySelector('.panel-body').innerHTML =
-      `<div class="text-red" style="font-size:11px;padding:8px">Failed: ${e.message}</div>`;
+    const body = panel.querySelector('.panel-body');
+    if (body) body.innerHTML =
+      `<div class="text-red" style="font-size:11px;padding:8px">Failed: ${_esc(e.message || String(e))}</div>`;
   }
 }
 
