@@ -201,10 +201,11 @@ def _ensure_pattern_column() -> None:
 # ---------------------------------------------------------------------------
 
 def _clip(x: float, lo: float, hi: float) -> float:
-    if x is None:
-        return lo
-    if x != x:  # NaN
-        return 0.0
+    # Treat None/NaN the same way — neutral midpoint of the band. Returning
+    # `lo` (the old behaviour) silently biased every feature with a defensive
+    # None forward toward maximally bearish.
+    if x is None or x != x:  # None or NaN
+        return (lo + hi) / 2.0
     return max(lo, min(hi, x))
 
 

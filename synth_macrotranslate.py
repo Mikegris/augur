@@ -312,7 +312,10 @@ def _close_series(symbol: str) -> Dict[str, float]:
         bars = fetcher.get_chart_data(symbol, period="10y", interval="1d") or []
     except Exception as e:
         log.debug("macrotranslate: get_chart_data(%s) failed: %s", symbol, e)
-        return []  # type: ignore[return-value]
+        # Must match the declared return type (Dict[str, float]). The old
+        # `return []` was caught by downstream `or {}` truthiness checks but
+        # would crash any consumer that called `.keys()` / `.items()` directly.
+        return {}
     out: Dict[str, float] = {}
     if not bars:
         return out
