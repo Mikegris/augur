@@ -621,7 +621,9 @@ def portfolio_history():
 
 @app.route("/api/portfolio/benchmark")
 def portfolio_benchmark():
-    symbol = request.args.get("symbol", "SPY")
+    symbol = (request.args.get("symbol") or "SPY").upper().strip()
+    if not _valid_ticker(symbol):
+        return jsonify({"error": "Invalid symbol"}), 400
     period = request.args.get("period", "1y")
     # Get first snapshot value to normalize benchmark to same starting value
     snapshots = db.get_snapshots()
