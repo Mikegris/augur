@@ -106,6 +106,13 @@
   // band p25–p75, median tick, and a marker for the 0% line.
   function _renderFan(d) {
     if (!d) return '';
+    // Guard against partial payloads (any of p05/p95/p25/p75/median missing
+    // would otherwise produce NaN widths and a broken fan chart).
+    if (d.p05 == null || d.p95 == null || d.p25 == null ||
+        d.p75 == null || d.median == null ||
+        !isFinite(d.p05) || !isFinite(d.p95)) {
+      return '<div class="pf-err">distribution missing percentile data</div>';
+    }
     // Domain: pad the [p05, p95] range slightly so the bands don't kiss
     // the edges; also force 0% to live inside the visible range so the
     // "no-change" reference is always shown.
