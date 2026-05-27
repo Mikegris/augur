@@ -4912,21 +4912,24 @@ function renderInstitutional(data, panel) {
     return;
   }
 
-  const cards = funds.map(name => {
+  const cards = funds.map((name, i) => {
     const fd = data[name];
     const hasError = fd.error && !fd.holdings?.length;
     const val = fd.total_value ? '$' + fmt.compact(fd.total_value) : '—';
     const numH = fd.num_holdings || fd.holdings?.length || 0;
     const overlap = fd.overlap_with_portfolio?.length || 0;
+    // Use index as the ID suffix; whitespace-collapsing produced collisions
+    // between e.g. "Berkshire Hathaway" and "Berkshire  Hathaway" (double
+    // space), and broke entirely on names with non-alphanumeric chars.
     return `
-      <div class="fund-card" id="fcard-${name.replace(/\s+/g,'_')}" onclick="showFundHoldings('${name}')">
-        <div style="font-size:11px;font-weight:700;color:var(--green);margin-bottom:6px">${name}</div>
+      <div class="fund-card" id="fcard-${i}" onclick="showFundHoldings('${_jesc(name)}')">
+        <div style="font-size:11px;font-weight:700;color:var(--green);margin-bottom:6px">${_esc(name)}</div>
         ${hasError
           ? `<div style="font-size:10px;color:var(--red)">Data unavailable</div>`
           : `
             <div style="font-size:10px;color:var(--text-dim)">AUM: <span style="color:var(--text-primary)">${val}</span></div>
             <div style="font-size:10px;color:var(--text-dim)">Holdings: <span style="color:var(--text-primary)">${numH}</span></div>
-            <div style="font-size:10px;color:var(--text-dim)">Filed: <span style="color:var(--text-primary)">${fd.filing_date || '—'}</span></div>
+            <div style="font-size:10px;color:var(--text-dim)">Filed: <span style="color:var(--text-primary)">${_esc(fd.filing_date || '—')}</span></div>
             ${overlap ? `<div style="font-size:10px;color:var(--amber);margin-top:4px">◈ ${overlap} PORTFOLIO OVERLAP</div>` : ''}
           `
         }
