@@ -3211,6 +3211,10 @@ def synth_whatif_get():
     action = (request.args.get("action") or "add").lower()
     if not sym or mv < 0:
         return jsonify({"error": "need ?symbol=...&market_value=...&action=add|remove|resize_to"}), 400
+    if not _valid_ticker(sym):
+        return jsonify({"error": "Invalid symbol"}), 400
+    if action not in ("add", "remove", "resize_to"):
+        return jsonify({"error": "action must be add|remove|resize_to"}), 400
     acct = request.args.get("account_id")
     holdings_raw = db.get_portfolio(account_id=int(acct) if acct and acct.isdigit() else None)
     enriched = []
