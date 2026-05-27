@@ -1173,14 +1173,14 @@ async function loadAccountsList() {
     var html = '<table class="data-table" style="font-size:11px">'
       + '<thead><tr><th>NAME</th><th>TYPE</th><th>INSTITUTION</th><th>POSITIONS</th><th></th></tr></thead><tbody>';
     accounts.forEach(function(a) {
-      var colorDot = a.color ? '<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:' + a.color + ';margin-right:6px"></span>' : '';
+      var colorDot = a.color ? '<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:' + _esc(a.color) + ';margin-right:6px"></span>' : '';
       html += '<tr>'
-        + '<td>' + colorDot + a.name + '</td>'
-        + '<td>' + (ACCT_TYPE_LABELS[a.account_type] || a.account_type) + '</td>'
-        + '<td class="text-dim">' + (a.institution || '-') + '</td>'
-        + '<td class="text-dim">' + (a.position_count || '-') + '</td>'
+        + '<td>' + colorDot + _esc(a.name) + '</td>'
+        + '<td>' + _esc(ACCT_TYPE_LABELS[a.account_type] || a.account_type) + '</td>'
+        + '<td class="text-dim">' + _esc(a.institution || '-') + '</td>'
+        + '<td class="text-dim">' + _esc(a.position_count || '-') + '</td>'
         + '<td class="col-actions">'
-        + '<button class="btn btn-red btn-sm" onclick="deleteAccount(' + a.id + ', \'' + a.name.replace(/'/g, "\\'") + '\')">DEL</button>'
+        + '<button class="btn btn-red btn-sm" onclick="deleteAccount(' + a.id + ', \'' + _jesc(a.name) + '\')">DEL</button>'
         + '</td></tr>';
     });
     html += '</tbody></table>';
