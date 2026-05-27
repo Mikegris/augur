@@ -987,11 +987,76 @@ def get_top_movers() -> dict:
 
 # ─── Crypto ───────────────────────────────────────────────────────────────────
 
-def _cg_get(path: str, params: dict = None):
+# CoinGecko's free tier is ~30 requests/minute. Without caching every UI poll
+# (crypto market, global, charts, per-coin extras) hits the upstream fresh,
+# easily blowing the budget and triggering 429s that cascade into wrong-price
+# fallbacks via yfinance. _cg_get adds a thin in-process TTL cache keyed on
+# the full URL + sorted params, plus a global cool-down when CoinGecko 429s
+# us so concurrent callers don't pile on while we're already throttled.
+
+_CG_CACHE = {}                  # (path, frozen_params) -> (expiry_ts, value)
+_CG_CACHE_LOCK = threading.Lock()
+_CG_RATE_LIMIT_UNTIL = [0.0]    # mutable epoch — when we may resume calling
+
+# Per-path TTLs (seconds). Crypto trades 24/7 but the free-tier budget is
+# the binding constraint here, not freshness. /simple/price is what the
+# quote sweep uses, so keep it short.
+_CG_TTL_DEFAULTS = {
+    "/simple/price": 60,
+    "/coins/markets": 60,
+    "/global": 300,
+}
+
+
+def _cg_default_ttl(path: str) -> int:
+    for prefix, ttl in _CG_TTL_DEFAULTS.items():
+        if path.startswith(prefix):
+            return ttl
+    # /coins/{id}, /coins/{id}/market_chart, etc. — coin-level data is fine
+    # to cache a couple of minutes.
+    return 120
+
+
+def _cg_get(path: str, params: dict = None, ttl: int = None):
+    """GET against CoinGecko with TTL caching + global 429 cool-down.
+
+    ttl=None picks a per-path default. ttl=0 disables caching."""
+    key = (path, tuple(sorted((params or {}).items())))
+    now = time.time()
+    cache_ttl = _cg_default_ttl(path) if ttl is None else ttl
+    if cache_ttl > 0:
+        with _CG_CACHE_LOCK:
+            hit = _CG_CACHE.get(key)
+            if hit and hit[0] > now:
+                return hit[1]
+    # If we're inside a 429 cool-down, fail fast — burning more requests
+    # only deepens the throttle. Callers all wrap _cg_get in try/except and
+    # gracefully return [] / {}, so raising here is safe.
+    if _CG_RATE_LIMIT_UNTIL[0] > now:
+        raise RuntimeError("coingecko rate-limited; cool-down active")
     url = f"{COINGECKO_BASE}{path}"
     resp = requests.get(url, params=params, headers=HEADERS, timeout=15)
+    if resp.status_code == 429:
+        # Respect Retry-After if present, otherwise back off 30s (CoinGecko's
+        # free-tier window is a rolling minute).
+        ra = resp.headers.get("Retry-After")
+        try:
+            backoff = float(ra) if ra else 30.0
+        except (TypeError, ValueError):
+            backoff = 30.0
+        _CG_RATE_LIMIT_UNTIL[0] = time.time() + min(max(backoff, 5.0), 120.0)
+        resp.raise_for_status()
     resp.raise_for_status()
-    return resp.json()
+    data = resp.json()
+    if cache_ttl > 0:
+        with _CG_CACHE_LOCK:
+            _CG_CACHE[key] = (now + cache_ttl, data)
+            # Bounded — prune oldest if we ever exceed 256 entries.
+            if len(_CG_CACHE) > 256:
+                oldest = sorted(_CG_CACHE.items(), key=lambda kv: kv[1][0])[:64]
+                for k, _ in oldest:
+                    _CG_CACHE.pop(k, None)
+    return data
 
 
 def get_crypto_market(limit: int = 50) -> list:
@@ -1004,16 +1069,29 @@ def get_crypto_market(limit: int = 50) -> list:
             "sparkline": "true",
             "price_change_percentage": "1h,24h,7d",
         })
+        if not isinstance(data, list):
+            return []
         result = []
         for c in data:
+            if not isinstance(c, dict):
+                continue
+            # Skip rows that are missing critical identity fields rather
+            # than failing the whole batch with a KeyError. CoinGecko has
+            # been returning sparse rows for newly-listed coins (symbol
+            # may be null for a few minutes after listing).
+            cid = c.get("id")
+            sym = c.get("symbol")
+            if not cid or not sym:
+                continue
+            sparkline = (c.get("sparkline_in_7d") or {}).get("price") or []
             result.append({
-                "id": c["id"],
-                "symbol": c["symbol"].upper(),
-                "name": c["name"],
-                "price": c["current_price"],
-                "market_cap": c["market_cap"],
-                "market_cap_rank": c["market_cap_rank"],
-                "volume_24h": c["total_volume"],
+                "id": cid,
+                "symbol": str(sym).upper(),
+                "name": c.get("name") or cid,
+                "price": c.get("current_price"),
+                "market_cap": c.get("market_cap"),
+                "market_cap_rank": c.get("market_cap_rank"),
+                "volume_24h": c.get("total_volume"),
                 "change_1h": c.get("price_change_percentage_1h_in_currency"),
                 "change_24h": c.get("price_change_percentage_24h"),
                 "change_7d": c.get("price_change_percentage_7d_in_currency"),
@@ -1021,11 +1099,11 @@ def get_crypto_market(limit: int = 50) -> list:
                 "ath_change_pct": c.get("ath_change_percentage"),
                 "circulating_supply": c.get("circulating_supply"),
                 "total_supply": c.get("total_supply"),
-                "sparkline": c.get("sparkline_in_7d", {}).get("price", []),
+                "sparkline": sparkline,
                 "image": c.get("image", ""),
             })
         return result
-    except Exception as e:
+    except Exception:
         return []
 
 
@@ -1053,12 +1131,15 @@ def get_crypto_chart(coin_id: str, days: int = 30) -> list:
 def get_crypto_global() -> dict:
     try:
         data = _cg_get("/global")
-        d = data.get("data", {})
+        d = (data or {}).get("data") or {}
+        # `or {}` defends against null sub-objects — CoinGecko has shipped
+        # responses where market_cap_percentage is present-but-null during
+        # ingestion windows around the top of the hour.
         return {
-            "total_market_cap_usd": d.get("total_market_cap", {}).get("usd"),
-            "total_volume_usd": d.get("total_volume", {}).get("usd"),
-            "btc_dominance": d.get("market_cap_percentage", {}).get("btc"),
-            "eth_dominance": d.get("market_cap_percentage", {}).get("eth"),
+            "total_market_cap_usd": (d.get("total_market_cap") or {}).get("usd"),
+            "total_volume_usd": (d.get("total_volume") or {}).get("usd"),
+            "btc_dominance": (d.get("market_cap_percentage") or {}).get("btc"),
+            "eth_dominance": (d.get("market_cap_percentage") or {}).get("eth"),
             "active_coins": d.get("active_cryptocurrencies"),
             "markets": d.get("markets"),
             "market_cap_change_24h": d.get("market_cap_change_percentage_24h_usd"),
@@ -1077,16 +1158,19 @@ def get_crypto_quote(coin_id: str) -> dict:
             "community_data": "false",
             "developer_data": "false",
         })
-        # CoinGecko returns `null` (not omitted) for unpopulated dicts on
-        # newer/obscure coins, so `data.get("description", {})` still yields
-        # None and `.get("en")` would AttributeError. Coerce with `or {}`.
+        if not isinstance(data, dict):
+            return {"id": coin_id, "error": "coingecko returned non-dict"}
         md = data.get("market_data") or {}
-        desc = (data.get("description") or {}).get("en") or ""
+        sym = data.get("symbol") or coin_id
         return {
-            "id": data["id"],
-            "symbol": data["symbol"].upper(),
-            "name": data["name"],
-            "description": desc[:500],
+            "id": data.get("id") or coin_id,
+            "symbol": str(sym).upper(),
+            "name": data.get("name") or coin_id,
+            "description": (data.get("description") or {}).get("en", "")[:500],
+            # CoinGecko returns null (not omitted) sub-objects for delisted
+            # / pre-market coins — md.get("current_price", {}) won't supply
+            # the default in that case because the key DOES exist with
+            # value None, then None.get("usd") raises AttributeError.
             "price": (md.get("current_price") or {}).get("usd"),
             "market_cap": (md.get("market_cap") or {}).get("usd"),
             "volume_24h": (md.get("total_volume") or {}).get("usd"),
@@ -1126,6 +1210,8 @@ def get_crypto_extras(coin_id: str) -> dict:
             "developer_data": "true",
             "sparkline": "false",
         })
+        if not isinstance(data, dict):
+            return {"id": coin_id, "error": "coingecko returned non-dict"}
         community = data.get("community_data") or {}
         dev = data.get("developer_data") or {}
         result = {
@@ -1152,6 +1238,11 @@ def get_crypto_extras(coin_id: str) -> dict:
         _set_cache(cache_key, result, ttl=3600)
         return result
     except Exception as e:
+        # cache_store's _looks_like_failure rejects error envelopes, so we
+        # can't cache here. Negative caching of CoinGecko failures lives in
+        # _cg_get's global cool-down — that gate fires fast for the whole
+        # cool-down window, which is what idea_generator's parallel pool
+        # needed.
         return {"id": coin_id, "error": str(e)}
 
 

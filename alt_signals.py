@@ -71,6 +71,13 @@ def reddit_subreddit_posts(subreddit, *, sort="hot", limit=50):
     url = f"https://www.reddit.com/r/{subreddit}/{sort}.json"
     try:
         r = requests.get(url, headers=HEADERS_REDDIT, params={"limit": min(limit, 100)}, timeout=15)
+        # 403/404 = subreddit went private or was banned; 429 = rate limited.
+        # Cache the empty result so we don't hammer Reddit on every idea
+        # generator / dashboard tick — they all run reddit_ticker_mentions
+        # which sweeps the full default subreddit list in a tight loop.
+        if r.status_code in (403, 404, 429, 451):
+            _cset(cache_key, [], 1800 if r.status_code == 429 else 3600)
+            return []
         r.raise_for_status()
         children = (r.json().get("data") or {}).get("children") or []
         posts = []
@@ -92,6 +99,9 @@ def reddit_subreddit_posts(subreddit, *, sort="hot", limit=50):
         return posts
     except Exception as e:
         log.warning("reddit fetch %s: %s", subreddit, e)
+        # Cache the failure for a shorter window so transient network blips
+        # don't lock us out, but parallel callers don't all retry at once.
+        _cset(cache_key, [], 120)
         return []
 
 
@@ -152,6 +162,12 @@ def stocktwits_symbol_sentiment(symbol):
     try:
         r = requests.get(STOCKTWITS_SYMBOL.format(sym=symbol.upper()), headers=HEADERS_STWITS, timeout=15)
         if r.status_code != 200:
+            # Stocktwits aggressively rate-limits (~200/hr without auth).
+            # Cache the failure so idea_generator's parallel pool calls
+            # don't retry on every page load — that's how we end up locked
+            # out for hours at a time.
+            ttl = 1800 if r.status_code == 429 else 600
+            _cset(cache_key, None, ttl)
             return None
         data = r.json()
         msgs = data.get("messages") or []
@@ -186,17 +202,21 @@ def stocktwits_symbol_sentiment(symbol):
         return out
     except Exception as e:
         log.warning("stocktwits %s: %s", symbol, e)
+        _cset(cache_key, None, 120)
         return None
 
 
 def stocktwits_trending(limit=20):
     """Trending tickers on StockTwits."""
-    hit = _cget(("stwits_trending", limit))
+    cache_key = ("stwits_trending", limit)
+    hit = _cget(cache_key)
     if hit is not None:
         return hit
     try:
         r = requests.get(STOCKTWITS_TRENDING, headers=HEADERS_STWITS, timeout=15)
         if r.status_code != 200:
+            ttl = 1800 if r.status_code == 429 else 600
+            _cset(cache_key, [], ttl)
             return []
         sym = r.json().get("symbols") or []
         out = [{
@@ -204,8 +224,9 @@ def stocktwits_trending(limit=20):
             "title": s.get("title"),
             "id": s.get("id"),
         } for s in sym[:limit]]
-        _cset(("stwits_trending", limit), out, 300)
+        _cset(cache_key, out, 300)
         return out
     except Exception as e:
         log.warning("stocktwits trending: %s", e)
+        _cset(cache_key, [], 120)
         return []
