@@ -45,6 +45,7 @@ from __future__ import annotations
 import logging
 import math
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone, timedelta
 from typing import Any, Callable, Dict, List, Optional, Tuple
@@ -392,23 +393,34 @@ def _m_insider_form4_net_60d(sym: str) -> Optional[float]:
 # Shared congress trade cache: one network round-trip per (set of symbols,
 # 60d), reused across all per-ticker calls in a single peer_divergence run.
 # Without this we'd download the same 200 PTR PDFs N+1 times in parallel.
-_congress_trades_cache: Dict[str, List[Dict[str, Any]]] = {}
+#
+# Entries carry their populate timestamp so they expire after _CONGRESS_TTL_S.
+# Without a TTL the module-level dict would (a) cache transient failures as
+# permanent "no trades" entries, and (b) serve stale 60-day windows forever
+# once populated.
+_CONGRESS_TTL_S = 900  # 15min — matches the outer peerdiv cache
+_congress_trades_cache: Dict[str, Tuple[float, List[Dict[str, Any]]]] = {}
 _congress_lock = threading.Lock()
 
 
 def _ensure_congress_trades_for(symbols: List[str]) -> None:
     """Pre-fetch the 60-day congress trades for all symbols in a single call.
 
-    Stores results in ``_congress_trades_cache[symbol] = [trades]``. Idempotent;
-    a second call with overlapping symbols is a no-op for the already-cached
-    ones. Failures are silent — affected tickers map to ``[]``.
+    Stores results in ``_congress_trades_cache[symbol] = (ts, trades)``.
+    Idempotent within the TTL window; a second call with overlapping
+    symbols is a no-op for tickers cached < _CONGRESS_TTL_S ago. Failures
+    are silent — affected tickers map to ``[]`` with the current ts so we
+    don't retry on every metric call within the scan, but the next scan
+    after TTL expiry will retry.
     """
     if congress is None:
         return
+    now = time.time()
     syms_to_fetch = []
     with _congress_lock:
         for s in symbols:
-            if s not in _congress_trades_cache:
+            entry = _congress_trades_cache.get(s)
+            if entry is None or (now - entry[0]) > _CONGRESS_TTL_S:
                 syms_to_fetch.append(s)
     if not syms_to_fetch:
         return
@@ -432,7 +444,7 @@ def _ensure_congress_trades_for(symbols: List[str]) -> None:
             partition[sym].append(t)
     with _congress_lock:
         for s in syms_to_fetch:
-            _congress_trades_cache[s] = partition.get(s, [])
+            _congress_trades_cache[s] = (now, partition.get(s, []))
 
 
 def _m_congress_net_60d(sym: str) -> Optional[float]:
@@ -449,10 +461,13 @@ def _m_congress_net_60d(sym: str) -> Optional[float]:
     """
     if congress is None:
         return None
+    trades: Optional[List[Dict[str, Any]]] = None
     with _congress_lock:
-        trades = _congress_trades_cache.get(sym)
+        entry = _congress_trades_cache.get(sym)
+        if entry is not None and (time.time() - entry[0]) <= _CONGRESS_TTL_S:
+            trades = entry[1]
     if trades is None:
-        # Fallback path: caller didn't pre-warm. Fetch on-demand (slow).
+        # Fallback path: caller didn't pre-warm (or entry expired). Fetch on-demand (slow).
         try:
             trades = congress.get_trades_for_ticker(sym, days=60) or []
         except Exception:
