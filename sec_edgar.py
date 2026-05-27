@@ -530,10 +530,11 @@ def get_form4_transactions(ticker, limit=30):
     filing_dates = recent.get("filingDate", [])
     primary_docs = recent.get("primaryDocument", [])
 
-    # Collect Form 4 filings
+    # Collect Form 4 filings — include amendments (4/A) so corrected
+    # transactions don't get silently ignored.
     form4_filings = []
     for i, ft in enumerate(form_types):
-        if ft == "4":
+        if ft in ("4", "4/A"):
             raw_doc = primary_docs[i] if i < len(primary_docs) else ""
             # Strip XSLT subdirectory prefix: "xslF345X06/form4.xml" → "form4.xml"
             if "/" in raw_doc:
@@ -749,10 +750,16 @@ def get_institutional_holdings(fund_cik, fund_name):
     filing_dates = recent.get("filingDate", [])
     report_dates = recent.get("reportDate", [])
 
-    # Find most recent 13F-HR
+    # Find most recent 13F-HR — but also accept amendments (13F-HR/A).
+    # SEC lists newest-first, so the first match is the freshest version of
+    # this period. Originally we only matched the bare "13F-HR" string,
+    # which meant funds that filed a corrected 13F-HR/A (to fix CUSIP or
+    # share-count errors) kept serving the pre-correction holdings — a
+    # silent stale-cache problem since our coalesce/file cache happily
+    # returned the stale submissions JSON for hours.
     filing_idx = None
     for i, ft in enumerate(form_types):
-        if ft == "13F-HR":
+        if ft in ("13F-HR", "13F-HR/A"):
             filing_idx = i
             break
 
