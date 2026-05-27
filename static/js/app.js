@@ -4082,12 +4082,12 @@ async function loadOptionsChain(symbol, date) {
     const url = '/api/options/' + symbol + '/chain' + (date ? '?date=' + encodeURIComponent(date) : '');
     const chain = await API.get(url);
     if (gen !== _optionsChainGen) return;
-    if (chain.error && !chain.calls.length) {
-      bodyEl.innerHTML = '<div class="empty-state"><span class="text-red">' + chain.error + '</span></div>';
-      return;
-    }
     const calls = chain.calls || [];
     const puts = chain.puts || [];
+    if (chain.error && !calls.length) {
+      bodyEl.innerHTML = '<div class="empty-state"><span class="text-red">' + _esc(chain.error) + '</span></div>';
+      return;
+    }
     // Build strike-keyed map
     const allStrikes = Array.from(new Set([...calls.map(c => c.strike), ...puts.map(p => p.strike)])).sort((a,b)=>a-b);
     const callMap = {};
