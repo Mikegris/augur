@@ -120,20 +120,34 @@ def _format_gex_value(value):
 # Internal helpers
 # ---------------------------------------------------------------------------
 
-def _get_spot_price(ticker):
-    """Retrieve the current spot price from a yfinance Ticker object."""
+def _get_spot_price(ticker, symbol=None):
+    """Retrieve the current spot price from a yfinance Ticker object, with
+    a fetcher.get_quote fall back so a yfinance crumb-auth failure doesn't
+    take the whole GEX panel down. The `symbol` arg is optional only for
+    backward compat; callers should pass it so the fall back can fire."""
     try:
         price = ticker.fast_info.get("lastPrice")
         if price and price > 0:
             return float(price)
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug("gex spot: fast_info failed: %s", e)
     try:
         price = ticker.info.get("regularMarketPrice")
         if price and price > 0:
             return float(price)
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug("gex spot: ticker.info failed: %s", e)
+    # Final fall back — fetcher.get_quote carries the Yahoo-direct + Finviz
+    # fallback chain so we still recover spot when yfinance auth is broken.
+    if symbol:
+        try:
+            import fetcher
+            q = fetcher.get_quote(symbol) or {}
+            p = q.get("price")
+            if p and float(p) > 0:
+                return float(p)
+        except Exception as e:
+            logger.debug("gex spot: fetcher.get_quote(%s) failed: %s", symbol, e)
     return None
 
 
@@ -221,8 +235,9 @@ def compute_gex(symbol):
         logger.error("Failed to create Ticker for %s: %s", symbol, e)
         return {"error": str(e)}
 
-    # Spot price
-    spot = _get_spot_price(ticker)
+    # Spot price (with fetcher fall back so a yfinance auth failure
+    # doesn't blank the whole GEX response when the chain itself is fine).
+    spot = _get_spot_price(ticker, symbol=symbol)
     if not spot:
         return {"error": "Could not retrieve spot price for {}".format(symbol)}
 
