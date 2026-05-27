@@ -12,6 +12,7 @@ the routes return empty lists that look like "no filings found".
 """
 
 import logging
+import os
 import threading
 import time
 
@@ -41,13 +42,12 @@ def is_available() -> bool:
 def _ensure_init():
     """edgartools requires set_identity() to be polite to SEC.
 
-    SEC filters User-Agents that look spoofed or contain reserved TLDs.
-    `.local` is the mDNS reserved TLD (RFC 6762) and gets flagged as
-    suspicious — sec_edgar.py already migrated away from `research@augur.local`
-    for this exact reason. Match its contact (with the AUGUR_SEC_UA override)
-    so both code paths look like the same polite client to SEC.
+    The original UA used `.local`, which is reserved for mDNS — SEC's
+    fair-use filter treats it as a suspicious / unreachable contact and
+    429-rate-limits every request. sec_edgar.py already addresses this
+    (see the AUGUR_SEC_UA env override there); mirror the same fallback
+    so this module doesn't independently get throttled.
     """
-    import os
     global _initialized
     if not _AVAILABLE:
         return

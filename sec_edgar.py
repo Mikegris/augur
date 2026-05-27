@@ -200,6 +200,16 @@ def _edgar_get(url, params=None, timeout=30):
     return _CachedResp(payload)
 
 
+def _normalize_ticker_for_sec(ticker):
+    """SEC's company_tickers.json uses hyphens for share-class separators
+    (BRK-B, BF-A, MOG-A). Users / Yahoo Finance / our other data sources
+    use dots (BRK.B) or slashes (BRK/B). Without normalisation a lookup
+    for `BRK.B` walks the entire 10k-entry JSON, finds nothing, falls
+    through to the slow `efts.sec.gov` search, and usually still misses.
+    """
+    return ticker.upper().replace(".", "-").replace("/", "-")
+
+
 def get_cik(ticker):
     """
     Look up 10-digit zero-padded CIK for a ticker symbol.
@@ -211,7 +221,7 @@ def get_cik(ticker):
     /files/company_tickers.json endpoint when a transient outage marks a
     ticker as un-resolvable.
     """
-    ticker_upper = ticker.upper()
+    ticker_upper = _normalize_ticker_for_sec(ticker)
     now = time.time()
     hit = _CIK_CACHE.get(ticker_upper)
     if hit is not None:
@@ -224,7 +234,11 @@ def get_cik(ticker):
         resp = _edgar_get("https://www.sec.gov/files/company_tickers.json")
         data = resp.json()
         for _, entry in data.items():
-            if entry.get("ticker", "").upper() == ticker_upper:
+            entry_ticker = entry.get("ticker", "").upper()
+            # SEC stores hyphenated; we already normalised on the way in,
+            # but normalise the SEC side too in case the dataset ever
+            # introduces dot-form tickers.
+            if entry_ticker.replace(".", "-") == ticker_upper:
                 cik_int = entry["cik_str"]
                 cik_padded = str(cik_int).zfill(10)
                 _CIK_CACHE[ticker_upper] = (cik_padded, now + _CIK_POSITIVE_TTL)
@@ -516,10 +530,11 @@ def get_form4_transactions(ticker, limit=30):
     filing_dates = recent.get("filingDate", [])
     primary_docs = recent.get("primaryDocument", [])
 
-    # Collect Form 4 filings
+    # Collect Form 4 filings — include amendments (4/A) so corrected
+    # transactions don't get silently ignored.
     form4_filings = []
     for i, ft in enumerate(form_types):
-        if ft == "4":
+        if ft in ("4", "4/A"):
             raw_doc = primary_docs[i] if i < len(primary_docs) else ""
             # Strip XSLT subdirectory prefix: "xslF345X06/form4.xml" → "form4.xml"
             if "/" in raw_doc:
@@ -598,7 +613,27 @@ def get_form4_transactions(ticker, limit=30):
                 txn_date = txn.findtext("transactionDate/value") or txn.findtext("transactionDate") or filing["filing_date"]
                 shares_text = txn.findtext("transactionAmounts/transactionShares/value") or txn.findtext("transactionAmounts/transactionShares") or "0"
                 price_text = txn.findtext("transactionAmounts/transactionPricePerShare/value") or txn.findtext("transactionAmounts/transactionPricePerShare") or "0"
-                code_text = txn.findtext("transactionAmounts/transactionAcquiredDisposedCode/value") or txn.findtext("transactionAmounts/transactionAcquiredDisposedCode") or ""
+                # transactionCode is the *action* (P=Open-Market Purchase,
+                # S=Open-Market Sale, M=Exercise of derivative, F=Tax payment,
+                # A=Grant/award, G=Gift, D=Disposition to issuer, etc.).
+                # transactionAcquiredDisposedCode is just A/D ("Acquired" vs
+                # "Disposed") — derived from the action but ambiguous on its
+                # own: an RSU grant has A/A (Acquired via Award), which the
+                # old code mis-labelled BUY; an M-exercise typically has
+                # multiple sub-transactions including a D, which got labelled
+                # SELL. Use the real action code for the buy/sell decision,
+                # fall back to A/D direction only when transactionCode is
+                # absent.
+                action_code = (
+                    txn.findtext("transactionCoding/transactionCode")
+                    or txn.findtext(".//transactionCode")
+                    or ""
+                ).strip().upper()
+                direction_code = (
+                    txn.findtext("transactionAmounts/transactionAcquiredDisposedCode/value")
+                    or txn.findtext("transactionAmounts/transactionAcquiredDisposedCode")
+                    or ""
+                ).strip().upper()
                 shares_after_text = txn.findtext("postTransactionAmounts/sharesOwnedFollowingTransaction/value") or txn.findtext("postTransactionAmounts/sharesOwnedFollowingTransaction") or "0"
                 try:
                     shares = float(shares_text.replace(",", ""))
@@ -612,7 +647,21 @@ def get_form4_transactions(ticker, limit=30):
                     shares_after = float(shares_after_text.replace(",", ""))
                 except (ValueError, AttributeError):
                     shares_after = 0.0
-                txn_type = "BUY" if code_text.strip().upper() == "A" else "SELL"
+                # Classify by action code first (open-market only counts as
+                # a real signal); everything else is "OTHER" so downstream
+                # filters (smart-money, opportunity_scanner) don't count
+                # grants and tax-withholding withholdings as insider buys.
+                if action_code == "P":
+                    txn_type = "BUY"
+                elif action_code == "S":
+                    txn_type = "SELL"
+                elif action_code:
+                    # Tag with the code so callers can decide (A=Award,
+                    # M=Exercise, F=Tax-paid, G=Gift, D=Disposition, etc.)
+                    txn_type = "OTHER:" + action_code
+                else:
+                    # No action code at all — fall back to A/D direction.
+                    txn_type = "BUY" if direction_code == "A" else "SELL"
                 value = shares * price if shares and price else 0.0
                 if derivative and shares <= 0:
                     return None
@@ -620,7 +669,8 @@ def get_form4_transactions(ticker, limit=30):
                 return {
                     "ticker": ticker.upper(), "insider_name": owner_name,
                     "title": title_str, "is_director": is_director, "is_officer": is_officer,
-                    "transaction_type": txn_type, "security": security,
+                    "transaction_type": txn_type, "transaction_code": action_code,
+                    "security": security,
                     "shares": shares, "price": price, "value": value,
                     "shares_after": shares_after, "date": txn_date,
                     "accession": acc, "form_url": form_url,
@@ -700,10 +750,16 @@ def get_institutional_holdings(fund_cik, fund_name):
     filing_dates = recent.get("filingDate", [])
     report_dates = recent.get("reportDate", [])
 
-    # Find most recent 13F-HR
+    # Find most recent 13F-HR — but also accept amendments (13F-HR/A).
+    # SEC lists newest-first, so the first match is the freshest version of
+    # this period. Originally we only matched the bare "13F-HR" string,
+    # which meant funds that filed a corrected 13F-HR/A (to fix CUSIP or
+    # share-count errors) kept serving the pre-correction holdings — a
+    # silent stale-cache problem since our coalesce/file cache happily
+    # returned the stale submissions JSON for hours.
     filing_idx = None
     for i, ft in enumerate(form_types):
-        if ft == "13F-HR":
+        if ft in ("13F-HR", "13F-HR/A"):
             filing_idx = i
             break
 
