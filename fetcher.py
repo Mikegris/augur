@@ -260,7 +260,9 @@ def _finviz_quote_fallback(symbol: str) -> dict:
         return {"symbol": sym, "error": "finviz: no Price field"}
     prev = _num(fund.get("Prev Close"))
     chg_pct = _num(fund.get("Change"))
-    chg = round(price - prev, 4) if (price is not None and prev) else None
+    # `prev` is a non-zero float when present; explicit None check keeps a
+    # flat-day quote (price == prev_close) from being silently dropped to None.
+    chg = round(price - prev, 4) if (price is not None and prev is not None and prev != 0) else None
     return {
         "symbol": sym,
         "price": price,
@@ -526,8 +528,12 @@ def get_quotes_batch(symbols: list) -> dict:
                 prev = _safe(info.previous_close)
                 if price is None:
                     raise RuntimeError("no price from yfinance")
-                chg = round(price - prev, 4) if price and prev else None
-                chg_pct = round((chg / prev) * 100, 4) if chg and prev else None
+                # Use explicit None checks: a price that's *unchanged* (chg == 0)
+                # must yield change_pct = 0.0, not None. The old `if chg and prev`
+                # gate silently dropped flat-day prints to None and produced
+                # "missing data" gaps on the UI for any ticker that didn't move.
+                chg = round(price - prev, 4) if (price is not None and prev) else None
+                chg_pct = round((chg / prev) * 100, 4) if (chg is not None and prev) else None
                 results[sym.upper()] = {
                     "symbol": sym.upper(),
                     "price": price,
