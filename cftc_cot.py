@@ -134,12 +134,20 @@ def _net_position(row: dict, dataset_id: str):
 
 def snapshot() -> dict:
     """Return positioning summary across every WATCHED_CONTRACTS row, with
-    week-over-week delta. Used to power the Macro view's CFTC panel."""
-    out = []
-    for dataset_id, pattern, label, category in WATCHED_CONTRACTS:
+    week-over-week delta. Used to power the Macro view's CFTC panel.
+
+    Fetches each contract in parallel — Socrata round-trips are ~1-2s each,
+    so a serial loop over 15 contracts blocked the macro endpoint for
+    ~20-30s on cold cache. Bounded concurrency keeps us comfortably under
+    Socrata's per-IP throttle.
+    """
+    from concurrent.futures import ThreadPoolExecutor
+
+    def _one(entry):
+        dataset_id, pattern, label, category = entry
         rows = _fetch_latest_two(dataset_id, pattern)
         if not rows:
-            continue
+            return None
         latest = rows[0]
         prior  = rows[1] if len(rows) > 1 else None
 
@@ -148,7 +156,7 @@ def snapshot() -> dict:
         delta = (net_l - net_p) if (net_l is not None and net_p is not None) else None
         oi = _safe_int(latest.get("open_interest_all"))
 
-        out.append({
+        return {
             "contract": pattern,
             "label": label,
             "category": category,
@@ -161,7 +169,14 @@ def snapshot() -> dict:
             "net_prior": net_p,
             "net_delta_wow": delta,
             "net_pct_of_oi": round(net_l / oi * 100, 2) if (net_l is not None and oi) else None,
-        })
+        }
+
+    # Preserve WATCHED_CONTRACTS order in the output so the UI grid stays
+    # stable across reloads.
+    with ThreadPoolExecutor(max_workers=6) as pool:
+        results = list(pool.map(_one, WATCHED_CONTRACTS))
+    out = [r for r in results if r is not None]
+
     return {
         "snapshot": out,
         "fetched_at": datetime.utcnow().isoformat() + "Z",
