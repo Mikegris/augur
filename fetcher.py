@@ -946,9 +946,15 @@ def get_top_movers() -> dict:
             if q.get("change_pct") is not None:
                 ranked.append(q)
         ranked.sort(key=lambda x: x.get("change_pct", 0), reverse=True)
+        # When fewer than 20 names returned, `ranked[:10]` and `ranked[-10:]`
+        # overlap and the same ticker shows up in BOTH gainers and losers —
+        # split at the midpoint instead so each name appears at most once.
+        split = len(ranked) // 2
+        gainers = ranked[:min(10, split or len(ranked))]
+        losers_slice = ranked[-min(10, len(ranked) - len(gainers)):] if len(ranked) > len(gainers) else []
         return {
-            "gainers": ranked[:10],
-            "losers": ranked[-10:][::-1],
+            "gainers": gainers,
+            "losers": losers_slice[::-1],
         }
     except Exception:
         return {"gainers": [], "losers": []}
