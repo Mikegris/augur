@@ -218,10 +218,13 @@
     const s = data.summary || {};
 
     // Build a small table of top/bottom 3 individual instances.
+    // When fewer than 6 events are returned, slice(0,3) and slice(-3) overlap
+    // and the user sees the same row twice. Carve out the bottom-3 from the
+    // tail only after the top-3 have been claimed.
     const evs = (data.events || []).slice();
     evs.sort((a, b) => (b.cumulative_return_at_end || 0) - (a.cumulative_return_at_end || 0));
     const top3 = evs.slice(0, 3);
-    const bot3 = evs.slice(-3).reverse();
+    const bot3 = evs.length > 3 ? evs.slice(Math.max(3, evs.length - 3)).reverse() : [];
 
     const row = (e) => `
       <tr>
