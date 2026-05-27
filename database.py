@@ -632,10 +632,20 @@ def increment_ai_call_count(date=None, by=1):
 # ── Portfolio Snapshots ────────────────────────────────────────────────────────
 
 def save_snapshot(date, total_value, total_cost, total_pnl, total_pnl_pct, positions_json):
+    """Persist a portfolio snapshot for `date`. Uses INSERT OR REPLACE so a
+    later snapshot in the same calendar day OVERWRITES the earlier one
+    instead of being silently ignored — the snapshot worker fires every
+    5 min and we want the most recent end-of-day picture, not whatever
+    happened to be the first quote-fetch success of the morning.
+
+    Previously used INSERT OR IGNORE which froze the row at the first
+    write of the day; if that first write happened while half the
+    upstreams were rate-limited, the saved value undercount persisted
+    until midnight."""
     with _write_lock:
         conn = get_conn()
         conn.execute(
-            """INSERT OR IGNORE INTO portfolio_snapshots
+            """INSERT OR REPLACE INTO portfolio_snapshots
                (date, total_value, total_cost, total_pnl, total_pnl_pct, positions_json)
                VALUES (?,?,?,?,?,?)""",
             (date, total_value, total_cost, total_pnl, total_pnl_pct, positions_json)
