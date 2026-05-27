@@ -48,12 +48,23 @@ log = logging.getLogger("augur.cache")
 # Same DB AUGUR uses for everything else — keeps backup / migration simple.
 _DB_PATH = os.environ.get("AUGUR_DB_PATH", "wealth.db")
 
-_mem: dict = {}                    # key -> (value, expiry_ts)
+_mem: dict = {}                    # key -> (value, expiry_ts, last_access_ts)
 _mem_lock = threading.RLock()
+_MEM_SOFT_CAP = 2000
+_MEM_EVICT_TARGET = 1800
 
 # Per-key locking so a stampede on key A doesn't block traffic for key B.
-_inflight: dict = {}               # key -> threading.Event
+# key -> (threading.Event, claimed_at_ts). The timestamp lets a periodic
+# sweep release events whose fetch_fn never returned (e.g. a network deadlock
+# inside a third-party HTTP client that ignored our timeout); without the
+# sweep the Event sits in memory forever and any subsequent caller for the
+# same key wastes 15s waiting on it before falling through.
+_inflight: dict = {}
 _inflight_lock = threading.Lock()
+# Events older than this are assumed orphaned and force-released by
+# _sweep_inflight(). The longest legitimate upstream calls (full SEC EDGAR
+# 10-K fetch + AI summary) take 60-90s, so 5min is a comfortable buffer.
+_INFLIGHT_MAX_AGE_SEC = 300.0
 
 # Thread-local sqlite connection so writes from the warmer thread don't
 # fight the request threads for the same connection object.
@@ -175,12 +186,32 @@ def _looks_like_failure(value) -> bool:
 def _conn():
     c = getattr(_local, "c", None)
     if c is None:
-        c = sqlite3.connect(_DB_PATH, check_same_thread=False, timeout=5.0)
+        c = sqlite3.connect(_DB_PATH, check_same_thread=False, timeout=10.0)
         c.execute("PRAGMA journal_mode=WAL")
         c.execute("PRAGMA synchronous=NORMAL")
-        c.execute("PRAGMA busy_timeout=3000")
+        # Match database.get_conn (5000ms). Previously 3000ms here, which
+        # caused this connection to bail with SQLITE_BUSY while the main
+        # database.py connection on the same file was still happy to wait.
+        c.execute("PRAGMA busy_timeout=5000")
         _local.c = c
     return c
+
+
+def close_thread_conn():
+    """Explicitly close this thread's cache_store connection. Short-lived
+    worker threads should call this before exiting so the FD is released
+    immediately rather than waiting for GC. No-op if no connection was
+    opened on this thread."""
+    c = getattr(_local, "c", None)
+    if c is not None:
+        try:
+            c.close()
+        except Exception:
+            pass
+        try:
+            del _local.c
+        except AttributeError:
+            pass
 
 
 def _serialize_key(key) -> str:
@@ -193,22 +224,45 @@ def _serialize_key(key) -> str:
         return repr(key)
 
 
+_table_ready = False
+_table_ready_lock = threading.Lock()
+
+
+def _ensure_table() -> bool:
+    """Create the api_cache table if it doesn't exist. Returns True if the
+    table is usable, False otherwise. Called from init() and lazily from
+    cache_set() if init() failed (e.g. DB was momentarily locked at app
+    startup) — so a transient boot-time SQLITE_BUSY doesn't disable the
+    disk cache for the rest of the process lifetime."""
+    global _table_ready
+    if _table_ready:
+        return True
+    with _table_ready_lock:
+        if _table_ready:
+            return True
+        try:
+            c = _conn()
+            c.execute("""CREATE TABLE IF NOT EXISTS api_cache (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL,
+                expiry REAL NOT NULL,
+                written_at REAL NOT NULL
+            )""")
+            c.execute("CREATE INDEX IF NOT EXISTS api_cache_expiry ON api_cache(expiry)")
+            c.commit()
+            _table_ready = True
+            return True
+        except Exception as e:
+            log.warning("cache table init failed: %s", e)
+            return False
+
+
 def init() -> None:
     """Create the cache table and hydrate the in-memory map from disk.
     Idempotent — safe to call multiple times. Called once at app startup."""
-    try:
-        c = _conn()
-        c.execute("""CREATE TABLE IF NOT EXISTS api_cache (
-            key TEXT PRIMARY KEY,
-            value TEXT NOT NULL,
-            expiry REAL NOT NULL,
-            written_at REAL NOT NULL
-        )""")
-        c.execute("CREATE INDEX IF NOT EXISTS api_cache_expiry ON api_cache(expiry)")
-        c.commit()
-    except Exception as e:
-        log.warning("cache table init failed: %s", e)
+    if not _ensure_table():
         return
+    c = _conn()
 
     # Sweep expired rows before loading — keeps the in-memory map lean and
     # the SQLite table from growing without bound across many sessions.
@@ -252,6 +306,7 @@ def init() -> None:
     poisoned_keys = []
     try:
         rows = c.execute("SELECT key, value, expiry FROM api_cache").fetchall()
+        now = time.time()
         with _mem_lock:
             for key, raw, expiry in rows:
                 try:
@@ -262,7 +317,7 @@ def init() -> None:
                     poisoned_keys.append(key)
                     skipped += 1
                     continue
-                _mem[key] = (val, expiry)
+                _mem[key] = (val, expiry, now)
                 loaded += 1
     except Exception as e:
         log.warning("cache hydrate failed: %s", e)
@@ -287,8 +342,14 @@ def cache_get(key, ttl: Optional[float] = None):
     hit = _mem.get(k)
     if hit is None:
         return None
-    value, expiry = hit
-    if time.time() >= expiry:
+    # Hydrate from legacy 2-tuple format if a prior version's _mem leaked in.
+    if len(hit) == 2:
+        value, expiry = hit
+        last_access = expiry  # best effort
+    else:
+        value, expiry, last_access = hit
+    now = time.time()
+    if now >= expiry:
         with _mem_lock:
             _mem.pop(k, None)
         return None
@@ -296,6 +357,10 @@ def cache_get(key, ttl: Optional[float] = None):
         with _mem_lock:
             _mem.pop(k, None)
         return None
+    # Refresh last_access so LRU eviction favors recently-read entries.
+    # Avoid the lock on every read by writing the tuple back directly —
+    # dict item replacement is atomic in CPython.
+    _mem[k] = (value, expiry, now)
     return value
 
 
@@ -310,22 +375,34 @@ def cache_set(key, value, ttl: float) -> None:
     if _looks_like_failure(value):
         return
     k = _serialize_key(key)
-    expiry = time.time() + float(ttl)
+    now = time.time()
+    expiry = now + float(ttl)
     with _mem_lock:
-        _mem[k] = (value, expiry)
-        # Bound in-memory size — same policy as the old helper. Sweeps run
-        # only when we cross the threshold so the hot path stays cheap.
-        if len(_mem) > 2000:
-            now = time.time()
-            for stale_k in [kk for kk, (_, e) in _mem.items() if e < now]:
+        _mem[k] = (value, expiry, now)
+        # Bound in-memory size — sweeps run only when we cross the threshold
+        # so the hot path stays cheap. Eviction is two-stage: (1) drop
+        # already-expired entries; (2) if still over cap, drop the
+        # least-recently-accessed entries (true LRU, not just oldest-by-write).
+        if len(_mem) > _MEM_SOFT_CAP:
+            for stale_k in [kk for kk, t in _mem.items() if t[1] < now]:
                 _mem.pop(stale_k, None)
-            if len(_mem) > 2000:
-                # Drop the oldest 10% by expiry (effectively LRU-by-write).
-                ordered = sorted(_mem.items(), key=lambda kv: kv[1][1])
-                for kk, _ in ordered[: len(_mem) - 1800]:
+            if len(_mem) > _MEM_SOFT_CAP:
+                # Tuple is (value, expiry, last_access); evict by last_access.
+                # Legacy 2-tuples (unlikely after the in-place hydration in
+                # cache_get) fall back to expiry as the access proxy.
+                def _lru_key(kv):
+                    t = kv[1]
+                    return t[2] if len(t) >= 3 else t[1]
+                ordered = sorted(_mem.items(), key=_lru_key)
+                for kk, _ in ordered[: len(_mem) - _MEM_EVICT_TARGET]:
                     _mem.pop(kk, None)
 
     if ttl < _PERSIST_MIN_TTL:
+        return
+    # Lazy table creation: if init() was called before the DB was writable
+    # (rare boot-time SQLITE_BUSY), retry here so the disk cache doesn't
+    # stay permanently disabled for the rest of the process.
+    if not _ensure_table():
         return
     try:
         raw = json.dumps(value, default=str)
@@ -366,14 +443,19 @@ def coalesce(key, ttl: float, fetch_fn: Callable[[], Any]) -> Any:
         return cached
     k = _serialize_key(key)
 
+    # Opportunistic sweep of orphaned events so callers don't pay the
+    # full wait timeout on a key whose previous fetch_fn never returned.
+    _sweep_inflight()
+
     # Claim the in-flight slot or wait for the existing fetch.
     with _inflight_lock:
-        ev = _inflight.get(k)
-        if ev is not None:
+        entry = _inflight.get(k)
+        if entry is not None:
+            ev, _claimed_at = entry
             owner = False
         else:
             ev = threading.Event()
-            _inflight[k] = ev
+            _inflight[k] = (ev, time.time())
             owner = True
 
     if not owner:
@@ -397,12 +479,42 @@ def coalesce(key, ttl: float, fetch_fn: Callable[[], Any]) -> Any:
             ev.set()
 
 
+def _sweep_inflight() -> int:
+    """Release in-flight events whose fetch_fn appears to have died.
+
+    Returns the number of entries swept. Safe to call from any thread.
+    Cheap (lock-protected dict scan) and idempotent."""
+    now = time.time()
+    swept = 0
+    with _inflight_lock:
+        # Materialize to a list so we can mutate the dict during iteration.
+        stale = [
+            (kk, ev)
+            for kk, (ev, claimed_at) in _inflight.items()
+            if now - claimed_at > _INFLIGHT_MAX_AGE_SEC
+        ]
+        for kk, ev in stale:
+            _inflight.pop(kk, None)
+            swept += 1
+    # Set events OUTSIDE the lock — Event.set() can wake other threads that
+    # may try to re-acquire _inflight_lock immediately.
+    for _, ev in stale:
+        try:
+            ev.set()
+        except Exception:
+            pass
+    if swept:
+        log.info("cache: swept %d orphaned in-flight events", swept)
+    return swept
+
+
 def stats() -> dict:
     """Lightweight introspection for a debug endpoint."""
     with _mem_lock:
         n_mem = len(_mem)
         now = time.time()
-        fresh = sum(1 for _, exp in _mem.values() if exp > now)
+        # Tuple is (value, expiry, last_access); we only need expiry here.
+        fresh = sum(1 for t in _mem.values() if t[1] > now)
     try:
         c = _conn()
         n_disk = c.execute("SELECT COUNT(*) FROM api_cache").fetchone()[0]

@@ -57,6 +57,10 @@ HYPOTHESIS_SCORE_INTERVAL = 24 * 3600  # research_hypothesis daily scoring
 CLUSTER_INTERVAL = 12 * 3600       # synth_cluster bull+bear scans
 DIVMAP_INTERVAL = 6 * 3600         # synth_divmap divergence scan
 SECTORFLOW_INTERVAL = 30 * 60      # synth_sectorflow heatmap (11 ETFs × 12 signals)
+# Daily housekeeping: prune monotonically-growing tables + occasional VACUUM.
+# Without this an active user's wealth.db grows without bound (observed 535MB).
+PRUNE_INTERVAL = 24 * 3600
+VACUUM_INTERVAL = 7 * 24 * 3600
 INTER_REQUEST_DELAY = 1.2          # spacing between requests within a cycle
 
 # Cap how many portfolio symbols we warm per cycle so an unusually large
@@ -70,14 +74,41 @@ _started_lock = threading.Lock()
 _last_cycle: dict = {}              # task -> unix ts of last successful run
 
 
+# Soft watchdog: max wall-clock we'll wait for a single warm call before
+# moving on. If the upstream blocks past this, the orphaned thread keeps
+# running (we can't safely abort a Python thread mid-call) but the warmer
+# loop continues so other cadences don't fall behind.
+WARM_CALL_TIMEOUT = 45.0
+
+
 def _safe(label: str, fn, *args, **kwargs):
     """Wrap a warm call so a single endpoint failure doesn't kill the thread.
-    Records the timestamp on success for the status endpoint."""
-    try:
-        fn(*args, **kwargs)
-        _last_cycle[label] = time.time()
-    except Exception as e:
-        log.debug("warmer %s failed: %s", label, e)
+    Records the timestamp on success for the status endpoint.
+
+    Bounded by WARM_CALL_TIMEOUT — if the call doesn't return in time we log
+    and move on, otherwise one slow upstream (yfinance 60s timeout, SEC
+    EDGAR 90s response) can starve all the other cadences."""
+    holder = {"err": None, "done": False}
+
+    def _runner():
+        try:
+            fn(*args, **kwargs)
+        except Exception as e:
+            holder["err"] = e
+        finally:
+            holder["done"] = True
+
+    t = threading.Thread(target=_runner, name=f"warm-{label}", daemon=True)
+    t.start()
+    t.join(WARM_CALL_TIMEOUT)
+    if not holder["done"]:
+        log.warning("warmer %s exceeded %.0fs soft timeout; moving on",
+                    label, WARM_CALL_TIMEOUT)
+        return
+    if holder["err"] is not None:
+        log.debug("warmer %s failed: %s", label, holder["err"])
+        return
+    _last_cycle[label] = time.time()
 
 
 def _portfolio_symbols():
@@ -251,6 +282,28 @@ def _loop():
                           universe="sp500_top100", top_n=20)
             except Exception as e:
                 log.debug("divmap skipped: %s", e)
+            time.sleep(INTER_REQUEST_DELAY)
+
+        # ── daily prune of monotonically-growing tables ─────────────────
+        # Scanner history, snapshots (downsampled), TTL-expired cache rows,
+        # idea_pool, and ai_call_log all grow without bound without this.
+        if now - _last_cycle.get("prune", 0) >= PRUNE_INTERVAL:
+            try:
+                import database as _db
+                _safe("prune", _db.run_daily_prune)
+            except Exception as e:
+                log.debug("prune skipped: %s", e)
+            time.sleep(INTER_REQUEST_DELAY)
+
+        # ── weekly VACUUM to reclaim freed pages ────────────────────────
+        # DELETEs leave SQLite pages fragmented; without VACUUM the file
+        # never shrinks even after a big prune.
+        if now - _last_cycle.get("vacuum", 0) >= VACUUM_INTERVAL:
+            try:
+                import database as _db
+                _safe("vacuum", _db.vacuum_db)
+            except Exception as e:
+                log.debug("vacuum skipped: %s", e)
             time.sleep(INTER_REQUEST_DELAY)
 
         # ── v0.3.3 synth_sectorflow cadence: every 30 min ────────────────

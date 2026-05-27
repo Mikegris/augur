@@ -38,6 +38,24 @@ def get_conn():
     return conn
 
 
+def close_thread_conn():
+    """Explicitly close this thread's connection. Short-lived worker
+    threads (the snapshot worker on each cycle, a one-shot prune call from
+    a CLI script, etc.) should call this before exiting so the FD is
+    released immediately rather than waiting for GC. No-op if no
+    connection was opened on this thread."""
+    conn = getattr(_local, "conn", None)
+    if conn is not None:
+        try:
+            conn.close()
+        except Exception:
+            pass
+        try:
+            del _local.conn
+        except AttributeError:
+            pass
+
+
 def init_db():
     conn = get_conn()
     c = conn.cursor()
@@ -229,8 +247,64 @@ def init_db():
     for k, v in defaults.items():
         c.execute("INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)", (k, v))
 
+    # ── Settings schema version ──
+    # Tracks which migration pass has run against the settings table. Old
+    # releases stored typo'd or now-renamed keys (e.g. `show_crypto`
+    # accidentally stored as `showcrypto`); without a version sentinel we
+    # have no way to know whether a given key in the table is a stale
+    # leftover or a legitimate user override. Bump SCHEMA_VERSION below
+    # and add a corresponding case in _migrate_settings() to retire keys.
+    c.execute("INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)",
+              ("__schema_version__", "1"))
+
     conn.commit()
+    # Run settings migrations after defaults so we can prune renamed keys.
+    try:
+        _migrate_settings(conn)
+    except Exception as e:
+        # Migration errors must never block app startup — log and continue
+        # with the un-migrated schema. The app reads settings with
+        # `dict.get(..., default)` so missing keys degrade gracefully.
+        import logging as _logging
+        _logging.getLogger("augur.db").warning("settings migration failed: %s", e)
     # connection reused (thread-local pool)
+
+
+SCHEMA_VERSION = 1
+# List of settings keys retired in past releases. We delete them on init so
+# stale values don't poison new lookups. Append to this when renaming.
+_RETIRED_SETTING_KEYS = []  # type: list
+
+
+def _migrate_settings(conn):
+    """Run idempotent settings migrations. Called at the end of init_db()."""
+    cur = conn.execute("SELECT value FROM settings WHERE key='__schema_version__'")
+    row = cur.fetchone()
+    current = int(row["value"]) if row else 0
+    if current >= SCHEMA_VERSION:
+        # Even at the latest version, sweep retired keys (cheap + safe).
+        if _RETIRED_SETTING_KEYS:
+            with _write_lock:
+                conn.executemany(
+                    "DELETE FROM settings WHERE key=?",
+                    [(k,) for k in _RETIRED_SETTING_KEYS],
+                )
+                conn.commit()
+        return
+    # Future per-version steps go here. Example shape:
+    #   if current < 2: ... rename / coerce ...
+    # For now we just stamp the version forward.
+    with _write_lock:
+        conn.execute(
+            "INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)",
+            ("__schema_version__", str(SCHEMA_VERSION)),
+        )
+        if _RETIRED_SETTING_KEYS:
+            conn.executemany(
+                "DELETE FROM settings WHERE key=?",
+                [(k,) for k in _RETIRED_SETTING_KEYS],
+            )
+        conn.commit()
 
 
 # ── Accounts ──────────────────────────────────────────────────────────────────
@@ -254,42 +328,45 @@ def get_account(account_id):
 
 
 def add_account(name, account_type="brokerage", institution="", notes="", color=""):
-    conn = get_conn()
-    cur = conn.execute(
-        "INSERT INTO accounts (name, account_type, institution, notes, color) VALUES (?,?,?,?,?)",
-        (name, account_type, institution, notes, color)
-    )
-    conn.commit()
-    return cur.lastrowid
+    with _write_lock:
+        conn = get_conn()
+        cur = conn.execute(
+            "INSERT INTO accounts (name, account_type, institution, notes, color) VALUES (?,?,?,?,?)",
+            (name, account_type, institution, notes, color)
+        )
+        conn.commit()
+        return cur.lastrowid
 
 
 def update_account(account_id, name=None, account_type=None, institution=None, notes=None, color=None):
-    conn = get_conn()
-    acct = conn.execute("SELECT * FROM accounts WHERE id = ?", (account_id,)).fetchone()
-    if not acct:
-        return False
-    conn.execute(
-        "UPDATE accounts SET name=?, account_type=?, institution=?, notes=?, color=? WHERE id=?",
-        (
-            name if name is not None else acct["name"],
-            account_type if account_type is not None else acct["account_type"],
-            institution if institution is not None else acct["institution"],
-            notes if notes is not None else acct["notes"],
-            color if color is not None else acct["color"],
-            account_id,
+    with _write_lock:
+        conn = get_conn()
+        acct = conn.execute("SELECT * FROM accounts WHERE id = ?", (account_id,)).fetchone()
+        if not acct:
+            return False
+        conn.execute(
+            "UPDATE accounts SET name=?, account_type=?, institution=?, notes=?, color=? WHERE id=?",
+            (
+                name if name is not None else acct["name"],
+                account_type if account_type is not None else acct["account_type"],
+                institution if institution is not None else acct["institution"],
+                notes if notes is not None else acct["notes"],
+                color if color is not None else acct["color"],
+                account_id,
+            )
         )
-    )
-    conn.commit()
-    return True
+        conn.commit()
+        return True
 
 
 def delete_account(account_id):
-    conn = get_conn()
-    # Nullify portfolio/transaction references first
-    conn.execute("UPDATE portfolio SET account_id = NULL WHERE account_id = ?", (account_id,))
-    conn.execute("UPDATE transactions SET account_id = NULL WHERE account_id = ?", (account_id,))
-    conn.execute("DELETE FROM accounts WHERE id = ?", (account_id,))
-    conn.commit()
+    with _write_lock:
+        conn = get_conn()
+        # Nullify portfolio/transaction references first
+        conn.execute("UPDATE portfolio SET account_id = NULL WHERE account_id = ?", (account_id,))
+        conn.execute("UPDATE transactions SET account_id = NULL WHERE account_id = ?", (account_id,))
+        conn.execute("DELETE FROM accounts WHERE id = ?", (account_id,))
+        conn.commit()
 
 
 # ── Portfolio ──────────────────────────────────────────────────────────────────
@@ -346,26 +423,28 @@ def add_position(symbol, name, shares, avg_cost, asset_type="stock", sector="", 
 
 
 def update_position(pos_id, shares=None, avg_cost=None, notes=None, account_id=None):
-    conn = get_conn()
-    pos = conn.execute("SELECT * FROM portfolio WHERE id = ?", (pos_id,)).fetchone()
-    if not pos:
-        return False
-    new_shares = shares if shares is not None else pos["shares"]
-    new_cost = avg_cost if avg_cost is not None else pos["avg_cost"]
-    new_notes = notes if notes is not None else pos["notes"]
-    new_acct = account_id if account_id is not None else pos["account_id"]
-    conn.execute(
-        "UPDATE portfolio SET shares = ?, avg_cost = ?, notes = ?, account_id = ? WHERE id = ?",
-        (new_shares, new_cost, new_notes, new_acct, pos_id)
-    )
-    conn.commit()
-    return True
+    with _write_lock:
+        conn = get_conn()
+        pos = conn.execute("SELECT * FROM portfolio WHERE id = ?", (pos_id,)).fetchone()
+        if not pos:
+            return False
+        new_shares = shares if shares is not None else pos["shares"]
+        new_cost = avg_cost if avg_cost is not None else pos["avg_cost"]
+        new_notes = notes if notes is not None else pos["notes"]
+        new_acct = account_id if account_id is not None else pos["account_id"]
+        conn.execute(
+            "UPDATE portfolio SET shares = ?, avg_cost = ?, notes = ?, account_id = ? WHERE id = ?",
+            (new_shares, new_cost, new_notes, new_acct, pos_id)
+        )
+        conn.commit()
+        return True
 
 
 def delete_position(pos_id):
-    conn = get_conn()
-    conn.execute("DELETE FROM portfolio WHERE id = ?", (pos_id,))
-    conn.commit()
+    with _write_lock:
+        conn = get_conn()
+        conn.execute("DELETE FROM portfolio WHERE id = ?", (pos_id,))
+        conn.commit()
 
 
 # ── Watchlist ──────────────────────────────────────────────────────────────────
@@ -378,31 +457,33 @@ def get_watchlist():
 
 
 def add_to_watchlist(symbol, name="", asset_type="stock", alert_high=None, alert_low=None, notes=""):
-    conn = get_conn()
-    try:
-        conn.execute(
-            "INSERT INTO watchlist (symbol, name, asset_type, alert_high, alert_low, notes) VALUES (?,?,?,?,?,?)",
-            (symbol.upper(), name, asset_type, alert_high, alert_low, notes)
-        )
-        conn.commit()
-        result = True
-    except sqlite3.IntegrityError:
-        # Update alerts if already exists
-        conn.execute(
-            "UPDATE watchlist SET alert_high = ?, alert_low = ?, notes = ? WHERE symbol = ?",
-            (alert_high, alert_low, notes, symbol.upper())
-        )
-        conn.commit()
-        result = False
-    # connection reused (thread-local pool)
-    return result
+    with _write_lock:
+        conn = get_conn()
+        try:
+            conn.execute(
+                "INSERT INTO watchlist (symbol, name, asset_type, alert_high, alert_low, notes) VALUES (?,?,?,?,?,?)",
+                (symbol.upper(), name, asset_type, alert_high, alert_low, notes)
+            )
+            conn.commit()
+            result = True
+        except sqlite3.IntegrityError:
+            # Update alerts if already exists
+            conn.execute(
+                "UPDATE watchlist SET alert_high = ?, alert_low = ?, notes = ? WHERE symbol = ?",
+                (alert_high, alert_low, notes, symbol.upper())
+            )
+            conn.commit()
+            result = False
+        # connection reused (thread-local pool)
+        return result
 
 
 def delete_from_watchlist(wl_id):
-    conn = get_conn()
-    conn.execute("DELETE FROM watchlist WHERE id = ?", (wl_id,))
-    conn.commit()
-    # connection reused (thread-local pool)
+    with _write_lock:
+        conn = get_conn()
+        conn.execute("DELETE FROM watchlist WHERE id = ?", (wl_id,))
+        conn.commit()
+        # connection reused (thread-local pool)
 
 
 # ── Transactions ───────────────────────────────────────────────────────────────
@@ -426,15 +507,16 @@ def get_transactions(symbol=None, limit=100, account_id=None):
 
 
 def add_transaction(symbol, action, shares, price, fees=0, date=None, notes="", account_id=None):
-    conn = get_conn()
-    total = shares * price
-    if not date:
-        date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    conn.execute(
-        "INSERT INTO transactions (symbol, action, shares, price, total, fees, date, notes, account_id) VALUES (?,?,?,?,?,?,?,?,?)",
-        (symbol.upper(), action.upper(), shares, price, total, fees, date, notes, account_id)
-    )
-    conn.commit()
+    with _write_lock:
+        conn = get_conn()
+        total = shares * price
+        if not date:
+            date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        conn.execute(
+            "INSERT INTO transactions (symbol, action, shares, price, total, fees, date, notes, account_id) VALUES (?,?,?,?,?,?,?,?,?)",
+            (symbol.upper(), action.upper(), shares, price, total, fees, date, notes, account_id)
+        )
+        conn.commit()
 
 
 # ── Price Alerts ──────────────────────────────────────────────────────────────
@@ -454,39 +536,43 @@ def get_price_alerts(include_triggered=False):
 
 
 def add_price_alert(symbol, alert_type, price, note=""):
-    conn = get_conn()
-    cur = conn.execute(
-        "INSERT INTO price_alerts (symbol, alert_type, price, triggered) VALUES (?,?,?,0)",
-        (symbol.upper(), alert_type, price)
-    )
-    row_id = cur.lastrowid
-    conn.commit()
-    # connection reused (thread-local pool)
-    return row_id
+    with _write_lock:
+        conn = get_conn()
+        cur = conn.execute(
+            "INSERT INTO price_alerts (symbol, alert_type, price, triggered) VALUES (?,?,?,0)",
+            (symbol.upper(), alert_type, price)
+        )
+        row_id = cur.lastrowid
+        conn.commit()
+        # connection reused (thread-local pool)
+        return row_id
 
 
 def delete_price_alert(alert_id):
-    conn = get_conn()
-    conn.execute("DELETE FROM price_alerts WHERE id=?", (alert_id,))
-    conn.commit()
-    # connection reused (thread-local pool)
+    with _write_lock:
+        conn = get_conn()
+        conn.execute("DELETE FROM price_alerts WHERE id=?", (alert_id,))
+        conn.commit()
+        # connection reused (thread-local pool)
 
 
 def mark_alert_triggered(alert_id):
-    conn = get_conn()
-    conn.execute(
-        "UPDATE price_alerts SET triggered=1, triggered_at=CURRENT_TIMESTAMP WHERE id=?",
-        (alert_id,)
-    )
-    conn.commit()
-    # connection reused (thread-local pool)
+    with _write_lock:
+        conn = get_conn()
+        conn.execute(
+            "UPDATE price_alerts SET triggered=1, triggered_at=CURRENT_TIMESTAMP WHERE id=?",
+            (alert_id,)
+        )
+        conn.commit()
+        # connection reused (thread-local pool)
 
 
 def clear_triggered_alerts():
-    conn = get_conn()
-    conn.execute("DELETE FROM price_alerts WHERE triggered=1")
-    conn.commit()
-    # connection reused (thread-local pool)
+    with _write_lock:
+        conn = get_conn()
+        conn.execute("DELETE FROM price_alerts WHERE triggered=1")
+        conn.commit()
+        # connection reused (thread-local pool)
 
 
 # ── Settings ───────────────────────────────────────────────────────────────────
@@ -495,14 +581,18 @@ def get_settings():
     conn = get_conn()
     rows = conn.execute("SELECT key, value FROM settings").fetchall()
     # connection reused (thread-local pool)
-    return {r["key"]: r["value"] for r in rows}
+    # Hide internal metadata keys (anything starting with __) from callers —
+    # the frontend settings form would otherwise round-trip them and a stray
+    # JS handler could clobber the schema version on save.
+    return {r["key"]: r["value"] for r in rows if not r["key"].startswith("__")}
 
 
 def set_setting(key, value):
-    conn = get_conn()
-    conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", (key, str(value)))
-    conn.commit()
-    # connection reused (thread-local pool)
+    with _write_lock:
+        conn = get_conn()
+        conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", (key, str(value)))
+        conn.commit()
+        # connection reused (thread-local pool)
 
 
 # ── AI Call Log (daily counter) ───────────────────────────────────────────────
@@ -542,10 +632,20 @@ def increment_ai_call_count(date=None, by=1):
 # ── Portfolio Snapshots ────────────────────────────────────────────────────────
 
 def save_snapshot(date, total_value, total_cost, total_pnl, total_pnl_pct, positions_json):
+    """Persist a portfolio snapshot for `date`. Uses INSERT OR REPLACE so a
+    later snapshot in the same calendar day OVERWRITES the earlier one
+    instead of being silently ignored — the snapshot worker fires every
+    5 min and we want the most recent end-of-day picture, not whatever
+    happened to be the first quote-fetch success of the morning.
+
+    Previously used INSERT OR IGNORE which froze the row at the first
+    write of the day; if that first write happened while half the
+    upstreams were rate-limited, the saved value undercount persisted
+    until midnight."""
     with _write_lock:
         conn = get_conn()
         conn.execute(
-            """INSERT OR IGNORE INTO portfolio_snapshots
+            """INSERT OR REPLACE INTO portfolio_snapshots
                (date, total_value, total_cost, total_pnl, total_pnl_pct, positions_json)
                VALUES (?,?,?,?,?,?)""",
             (date, total_value, total_cost, total_pnl, total_pnl_pct, positions_json)
@@ -587,25 +687,26 @@ def get_cached_filing(accession):
 
 def cache_filing(accession, ticker, form_type, filing_date, description, filing_text, ai_result):
     """Cache a filing with its AI analysis."""
-    conn = get_conn()
-    key_points = ai_result.get("key_points", [])
-    conn.execute(
-        """INSERT OR REPLACE INTO sec_filings_cache
-           (accession, ticker, form_type, filing_date, description, filing_text,
-            ai_signal, ai_summary, ai_key_points, ai_event_type, ai_powered, cached_at)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP)""",
-        (
-            accession, ticker, form_type, filing_date, description,
-            filing_text[:5000] if filing_text else "",
-            ai_result.get("signal", "NEUTRAL"),
-            ai_result.get("summary", ""),
-            json.dumps(key_points),
-            ai_result.get("event_type", ""),
-            1 if ai_result.get("ai_powered") else 0,
+    with _write_lock:
+        conn = get_conn()
+        key_points = ai_result.get("key_points", [])
+        conn.execute(
+            """INSERT OR REPLACE INTO sec_filings_cache
+               (accession, ticker, form_type, filing_date, description, filing_text,
+                ai_signal, ai_summary, ai_key_points, ai_event_type, ai_powered, cached_at)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP)""",
+            (
+                accession, ticker, form_type, filing_date, description,
+                filing_text[:5000] if filing_text else "",
+                ai_result.get("signal", "NEUTRAL"),
+                ai_result.get("summary", ""),
+                json.dumps(key_points),
+                ai_result.get("event_type", ""),
+                1 if ai_result.get("ai_powered") else 0,
+            )
         )
-    )
-    conn.commit()
-    # connection reused (thread-local pool)
+        conn.commit()
+        # connection reused (thread-local pool)
 
 
 def get_cached_insiders(ticker, days=90):
@@ -626,33 +727,34 @@ def cache_insider_transactions(ticker, transactions):
     """Bulk insert insider transactions, ignoring duplicates."""
     if not transactions:
         return
-    conn = get_conn()
-    for t in transactions:
-        try:
-            conn.execute(
-                """INSERT OR IGNORE INTO insider_transactions_cache
-                   (ticker, accession, insider_name, title, transaction_type, security,
-                    shares, price, value, shares_after, date, form_url, cached_at)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP)""",
-                (
-                    t.get("ticker", ticker).upper(),
-                    t.get("accession", ""),
-                    t.get("insider_name", ""),
-                    t.get("title", ""),
-                    t.get("transaction_type", ""),
-                    t.get("security", ""),
-                    t.get("shares"),
-                    t.get("price"),
-                    t.get("value"),
-                    t.get("shares_after"),
-                    t.get("date", ""),
-                    t.get("form_url", ""),
+    with _write_lock:
+        conn = get_conn()
+        for t in transactions:
+            try:
+                conn.execute(
+                    """INSERT OR IGNORE INTO insider_transactions_cache
+                       (ticker, accession, insider_name, title, transaction_type, security,
+                        shares, price, value, shares_after, date, form_url, cached_at)
+                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP)""",
+                    (
+                        t.get("ticker", ticker).upper(),
+                        t.get("accession", ""),
+                        t.get("insider_name", ""),
+                        t.get("title", ""),
+                        t.get("transaction_type", ""),
+                        t.get("security", ""),
+                        t.get("shares"),
+                        t.get("price"),
+                        t.get("value"),
+                        t.get("shares_after"),
+                        t.get("date", ""),
+                        t.get("form_url", ""),
+                    )
                 )
-            )
-        except Exception:
-            pass
-    conn.commit()
-    # connection reused (thread-local pool)
+            except Exception:
+                pass
+        conn.commit()
+        # connection reused (thread-local pool)
 
 
 def get_cached_institutional(fund_cik):
@@ -680,23 +782,24 @@ def get_cached_institutional(fund_cik):
 
 def cache_institutional(fund_name, fund_cik, data):
     """Save fund holdings data to cache."""
-    conn = get_conn()
-    holdings = data.get("holdings", [])
-    conn.execute(
-        """INSERT OR REPLACE INTO institutional_cache
-           (fund_name, fund_cik, filing_date, period, total_value_usd, holdings_json, cached_at)
-           VALUES (?,?,?,?,?,?,CURRENT_TIMESTAMP)""",
-        (
-            fund_name,
-            str(fund_cik),
-            data.get("filing_date", ""),
-            data.get("period_of_report", ""),
-            data.get("total_value", 0),
-            json.dumps(holdings),
+    with _write_lock:
+        conn = get_conn()
+        holdings = data.get("holdings", [])
+        conn.execute(
+            """INSERT OR REPLACE INTO institutional_cache
+               (fund_name, fund_cik, filing_date, period, total_value_usd, holdings_json, cached_at)
+               VALUES (?,?,?,?,?,?,CURRENT_TIMESTAMP)""",
+            (
+                fund_name,
+                str(fund_cik),
+                data.get("filing_date", ""),
+                data.get("period_of_report", ""),
+                data.get("total_value", 0),
+                json.dumps(holdings),
+            )
         )
-    )
-    conn.commit()
-    # connection reused (thread-local pool)
+        conn.commit()
+        # connection reused (thread-local pool)
 
 
 # ── Earnings Cache ─────────────────────────────────────────────────────────────
@@ -721,13 +824,14 @@ def get_cached_earnings_dossier(symbol, max_age_hours=6):
 
 def cache_earnings_dossier(symbol, dossier):
     """Cache an earnings dossier dict."""
-    conn = get_conn()
-    conn.execute(
-        "INSERT OR REPLACE INTO earnings_cache (symbol, dossier_json, cached_at) VALUES (?,?,CURRENT_TIMESTAMP)",
-        (symbol.upper(), json.dumps(dossier, default=str))
-    )
-    conn.commit()
-    # connection reused (thread-local pool)
+    with _write_lock:
+        conn = get_conn()
+        conn.execute(
+            "INSERT OR REPLACE INTO earnings_cache (symbol, dossier_json, cached_at) VALUES (?,?,CURRENT_TIMESTAMP)",
+            (symbol.upper(), json.dumps(dossier, default=str))
+        )
+        conn.commit()
+        # connection reused (thread-local pool)
 
 
 # ── Scanner History ────────────────────────────────────────────────────────────
@@ -797,3 +901,186 @@ def get_scanner_watchlist(limit=20, days=30):
         (f"-{int(days)} days", limit)
     ).fetchall()
     return [dict(r) for r in rows]
+
+
+# ── Prune helpers ──────────────────────────────────────────────────────────────
+#
+# Every table below grows monotonically with usage. The warmer (cache_warmer.py)
+# calls these on a daily cadence so an active user's wealth.db doesn't balloon
+# past a gigabyte over a few months.
+
+def prune_scanner_history(days=90):
+    """Drop scanner_history rows older than `days`. Returns rows deleted."""
+    with _write_lock:
+        conn = get_conn()
+        cur = conn.execute(
+            "DELETE FROM scanner_history WHERE datetime(scanned_at) < datetime('now', ?)",
+            (f"-{int(days)} days",)
+        )
+        conn.commit()
+        return cur.rowcount or 0
+
+
+def prune_portfolio_snapshots(keep_daily_days=365):
+    """Downsample portfolio_snapshots: keep every daily row within the last
+    `keep_daily_days` days, but for rows older than that keep only the LAST
+    snapshot per calendar month. Returns rows deleted."""
+    with _write_lock:
+        conn = get_conn()
+        # For each (year-month) older than the cutoff, keep only the row with
+        # the maximum date. Delete everything else in that month.
+        cur = conn.execute(
+            """DELETE FROM portfolio_snapshots
+               WHERE date < date('now', ?)
+                 AND date NOT IN (
+                     SELECT MAX(date) FROM portfolio_snapshots
+                     WHERE date < date('now', ?)
+                     GROUP BY substr(date, 1, 7)
+                 )""",
+            (f"-{int(keep_daily_days)} days", f"-{int(keep_daily_days)} days")
+        )
+        conn.commit()
+        return cur.rowcount or 0
+
+
+def prune_insider_cache(days=90):
+    """Drop insider_transactions_cache rows older than `days` by cached_at."""
+    with _write_lock:
+        conn = get_conn()
+        cur = conn.execute(
+            "DELETE FROM insider_transactions_cache WHERE datetime(cached_at) < datetime('now', ?)",
+            (f"-{int(days)} days",)
+        )
+        conn.commit()
+        return cur.rowcount or 0
+
+
+def prune_institutional_cache(days=30):
+    """Drop institutional_cache rows older than `days` by cached_at.
+    The lookup helper already filters to <=7d; older rows are dead weight."""
+    with _write_lock:
+        conn = get_conn()
+        cur = conn.execute(
+            "DELETE FROM institutional_cache WHERE datetime(cached_at) < datetime('now', ?)",
+            (f"-{int(days)} days",)
+        )
+        conn.commit()
+        return cur.rowcount or 0
+
+
+def prune_sec_filings_cache(days=30):
+    """Drop sec_filings_cache rows older than `days` by cached_at.
+    The lookup helper filters to <=24h; older AI-analyzed rows are dead weight."""
+    with _write_lock:
+        conn = get_conn()
+        cur = conn.execute(
+            "DELETE FROM sec_filings_cache WHERE datetime(cached_at) < datetime('now', ?)",
+            (f"-{int(days)} days",)
+        )
+        conn.commit()
+        return cur.rowcount or 0
+
+
+def prune_earnings_cache(hours=48):
+    """Drop earnings_cache rows older than `hours` by cached_at.
+    Lookup helper filters to <=6h; this is a safety net for stale rows."""
+    with _write_lock:
+        conn = get_conn()
+        cur = conn.execute(
+            "DELETE FROM earnings_cache WHERE datetime(cached_at) < datetime('now', ?)",
+            (f"-{int(hours)} hours",)
+        )
+        conn.commit()
+        return cur.rowcount or 0
+
+
+def prune_idea_pool(keep_n=500):
+    """Keep only the most recently warmed `keep_n` idea_pool rows."""
+    with _write_lock:
+        conn = get_conn()
+        # idea_pool may not exist yet on a brand-new DB; tolerate the miss.
+        try:
+            cur = conn.execute(
+                """DELETE FROM idea_pool
+                   WHERE rowid NOT IN (
+                       SELECT rowid FROM idea_pool
+                       ORDER BY warmed_at DESC LIMIT ?
+                   )""",
+                (int(keep_n),)
+            )
+            conn.commit()
+            return cur.rowcount or 0
+        except sqlite3.OperationalError:
+            return 0
+
+
+def prune_ai_call_log(days=90):
+    """Drop ai_call_log rows older than `days`."""
+    with _write_lock:
+        conn = get_conn()
+        cur = conn.execute(
+            "DELETE FROM ai_call_log WHERE date < date('now', ?)",
+            (f"-{int(days)} days",)
+        )
+        conn.commit()
+        return cur.rowcount or 0
+
+
+def vacuum_db():
+    """Reclaim disk pages freed by DELETEs. Cannot run inside a transaction,
+    so we commit any pending writes first. Returns the new file size in bytes
+    (or -1 if the DB path can't be stat'd)."""
+    with _write_lock:
+        conn = get_conn()
+        try:
+            conn.commit()  # close any open implicit txn
+        except Exception:
+            pass
+        try:
+            conn.execute("VACUUM")
+        except sqlite3.OperationalError:
+            # Some SQLite builds reject VACUUM under WAL mode if a reader is
+            # still active. Best-effort — just skip on failure.
+            return -1
+        try:
+            return os.path.getsize(DB_PATH)
+        except OSError:
+            return -1
+
+
+def run_daily_prune():
+    """Run all prune helpers in one go. Returns a dict of rows deleted by table."""
+    out = {}
+    try:
+        out["scanner_history"] = prune_scanner_history(90)
+    except Exception:
+        out["scanner_history"] = -1
+    try:
+        out["portfolio_snapshots"] = prune_portfolio_snapshots(365)
+    except Exception:
+        out["portfolio_snapshots"] = -1
+    try:
+        out["insider_transactions_cache"] = prune_insider_cache(90)
+    except Exception:
+        out["insider_transactions_cache"] = -1
+    try:
+        out["institutional_cache"] = prune_institutional_cache(30)
+    except Exception:
+        out["institutional_cache"] = -1
+    try:
+        out["sec_filings_cache"] = prune_sec_filings_cache(30)
+    except Exception:
+        out["sec_filings_cache"] = -1
+    try:
+        out["earnings_cache"] = prune_earnings_cache(48)
+    except Exception:
+        out["earnings_cache"] = -1
+    try:
+        out["idea_pool"] = prune_idea_pool(500)
+    except Exception:
+        out["idea_pool"] = -1
+    try:
+        out["ai_call_log"] = prune_ai_call_log(90)
+    except Exception:
+        out["ai_call_log"] = -1
+    return out

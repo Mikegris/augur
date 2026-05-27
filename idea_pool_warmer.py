@@ -69,27 +69,30 @@ _warm_interval = 6 * 3600
 # ── Schema bootstrap ─────────────────────────────────────────────────────────
 
 def init_idea_pool_table() -> None:
-    """Create the idea_pool + idea_pool_state tables if they don't exist."""
-    conn = db.get_conn()
-    c = conn.cursor()
-    c.execute("""CREATE TABLE IF NOT EXISTS idea_pool (
-        symbol TEXT NOT NULL,
-        asset_class TEXT NOT NULL,
-        strategy TEXT NOT NULL,
-        dossier_json TEXT NOT NULL,
-        composite_score REAL,
-        sector TEXT,
-        warmed_at TEXT NOT NULL,
-        PRIMARY KEY (symbol, asset_class, strategy)
-    )""")
-    c.execute("CREATE INDEX IF NOT EXISTS idx_idea_pool_warmed ON idea_pool(warmed_at)")
-    c.execute("CREATE INDEX IF NOT EXISTS idx_idea_pool_score ON idea_pool(composite_score)")
+    """Create the idea_pool + idea_pool_state tables if they don't exist.
+    Holds _write_lock so we don't race the snapshot worker / cache_warmer
+    on module import."""
+    with db._write_lock:
+        conn = db.get_conn()
+        c = conn.cursor()
+        c.execute("""CREATE TABLE IF NOT EXISTS idea_pool (
+            symbol TEXT NOT NULL,
+            asset_class TEXT NOT NULL,
+            strategy TEXT NOT NULL,
+            dossier_json TEXT NOT NULL,
+            composite_score REAL,
+            sector TEXT,
+            warmed_at TEXT NOT NULL,
+            PRIMARY KEY (symbol, asset_class, strategy)
+        )""")
+        c.execute("CREATE INDEX IF NOT EXISTS idx_idea_pool_warmed ON idea_pool(warmed_at)")
+        c.execute("CREATE INDEX IF NOT EXISTS idx_idea_pool_score ON idea_pool(composite_score)")
 
-    c.execute("""CREATE TABLE IF NOT EXISTS idea_pool_state (
-        key TEXT PRIMARY KEY,
-        value TEXT
-    )""")
-    conn.commit()
+        c.execute("""CREATE TABLE IF NOT EXISTS idea_pool_state (
+            key TEXT PRIMARY KEY,
+            value TEXT
+        )""")
+        conn.commit()
 
 
 # Run on import so callers can immediately query the table.
@@ -99,20 +102,34 @@ init_idea_pool_table()
 # ── State key/value helpers ──────────────────────────────────────────────────
 
 def _state_get(key: str) -> Optional[str]:
-    conn = db.get_conn()
-    row = conn.execute(
-        "SELECT value FROM idea_pool_state WHERE key = ?", (key,)
-    ).fetchone()
-    return row["value"] if row else None
+    """Read a state key. Returns None if the table is missing, the row is
+    absent, or the DB is corrupted — the warmer treats this as 'start fresh'
+    rather than crashing the daemon."""
+    try:
+        conn = db.get_conn()
+        row = conn.execute(
+            "SELECT value FROM idea_pool_state WHERE key = ?", (key,)
+        ).fetchone()
+        return row["value"] if row else None
+    except Exception as exc:  # noqa: BLE001 — never let state read kill the loop
+        logger.warning("idea_pool: state_get(%s) failed: %s", key, exc)
+        return None
 
 
 def _state_set(key: str, value: str) -> None:
-    conn = db.get_conn()
-    conn.execute(
-        "INSERT OR REPLACE INTO idea_pool_state (key, value) VALUES (?, ?)",
-        (key, value),
-    )
-    conn.commit()
+    """Persist a state key under the shared _write_lock so we don't race
+    the snapshot worker or cache warmer. Best-effort: state is advisory
+    (rotation offset, last-run counts) so a write failure is just logged."""
+    try:
+        conn = db.get_conn()
+        with db._write_lock:
+            conn.execute(
+                "INSERT OR REPLACE INTO idea_pool_state (key, value) VALUES (?, ?)",
+                (key, value),
+            )
+            conn.commit()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("idea_pool: state_set(%s) failed: %s", key, exc)
 
 
 def _now_iso() -> str:
@@ -172,12 +189,15 @@ def list_warmed_symbols(asset_class: Optional[str] = None) -> List[Dict[str, Any
 
 
 def _count_fresh() -> int:
-    conn = db.get_conn()
-    row = conn.execute(
-        "SELECT COUNT(*) AS n FROM idea_pool WHERE warmed_at >= ?",
-        (_ttl_cutoff_iso(),),
-    ).fetchone()
-    return int(row["n"]) if row else 0
+    try:
+        conn = db.get_conn()
+        row = conn.execute(
+            "SELECT COUNT(*) AS n FROM idea_pool WHERE warmed_at >= ?",
+            (_ttl_cutoff_iso(),),
+        ).fetchone()
+        return int(row["n"]) if row else 0
+    except Exception:
+        return 0
 
 
 def warmer_status() -> Dict[str, Any]:
@@ -385,9 +405,11 @@ def warm_pool(target_count: int = 200) -> Dict[str, Any]:
         )
         # Force a WAL checkpoint so the WAL file doesn't grow unbounded across
         # passes and so subsequent reader connections don't spend time over
-        # the freshly-written WAL pages.
+        # the freshly-written WAL pages. Holds _write_lock so no concurrent
+        # writer races against the checkpoint's brief exclusive grab.
         try:
-            db.get_conn().execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            with db._write_lock:
+                db.get_conn().execute("PRAGMA wal_checkpoint(TRUNCATE)")
         except Exception as exc:  # noqa: BLE001
             logger.warning("idea_pool: WAL checkpoint failed: %s", exc)
 
