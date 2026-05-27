@@ -318,8 +318,8 @@ def list_accounts():
 
 @app.route("/api/accounts", methods=["POST"])
 def create_account():
-    data = request.json
-    if not data.get("name"):
+    data = request.get_json(silent=True) or {}
+    if not isinstance(data, dict) or not data.get("name"):
         return jsonify({"error": "Account name is required"}), 400
     row_id = db.add_account(
         name=data["name"],
@@ -333,7 +333,9 @@ def create_account():
 
 @app.route("/api/accounts/<int:account_id>", methods=["PUT"])
 def update_account(account_id):
-    data = request.json
+    data = request.get_json(silent=True) or {}
+    if not isinstance(data, dict):
+        return jsonify({"error": "expected JSON object"}), 400
     ok = db.update_account(
         account_id,
         name=data.get("name"),
