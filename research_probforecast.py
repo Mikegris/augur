@@ -45,6 +45,7 @@ import datetime as _dt
 import logging
 import math
 import time
+from datetime import timezone as _timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
@@ -395,7 +396,7 @@ def _run_uncached(symbol: str, horizon_days: int,
         "n_paths": int(n_bootstrap),
         "input_window_days": int(rets.size),
         "elapsed_ms": int(elapsed * 1000),
-        "as_of": _dt.date.today().isoformat(),
+        "as_of": _dt.datetime.now(_timezone.utc).date().isoformat(),
     }
 
 

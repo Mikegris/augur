@@ -37,6 +37,7 @@ import json
 import logging
 import math
 import time
+from datetime import timezone as _timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
@@ -251,7 +252,7 @@ def _empty_response(holdings: List[Dict[str, Any]], horizon_days: int,
                     "value_at_risk_95_pct": 0.0, "expected_shortfall_95_pct": 0.0},
         "dropped_symbols": [],
         "warning": reason,
-        "as_of": _dt.date.today().isoformat(),
+        "as_of": _dt.datetime.now(_timezone.utc).date().isoformat(),
     }
 
 
@@ -524,7 +525,7 @@ def _simulate_uncached(clean: List[Dict[str, Any]], n_paths: int,
         "dropped_symbols": dropped,
         "lookback_days_used": int(R.shape[0]),
         "elapsed_ms": int(elapsed * 1000),
-        "as_of": _dt.date.today().isoformat(),
+        "as_of": _dt.datetime.now(_timezone.utc).date().isoformat(),
     }
 
 
