@@ -46,7 +46,13 @@ def _cset(k, value, ttl):
 # REDDIT — no auth, hot/new posts as JSON
 # ════════════════════════════════════════════════════════════════════
 SUBREDDITS_DEFAULT = ("wallstreetbets", "stocks", "investing", "options")
-_TICKER_PATTERN = re.compile(r"\$?\b([A-Z]{1,5})\b")
+# Distinguish "$F" / "$T" style cashtags (always a ticker, even single-letter)
+# from bare letters in a sentence (almost never a ticker).
+_CASHTAG_PATTERN = re.compile(r"\$([A-Z]{1,5})\b")
+_TICKER_PATTERN = re.compile(r"\b([A-Z]{2,5})\b")
+# Single-letter NYSE tickers actually traded; allowed only via the $-cashtag
+# path so we don't get false positives from sentence starts.
+_SINGLE_LETTER_TICKERS = {"F", "T", "V", "C", "M", "X", "K", "O", "B", "D", "S", "Z"}
 _NOISE = {
     "I", "A", "THE", "AND", "FOR", "ARE", "BUT", "NOT", "YOU", "ALL", "WHO",
     "WHY", "HOW", "ITS", "MY", "ON", "OR", "OF", "TO", "BE", "IS", "AS", "AT",
@@ -98,9 +104,20 @@ def reddit_ticker_mentions(*, subreddits=SUBREDDITS_DEFAULT, sort="hot", limit_p
         for p in reddit_subreddit_posts(sub, sort=sort, limit=limit_per):
             text = (p.get("title") or "") + " " + (p.get("selftext") or "")
             seen = set()
+            # 2-5 letter all-caps tokens with word boundaries
             for m in _TICKER_PATTERN.finditer(text):
                 t = m.group(1)
-                if len(t) < 2 or t in _NOISE:
+                if t in _NOISE:
+                    continue
+                seen.add(t)
+            # Cashtag form ($F, $T) catches single-letter NYSE tickers that
+            # the bare-token regex deliberately skips to avoid sentence-start
+            # false positives.
+            for m in _CASHTAG_PATTERN.finditer(text):
+                t = m.group(1)
+                if t in _NOISE:
+                    continue
+                if len(t) == 1 and t not in _SINGLE_LETTER_TICKERS:
                     continue
                 seen.add(t)
             for t in seen:
