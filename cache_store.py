@@ -197,6 +197,15 @@ def _conn():
         # caused this connection to bail with SQLITE_BUSY while the main
         # database.py connection on the same file was still happy to wait.
         c.execute("PRAGMA busy_timeout=5000")
+        # foreign_keys is a per-connection PRAGMA. database.get_conn enables
+        # it so ON DELETE SET NULL on portfolio.account_id fires correctly.
+        # Without the same setting here, this connection can issue writes
+        # against the same DB file with FK enforcement OFF — any future
+        # cache_store helper that touches portfolio/transactions (or any code
+        # path that runs cross-table cleanup through this connection) would
+        # silently leave dangling FKs. Keep PRAGMAs aligned across every
+        # connection opened against wealth.db.
+        c.execute("PRAGMA foreign_keys = ON")
         _local.c = c
     return c
 
