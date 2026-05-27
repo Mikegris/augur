@@ -46,7 +46,11 @@ from typing import Any, Callable, Optional, Tuple
 log = logging.getLogger("augur.cache")
 
 # Same DB AUGUR uses for everything else — keeps backup / migration simple.
-_DB_PATH = os.environ.get("AUGUR_DB_PATH", "wealth.db")
+# Resolved to absolute at import time so an in-process os.chdir() can't cause
+# a thread spawned later to open a SECOND wealth.db in the new working dir.
+# Must mirror database.py's resolution exactly so both modules hit the same
+# file regardless of subsequent cwd changes.
+_DB_PATH = os.path.abspath(os.environ.get("AUGUR_DB_PATH", "wealth.db"))
 
 _mem: dict = {}                    # key -> (value, expiry_ts, last_access_ts)
 _mem_lock = threading.RLock()

@@ -8,7 +8,16 @@ from datetime import datetime, timezone
 # the desktop bundle overrides this via AUGUR_DB_PATH to point at the user's
 # Application Support directory (which is the only writable place once the
 # app is launched as a .app bundle from /Applications).
-DB_PATH = os.environ.get("AUGUR_DB_PATH", "wealth.db")
+#
+# Resolve to an absolute path at import time. If anything in-process later
+# calls os.chdir() (some plotting / data-science libs do this in test
+# fixtures, and pywebview backends sometimes shift cwd on macOS), subsequent
+# threads opening a fresh connection would otherwise create a SECOND
+# wealth.db in the new working directory — silent data fork. The thread-local
+# connection pool means the original thread keeps writing to the first file
+# while new threads write to the second; portfolios appear to vanish.
+_DB_PATH_RAW = os.environ.get("AUGUR_DB_PATH", "wealth.db")
+DB_PATH = os.path.abspath(_DB_PATH_RAW)
 
 # Thread-local connection pool — reuse connections per thread instead of
 # opening/closing on every call. Saves ~1-5ms per DB operation.
