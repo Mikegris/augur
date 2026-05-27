@@ -17,7 +17,7 @@ Sub-indicators (0-100 each):
 
 import logging
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Dict, List, Optional
 
 import numpy as np
@@ -105,8 +105,10 @@ def _compute_vix_regime():
         return _neutral_indicator("VIX")
 
     level = float(closes[-1])
-    percentile = float(np.percentile(closes, 0))  # placeholder; compute real
-    # Real percentile: fraction of observations <= current level
+    # Percentile = fraction of observations <= current level. (The original
+    # `np.percentile(closes, 0)` line was a leftover placeholder that the
+    # next assignment immediately overwrote; remove it so the work isn't
+    # done twice.)
     percentile = float(np.sum(closes <= level) / len(closes) * 100.0)
 
     # Base score from absolute level
@@ -588,7 +590,7 @@ def _compute_stress_score_inner():
         "percentile_rank": round(percentile_rank, 1),
         "history": history[-30:],  # last 30 data points
         "recommendation": recommendation,
-        "timestamp": datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
     }
 
     _cached_set("stress_score", result)

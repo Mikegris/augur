@@ -69,7 +69,7 @@ import hashlib
 import json
 import logging
 import math
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional, Protocol
 
 import numpy as np
@@ -623,7 +623,7 @@ def _run(
         "start":    start or (dates[0].strftime("%Y-%m-%d") if dates else None),
         "end":      end   or (dates[-1].strftime("%Y-%m-%d") if dates else None),
         "params":   {k: v for k, v in sig_params.items() if k != "symbol"},
-        "as_of":    datetime.utcnow().strftime("%Y-%m-%d"),
+        "as_of":    datetime.now(timezone.utc).strftime("%Y-%m-%d"),
         **metrics,
     }
 

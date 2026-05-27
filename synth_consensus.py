@@ -383,7 +383,10 @@ def _c_congress(symbol: str) -> Optional[Tuple[Any, float]]:
     if not isinstance(trades, list) or not trades:
         return None
     # Each trade has txn_type ("Purchase"/"Sale"/etc) and amount_val (estimate).
-    cutoff = datetime.now() - timedelta(days=60)
+    # txn_dt comes back as a naive datetime (congress.py strptime'd without
+    # tz), so anchor cutoff to UTC and drop tzinfo so the comparison is
+    # naive-vs-naive.
+    cutoff = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=60)
     net = 0.0
     for t in trades:
         if not isinstance(t, dict):

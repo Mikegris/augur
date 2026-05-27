@@ -16,11 +16,29 @@ Components:
 
 import logging
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 import yfinance as yf
 
 import fetcher
+
+try:
+    from zoneinfo import ZoneInfo
+    _ET = ZoneInfo("America/New_York")
+except Exception:  # pragma: no cover — Py3.9 without tzdata
+    _ET = None
+
+
+def _today_et() -> datetime:
+    """Return now anchored to America/New_York (option/market wall clock).
+
+    Falls back to a naive local `datetime.today()` when zoneinfo is unavailable
+    so the module still imports — the underlying date-arithmetic is identical
+    whenever the host is already in ET, and only drifts by ~1 day off-hours
+    in foreign time zones."""
+    if _ET is not None:
+        return datetime.now(_ET).replace(tzinfo=None)
+    return datetime.today()
 
 log = logging.getLogger(__name__)
 
@@ -57,7 +75,9 @@ def _score_insiders(symbol, days=90):
     if not txns:
         return 12, []
 
-    cutoff = datetime.now() - timedelta(days=days)
+    # Anchor cutoff to ET so SEC Form 4 dates (which are filed on US business
+    # days) line up with the same wall-clock window the user sees.
+    cutoff = _today_et() - timedelta(days=days)
     recent = []
     for t in txns:
         try:
@@ -198,8 +218,10 @@ def _score_options(ticker, current_price, hist):
         if not exps:
             return 8
 
-        # Find nearest expiry ~30-45 days out
-        today = datetime.today()
+        # Find nearest expiry ~30-45 days out. Options expire at 16:00 ET on
+        # the listed Friday, so anchor "today" to ET to avoid a 1-day drift
+        # for callers running outside US time zones.
+        today = _today_et()
         target = []
         for exp in exps:
             try:
@@ -217,7 +239,9 @@ def _score_options(ticker, current_price, hist):
                 return 8
 
         target.sort()
-        _, exp_date = target[0]
+        chosen_dte, exp_date = target[0]
+        # chosen_dte is calendar days; convert to trading days (~ x * 5/7).
+        trading_dte = max(1, int(round(chosen_dte * 5.0 / 7.0)))
 
         chain = ticker.option_chain(exp_date)
         calls = chain.calls
@@ -239,11 +263,16 @@ def _score_options(ticker, current_price, hist):
         import numpy as np
         returns = hist["Close"].pct_change().dropna()
         hv_daily = returns.tail(30).std()
-        hv_monthly = hv_daily * (21 ** 0.5) * 100
+        # Scale daily HV out to the chosen expiry's trading-day horizon so the
+        # ratio is apples-to-apples with the straddle's `dte`-period implied
+        # move. The previous fixed sqrt(21) assumed every expiry was exactly
+        # 21 trading days out and silently mis-scaled by 15-50% for any
+        # expiry outside that window.
+        hv_horizon = hv_daily * (trading_dte ** 0.5) * 100
 
         # IV premium ratio
-        if hv_monthly > 0:
-            iv_premium = implied_move_pct / hv_monthly
+        if hv_horizon > 0:
+            iv_premium = implied_move_pct / hv_horizon
         else:
             iv_premium = 1.0
 
@@ -361,8 +390,12 @@ def _score_ml_forecast(symbol):
 
     score = 10  # neutral baseline
 
-    # RF classifier probability (strongest signal — up to ±6 pts)
-    rf = result.get("rf_classifier", {})
+    # RF classifier probability (strongest signal — up to ±6 pts).
+    # ml_forecast.ml_forecast() explicitly sets each component to None when its
+    # sub-model fails (rf_classifier=None, trend_forecast=None, ...), so
+    # `result.get(key, {})` would still return None on failure. Coerce to {}
+    # via `or {}` so .get() doesn't blow up with AttributeError.
+    rf = result.get("rf_classifier") or {}
     prob_up = rf.get("prob_up_20d", 0.5)
     if prob_up >= 0.70:
         score += 6
@@ -378,7 +411,7 @@ def _score_ml_forecast(symbol):
         score -= 2
 
     # Trend alignment (±3 pts)
-    trend = result.get("trend_forecast", {})
+    trend = result.get("trend_forecast") or {}
     if trend.get("trends_aligned"):
         if trend.get("trend_short") == "UP":
             score += 3
@@ -391,7 +424,7 @@ def _score_ml_forecast(symbol):
             score -= 1
 
     # Mean reversion (±2 pts)
-    mr = result.get("mean_reversion", {})
+    mr = result.get("mean_reversion") or {}
     mr_sig = mr.get("signal", "")
     if mr_sig == "OVERSOLD":
         score += 2
@@ -399,7 +432,7 @@ def _score_ml_forecast(symbol):
         score -= 2
 
     # Regime context (±1 pt)
-    regime = result.get("regime", {})
+    regime = result.get("regime") or {}
     regime_label = regime.get("current_regime", "")
     if regime_label == "COMPRESSION":
         score += 1  # potential breakout setup
@@ -408,7 +441,10 @@ def _score_ml_forecast(symbol):
 
     score = max(0, min(20, score))
 
-    composite = result.get("composite_ml_score", 0.5)
+    # composite_ml_score is explicitly set to None by ml_forecast.ml_forecast()
+    # when every sub-model fails, so the default-via-`get` doesn't kick in.
+    # Fall back to a neutral 0.5 via `or` to keep round() safe below.
+    composite = result.get("composite_ml_score") or 0.5
     composite_signal = result.get("composite_signal", "HOLD")
 
     detail = {

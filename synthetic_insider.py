@@ -369,7 +369,7 @@ def compute_composite(symbol):
                 "technical_regime": ch_tech,
             },
             "signal": signal,
-            "timestamp": datetime.utcnow().isoformat() + "Z",
+            "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         }
 
         _cache_set(cache_key, result)
@@ -419,5 +419,15 @@ def scan_composite_bulk(symbols):
         return results
 
     except Exception as e:
+        # Keep the return shape stable (list) so callers — which iterate
+        # over the result — don't fail with "TypeError: 'dict' is not
+        # iterable" when bulk scanning errors out. Surface the error as
+        # a single-element list with the error metadata.
         logger.error("scan_composite_bulk failed: %s", e)
-        return {"error": str(e)}
+        return [{
+            "symbol": "",
+            "composite_score": 0,
+            "alert_level": "DORMANT",
+            "convergence_count": 0,
+            "error": str(e),
+        }]

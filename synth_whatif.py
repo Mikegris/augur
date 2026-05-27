@@ -134,7 +134,7 @@ def whatif(
     if cand is None:
         return {
             "error": "invalid candidate (need symbol, market_value, action)",
-            "as_of": _dt.datetime.utcnow().isoformat() + "Z",
+            "as_of": _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         }
 
     proposed_clean = _apply_candidate(current_clean, cand)
@@ -275,7 +275,7 @@ def _whatif_uncached(
         "monte_carlo_delta": mc_delta,
         "errors": errors or None,
         "elapsed_ms": elapsed_ms,
-        "as_of": _dt.datetime.utcnow().isoformat() + "Z",
+        "as_of": _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
     }
 
 

@@ -134,7 +134,7 @@ def _component_insider_form4(symbol: str, direction: str) -> Tuple[bool, str, st
     if not txns:
         return (False, "no data", "no Form 4 in 30d")
 
-    cutoff = datetime.utcnow() - timedelta(days=30)
+    cutoff = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=30)
     buys = sells = 0
     buy_val = sell_val = 0.0
     for t in txns:
@@ -176,7 +176,7 @@ def _component_congress_60d(symbol: str, direction: str) -> Tuple[bool, str, str
     if not trades:
         return (False, "no data", "no congressional trades")
 
-    cutoff = datetime.utcnow() - timedelta(days=60)
+    cutoff = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=60)
     buys = sells = 0
     buy_val = sell_val = 0.0
     for t in trades:
@@ -226,17 +226,30 @@ def _component_13f_institutional(symbol: str, direction: str) -> Tuple[bool, str
     distinct backfill project. We approximate using ownership level + a
     short-interest contra-signal — strong institutional grip + low shorts
     proxies "smart money long, weak hands not pressing"."""
-    try:
-        import yfinance as yf
-    except Exception:
-        return (False, "n/a", "yfinance unavailable")
-    try:
-        info = yf.Ticker(symbol).info or {}
-    except Exception as e:
-        return (False, "error", f"{type(e).__name__}: {e}")
+    # Route through fetcher.get_fundamentals which surfaces the same
+    # institutional/short fields and inherits the Yahoo + Finviz fallback
+    # chain. A bare yf.Ticker(...).info call dies silently whenever
+    # yfinance's crumb auth is rate-limited (v0.1.6 audit pattern).
+    fetcher = _mod("fetcher")
+    info: Dict[str, Any] = {}
+    if fetcher is not None and hasattr(fetcher, "get_fundamentals"):
+        try:
+            info = fetcher.get_fundamentals(symbol) or {}
+        except Exception as e:
+            return (False, "error", f"{type(e).__name__}: {e}")
+    if not info:
+        try:
+            import yfinance as yf
+            info = yf.Ticker(symbol).info or {}
+        except Exception as e:
+            return (False, "error", f"{type(e).__name__}: {e}")
 
-    inst = info.get("heldPercentInstitutions") or info.get("institutionPercentHeld")
-    short_pct = info.get("shortPercentOfFloat")
+    inst = (
+        info.get("heldPercentInstitutions")
+        or info.get("institutionPercentHeld")
+        or info.get("inst_pct")
+    )
+    short_pct = info.get("shortPercentOfFloat") or info.get("short_pct")
     try:
         inst_f = float(inst) if inst is not None else None
         short_f = float(short_pct) if short_pct is not None else None

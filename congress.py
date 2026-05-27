@@ -10,7 +10,7 @@ import zipfile
 import logging
 import requests
 import xml.etree.ElementTree as ET
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 try:
     import pdfplumber
@@ -331,8 +331,12 @@ def get_recent_trades(days=90, max_pdfs=100, tickers=None):
     if not _PDF_OK:
         return {"error": "pdfplumber not installed", "trades": []}
 
-    cutoff = datetime.now() - timedelta(days=days)
-    current_year = datetime.now().year
+    # Anchor to UTC so we don't accidentally exclude today's filings when the
+    # host is in a UTC-ahead time zone (House filing dates are US Eastern but
+    # naive vs UTC differs by ~5h — well within the "days" tolerance below).
+    _now = datetime.now(timezone.utc).replace(tzinfo=None)
+    cutoff = _now - timedelta(days=days)
+    current_year = _now.year
 
     # Get filing indices for current and previous year
     all_ptrs = []

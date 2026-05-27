@@ -585,7 +585,7 @@ def macro_translate(release_id: str,
             return {
                 "error": f"no historical release dates for {rid}",
                 "release": _release_envelope(meta, surprise_pct, None, None),
-                "as_of": datetime.datetime.utcnow().isoformat() + "Z",
+                "as_of": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
             }
 
         # SPY closes once, sector closes once. Even on a cold cache this
@@ -606,7 +606,7 @@ def macro_translate(release_id: str,
             return {
                 "error": "no historical episodes with usable price windows",
                 "release": _release_envelope(meta, surprise_pct, None, None),
-                "as_of": datetime.datetime.utcnow().isoformat() + "Z",
+                "as_of": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
             }
 
         avg_factors = _avg_dict([e.get("factor_returns_5d") for e in episodes])
@@ -652,7 +652,7 @@ def macro_translate(release_id: str,
             "release": release_block,
             "historical_episodes": episodes,
             "average_response": average_response,
-            "as_of": datetime.datetime.utcnow().isoformat() + "Z",
+            "as_of": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         }
 
         if portfolio_holdings:
