@@ -1502,9 +1502,11 @@ def compute_indicators(ohlcv: list) -> dict:
         "bb_lower": bb_lower,
         "atr": atr,
         "current_price": closes[-1],
-        "price_vs_sma20": round(((closes[-1] / sma20[-1]) - 1) * 100, 2) if sma20 else None,
-        "price_vs_sma50": round(((closes[-1] / sma50[-1]) - 1) * 100, 2) if sma50 else None,
-        "price_vs_sma200": round(((closes[-1] / sma200[-1]) - 1) * 100, 2) if sma200 else None,
+        # Guard against SMA == 0 (penny stocks / bad bars) — would otherwise
+        # raise ZeroDivisionError and bubble up as a 500 on /api/indicators.
+        "price_vs_sma20":  round(((closes[-1] / sma20[-1])  - 1) * 100, 2) if sma20  and sma20[-1]  else None,
+        "price_vs_sma50":  round(((closes[-1] / sma50[-1])  - 1) * 100, 2) if sma50  and sma50[-1]  else None,
+        "price_vs_sma200": round(((closes[-1] / sma200[-1]) - 1) * 100, 2) if sma200 and sma200[-1] else None,
     }
 
 
