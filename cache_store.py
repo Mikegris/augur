@@ -214,9 +214,19 @@ def close_thread_conn():
     """Explicitly close this thread's cache_store connection. Short-lived
     worker threads should call this before exiting so the FD is released
     immediately rather than waiting for GC. No-op if no connection was
-    opened on this thread."""
+    opened on this thread.
+
+    Commits before close: sqlite3.Connection.close() rolls back any open
+    implicit transaction. cache_set writes inside an explicit commit
+    today, but the defensive commit here guards against a future helper
+    that buffers a write through this connection without committing
+    (the api_cache row would otherwise vanish on thread exit)."""
     c = getattr(_local, "c", None)
     if c is not None:
+        try:
+            c.commit()
+        except Exception:
+            pass
         try:
             c.close()
         except Exception:

@@ -52,9 +52,21 @@ def close_thread_conn():
     threads (the snapshot worker on each cycle, a one-shot prune call from
     a CLI script, etc.) should call this before exiting so the FD is
     released immediately rather than waiting for GC. No-op if no
-    connection was opened on this thread."""
+    connection was opened on this thread.
+
+    Commits before close: sqlite3.Connection.close() ROLLS BACK any open
+    implicit transaction rather than committing it. If a code path
+    finished a successful sequence of writes but skipped the explicit
+    commit (e.g., an early return in a future helper), close_thread_conn
+    would silently discard those writes. Defensive commit ensures we
+    persist whatever was staged before releasing the FD.
+    """
     conn = getattr(_local, "conn", None)
     if conn is not None:
+        try:
+            conn.commit()
+        except Exception:
+            pass
         try:
             conn.close()
         except Exception:
