@@ -770,16 +770,25 @@ def _finviz_news_fallback(symbol: str, limit: int = 15) -> list:
     return out
 
 
+_NEWS_MAX_KEEP = 30  # most-headlines a caller is ever likely to ask for
+
+
 def get_news(symbol: str, limit: int = 15) -> list:
-    ck = ("news", symbol.upper(), limit)
+    # Cache by symbol only — the `limit` is a presentation-layer slice that
+    # has nothing to do with the upstream payload. Keying on (symbol, limit)
+    # meant a UI that asked for 10 headlines and a separate caller that asked
+    # for 15 both burned an upstream call for the same Yahoo response. We
+    # fetch up to _NEWS_MAX_KEEP once per TTL window and slice locally.
+    ck = ("news", symbol.upper())
+    fetch_n = max(limit, _NEWS_MAX_KEEP)
     hit = _cached(ck, ttl=900)  # 15 min — news doesn't change minute-to-minute
     if hit is not None:
-        return hit
+        return hit[:limit]
     try:
         t = yf.Ticker(symbol)
         news = t.news or []
         result = []
-        for item in news[:limit]:
+        for item in news[:fetch_n]:
             content = item.get("content", {})
             title = content.get("title", item.get("title", ""))
             summary = content.get("summary", "")
@@ -796,15 +805,15 @@ def get_news(symbol: str, limit: int = 15) -> list:
                 "published": pub_date,
             })
         if not result:
-            result = _finviz_news_fallback(symbol, limit)
+            result = _finviz_news_fallback(symbol, fetch_n)
         if result:
             _set_cache(ck, result, ttl=900)
-        return result
+        return result[:limit]
     except Exception:
-        fb = _finviz_news_fallback(symbol, limit)
+        fb = _finviz_news_fallback(symbol, fetch_n)
         if fb:
             _set_cache(ck, fb, ttl=900)
-        return fb
+        return fb[:limit] if fb else fb
 
 
 def _yahoo_search_direct(query: str, limit: int = 12) -> list:
