@@ -35,71 +35,116 @@ def _date_str(d):
 
 # ── Core functions ─────────────────────────────────────────────────────────────
 
+def _calendar_for_one(symbol):
+    """Fetch the calendar slice for a single symbol with cache_store caching.
+
+    Earnings dates move at most once per quarter; a per-symbol 6h cache
+    means the daily portfolio sweep only hits Yahoo when the previous
+    answer has actually had time to change. The previous implementation
+    had no caching at all and re-hit yfinance for every symbol on every
+    /api/earnings/calendar request, which routinely tripped Yahoo's rate
+    limit on portfolios with >20 tickers.
+    """
+    try:
+        import cache_store
+        ck = ("earnings_cal_one", symbol.upper())
+        hit = cache_store.cache_get(ck, ttl=6 * 3600)
+        if hit is not None:
+            return hit
+    except Exception:
+        cache_store = None
+        ck = None
+
+    today = datetime.date.today()
+    try:
+        t = yf.Ticker(symbol)
+        cal = t.calendar
+        if not cal:
+            return None
+
+        dates_list = cal.get("Earnings Date", [])
+        if not dates_list:
+            return None
+
+        next_earnings = None
+        for d in dates_list:
+            d_date = d.date() if hasattr(d, "date") else datetime.date.fromisoformat(str(d)[:10])
+            if d_date >= today:
+                next_earnings = d_date
+                break
+
+        if next_earnings is None:
+            return None
+
+        days_until = (next_earnings - today).days
+
+        beat_rate = None
+        avg_surprise = None
+        try:
+            eh = t.earnings_history
+            if eh is not None and not eh.empty:
+                actuals = eh["epsActual"].dropna()
+                estimates = eh["epsEstimate"].dropna()
+                if len(actuals) >= 2:
+                    beats = sum(1 for a, e in zip(actuals, estimates) if a > e)
+                    beat_rate = round(beats / len(actuals) * 100)
+                    surprises = eh["surprisePercent"].dropna().tolist()
+                    if surprises:
+                        avg_surprise = round(float(np.mean(surprises)) * 100, 2)
+        except Exception:
+            pass
+
+        entry = {
+            "symbol": symbol.upper(),
+            "earnings_date": next_earnings.isoformat(),
+            "days_until": days_until,
+            "eps_estimate": _safe_float(cal.get("Earnings Average")),
+            "eps_low": _safe_float(cal.get("Earnings Low")),
+            "eps_high": _safe_float(cal.get("Earnings High")),
+            "beat_rate": beat_rate,
+            "avg_surprise_pct": avg_surprise,
+        }
+        if cache_store is not None and ck is not None:
+            try:
+                cache_store.cache_set(ck, entry, ttl=6 * 3600)
+            except Exception:
+                pass
+        return entry
+    except Exception as e:
+        logger.debug("calendar skip %s: %s", symbol, e)
+        return None
+
+
 def get_earnings_calendar(symbols):
     """
     For a list of symbols, return upcoming earnings dates with basic metadata.
     Skips symbols with no upcoming earnings or no options (ETFs, etc).
     Returns list sorted by earnings date ascending.
+
+    Per-symbol results are cached for 6h via `_calendar_for_one`, so a
+    portfolio of N tickers normally costs ~0 Yahoo calls between refreshes
+    rather than 4N (calendar+earnings_history per symbol).
     """
     results = []
-    today = datetime.date.today()
+    cache_misses = 0
 
     for symbol in symbols:
+        # Only sleep between *upstream* calls (cache misses). The old
+        # unconditional 0.15s/symbol stalled the whole request by N*150ms
+        # even when every entry was already cached.
         try:
-            time.sleep(0.15)  # light rate limiting
-            t = yf.Ticker(symbol)
-            cal = t.calendar
-            if not cal:
-                continue
+            import cache_store
+            cached = cache_store.cache_get(("earnings_cal_one", symbol.upper()))
+        except Exception:
+            cached = None
+        if cached is None:
+            if cache_misses > 0:
+                time.sleep(0.15)  # light rate limiting between upstream hits
+            cache_misses += 1
 
-            dates_list = cal.get("Earnings Date", [])
-            if not dates_list:
-                continue
-
-            # yfinance returns a list; grab first future date
-            next_earnings = None
-            for d in dates_list:
-                d_date = d.date() if hasattr(d, "date") else datetime.date.fromisoformat(str(d)[:10])
-                if d_date >= today:
-                    next_earnings = d_date
-                    break
-
-            if next_earnings is None:
-                continue
-
-            days_until = (next_earnings - today).days
-
-            # Quick beat/miss rate from earnings_history
-            beat_rate = None
-            avg_surprise = None
-            try:
-                eh = t.earnings_history
-                if eh is not None and not eh.empty:
-                    actuals = eh["epsActual"].dropna()
-                    estimates = eh["epsEstimate"].dropna()
-                    if len(actuals) >= 2:
-                        beats = sum(1 for a, e in zip(actuals, estimates) if a > e)
-                        beat_rate = round(beats / len(actuals) * 100)
-                        surprises = eh["surprisePercent"].dropna().tolist()
-                        if surprises:
-                            avg_surprise = round(float(np.mean(surprises)) * 100, 2)
-            except Exception:
-                pass
-
-            results.append({
-                "symbol": symbol.upper(),
-                "earnings_date": next_earnings.isoformat(),
-                "days_until": days_until,
-                "eps_estimate": _safe_float(cal.get("Earnings Average")),
-                "eps_low": _safe_float(cal.get("Earnings Low")),
-                "eps_high": _safe_float(cal.get("Earnings High")),
-                "beat_rate": beat_rate,
-                "avg_surprise_pct": avg_surprise,
-            })
-
-        except Exception as e:
-            logger.debug("calendar skip %s: %s", symbol, e)
-            continue
+        entry = _calendar_for_one(symbol)
+        if entry is not None:
+            results.append(entry)
 
     results.sort(key=lambda x: x["earnings_date"])
     return results

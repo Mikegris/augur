@@ -250,7 +250,9 @@ def _finviz_quote_fallback(symbol: str) -> dict:
         return {"symbol": sym, "error": "finviz: no Price field"}
     prev = _num(fund.get("Prev Close"))
     chg_pct = _num(fund.get("Change"))
-    chg = round(price - prev, 4) if (price is not None and prev) else None
+    # `prev` is a non-zero float when present; explicit None check keeps a
+    # flat-day quote (price == prev_close) from being silently dropped to None.
+    chg = round(price - prev, 4) if (price is not None and prev is not None and prev != 0) else None
     return {
         "symbol": sym,
         "price": price,
@@ -456,7 +458,11 @@ def get_quote(symbol: str) -> dict:
     try:
         t = yf.Ticker(symbol)
         info = t.fast_info
-        hist = t.history(period="2d", interval="1d")
+        # NOTE: do not call t.history() here — fast_info already carries
+        # last_price / previous_close. The old code fetched a 2-day daily
+        # history then never read it, burning one yfinance round trip per
+        # cache miss (which on Yahoo's broken-crumb fast path costs us
+        # rate-limit budget for nothing).
 
         price = _safe(info.last_price) or _safe(info.regular_market_price)
         prev_close = _safe(info.previous_close)
@@ -516,7 +522,11 @@ def get_quotes_batch(symbols: list) -> dict:
                 prev = _safe(info.previous_close)
                 if price is None:
                     raise RuntimeError("no price from yfinance")
-                chg = round(price - prev, 4) if price and prev else None
+                # Use explicit None checks: a price that's *unchanged* (chg == 0)
+                # must yield change_pct = 0.0, not None. The old `if chg and prev`
+                # gate silently dropped flat-day prints to None and produced
+                # "missing data" gaps on the UI for any ticker that didn't move.
+                chg = round(price - prev, 4) if (price is not None and prev) else None
                 chg_pct = round((chg / prev) * 100, 4) if (chg is not None and prev) else None
                 results[sym.upper()] = {
                     "symbol": sym.upper(),
@@ -750,16 +760,25 @@ def _finviz_news_fallback(symbol: str, limit: int = 15) -> list:
     return out
 
 
+_NEWS_MAX_KEEP = 30  # most-headlines a caller is ever likely to ask for
+
+
 def get_news(symbol: str, limit: int = 15) -> list:
-    ck = ("news", symbol.upper(), limit)
+    # Cache by symbol only — the `limit` is a presentation-layer slice that
+    # has nothing to do with the upstream payload. Keying on (symbol, limit)
+    # meant a UI that asked for 10 headlines and a separate caller that asked
+    # for 15 both burned an upstream call for the same Yahoo response. We
+    # fetch up to _NEWS_MAX_KEEP once per TTL window and slice locally.
+    ck = ("news", symbol.upper())
+    fetch_n = max(limit, _NEWS_MAX_KEEP)
     hit = _cached(ck, ttl=900)  # 15 min — news doesn't change minute-to-minute
     if hit is not None:
-        return hit
+        return hit[:limit]
     try:
         t = yf.Ticker(symbol)
         news = t.news or []
         result = []
-        for item in news[:limit]:
+        for item in news[:fetch_n]:
             content = item.get("content", {})
             title = content.get("title", item.get("title", ""))
             summary = content.get("summary", "")
@@ -776,15 +795,15 @@ def get_news(symbol: str, limit: int = 15) -> list:
                 "published": pub_date,
             })
         if not result:
-            result = _finviz_news_fallback(symbol, limit)
+            result = _finviz_news_fallback(symbol, fetch_n)
         if result:
             _set_cache(ck, result, ttl=900)
-        return result
+        return result[:limit]
     except Exception:
-        fb = _finviz_news_fallback(symbol, limit)
+        fb = _finviz_news_fallback(symbol, fetch_n)
         if fb:
             _set_cache(ck, fb, ttl=900)
-        return fb
+        return fb[:limit] if fb else fb
 
 
 def _yahoo_search_direct(query: str, limit: int = 12) -> list:
@@ -818,7 +837,15 @@ def _yahoo_search_direct(query: str, limit: int = 12) -> list:
 
 def search_symbol(query: str) -> list:
     """Use yfinance search with Yahoo's direct /finance/search as a fallback."""
-    ck = ("search", query.lower())
+    # Normalize the cache key: strip surrounding whitespace, collapse internal
+    # runs of whitespace, lowercase. Otherwise " AAPL", "AAPL ", "AAPL\t" and
+    # "AAPL" all produce distinct cache rows for the same logical query, and
+    # the auto-complete UI sometimes feeds us a trailing-space query on each
+    # keystroke — guaranteed cache miss per keystroke.
+    norm_q = " ".join((query or "").split()).lower()
+    if not norm_q:
+        return []
+    ck = ("search", norm_q)
     hit = _cached(ck, ttl=86400)  # search results barely change day-to-day
     if hit is not None:
         return hit
@@ -1257,6 +1284,14 @@ def get_correlation_matrix(symbols: list, period: str = "3mo") -> dict:
     if len(symbols) == 1:
         sym = symbols[0]
         return {"symbols": [sym], "matrix": {sym: {sym: 1.0}}}
+    # Cache by normalized (sorted upper-case) symbol tuple + period. Callers
+    # in app.py build the symbols list via `list(set(...))`, which is order-
+    # nondeterministic in CPython — without normalization the same portfolio
+    # could miss its own cache from one request to the next.
+    norm_key = ("corr", tuple(sorted({s.upper() for s in symbols})), period)
+    hit = _cached(norm_key, ttl=30 * 60)  # 30 min — daily closes don't move
+    if hit is not None:
+        return hit
     try:
         returns = _get_returns_df(symbols, period)
         sym_upper = [s.upper() for s in symbols]
@@ -1294,6 +1329,7 @@ def get_correlation_matrix(symbols: list, period: str = "3mo") -> dict:
         result = {"symbols": list(corr.columns), "matrix": matrix}
         if missing:
             result["missing_symbols"] = missing
+        _set_cache(norm_key, result, ttl=30 * 60)
         return result
     except Exception as e:
         return {"symbols": symbols, "matrix": {}, "error": str(e)}
@@ -1308,6 +1344,12 @@ def get_risk_metrics(symbols: list, period: str = "1y") -> dict:
     """
     if not symbols:
         return {}
+    # Cache key normalized to a sorted upper-case tuple so non-deterministic
+    # `list(set(...))` ordering from upstream doesn't fragment the cache.
+    norm_key = ("risk", tuple(sorted({s.upper() for s in symbols})), period)
+    hit = _cached(norm_key, ttl=30 * 60)
+    if hit is not None:
+        return hit
     try:
         returns = _get_returns_df(symbols, period)
         sym_upper = [s.upper() for s in symbols]
@@ -1367,6 +1409,7 @@ def get_risk_metrics(symbols: list, period: str = "1y") -> dict:
         missing = [s for s, u in zip(symbols, sym_upper) if u not in covered_upper]
         if missing:
             result["_missing_symbols"] = missing
+        _set_cache(norm_key, result, ttl=30 * 60)
         return result
     except Exception as e:
         return {"error": str(e)}
