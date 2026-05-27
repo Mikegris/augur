@@ -2820,10 +2820,12 @@ def research_optimize():
 def research_probforecast(symbol):
     if not _pf_mod:
         return jsonify({"error": "research_probforecast module not available"}), 500
+    if not _valid_ticker(symbol):
+        return jsonify({"error": "Invalid symbol"}), 400
     try:
         horizon = _safe_int(request.args.get("horizon"), 20)
         n_boot = _safe_int(request.args.get("n"), 2000)
-        return jsonify(_pf_mod.prob_forecast(symbol, horizon_days=horizon, n_bootstrap=n_boot))
+        return jsonify(_pf_mod.prob_forecast(symbol.upper(), horizon_days=horizon, n_bootstrap=n_boot))
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
@@ -2832,9 +2834,11 @@ def research_probforecast(symbol):
 def research_probforecast_vs_point(symbol):
     if not _pf_mod:
         return jsonify({"error": "research_probforecast module not available"}), 500
+    if not _valid_ticker(symbol):
+        return jsonify({"error": "Invalid symbol"}), 400
     try:
         horizon = _safe_int(request.args.get("horizon"), 20)
-        return jsonify(_pf_mod.compare_to_point(symbol, horizon_days=horizon))
+        return jsonify(_pf_mod.compare_to_point(symbol.upper(), horizon_days=horizon))
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
