@@ -458,12 +458,17 @@ def add_position():
 
 @app.route("/api/portfolio/<int:pos_id>", methods=["PUT"])
 def update_position(pos_id):
-    data = request.json
+    data = request.get_json(silent=True) or {}
+    if not isinstance(data, dict):
+        return jsonify({"error": "expected JSON object"}), 400
     acct_id = data.get("account_id")
-    if acct_id == "":
+    if acct_id == "" or acct_id is None:
         acct_id = None
-    elif acct_id is not None:
-        acct_id = int(acct_id)
+    else:
+        try:
+            acct_id = int(acct_id)
+        except (TypeError, ValueError):
+            return jsonify({"error": "account_id must be an integer"}), 400
     ok = db.update_position(
         pos_id,
         shares=data.get("shares"),
