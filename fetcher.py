@@ -1274,6 +1274,14 @@ def get_correlation_matrix(symbols: list, period: str = "3mo") -> dict:
     if len(symbols) == 1:
         sym = symbols[0]
         return {"symbols": [sym], "matrix": {sym: {sym: 1.0}}}
+    # Cache by normalized (sorted upper-case) symbol tuple + period. Callers
+    # in app.py build the symbols list via `list(set(...))`, which is order-
+    # nondeterministic in CPython — without normalization the same portfolio
+    # could miss its own cache from one request to the next.
+    norm_key = ("corr", tuple(sorted({s.upper() for s in symbols})), period)
+    hit = _cached(norm_key, ttl=30 * 60)  # 30 min — daily closes don't move
+    if hit is not None:
+        return hit
     try:
         returns = _get_returns_df(symbols, period)
         sym_upper = [s.upper() for s in symbols]
@@ -1311,6 +1319,7 @@ def get_correlation_matrix(symbols: list, period: str = "3mo") -> dict:
         result = {"symbols": list(corr.columns), "matrix": matrix}
         if missing:
             result["missing_symbols"] = missing
+        _set_cache(norm_key, result, ttl=30 * 60)
         return result
     except Exception as e:
         return {"symbols": symbols, "matrix": {}, "error": str(e)}
@@ -1325,6 +1334,12 @@ def get_risk_metrics(symbols: list, period: str = "1y") -> dict:
     """
     if not symbols:
         return {}
+    # Cache key normalized to a sorted upper-case tuple so non-deterministic
+    # `list(set(...))` ordering from upstream doesn't fragment the cache.
+    norm_key = ("risk", tuple(sorted({s.upper() for s in symbols})), period)
+    hit = _cached(norm_key, ttl=30 * 60)
+    if hit is not None:
+        return hit
     try:
         returns = _get_returns_df(symbols, period)
         sym_upper = [s.upper() for s in symbols]
@@ -1384,6 +1399,7 @@ def get_risk_metrics(symbols: list, period: str = "1y") -> dict:
         missing = [s for s, u in zip(symbols, sym_upper) if u not in covered_upper]
         if missing:
             result["_missing_symbols"] = missing
+        _set_cache(norm_key, result, ttl=30 * 60)
         return result
     except Exception as e:
         return {"error": str(e)}
