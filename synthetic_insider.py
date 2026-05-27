@@ -207,8 +207,14 @@ def _score_congress_cluster(symbol):
         if not trades:
             return {"score": 10, "detail": "no congressional trades", "firing": False, "weight": 0.15}
 
-        purchases = [t for t in trades if t.get("transaction_type", "") == "Purchase"]
-        sales = [t for t in trades if "Sale" in t.get("transaction_type", "")]
+        # congress.get_trades_for_ticker emits raw txn codes on `txn_type_raw`
+        # (P/PE = buy, S/S (partial)/SE/etc = sell) and a friendly label on
+        # `txn_type` ("Buy"/"Sell"/"Purchase (Exercise)"/...). Previously we
+        # filtered on a non-existent `transaction_type` key with the literal
+        # "Purchase" — neither key nor value ever matched, so this channel
+        # scored 10 (no activity) for every symbol regardless of real flow.
+        purchases = [t for t in trades if (t.get("txn_type_raw") or "") in ("P", "PE")]
+        sales = [t for t in trades if (t.get("txn_type_raw") or "").startswith("S")]
 
         n_purchases = len(purchases)
 
