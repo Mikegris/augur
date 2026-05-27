@@ -94,16 +94,6 @@ def _coingecko_quote(coin_id: str, yf_symbol: str) -> dict:
     }
 
 
-def _is_failed_crypto_quote(q: dict) -> bool:
-    """True if a quote dict looks like a yfinance failure we can recover
-    from via CoinGecko (no price, error string, or rate-limited)."""
-    if not isinstance(q, dict):
-        return True
-    if "error" in q:
-        return True
-    return q.get("price") is None
-
-
 # ─── TTL Cache ───────────────────────────────────────────────────────────────
 # Delegates to cache_store, which adds SQLite write-through (so the cache
 # survives app restarts and we don't cold-start hammer Yahoo on every launch)
@@ -527,7 +517,7 @@ def get_quotes_batch(symbols: list) -> dict:
                 if price is None:
                     raise RuntimeError("no price from yfinance")
                 chg = round(price - prev, 4) if price and prev else None
-                chg_pct = round((chg / prev) * 100, 4) if chg and prev else None
+                chg_pct = round((chg / prev) * 100, 4) if (chg is not None and prev) else None
                 results[sym.upper()] = {
                     "symbol": sym.upper(),
                     "price": price,
@@ -884,7 +874,11 @@ def get_market_indices() -> list:
             results.append(q)
     except Exception:
         pass
-    _set_cache(ck, results, ttl=60)
+    # Don't cache an all-empty/all-error snapshot — a transient yfinance
+    # outage would otherwise pin the dashboard to "no data" for 60s past
+    # the actual recovery.
+    if any(r.get("price") is not None for r in results):
+        _set_cache(ck, results, ttl=60)
     return results
 
 
@@ -917,10 +911,16 @@ def get_sector_performance() -> list:
                 "change_pct": q.get("change_pct"),
                 "price": q.get("price"),
             })
-        results.sort(key=lambda x: (x["change_pct"] or -999), reverse=True)
+        # `x["change_pct"] or -999` collapses a real 0% reading to -999 and
+        # would bury a flat sector at the bottom; only fall back when None.
+        results.sort(key=lambda x: (x["change_pct"] if x["change_pct"] is not None else -999), reverse=True)
     except Exception:
         pass
-    _set_cache(ck, results, ttl=60)
+    # Only cache when we have something useful — otherwise a single transient
+    # failure poisons the slot for 60s and downstream UI shows an empty heat
+    # bar even after upstream recovers.
+    if any(r.get("change_pct") is not None for r in results):
+        _set_cache(ck, results, ttl=60)
     return results
 
 
@@ -944,9 +944,15 @@ def get_top_movers() -> dict:
             if q.get("change_pct") is not None:
                 ranked.append(q)
         ranked.sort(key=lambda x: x.get("change_pct", 0), reverse=True)
+        # When fewer than 20 names returned, `ranked[:10]` and `ranked[-10:]`
+        # overlap and the same ticker shows up in BOTH gainers and losers —
+        # split at the midpoint instead so each name appears at most once.
+        split = len(ranked) // 2
+        gainers = ranked[:min(10, split or len(ranked))]
+        losers_slice = ranked[-min(10, len(ranked) - len(gainers)):] if len(ranked) > len(gainers) else []
         return {
-            "gainers": ranked[:10],
-            "losers": ranked[-10:][::-1],
+            "gainers": gainers,
+            "losers": losers_slice[::-1],
         }
     except Exception:
         return {"gainers": [], "losers": []}
@@ -1044,22 +1050,26 @@ def get_crypto_quote(coin_id: str) -> dict:
             "community_data": "false",
             "developer_data": "false",
         })
-        md = data.get("market_data", {})
+        # CoinGecko returns `null` (not omitted) for unpopulated dicts on
+        # newer/obscure coins, so `data.get("description", {})` still yields
+        # None and `.get("en")` would AttributeError. Coerce with `or {}`.
+        md = data.get("market_data") or {}
+        desc = (data.get("description") or {}).get("en") or ""
         return {
             "id": data["id"],
             "symbol": data["symbol"].upper(),
             "name": data["name"],
-            "description": data.get("description", {}).get("en", "")[:500],
-            "price": md.get("current_price", {}).get("usd"),
-            "market_cap": md.get("market_cap", {}).get("usd"),
-            "volume_24h": md.get("total_volume", {}).get("usd"),
+            "description": desc[:500],
+            "price": (md.get("current_price") or {}).get("usd"),
+            "market_cap": (md.get("market_cap") or {}).get("usd"),
+            "volume_24h": (md.get("total_volume") or {}).get("usd"),
             "change_24h": md.get("price_change_percentage_24h"),
             "change_7d": md.get("price_change_percentage_7d"),
             "change_30d": md.get("price_change_percentage_30d"),
             "change_1y": md.get("price_change_percentage_1y"),
-            "ath": md.get("ath", {}).get("usd"),
-            "ath_change_pct": md.get("ath_change_percentage", {}).get("usd"),
-            "atl": md.get("atl", {}).get("usd"),
+            "ath": (md.get("ath") or {}).get("usd"),
+            "ath_change_pct": (md.get("ath_change_percentage") or {}).get("usd"),
+            "atl": (md.get("atl") or {}).get("usd"),
             "circulating_supply": md.get("circulating_supply"),
             "total_supply": md.get("total_supply"),
             "max_supply": md.get("max_supply"),
@@ -1490,9 +1500,11 @@ def compute_indicators(ohlcv: list) -> dict:
         "bb_lower": bb_lower,
         "atr": atr,
         "current_price": closes[-1],
-        "price_vs_sma20": round(((closes[-1] / sma20[-1]) - 1) * 100, 2) if sma20 else None,
-        "price_vs_sma50": round(((closes[-1] / sma50[-1]) - 1) * 100, 2) if sma50 else None,
-        "price_vs_sma200": round(((closes[-1] / sma200[-1]) - 1) * 100, 2) if sma200 else None,
+        # Guard against SMA == 0 (penny stocks / bad bars) — would otherwise
+        # raise ZeroDivisionError and bubble up as a 500 on /api/indicators.
+        "price_vs_sma20":  round(((closes[-1] / sma20[-1])  - 1) * 100, 2) if sma20  and sma20[-1]  else None,
+        "price_vs_sma50":  round(((closes[-1] / sma50[-1])  - 1) * 100, 2) if sma50  and sma50[-1]  else None,
+        "price_vs_sma200": round(((closes[-1] / sma200[-1]) - 1) * 100, 2) if sma200 and sma200[-1] else None,
     }
 
 
