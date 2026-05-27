@@ -374,6 +374,16 @@
       } catch (e) {
         if (global.Toast) global.Toast.error('Monte Carlo failed: ' + e.message);
         sideEl.innerHTML = '<div class="text-red" style="font-size:11px">' + _esc(e.message) + '</div>';
+        // Tear down any prior chart so the user doesn't see a stale cone
+        // alongside the new error message — that combination implies the
+        // previous result is still valid, which it isn't.
+        if (canvas._mcChart) {
+          try { canvas._mcChart.destroy(); } catch (_e) { /* ignore */ }
+          canvas._mcChart = null;
+          var ctx = canvas.getContext('2d');
+          if (ctx) ctx.clearRect(0, 0, canvas.width, canvas.height);
+        }
+        currentSim = null;
       } finally {
         setBusy(false);
       }
