@@ -1036,16 +1036,29 @@ def get_crypto_market(limit: int = 50) -> list:
             "sparkline": "true",
             "price_change_percentage": "1h,24h,7d",
         })
+        if not isinstance(data, list):
+            return []
         result = []
         for c in data:
+            if not isinstance(c, dict):
+                continue
+            # Skip rows that are missing critical identity fields rather
+            # than failing the whole batch with a KeyError. CoinGecko has
+            # been returning sparse rows for newly-listed coins (symbol
+            # may be null for a few minutes after listing).
+            cid = c.get("id")
+            sym = c.get("symbol")
+            if not cid or not sym:
+                continue
+            sparkline = (c.get("sparkline_in_7d") or {}).get("price") or []
             result.append({
-                "id": c["id"],
-                "symbol": c["symbol"].upper(),
-                "name": c["name"],
-                "price": c["current_price"],
-                "market_cap": c["market_cap"],
-                "market_cap_rank": c["market_cap_rank"],
-                "volume_24h": c["total_volume"],
+                "id": cid,
+                "symbol": str(sym).upper(),
+                "name": c.get("name") or cid,
+                "price": c.get("current_price"),
+                "market_cap": c.get("market_cap"),
+                "market_cap_rank": c.get("market_cap_rank"),
+                "volume_24h": c.get("total_volume"),
                 "change_1h": c.get("price_change_percentage_1h_in_currency"),
                 "change_24h": c.get("price_change_percentage_24h"),
                 "change_7d": c.get("price_change_percentage_7d_in_currency"),
@@ -1053,11 +1066,11 @@ def get_crypto_market(limit: int = 50) -> list:
                 "ath_change_pct": c.get("ath_change_percentage"),
                 "circulating_supply": c.get("circulating_supply"),
                 "total_supply": c.get("total_supply"),
-                "sparkline": c.get("sparkline_in_7d", {}).get("price", []),
+                "sparkline": sparkline,
                 "image": c.get("image", ""),
             })
         return result
-    except Exception as e:
+    except Exception:
         return []
 
 
@@ -1085,12 +1098,15 @@ def get_crypto_chart(coin_id: str, days: int = 30) -> list:
 def get_crypto_global() -> dict:
     try:
         data = _cg_get("/global")
-        d = data.get("data", {})
+        d = (data or {}).get("data") or {}
+        # `or {}` defends against null sub-objects — CoinGecko has shipped
+        # responses where market_cap_percentage is present-but-null during
+        # ingestion windows around the top of the hour.
         return {
-            "total_market_cap_usd": d.get("total_market_cap", {}).get("usd"),
-            "total_volume_usd": d.get("total_volume", {}).get("usd"),
-            "btc_dominance": d.get("market_cap_percentage", {}).get("btc"),
-            "eth_dominance": d.get("market_cap_percentage", {}).get("eth"),
+            "total_market_cap_usd": (d.get("total_market_cap") or {}).get("usd"),
+            "total_volume_usd": (d.get("total_volume") or {}).get("usd"),
+            "btc_dominance": (d.get("market_cap_percentage") or {}).get("btc"),
+            "eth_dominance": (d.get("market_cap_percentage") or {}).get("eth"),
             "active_coins": d.get("active_cryptocurrencies"),
             "markets": d.get("markets"),
             "market_cap_change_24h": d.get("market_cap_change_percentage_24h_usd"),
@@ -1109,22 +1125,29 @@ def get_crypto_quote(coin_id: str) -> dict:
             "community_data": "false",
             "developer_data": "false",
         })
-        md = data.get("market_data", {})
+        if not isinstance(data, dict):
+            return {"id": coin_id, "error": "coingecko returned non-dict"}
+        md = data.get("market_data") or {}
+        sym = data.get("symbol") or coin_id
         return {
-            "id": data["id"],
-            "symbol": data["symbol"].upper(),
-            "name": data["name"],
-            "description": data.get("description", {}).get("en", "")[:500],
-            "price": md.get("current_price", {}).get("usd"),
-            "market_cap": md.get("market_cap", {}).get("usd"),
-            "volume_24h": md.get("total_volume", {}).get("usd"),
+            "id": data.get("id") or coin_id,
+            "symbol": str(sym).upper(),
+            "name": data.get("name") or coin_id,
+            "description": (data.get("description") or {}).get("en", "")[:500],
+            # CoinGecko returns null (not omitted) sub-objects for delisted
+            # / pre-market coins — md.get("current_price", {}) won't supply
+            # the default in that case because the key DOES exist with
+            # value None, then None.get("usd") raises AttributeError.
+            "price": (md.get("current_price") or {}).get("usd"),
+            "market_cap": (md.get("market_cap") or {}).get("usd"),
+            "volume_24h": (md.get("total_volume") or {}).get("usd"),
             "change_24h": md.get("price_change_percentage_24h"),
             "change_7d": md.get("price_change_percentage_7d"),
             "change_30d": md.get("price_change_percentage_30d"),
             "change_1y": md.get("price_change_percentage_1y"),
-            "ath": md.get("ath", {}).get("usd"),
-            "ath_change_pct": md.get("ath_change_percentage", {}).get("usd"),
-            "atl": md.get("atl", {}).get("usd"),
+            "ath": (md.get("ath") or {}).get("usd"),
+            "ath_change_pct": (md.get("ath_change_percentage") or {}).get("usd"),
+            "atl": (md.get("atl") or {}).get("usd"),
             "circulating_supply": md.get("circulating_supply"),
             "total_supply": md.get("total_supply"),
             "max_supply": md.get("max_supply"),
@@ -1154,6 +1177,8 @@ def get_crypto_extras(coin_id: str) -> dict:
             "developer_data": "true",
             "sparkline": "false",
         })
+        if not isinstance(data, dict):
+            return {"id": coin_id, "error": "coingecko returned non-dict"}
         community = data.get("community_data") or {}
         dev = data.get("developer_data") or {}
         result = {
@@ -1180,6 +1205,11 @@ def get_crypto_extras(coin_id: str) -> dict:
         _set_cache(cache_key, result, ttl=3600)
         return result
     except Exception as e:
+        # cache_store's _looks_like_failure rejects error envelopes, so we
+        # can't cache here. Negative caching of CoinGecko failures lives in
+        # _cg_get's global cool-down — that gate fires fast for the whole
+        # cool-down window, which is what idea_generator's parallel pool
+        # needed.
         return {"id": coin_id, "error": str(e)}
 
 
