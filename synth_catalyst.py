@@ -408,12 +408,22 @@ def _implied_skew(symbol: str, event_date: datetime.date) -> Optional[float]:
     # recomputing — research_iv_density.coalesce caches the full payload
     # so this is essentially free on the second hit.
     try:
-        # Best-effort: pick first expiry ≥ event date via yf options list.
+        # Route through fetcher.get_option_expiries first so we inherit the
+        # cache + fallback handling; a naked yf.Ticker(symbol).options call
+        # silently returns () whenever yfinance is rate-limited. Fall back to
+        # yfinance only if fetcher isn't carrying the helper.
+        expiries: list = []
         try:
-            import yfinance as yf
-            expiries = list(yf.Ticker(symbol).options or [])
+            if fetcher is not None and hasattr(fetcher, "get_option_expiries"):
+                expiries = fetcher.get_option_expiries(symbol) or []
         except Exception:
             expiries = []
+        if not expiries:
+            try:
+                import yfinance as yf
+                expiries = list(yf.Ticker(symbol).options or [])
+            except Exception:
+                expiries = []
         chosen = None
         ev_iso = event_date.isoformat()
         for exp in expiries:
