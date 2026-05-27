@@ -635,9 +635,9 @@ def _compute(symbol: str) -> Dict[str, Any]:
         }
 
     avg = weighted_sum / sum_w  # in roughly [-1, +1]
-    # Tanh squash gives nice midrange spread; 50 + 50*tanh(2*avg) maps the
-    # high-conviction tails (|avg|≈1) to 88..96 and keeps the middle band
-    # wide. The factor of 2 was chosen so |avg|=0.5 lands at ~88.
+    # Tanh squash gives nice midrange spread; 50 + 50*tanh(1.6*avg) maps the
+    # high-conviction tails (|avg|≈1) to ~96/4 and keeps the middle band
+    # wide. The factor of 1.6 was chosen so |avg|=0.5 lands at ~83.
     score = 50.0 + 50.0 * _tanh(avg * 1.6)
     score = round(_clip(score, 0.0, 100.0), 1)
 
