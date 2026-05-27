@@ -523,6 +523,9 @@ async function loadTicker() {
 function renderTicker(items) {
   const el = document.getElementById('header-ticker');
   if (!el) return;
+  // API can return null/undefined or a {error:...} envelope when the
+  // indices endpoint is rate-limited; spreading non-iterable throws.
+  if (!Array.isArray(items) || !items.length) return;
   const html = [...items, ...items].map(item => {
     const chg = item.change_pct;
     const cls = chg == null ? 'flat' : chg > 0 ? 'up' : chg < 0 ? 'down' : 'flat';
