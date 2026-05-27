@@ -38,6 +38,24 @@ def get_conn():
     return conn
 
 
+def close_thread_conn():
+    """Explicitly close this thread's connection. Short-lived worker
+    threads (the snapshot worker on each cycle, a one-shot prune call from
+    a CLI script, etc.) should call this before exiting so the FD is
+    released immediately rather than waiting for GC. No-op if no
+    connection was opened on this thread."""
+    conn = getattr(_local, "conn", None)
+    if conn is not None:
+        try:
+            conn.close()
+        except Exception:
+            pass
+        try:
+            del _local.conn
+        except AttributeError:
+            pass
+
+
 def init_db():
     conn = get_conn()
     c = conn.cursor()

@@ -197,6 +197,23 @@ def _conn():
     return c
 
 
+def close_thread_conn():
+    """Explicitly close this thread's cache_store connection. Short-lived
+    worker threads should call this before exiting so the FD is released
+    immediately rather than waiting for GC. No-op if no connection was
+    opened on this thread."""
+    c = getattr(_local, "c", None)
+    if c is not None:
+        try:
+            c.close()
+        except Exception:
+            pass
+        try:
+            del _local.c
+        except AttributeError:
+            pass
+
+
 def _serialize_key(key) -> str:
     """Stable string form of a tuple/dict/etc. so SQLite can use it as PK."""
     if isinstance(key, str):
