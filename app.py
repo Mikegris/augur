@@ -424,18 +424,26 @@ def get_portfolio():
 
 @app.route("/api/portfolio/add", methods=["POST"])
 def add_position():
-    data = request.json
+    data = request.get_json(silent=True) or {}
+    if not isinstance(data, dict):
+        return jsonify({"error": "expected JSON object"}), 400
     required = ["symbol", "shares", "avg_cost"]
     if not all(k in data for k in required):
         return jsonify({"error": "Missing required fields"}), 400
     if not _valid_ticker(data["symbol"]):
         return jsonify({"error": "Invalid symbol"}), 400
+    try:
+        shares = float(data["shares"])
+        avg_cost = float(data["avg_cost"])
+        fees = float(data.get("fees", 0))
+    except (TypeError, ValueError):
+        return jsonify({"error": "shares, avg_cost, fees must be numeric"}), 400
     acct_id = _safe_int(data.get("account_id"), None) if data.get("account_id") else None
     row_id = db.add_position(
         symbol=data["symbol"],
         name=data.get("name", ""),
-        shares=float(data["shares"]),
-        avg_cost=float(data["avg_cost"]),
+        shares=shares,
+        avg_cost=avg_cost,
         asset_type=data.get("asset_type", "stock"),
         sector=data.get("sector", ""),
         currency=data.get("currency", "USD"),
@@ -446,9 +454,9 @@ def add_position():
     db.add_transaction(
         symbol=data["symbol"],
         action="BUY",
-        shares=float(data["shares"]),
-        price=float(data["avg_cost"]),
-        fees=float(data.get("fees", 0)),
+        shares=shares,
+        price=avg_cost,
+        fees=fees,
         date=data.get("date"),
         notes=data.get("notes", ""),
         account_id=acct_id,
@@ -508,8 +516,8 @@ def get_watchlist():
 
 @app.route("/api/watchlist/add", methods=["POST"])
 def add_watchlist():
-    data = request.json
-    if "symbol" not in data:
+    data = request.get_json(silent=True) or {}
+    if not isinstance(data, dict) or "symbol" not in data:
         return jsonify({"error": "symbol required"}), 400
     if not _valid_ticker(data["symbol"]):
         return jsonify({"error": "Invalid symbol"}), 400
@@ -568,18 +576,26 @@ def transactions_summary():
 
 @app.route("/api/transactions/add", methods=["POST"])
 def add_transaction():
-    data = request.json
+    data = request.get_json(silent=True) or {}
+    if not isinstance(data, dict):
+        return jsonify({"error": "expected JSON object"}), 400
     required = ["symbol", "action", "shares", "price"]
     if not all(k in data for k in required):
         return jsonify({"error": "Missing required fields"}), 400
     if not _valid_ticker(data["symbol"]):
         return jsonify({"error": "Invalid symbol"}), 400
+    try:
+        shares = float(data["shares"])
+        price = float(data["price"])
+        fees = float(data.get("fees", 0))
+    except (TypeError, ValueError):
+        return jsonify({"error": "shares, price, fees must be numeric"}), 400
     db.add_transaction(
         symbol=data["symbol"],
         action=data["action"],
-        shares=float(data["shares"]),
-        price=float(data["price"]),
-        fees=float(data.get("fees", 0)),
+        shares=shares,
+        price=price,
+        fees=fees,
         date=data.get("date"),
         notes=data.get("notes", ""),
     )
@@ -871,7 +887,9 @@ def get_alerts():
 
 @app.route("/api/alerts", methods=["POST"])
 def add_alert():
-    data = request.json
+    data = request.get_json(silent=True) or {}
+    if not isinstance(data, dict):
+        return jsonify({"error": "expected JSON object"}), 400
     symbol    = (data.get("symbol", "") or "").upper().strip()
     alert_type = data.get("alert_type", "above")   # "above" or "below"
     try:
