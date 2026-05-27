@@ -488,7 +488,17 @@ def coalesce(key, ttl: float, fetch_fn: Callable[[], Any]) -> Any:
     finally:
         if owner:
             with _inflight_lock:
-                _inflight.pop(k, None)
+                # Only remove the slot if it still belongs to *this* owner.
+                # Race scenario this guards against: _sweep_inflight()
+                # declared us orphaned and dropped our entry, then a fresh
+                # caller claimed the same key and installed a NEW (Event,
+                # ts) tuple. A blind pop(k) here would delete that fresh
+                # caller's slot, letting a third caller stampede with a
+                # duplicate fetch_fn while the second waiter blocks until
+                # its 15s wait timeout.
+                cur = _inflight.get(k)
+                if cur is not None and cur[0] is ev:
+                    _inflight.pop(k, None)
             ev.set()
 
 
