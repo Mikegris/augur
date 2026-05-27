@@ -179,7 +179,7 @@ LLAMA_YIELDS = "https://yields.llama.fi"
 def defillama_tvl_summary():
     """Top protocols by TVL + total chains TVL."""
     protos = _get(f"{LLAMA}/protocols", ttl=900) or []
-    chains = _get(f"{LLAMA}/v2/chains", ttl=900) or []
+    chains_raw = _get(f"{LLAMA}/v2/chains", ttl=900) or []
     if isinstance(protos, list):
         protos = sorted(
             [p for p in protos if p.get("tvl")],
@@ -197,20 +197,24 @@ def defillama_tvl_summary():
         } for p in protos]
     else:
         protos = []
-    if isinstance(chains, list):
-        chains = sorted(
-            [c for c in chains if c.get("tvl")],
-            key=lambda c: c["tvl"], reverse=True
-        )[:15]
+
+    # Compute the true total TVL across ALL chains *before* truncating to the
+    # top 15 we surface in the response. The old version summed only the
+    # top-15 slice and labeled it "total_tvl", under-reporting total DeFi TVL
+    # by everything beyond the 15th chain.
+    if isinstance(chains_raw, list):
+        all_chains_with_tvl = [c for c in chains_raw if isinstance(c.get("tvl"), (int, float))]
+        total = sum(float(c["tvl"]) for c in all_chains_with_tvl)
+        chains_sorted = sorted(all_chains_with_tvl, key=lambda c: c["tvl"], reverse=True)[:15]
         chains = [{
             "name": c.get("name"),
             "tokenSymbol": c.get("tokenSymbol"),
             "tvl": c.get("tvl"),
             "gecko_id": c.get("gecko_id"),
-        } for c in chains]
+        } for c in chains_sorted]
     else:
         chains = []
-    total = sum(c["tvl"] for c in chains) if chains else 0
+        total = 0
     return {"total_tvl": total, "chains": chains, "protocols": protos}
 
 

@@ -410,8 +410,18 @@ def _compute_history_sparkline():
         else:
             vix_dates.append("")
 
+    # Tail-anchored offset: VIX 6mo (~126 bars) and SPY 3mo (~63 bars) have
+    # different lengths, but they share the SAME rightmost bar (today). Walk
+    # back from each tail independently so the volume score actually changes
+    # day-over-day instead of being clamped to a single SPY index for every
+    # history point.
+    spy_tail = len(spy_vols) - 1
+    vix_tail = len(vix_closes) - 1
     for offset in range(n_days, 0, -1):
-        idx = len(vix_closes) - offset
+        idx = vix_tail - offset + 1  # vix index for this history point
+        spy_idx = spy_tail - offset + 1
+        if spy_idx < 0:
+            spy_idx = 0
 
         # VIX score at this point
         vix_val = float(vix_closes[idx])
@@ -429,7 +439,6 @@ def _compute_history_sparkline():
             vix_s = 10
 
         # Volume score at corresponding index (approximate)
-        spy_idx = min(idx, len(spy_vols) - 1)
         if spy_idx >= 20:
             avg5 = float(np.mean(spy_vols[spy_idx - 4:spy_idx + 1]))
             avg20 = float(np.mean(spy_vols[spy_idx - 19:spy_idx + 1]))

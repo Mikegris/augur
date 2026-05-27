@@ -41,12 +41,28 @@ _SMA_SLOW = 200
 # ---------------------------------------------------------------------------
 
 def _compute_rsi(close: pd.Series, period: int = 14) -> pd.Series:
-    """Standard 14-day Wilder-style RSI (using simple rolling means of gains/losses)."""
+    """Standard 14-day Wilder-style RSI (using simple rolling means of gains/losses).
+
+    Handles the degenerate cases properly:
+      - No losses over the window (loss == 0) -> RSI = 100 (max overbought)
+      - No gains over the window  (gain == 0) -> RSI = 0   (max oversold)
+    Previously this returned NaN in both cases because we divided by NaN.
+    """
     delta = close.diff()
     gain = delta.clip(lower=0).rolling(period).mean()
     loss = (-delta.clip(upper=0)).rolling(period).mean()
-    rs = gain / loss.replace(0, np.nan)
-    return 100 - (100 / (1 + rs))
+    # Standard RSI handles the zero-denominator cases as RSI=100 / RSI=0.
+    rsi = pd.Series(np.nan, index=close.index, dtype=float)
+    valid = gain.notna() & loss.notna()
+    no_loss = valid & (loss == 0) & (gain > 0)
+    no_gain = valid & (gain == 0)
+    normal = valid & (loss > 0) & (gain > 0)
+    rs = gain[normal] / loss[normal]
+    rsi.loc[normal] = 100 - (100 / (1 + rs))
+    rsi.loc[no_loss] = 100.0
+    rsi.loc[no_gain] = 0.0
+    # Both zero (perfectly flat window): leave as NaN -> caller treats as undefined
+    return rsi
 
 
 def _rsi_band(rsi: float) -> Optional[str]:
