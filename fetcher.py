@@ -954,11 +954,76 @@ def get_top_movers() -> dict:
 
 # ─── Crypto ───────────────────────────────────────────────────────────────────
 
-def _cg_get(path: str, params: dict = None):
+# CoinGecko's free tier is ~30 requests/minute. Without caching every UI poll
+# (crypto market, global, charts, per-coin extras) hits the upstream fresh,
+# easily blowing the budget and triggering 429s that cascade into wrong-price
+# fallbacks via yfinance. _cg_get adds a thin in-process TTL cache keyed on
+# the full URL + sorted params, plus a global cool-down when CoinGecko 429s
+# us so concurrent callers don't pile on while we're already throttled.
+
+_CG_CACHE = {}                  # (path, frozen_params) -> (expiry_ts, value)
+_CG_CACHE_LOCK = threading.Lock()
+_CG_RATE_LIMIT_UNTIL = [0.0]    # mutable epoch — when we may resume calling
+
+# Per-path TTLs (seconds). Crypto trades 24/7 but the free-tier budget is
+# the binding constraint here, not freshness. /simple/price is what the
+# quote sweep uses, so keep it short.
+_CG_TTL_DEFAULTS = {
+    "/simple/price": 60,
+    "/coins/markets": 60,
+    "/global": 300,
+}
+
+
+def _cg_default_ttl(path: str) -> int:
+    for prefix, ttl in _CG_TTL_DEFAULTS.items():
+        if path.startswith(prefix):
+            return ttl
+    # /coins/{id}, /coins/{id}/market_chart, etc. — coin-level data is fine
+    # to cache a couple of minutes.
+    return 120
+
+
+def _cg_get(path: str, params: dict = None, ttl: int = None):
+    """GET against CoinGecko with TTL caching + global 429 cool-down.
+
+    ttl=None picks a per-path default. ttl=0 disables caching."""
+    key = (path, tuple(sorted((params or {}).items())))
+    now = time.time()
+    cache_ttl = _cg_default_ttl(path) if ttl is None else ttl
+    if cache_ttl > 0:
+        with _CG_CACHE_LOCK:
+            hit = _CG_CACHE.get(key)
+            if hit and hit[0] > now:
+                return hit[1]
+    # If we're inside a 429 cool-down, fail fast — burning more requests
+    # only deepens the throttle. Callers all wrap _cg_get in try/except and
+    # gracefully return [] / {}, so raising here is safe.
+    if _CG_RATE_LIMIT_UNTIL[0] > now:
+        raise RuntimeError("coingecko rate-limited; cool-down active")
     url = f"{COINGECKO_BASE}{path}"
     resp = requests.get(url, params=params, headers=HEADERS, timeout=15)
+    if resp.status_code == 429:
+        # Respect Retry-After if present, otherwise back off 30s (CoinGecko's
+        # free-tier window is a rolling minute).
+        ra = resp.headers.get("Retry-After")
+        try:
+            backoff = float(ra) if ra else 30.0
+        except (TypeError, ValueError):
+            backoff = 30.0
+        _CG_RATE_LIMIT_UNTIL[0] = time.time() + min(max(backoff, 5.0), 120.0)
+        resp.raise_for_status()
     resp.raise_for_status()
-    return resp.json()
+    data = resp.json()
+    if cache_ttl > 0:
+        with _CG_CACHE_LOCK:
+            _CG_CACHE[key] = (now + cache_ttl, data)
+            # Bounded — prune oldest if we ever exceed 256 entries.
+            if len(_CG_CACHE) > 256:
+                oldest = sorted(_CG_CACHE.items(), key=lambda kv: kv[1][0])[:64]
+                for k, _ in oldest:
+                    _CG_CACHE.pop(k, None)
+    return data
 
 
 def get_crypto_market(limit: int = 50) -> list:
