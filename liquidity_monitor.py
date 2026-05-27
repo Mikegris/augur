@@ -105,8 +105,10 @@ def _compute_vix_regime():
         return _neutral_indicator("VIX")
 
     level = float(closes[-1])
-    percentile = float(np.percentile(closes, 0))  # placeholder; compute real
-    # Real percentile: fraction of observations <= current level
+    # Percentile = fraction of observations <= current level. (The original
+    # `np.percentile(closes, 0)` line was a leftover placeholder that the
+    # next assignment immediately overwrote; remove it so the work isn't
+    # done twice.)
     percentile = float(np.sum(closes <= level) / len(closes) * 100.0)
 
     # Base score from absolute level
