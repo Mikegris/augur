@@ -546,12 +546,42 @@ def _scan_symbol(symbol: str, direction: str) -> Dict[str, Any]:
     # symbol — total ceiling of ~36 in-flight upstream HTTP calls, which
     # is still polite by Yahoo/EDGAR standards because each upstream has
     # its own per-source caching.
-    pool = ThreadPoolExecutor(max_workers=6, thread_name_prefix=f"sc-{symbol}")
+    # Bundle-state can flip `concurrent.futures.thread._shutdown` (atexit
+    # fires while Flask is still serving), after which every submit raises
+    # `RuntimeError: cannot schedule new futures after interpreter shutdown`
+    # and the route 500s. Fall back to a serial loop in that state — slower
+    # but the panel keeps working.
     try:
-        futures = {
-            pool.submit(_eval_component_safe, name, fn, symbol, direction): i
-            for i, (name, fn) in enumerate(COMPONENTS)
-        }
+        pool = ThreadPoolExecutor(max_workers=6, thread_name_prefix=f"sc-{symbol}")
+    except RuntimeError as e:
+        if "interpreter shutdown" in str(e) or "cannot schedule new futures" in str(e):
+            for i, (name, fn) in enumerate(COMPONENTS):
+                try:
+                    sources[i] = _eval_component_safe(name, fn, symbol, direction)
+                except Exception as exc:
+                    sources[i] = {"name": name, "fired": False, "value": "error",
+                                  "note": f"{type(exc).__name__}: {exc}"}
+            return sources
+        raise
+    try:
+        try:
+            futures = {
+                pool.submit(_eval_component_safe, name, fn, symbol, direction): i
+                for i, (name, fn) in enumerate(COMPONENTS)
+            }
+        except RuntimeError as e:
+            if "interpreter shutdown" in str(e) or "cannot schedule new futures" in str(e):
+                # Serial fallback if submit raises mid-loop
+                pool.shutdown(wait=False)
+                for i, (name, fn) in enumerate(COMPONENTS):
+                    if sources[i] is None:
+                        try:
+                            sources[i] = _eval_component_safe(name, fn, symbol, direction)
+                        except Exception as exc:
+                            sources[i] = {"name": name, "fired": False, "value": "error",
+                                          "note": f"{type(exc).__name__}: {exc}"}
+                return sources
+            raise
         # We iterate `as_completed` with a timeout; if the symbol-level
         # deadline triggers we catch the TimeoutError and fall through to
         # mark the still-unfilled component slots as timed-out.
@@ -681,22 +711,53 @@ def cluster_scan(
         # Outer pool: 6 symbols at a time. Each scans its 10 components
         # internally in a smaller inner pool. The inner pools are short-lived
         # so total live threads stay bounded (~6 * 6 = ~36 worst case).
-        with ThreadPoolExecutor(max_workers=6, thread_name_prefix="sc-outer") as outer:
-            futures = {outer.submit(_scan_symbol, sym, direction): sym for sym in symbols}
-            for fut in as_completed(futures):
-                sym = futures[fut]
+        # Same global-shutdown guard as the per-symbol pool above — if the
+        # ThreadPoolExecutor refuses to start, run the symbols sequentially
+        # so the route still returns a usable response.
+        def _outer_serial():
+            for sym in symbols:
                 try:
-                    res = fut.result(timeout=SYMBOL_TIMEOUT_S + 5)
+                    results.append(_scan_symbol(sym, direction))
                 except Exception as e:
-                    log.warning("synth_cluster: %s outer failed: %s", sym, e)
-                    res = {
+                    log.warning("synth_cluster: %s outer failed (serial): %s", sym, e)
+                    results.append({
                         "symbol":           sym,
                         "n_sources_firing": 0,
                         "sources":          [{"name": n, "fired": False, "value": "skipped",
                                               "note": "symbol-level failure"} for n, _ in COMPONENTS],
                         "composite_score":  0.0,
-                    }
-                results.append(res)
+                    })
+        try:
+            with ThreadPoolExecutor(max_workers=6, thread_name_prefix="sc-outer") as outer:
+                try:
+                    futures = {outer.submit(_scan_symbol, sym, direction): sym for sym in symbols}
+                except RuntimeError as e:
+                    if "interpreter shutdown" in str(e) or "cannot schedule new futures" in str(e):
+                        log.warning("synth_cluster: outer pool unavailable (%s); going serial", e)
+                        _outer_serial()
+                        futures = {}
+                    else:
+                        raise
+                for fut in as_completed(futures):
+                    sym = futures[fut]
+                    try:
+                        res = fut.result(timeout=SYMBOL_TIMEOUT_S + 5)
+                    except Exception as e:
+                        log.warning("synth_cluster: %s outer failed: %s", sym, e)
+                        res = {
+                            "symbol":           sym,
+                            "n_sources_firing": 0,
+                            "sources":          [{"name": n, "fired": False, "value": "skipped",
+                                                  "note": "symbol-level failure"} for n, _ in COMPONENTS],
+                            "composite_score":  0.0,
+                        }
+                    results.append(res)
+        except RuntimeError as e:
+            if "interpreter shutdown" in str(e) or "cannot schedule new futures" in str(e):
+                log.warning("synth_cluster: outer ThreadPoolExecutor ctor failed (%s); going serial", e)
+                _outer_serial()
+            else:
+                raise
 
         # Filter by min_sources, then sort by composite_score desc
         clusters = [r for r in results if r.get("n_sources_firing", 0) >= min_sources]

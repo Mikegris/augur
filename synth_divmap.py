@@ -701,20 +701,50 @@ def divergence_map(universe=None, top_n: int = 20) -> dict:
             for pair in PAIR_DEFS:
                 tasks.append((sym, pair))
 
-        with ThreadPoolExecutor(max_workers=_MAX_WORKERS) as pool:
-            futures = {
-                pool.submit(_evaluate_pair_for_symbol, sym, pair): (sym, pair)
-                for sym, pair in tasks
-            }
-            for fut in as_completed(futures):
-                sym, pair = futures[fut]
+        # Bundle-state can flip the global concurrent.futures._shutdown flag
+        # (atexit fires while Flask is still serving), after which every
+        # submit raises RuntimeError("cannot schedule new futures after
+        # interpreter shutdown") and the route 500s. Fall back to serial
+        # evaluation in that state so the panel still loads.
+        def _serial():
+            for sym, pair in tasks:
                 try:
-                    row = fut.result(timeout=_PER_SYMBOL_TIMEOUT_S)
+                    row = _evaluate_pair_for_symbol(sym, pair)
                 except Exception as e:
-                    log.debug("future failed %s/%s: %s", sym, pair["name"], e)
+                    log.debug("serial pair failed %s/%s: %s", sym, pair["name"], e)
                     continue
                 if row is not None:
                     all_rows.append(row)
+
+        try:
+            with ThreadPoolExecutor(max_workers=_MAX_WORKERS) as pool:
+                try:
+                    futures = {
+                        pool.submit(_evaluate_pair_for_symbol, sym, pair): (sym, pair)
+                        for sym, pair in tasks
+                    }
+                except RuntimeError as e:
+                    if "interpreter shutdown" in str(e) or "cannot schedule new futures" in str(e):
+                        log.warning("synth_divmap: ThreadPool unavailable (%s); going serial", e)
+                        _serial()
+                        futures = {}
+                    else:
+                        raise
+                for fut in as_completed(futures):
+                    sym, pair = futures[fut]
+                    try:
+                        row = fut.result(timeout=_PER_SYMBOL_TIMEOUT_S)
+                    except Exception as e:
+                        log.debug("future failed %s/%s: %s", sym, pair["name"], e)
+                        continue
+                    if row is not None:
+                        all_rows.append(row)
+        except RuntimeError as e:
+            if "interpreter shutdown" in str(e) or "cannot schedule new futures" in str(e):
+                log.warning("synth_divmap: ThreadPoolExecutor ctor failed (%s); going serial", e)
+                _serial()
+            else:
+                raise
 
         # Sort by magnitude desc, then take top_n.
         all_rows.sort(key=lambda r: r.get("magnitude", 0), reverse=True)

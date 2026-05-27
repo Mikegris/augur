@@ -42,6 +42,7 @@ LOCAL_MODULES = [
     "narrative_engine",
     "opportunity_scanner",
     "reflexivity_detector",
+    "safe_executor",
     "research_backtest",
     "research_eventstudy",
     "research_factors",

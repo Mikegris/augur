@@ -637,10 +637,15 @@ def compute_score(symbol):
 
 
 def compute_scores_bulk(symbols):
-    """Compute Smart Money scores for a list of symbols using parallel execution."""
-    from concurrent.futures import ThreadPoolExecutor, as_completed
+    """Compute Smart Money scores for a list of symbols using parallel execution.
 
-    results = []
+    Routes through safe_executor.parallel_map so the call survives the
+    bundle-state where Python's `concurrent.futures.thread._shutdown` global
+    has flipped (surfaces as `RuntimeError: cannot schedule new futures
+    after interpreter shutdown`). In that state we silently fall back to
+    sequential execution rather than returning HTTP 500.
+    """
+    import safe_executor
 
     def _score_one(sym):
         try:
@@ -651,13 +656,9 @@ def compute_scores_bulk(symbols):
             log.warning("Score error for %s: %s", sym, e)
         return None
 
-    # 3 workers — enough parallelism without hammering yfinance
-    with ThreadPoolExecutor(max_workers=3) as pool:
-        futures = {pool.submit(_score_one, sym): sym for sym in symbols}
-        for future in as_completed(futures):
-            result = future.result()
-            if result:
-                results.append(result)
-
+    raw = safe_executor.parallel_map(
+        _score_one, symbols, max_workers=3, thread_name_prefix="sm-bulk",
+    )
+    results = [r for r in raw if r]
     results.sort(key=lambda x: x.get("score", 0), reverse=True)
     return results
