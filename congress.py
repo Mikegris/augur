@@ -462,18 +462,34 @@ def get_congress_summary(days=90, max_pdfs=80):
                 "total_trades": 0,
                 "members": set(),
                 "latest_date": "",
+                "_latest_dt": None,
                 "total_amount": 0,
             }
         s = ticker_stats[sym]
         raw = t.get("txn_type_raw", "")
+        # "SP" was a typo — it's the owner code for Spouse, never a
+        # transaction type. The exchange variants ("S (Exchange)",
+        # "E (Exchange)") aren't unambiguous sells either, but we keep
+        # them under sells the way the parser tags them.
         if raw in ("P", "PE"):
             s["buys"] += 1
-        elif raw in ("S", "S (partial)", "SP", "SE", "S (Exchange)"):
+        elif raw in ("S", "S (partial)", "SE", "S (Exchange)", "E (Exchange)"):
             s["sells"] += 1
         s["total_trades"] += 1
         s["members"].add(t["member_name"])
         s["total_amount"] += t.get("amount_val", 0)
-        if not s["latest_date"] or t["txn_date"] > s["latest_date"]:
+        # Compare on the parsed datetime, not the MM/DD/YYYY string.
+        # Lexicographic compare of "12/05/2025" > "01/15/2026" is True
+        # because '1' > '0' — but Jan-2026 is later than Dec-2025, so
+        # the recorded "latest" was perpetually a December trade.
+        cand_dt = t.get("txn_dt")
+        if cand_dt is None and t.get("txn_date"):
+            try:
+                cand_dt = datetime.strptime(t["txn_date"], "%m/%d/%Y")
+            except Exception:
+                cand_dt = None
+        if cand_dt is not None and (s["_latest_dt"] is None or cand_dt > s["_latest_dt"]):
+            s["_latest_dt"] = cand_dt
             s["latest_date"] = t["txn_date"]
 
     # Convert sets to counts
@@ -482,6 +498,9 @@ def get_congress_summary(days=90, max_pdfs=80):
         member_count = len(s["members"])
         s["member_count"] = member_count
         del s["members"]
+        # _latest_dt is an internal sort key; downstream callers (UI /
+        # JSON serialiser) only need the string form in latest_date.
+        s.pop("_latest_dt", None)
         buy_pct = round(s["buys"] / s["total_trades"] * 100) if s["total_trades"] else 0
         s["buy_pct"] = buy_pct
         s["sentiment"] = "BULLISH" if buy_pct >= 70 else ("BEARISH" if buy_pct <= 30 else "MIXED")
