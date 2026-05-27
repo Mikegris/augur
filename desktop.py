@@ -123,7 +123,20 @@ def _parse_semver(v: str) -> tuple:
 
 
 def _fetch_latest_release() -> tuple[str, str] | None:
-    """Return (latest_tag_no_v_prefix, html_url) or None on any failure."""
+    """Return (latest_tag_no_v_prefix, html_url) or None on any failure.
+
+    Filters out pre-releases (`prerelease=true` in the API response) and
+    drafts (`draft=true`). GitHub's /releases/latest endpoint *usually*
+    excludes pre-releases automatically, but if a maintainer flips the
+    "latest" toggle manually it can still return one — and our lenient
+    semver parser would strip the `-rc.1` suffix and prompt the user to
+    "upgrade" to a beta. _parse_semver("1.2.4-beta") returns (1,2,4),
+    which compares strictly greater than a stable (1,2,3).
+
+    Defensive: also guards against `data` being non-dict (GitHub returns
+    `{"message": "Not Found"}` for an org with no releases yet — that's
+    still a dict, fine — but a network proxy could inject something else).
+    """
     try:
         req = urllib.request.Request(
             GITHUB_RELEASES_API,
@@ -134,8 +147,13 @@ def _fetch_latest_release() -> tuple[str, str] | None:
         )
         with urllib.request.urlopen(req, timeout=5) as r:
             data = json.loads(r.read())
-        tag = data.get("tag_name", "").lstrip("v")
-        url = data.get("html_url", "")
+        if not isinstance(data, dict):
+            return None
+        if data.get("prerelease") or data.get("draft"):
+            log.info("update check: latest release is pre-release/draft, skipping")
+            return None
+        tag = (data.get("tag_name") or "").lstrip("v")
+        url = data.get("html_url") or ""
         return (tag, url) if tag and url else None
     except Exception as e:
         log.debug("update fetch failed: %s", e)
