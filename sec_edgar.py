@@ -200,6 +200,16 @@ def _edgar_get(url, params=None, timeout=30):
     return _CachedResp(payload)
 
 
+def _normalize_ticker_for_sec(ticker):
+    """SEC's company_tickers.json uses hyphens for share-class separators
+    (BRK-B, BF-A, MOG-A). Users / Yahoo Finance / our other data sources
+    use dots (BRK.B) or slashes (BRK/B). Without normalisation a lookup
+    for `BRK.B` walks the entire 10k-entry JSON, finds nothing, falls
+    through to the slow `efts.sec.gov` search, and usually still misses.
+    """
+    return ticker.upper().replace(".", "-").replace("/", "-")
+
+
 def get_cik(ticker):
     """
     Look up 10-digit zero-padded CIK for a ticker symbol.
@@ -211,7 +221,7 @@ def get_cik(ticker):
     /files/company_tickers.json endpoint when a transient outage marks a
     ticker as un-resolvable.
     """
-    ticker_upper = ticker.upper()
+    ticker_upper = _normalize_ticker_for_sec(ticker)
     now = time.time()
     hit = _CIK_CACHE.get(ticker_upper)
     if hit is not None:
@@ -224,7 +234,11 @@ def get_cik(ticker):
         resp = _edgar_get("https://www.sec.gov/files/company_tickers.json")
         data = resp.json()
         for _, entry in data.items():
-            if entry.get("ticker", "").upper() == ticker_upper:
+            entry_ticker = entry.get("ticker", "").upper()
+            # SEC stores hyphenated; we already normalised on the way in,
+            # but normalise the SEC side too in case the dataset ever
+            # introduces dot-form tickers.
+            if entry_ticker.replace(".", "-") == ticker_upper:
                 cik_int = entry["cik_str"]
                 cik_padded = str(cik_int).zfill(10)
                 _CIK_CACHE[ticker_upper] = (cik_padded, now + _CIK_POSITIVE_TTL)
