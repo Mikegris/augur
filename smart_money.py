@@ -239,7 +239,9 @@ def _score_options(ticker, current_price, hist):
                 return 8
 
         target.sort()
-        _, exp_date = target[0]
+        chosen_dte, exp_date = target[0]
+        # chosen_dte is calendar days; convert to trading days (~ x * 5/7).
+        trading_dte = max(1, int(round(chosen_dte * 5.0 / 7.0)))
 
         chain = ticker.option_chain(exp_date)
         calls = chain.calls
@@ -261,11 +263,16 @@ def _score_options(ticker, current_price, hist):
         import numpy as np
         returns = hist["Close"].pct_change().dropna()
         hv_daily = returns.tail(30).std()
-        hv_monthly = hv_daily * (21 ** 0.5) * 100
+        # Scale daily HV out to the chosen expiry's trading-day horizon so the
+        # ratio is apples-to-apples with the straddle's `dte`-period implied
+        # move. The previous fixed sqrt(21) assumed every expiry was exactly
+        # 21 trading days out and silently mis-scaled by 15-50% for any
+        # expiry outside that window.
+        hv_horizon = hv_daily * (trading_dte ** 0.5) * 100
 
         # IV premium ratio
-        if hv_monthly > 0:
-            iv_premium = implied_move_pct / hv_monthly
+        if hv_horizon > 0:
+            iv_premium = implied_move_pct / hv_horizon
         else:
             iv_premium = 1.0
 
