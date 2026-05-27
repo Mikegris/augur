@@ -156,9 +156,18 @@
 
     // Subsample the density to ~100 points for chart smoothness (Chart.js
     // gets sluggish with 200+ datapoints and the visual difference is nil).
-    const strikes = rnd.strikes;
-    const density = rnd.density;
+    const strikes = rnd && Array.isArray(rnd.strikes) ? rnd.strikes : [];
+    const density = rnd && Array.isArray(rnd.density) ? rnd.density : [];
     const N = strikes.length;
+    if (!N || N !== density.length) {
+      // Empty / mismatched density payload — draw nothing rather than crash
+      // with "Cannot read property 'length' of undefined" inside Math.max.
+      const parent = ctx.parentElement;
+      if (parent) parent.innerHTML +=
+        '<div style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;' +
+        'color:var(--text-dim);font-size:11px;pointer-events:none">no density data</div>';
+      return;
+    }
     const target = 120;
     let step = Math.max(1, Math.floor(N / target));
     const xs = [], ys = [];
@@ -384,7 +393,13 @@
   }
 
   // ── Main render orchestration ──────────────────────────────────────────
+  // Per-symbol generation counter so a stale fetch can't overwrite a newer
+  // one. The dropdown handler at the bottom of render() increments _gen
+  // before awaiting; loadExpiry compares to its captured value after the
+  // await returns and bails if the user has already moved on.
+  const _gen = {};
   async function loadExpiry(sId, symbol, expiry) {
+    const myGen = (_gen[sId] = (_gen[sId] || 0) + 1);
     const statusEl = document.getElementById('rnd-status-' + sId);
     const methodEl = document.getElementById('rnd-method-' + sId);
     if (statusEl) statusEl.textContent = 'Computing risk-neutral density…';
@@ -392,12 +407,14 @@
     try {
       rnd = await fetchRND(symbol, expiry);
     } catch (e) {
+      if (myGen !== _gen[sId]) return; // user moved on
       if (statusEl) {
         statusEl.style.color = 'var(--red)';
         statusEl.textContent = 'Fetch failed: ' + e.message;
       }
       return;
     }
+    if (myGen !== _gen[sId]) return; // newer change in flight; drop stale result
     if (rnd.error) {
       if (statusEl) {
         statusEl.style.color = 'var(--red)';
@@ -497,20 +514,11 @@
       wireCalculator(sId, initial);
     }
 
-    // Wire the expiry-change handler. We dedupe via a generation counter so
-    // an in-flight request from a previous expiry doesn't overwrite the
-    // panel with stale data when the user rapidly switches expiries.
-    let gen = 0;
+    // Wire the expiry-change handler. Dedup is handled inside loadExpiry
+    // via the module-level _gen counter keyed by sId — that way the guard
+    // also covers the initial-load path above, not just dropdown changes.
     if (selectEl) {
-      selectEl.onchange = async () => {
-        const myGen = ++gen;
-        const exp = selectEl.value;
-        await loadExpiry(sId, symbol, exp);
-        // If a newer change came in while we were loading, throw away the
-        // older render. (Already handled inside loadExpiry — leaving this
-        // guard for explicitness.)
-        if (myGen !== gen) return;
-      };
+      selectEl.onchange = () => loadExpiry(sId, symbol, selectEl.value);
     }
   }
 
