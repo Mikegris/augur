@@ -633,18 +633,46 @@ def _gather_metrics(
         with lock:
             metrics[metric_name][sym] = v
 
-    futures = []
-    with ThreadPoolExecutor(max_workers=16) as pool:
+    # Bundle-state can flip `concurrent.futures.thread._shutdown` (atexit
+    # fires while Flask is still serving), after which every submit raises
+    # `RuntimeError: cannot schedule new futures after interpreter shutdown`
+    # and the peerdiv panel 500s. Fall back to a serial loop in that state.
+    def _serial_metrics():
         for metric_name, fn, _desc in _METRIC_REGISTRY:
             for sym in all_syms:
-                futures.append(pool.submit(_worker, metric_name, fn, sym))
-        for fut in as_completed(futures):
-            # ``_worker`` swallows exceptions, but be paranoid in case the
-            # future itself fails (e.g. pool was shut down).
+                _worker(metric_name, fn, sym)
+
+    futures = []
+    try:
+        with ThreadPoolExecutor(max_workers=16) as pool:
             try:
-                fut.result()
-            except Exception as e:  # pragma: no cover
-                errors.append(f"future:{type(e).__name__}: {e}")
+                for metric_name, fn, _desc in _METRIC_REGISTRY:
+                    for sym in all_syms:
+                        futures.append(pool.submit(_worker, metric_name, fn, sym))
+            except RuntimeError as e:
+                if "interpreter shutdown" in str(e) or "cannot schedule new futures" in str(e):
+                    log.warning(
+                        "synth_peerdiv: submit failed (%s); going serial", e,
+                    )
+                    futures = []
+                    _serial_metrics()
+                else:
+                    raise
+            for fut in as_completed(futures):
+                # ``_worker`` swallows exceptions, but be paranoid in case the
+                # future itself fails (e.g. pool was shut down).
+                try:
+                    fut.result()
+                except Exception as e:  # pragma: no cover
+                    errors.append(f"future:{type(e).__name__}: {e}")
+    except RuntimeError as e:
+        if "interpreter shutdown" in str(e) or "cannot schedule new futures" in str(e):
+            log.warning(
+                "synth_peerdiv: ThreadPoolExecutor ctor failed (%s); going serial", e,
+            )
+            _serial_metrics()
+        else:
+            raise
 
     return metrics, errors
 
