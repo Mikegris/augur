@@ -315,21 +315,56 @@ def compute_composite(symbol):
         if cached is not None:
             return cached
 
-        # Score all 6 channels in parallel
-        with ThreadPoolExecutor(max_workers=6) as pool:
-            fut_options = pool.submit(_score_options_flow, symbol)
-            fut_volume = pool.submit(_score_volume_anomaly, symbol)
-            fut_insider = pool.submit(_score_insider_cluster, symbol)
-            fut_congress = pool.submit(_score_congress_cluster, symbol)
-            fut_inst = pool.submit(_score_institutional_signal, symbol)
-            fut_tech = pool.submit(_score_technical_regime, symbol)
+        # Score all 6 channels in parallel.
+        # Bundle-state can flip `concurrent.futures.thread._shutdown` (atexit
+        # fires while Flask is still serving), after which every submit raises
+        # `RuntimeError: cannot schedule new futures after interpreter shutdown`
+        # and the route 500s. Fall back to a serial run so the panel keeps
+        # working (slower, but no 500).
+        def _serial_channels():
+            return (
+                _score_options_flow(symbol),
+                _score_volume_anomaly(symbol),
+                _score_insider_cluster(symbol),
+                _score_congress_cluster(symbol),
+                _score_institutional_signal(symbol),
+                _score_technical_regime(symbol),
+            )
 
-        ch_options = fut_options.result()
-        ch_volume = fut_volume.result()
-        ch_insider = fut_insider.result()
-        ch_congress = fut_congress.result()
-        ch_inst = fut_inst.result()
-        ch_tech = fut_tech.result()
+        try:
+            with ThreadPoolExecutor(max_workers=6) as pool:
+                try:
+                    fut_options = pool.submit(_score_options_flow, symbol)
+                    fut_volume = pool.submit(_score_volume_anomaly, symbol)
+                    fut_insider = pool.submit(_score_insider_cluster, symbol)
+                    fut_congress = pool.submit(_score_congress_cluster, symbol)
+                    fut_inst = pool.submit(_score_institutional_signal, symbol)
+                    fut_tech = pool.submit(_score_technical_regime, symbol)
+                except RuntimeError as e:
+                    if "interpreter shutdown" in str(e) or "cannot schedule new futures" in str(e):
+                        logger.warning(
+                            "synthetic_insider: submit failed (%s); going serial for %s",
+                            e, symbol,
+                        )
+                        ch_options, ch_volume, ch_insider, ch_congress, ch_inst, ch_tech = _serial_channels()
+                    else:
+                        raise
+                else:
+                    ch_options = fut_options.result()
+                    ch_volume = fut_volume.result()
+                    ch_insider = fut_insider.result()
+                    ch_congress = fut_congress.result()
+                    ch_inst = fut_inst.result()
+                    ch_tech = fut_tech.result()
+        except RuntimeError as e:
+            if "interpreter shutdown" in str(e) or "cannot schedule new futures" in str(e):
+                logger.warning(
+                    "synthetic_insider: ThreadPoolExecutor ctor failed (%s); going serial for %s",
+                    e, symbol,
+                )
+                ch_options, ch_volume, ch_insider, ch_congress, ch_inst, ch_tech = _serial_channels()
+            else:
+                raise
 
         # Weighted composite
         composite = (
@@ -407,18 +442,34 @@ def scan_composite_bulk(symbols):
 
         symbols = [s.upper().strip() for s in symbols[:15]]
 
-        with ThreadPoolExecutor(max_workers=3) as pool:
-            futures = {pool.submit(compute_composite, sym): sym for sym in symbols}
+        # Bundle-state guard: route through safe_executor so a tripped
+        # `concurrent.futures.thread._shutdown` flag falls back to serial
+        # rather than 500-ing the bulk endpoint. compute_composite() returns
+        # an error-dict instead of raising, so parallel_map's None-on-raise
+        # rule effectively never trips here — but we still defensively
+        # synthesize a placeholder for any None slot.
+        import safe_executor
+        raw_results = safe_executor.parallel_map(
+            compute_composite, symbols, max_workers=3,
+            thread_name_prefix="si-bulk",
+        )
 
         results = []
-        for fut in futures:
-            res = fut.result()
-            if "error" not in res:
+        for sym, res in zip(symbols, raw_results):
+            if res is None:
+                results.append({
+                    "symbol": sym,
+                    "composite_score": 0,
+                    "alert_level": "DORMANT",
+                    "convergence_count": 0,
+                    "error": "compute_composite returned None",
+                })
+            elif "error" not in res:
                 results.append(res)
             else:
                 # Include errored symbols with minimal info so caller knows
                 results.append({
-                    "symbol": futures[fut],
+                    "symbol": sym,
                     "composite_score": 0,
                     "alert_level": "DORMANT",
                     "convergence_count": 0,
