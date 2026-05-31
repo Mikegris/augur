@@ -153,6 +153,25 @@ def _get_spot_price(ticker, symbol=None):
                 return float(p)
         except Exception as e:
             logger.debug("gex spot: fetcher.get_quote(%s) failed: %s", symbol, e)
+    # Last-resort stale-tolerant read from cache_store. During a Yahoo
+    # rate-limit window the live fetch above returns None, leaving gex
+    # unable to compute even when a recent quote is sitting in cache.
+    # A slightly-stale spot is fine for gex — gamma is positional, not
+    # tick-sensitive — so we accept up to 1h-old prices to keep the
+    # panel rendering instead of returning the "no spot" error envelope.
+    if symbol:
+        try:
+            import cache_store
+            stale = cache_store.cache_get_stale(("quote", symbol.upper()),
+                                                max_age_seconds=3600)
+            if stale and isinstance(stale, dict):
+                p = stale.get("price")
+                if p and float(p) > 0:
+                    logger.info("gex spot: serving stale %s quote (%.2f) "
+                                "due to live-fetch failure", symbol, float(p))
+                    return float(p)
+        except Exception as e:
+            logger.debug("gex spot: cache_get_stale(%s) failed: %s", symbol, e)
     return None
 
 

@@ -387,6 +387,39 @@ def cache_get(key, ttl: Optional[float] = None):
     return value
 
 
+def cache_get_stale(key, max_age_seconds: float = 24 * 3600) -> Any:
+    """Return a cached value even if its TTL expired, as long as it was
+    written within `max_age_seconds`. Returns None if the entry is missing,
+    older than `max_age_seconds`, or shaped like a failure.
+
+    Use case: graceful degradation when an upstream is temporarily down.
+    Callers that prefer "slightly stale data" over "no data at all"
+    (e.g. gex_engine needs a spot price; better an hour-old quote than
+    a blank panel) can call this after their normal `cache_get` returns
+    None and the live fetch also fails.
+
+    Doesn't refresh `last_access` so LRU still treats the entry as old.
+    """
+    k = _serialize_key(key)
+    hit = _mem.get(k)
+    if hit is None:
+        return None
+    if len(hit) == 2:
+        value, expiry = hit
+        last_access = expiry
+    else:
+        value, expiry, last_access = hit
+    # Compute age from the writer's expiry; we wrote at (expiry - ttl) but
+    # don't know ttl here, so use last_access as a proxy. For an entry that
+    # was just expired, last_access ≈ expiry, so age ≈ now - expiry.
+    age = time.time() - last_access
+    if age > max_age_seconds:
+        return None
+    if _looks_like_failure(value):
+        return None
+    return value
+
+
 def cache_set(key, value, ttl: float) -> None:
     """Store in memory + (if ttl >= _PERSIST_MIN_TTL) write through to disk.
 
