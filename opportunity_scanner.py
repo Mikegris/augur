@@ -717,17 +717,51 @@ def scan_opportunities(profile=None, force_refresh=False):
             logger.warning("Crypto scan error for %s: %s", candidate["symbol"], e)
             return None
 
-    with ThreadPoolExecutor(max_workers=3) as pool:
-        futures = {}
+    # Bundle-state can flip `concurrent.futures.thread._shutdown` (atexit
+    # fires while Flask is still serving), after which every submit raises
+    # `RuntimeError: cannot schedule new futures after interpreter shutdown`
+    # and the scan 500s. Fall back to a serial loop in that state — slower,
+    # but the panel keeps returning data.
+    def _serial_score():
         for c in equity_candidates:
-            futures[pool.submit(_score_eq, c)] = c
+            r = _score_eq(c)
+            if r and r.get("composite", 0) > 0:
+                opportunities.append(r)
         for c in crypto_candidates:
-            futures[pool.submit(_score_cr, c)] = c
+            r = _score_cr(c)
+            if r and r.get("composite", 0) > 0:
+                opportunities.append(r)
 
-        for future in as_completed(futures):
-            result = future.result()
-            if result and result.get("composite", 0) > 0:
-                opportunities.append(result)
+    try:
+        with ThreadPoolExecutor(max_workers=3) as pool:
+            futures = {}
+            try:
+                for c in equity_candidates:
+                    futures[pool.submit(_score_eq, c)] = c
+                for c in crypto_candidates:
+                    futures[pool.submit(_score_cr, c)] = c
+            except RuntimeError as e:
+                if "interpreter shutdown" in str(e) or "cannot schedule new futures" in str(e):
+                    logger.warning(
+                        "opportunity_scanner: submit failed (%s); going serial", e,
+                    )
+                    futures = {}
+                    _serial_score()
+                else:
+                    raise
+
+            for future in as_completed(futures):
+                result = future.result()
+                if result and result.get("composite", 0) > 0:
+                    opportunities.append(result)
+    except RuntimeError as e:
+        if "interpreter shutdown" in str(e) or "cannot schedule new futures" in str(e):
+            logger.warning(
+                "opportunity_scanner: ThreadPoolExecutor ctor failed (%s); going serial", e,
+            )
+            _serial_score()
+        else:
+            raise
 
     # Sort by composite score descending
     opportunities.sort(key=lambda x: x.get("composite", 0), reverse=True)

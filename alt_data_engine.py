@@ -569,8 +569,23 @@ def nowcast_bulk(symbols):
         # Cap at 15 symbols
         symbols = [s.upper().strip() for s in symbols[:15]]
 
-        with ThreadPoolExecutor(max_workers=3) as executor:
-            results = list(executor.map(nowcast_revenue, symbols))
+        # Bundle-state guard: route through safe_executor so a tripped
+        # `concurrent.futures.thread._shutdown` flag falls back to serial
+        # rather than 500-ing the bulk endpoint. nowcast_revenue() returns
+        # error-dicts instead of raising, so parallel_map's None-on-raise
+        # rule rarely trips here — but synthesize an error-dict for any
+        # None slot defensively.
+        import safe_executor
+        raw = safe_executor.parallel_map(
+            nowcast_revenue, symbols, max_workers=3,
+            thread_name_prefix="alt-nowcast",
+        )
+        results = []
+        for sym, r in zip(symbols, raw):
+            if r is None:
+                results.append({"symbol": sym, "error": "nowcast_revenue returned None"})
+            else:
+                results.append(r)
 
         # Filter out errors for sorting, but keep them in output
         valid = [r for r in results if "error" not in r]

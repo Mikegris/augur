@@ -404,14 +404,56 @@ def get_recent_trades(days=90, max_pdfs=100, tickers=None):
         # the whole batch. Run in a single-slot executor so we can hard-cap
         # with future.result(timeout=…); the worker thread leaks if it
         # hangs, but it's a daemon and we'll have already returned.
-        parse_pool = ThreadPoolExecutor(max_workers=1)
+        #
+        # Bundle-state guard: if Python's `concurrent.futures.thread._shutdown`
+        # flag has been flipped (atexit fired mid-session in the py2app
+        # bundle), ThreadPoolExecutor.submit raises `RuntimeError: cannot
+        # schedule new futures after interpreter shutdown`. Fall back to a
+        # direct in-thread call to _parse_ptr_pdf — we lose the timeout
+        # bound, but a well-formed PDF parses in <1s, and the alternative
+        # (returning []) silently loses that PTR's trades.
         try:
-            fut = parse_pool.submit(_parse_ptr_pdf, resp.content, member, doc_id, year)
+            parse_pool = ThreadPoolExecutor(max_workers=1)
+        except RuntimeError as e:
+            if "interpreter shutdown" in str(e) or "cannot schedule new futures" in str(e):
+                log.warning(
+                    "congress: parse_pool ctor failed (%s); parsing %s in-thread", e, doc_id,
+                )
+                try:
+                    trades = _parse_ptr_pdf(resp.content, member, doc_id, year)
+                except Exception as ex:
+                    log.warning("congress: in-thread parse failed for %s: %s", doc_id, ex)
+                    return []
+                if cache_store is not None and trades:
+                    try:
+                        cache_store.cache_set(cache_key, trades, _PTR_CACHE_TTL)
+                    except Exception:
+                        pass
+                return trades
+            raise
+
+        try:
             try:
-                trades = fut.result(timeout=_PDF_PARSE_TIMEOUT_S)
-            except FutTimeoutError:
-                log.warning("PTR parse timeout for %s — abandoning", doc_id)
-                return []
+                fut = parse_pool.submit(_parse_ptr_pdf, resp.content, member, doc_id, year)
+            except RuntimeError as e:
+                if "interpreter shutdown" in str(e) or "cannot schedule new futures" in str(e):
+                    log.warning(
+                        "congress: parse_pool submit failed (%s); parsing %s in-thread",
+                        e, doc_id,
+                    )
+                    try:
+                        trades = _parse_ptr_pdf(resp.content, member, doc_id, year)
+                    except Exception as ex:
+                        log.warning("congress: in-thread parse failed for %s: %s", doc_id, ex)
+                        return []
+                else:
+                    raise
+            else:
+                try:
+                    trades = fut.result(timeout=_PDF_PARSE_TIMEOUT_S)
+                except FutTimeoutError:
+                    log.warning("PTR parse timeout for %s — abandoning", doc_id)
+                    return []
         finally:
             parse_pool.shutdown(wait=False)
 
@@ -422,11 +464,19 @@ def get_recent_trades(days=90, max_pdfs=100, tickers=None):
                 pass
         return trades
 
+    # Bundle-state guard: route through safe_executor so a tripped
+    # `concurrent.futures.thread._shutdown` falls back to serial fetches
+    # rather than 500-ing the congress endpoints. _fetch_one returns a
+    # list (or [] on error), so parallel_map's None-on-raise rule rarely
+    # trips here.
+    import safe_executor
     all_trades = []
-    with ThreadPoolExecutor(max_workers=5) as pool:
-        futures = {pool.submit(_fetch_one, ptr): ptr for ptr in all_ptrs}
-        for future in as_completed(futures):
-            all_trades.extend(future.result())
+    fetched = safe_executor.parallel_map(
+        _fetch_one, all_ptrs, max_workers=5, thread_name_prefix="congress-ptr",
+    )
+    for trades in fetched:
+        if trades:
+            all_trades.extend(trades)
 
     # Filter by ticker if requested
     if tickers:

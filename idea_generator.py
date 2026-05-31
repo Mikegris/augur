@@ -579,34 +579,82 @@ def _build_fast_dossier(symbol: str, asset_class: str, source: str, strategy: st
     yf_symbol = symbol if asset_class == "stock" else f"{symbol}-USD"
     started = time.time()
 
-    with ThreadPoolExecutor(max_workers=8) as pool:
+    # Bundle-state can flip `concurrent.futures.thread._shutdown` (atexit
+    # fires while Flask is still serving), after which every submit raises
+    # `RuntimeError: cannot schedule new futures after interpreter shutdown`
+    # and the dossier 500s. Fall back to a serial loop in that state.
+    def _serial_fast():
+        coin_id_local = _resolve_crypto_id(symbol) if asset_class == "crypto" else None
         if asset_class == "crypto":
-            coin_id = _resolve_crypto_id(symbol)
-            f_quote = pool.submit(_safe_call, fetcher.get_crypto_quote, coin_id) if coin_id else None
-            f_fund = None
-            f_earnings = None
-            f_dividend = None
+            _quote = _safe_call(fetcher.get_crypto_quote, coin_id_local) if coin_id_local else None
+            _fund = None
+            _earnings = None
+            _dividend = None
         else:
-            f_quote = pool.submit(_safe_call, fetcher.get_quote, symbol)
-            f_fund = pool.submit(_safe_call, fetcher.get_fundamentals, symbol)
-            f_earnings = pool.submit(_safe_call, earnings_module.get_earnings_calendar, [symbol])
-            f_dividend = pool.submit(_safe_call, fetcher.get_dividend_data, symbol)
+            _quote = _safe_call(fetcher.get_quote, symbol)
+            _fund = _safe_call(fetcher.get_fundamentals, symbol)
+            _earnings = _safe_call(earnings_module.get_earnings_calendar, [symbol])
+            _dividend = _safe_call(fetcher.get_dividend_data, symbol)
+        _narr = _safe_call(narrative_engine.analyze_narrative, symbol)
+        _news = _safe_call(fetcher.get_news, yf_symbol, 5) or []
+        _risk_all = _safe_call(fetcher.get_risk_metrics, [yf_symbol], "1y") or {}
+        _stwits = _safe_call(alt_signals.stocktwits_symbol_sentiment, symbol)
+        _reddit = _safe_call(alt_signals.reddit_ticker_mentions) or []
+        return (_narr, _news, _risk_all, _quote, _fund, _stwits, _reddit, _earnings, _dividend)
 
-        f_narr = pool.submit(_safe_call, narrative_engine.analyze_narrative, symbol)
-        f_news = pool.submit(_safe_call, fetcher.get_news, yf_symbol, 5)
-        f_risk = pool.submit(_safe_call, fetcher.get_risk_metrics, [yf_symbol], "1y")
-        f_stwits = pool.submit(_safe_call, alt_signals.stocktwits_symbol_sentiment, symbol)
-        f_reddit = pool.submit(_safe_call, alt_signals.reddit_ticker_mentions)
+    _did_serial = False
+    try:
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            try:
+                if asset_class == "crypto":
+                    coin_id = _resolve_crypto_id(symbol)
+                    f_quote = pool.submit(_safe_call, fetcher.get_crypto_quote, coin_id) if coin_id else None
+                    f_fund = None
+                    f_earnings = None
+                    f_dividend = None
+                else:
+                    f_quote = pool.submit(_safe_call, fetcher.get_quote, symbol)
+                    f_fund = pool.submit(_safe_call, fetcher.get_fundamentals, symbol)
+                    f_earnings = pool.submit(_safe_call, earnings_module.get_earnings_calendar, [symbol])
+                    f_dividend = pool.submit(_safe_call, fetcher.get_dividend_data, symbol)
 
-        narrative = f_narr.result()
-        news = f_news.result() or []
-        risk_all = f_risk.result() or {}
-        quote = f_quote.result() if f_quote else None
-        fundamentals = f_fund.result() if f_fund else None
-        stwits = f_stwits.result()
-        reddit_mentions = f_reddit.result() or []
-        earnings_cal = f_earnings.result() if f_earnings else None
-        dividend = f_dividend.result() if f_dividend else None
+                f_narr = pool.submit(_safe_call, narrative_engine.analyze_narrative, symbol)
+                f_news = pool.submit(_safe_call, fetcher.get_news, yf_symbol, 5)
+                f_risk = pool.submit(_safe_call, fetcher.get_risk_metrics, [yf_symbol], "1y")
+                f_stwits = pool.submit(_safe_call, alt_signals.stocktwits_symbol_sentiment, symbol)
+                f_reddit = pool.submit(_safe_call, alt_signals.reddit_ticker_mentions)
+            except RuntimeError as e:
+                if "interpreter shutdown" in str(e) or "cannot schedule new futures" in str(e):
+                    logger.warning(
+                        "idea_generator._build_fast_dossier: submit failed (%s); going serial for %s",
+                        e, symbol,
+                    )
+                    (narrative, news, risk_all, quote, fundamentals, stwits,
+                     reddit_mentions, earnings_cal, dividend) = _serial_fast()
+                    _did_serial = True
+                else:
+                    raise
+            else:
+                narrative = f_narr.result()
+                news = f_news.result() or []
+                risk_all = f_risk.result() or {}
+                quote = f_quote.result() if f_quote else None
+                fundamentals = f_fund.result() if f_fund else None
+                stwits = f_stwits.result()
+                reddit_mentions = f_reddit.result() or []
+                earnings_cal = f_earnings.result() if f_earnings else None
+                dividend = f_dividend.result() if f_dividend else None
+    except RuntimeError as e:
+        if "interpreter shutdown" in str(e) or "cannot schedule new futures" in str(e):
+            if not _did_serial:
+                logger.warning(
+                    "idea_generator._build_fast_dossier: pool ctor failed (%s); going serial for %s",
+                    e, symbol,
+                )
+                (narrative, news, risk_all, quote, fundamentals, stwits,
+                 reddit_mentions, earnings_cal, dividend) = _serial_fast()
+        else:
+            raise
 
     risk = (risk_all.get(yf_symbol) or risk_all.get(symbol) or {}) if isinstance(risk_all, dict) else {}
 
@@ -679,40 +727,98 @@ def _build_enrichment(symbol: str, asset_class: str, strategy: str, fast: dict):
     sector = (fast.get("snapshot") or {}).get("sector")
 
     started = time.time()
-    with ThreadPoolExecutor(max_workers=8) as pool:
+
+    # Bundle-state guard: if Python's `concurrent.futures.thread._shutdown`
+    # has been flipped (atexit fired mid-session in the py2app bundle),
+    # ThreadPoolExecutor.submit() raises `RuntimeError: cannot schedule new
+    # futures after interpreter shutdown`. Fall back to running each
+    # enrichment block serially so the route doesn't 500.
+    def _serial_enrich():
+        coin_id_local = _resolve_crypto_id(symbol) if asset_class == "crypto" else None
         if asset_class == "crypto":
-            f_score = pool.submit(_safe_call, scanner._score_crypto, symbol, profile, weights)
-            f_insider = None
-            f_congress = None
-            f_options = None
-            f_peers = None
+            _score = _safe_call(scanner._score_crypto, symbol, profile, weights)
+            _insider_txns = []
+            _congress_trades = []
+            _options_flow = None
+            _peers = None
         else:
-            f_score = pool.submit(_safe_call, scanner._score_equity, symbol, profile, weights)
-            f_insider = pool.submit(_safe_call, sec_edgar.get_form4_transactions, symbol, 30)
-            f_congress = pool.submit(_safe_call, congress_module.get_trades_for_ticker, symbol, 180)
-            f_options = pool.submit(_safe_call, fetcher.get_unusual_options_flow, symbol)
-            f_peers = pool.submit(_safe_call, _compute_peers, symbol, sector)
-
-        f_ml = pool.submit(_safe_call, ml_forecast.ml_forecast, yf_symbol)
-        f_analog = pool.submit(_safe_call, _compute_historical_analog, yf_symbol)
-        f_crypto_extras = (
-            pool.submit(_safe_call, fetcher.get_crypto_extras, _resolve_crypto_id(symbol))
-            if asset_class == "crypto" and _resolve_crypto_id(symbol) else None
+            _score = _safe_call(scanner._score_equity, symbol, profile, weights)
+            _insider_txns = _safe_call(sec_edgar.get_form4_transactions, symbol, 30) or []
+            _congress_trades = _safe_call(congress_module.get_trades_for_ticker, symbol, 180) or []
+            _options_flow = _safe_call(fetcher.get_unusual_options_flow, symbol)
+            _peers = _safe_call(_compute_peers, symbol, sector)
+        _ml = _safe_call(ml_forecast.ml_forecast, yf_symbol)
+        _analog = _safe_call(_compute_historical_analog, yf_symbol)
+        _crypto_extras = (
+            _safe_call(fetcher.get_crypto_extras, coin_id_local)
+            if asset_class == "crypto" and coin_id_local else None
         )
-        # Decision-support fetches that don't depend on scanner/ML output
-        f_portfolio_value = pool.submit(_safe_call, _portfolio_total_value)
-        f_correlation = pool.submit(_safe_call, _compute_correlation_to_holdings, symbol, asset_class)
+        _pv = _safe_call(_portfolio_total_value) or 0.0
+        _corr = _safe_call(_compute_correlation_to_holdings, symbol, asset_class) or {"available": False}
+        return (_score, _ml, _insider_txns, _congress_trades, _options_flow,
+                _peers, _analog, _crypto_extras, _pv, _corr)
 
-        score_result = f_score.result()
-        ml_result = f_ml.result()
-        insider_txns = f_insider.result() if f_insider else []
-        congress_trades = f_congress.result() if f_congress else []
-        options_flow = f_options.result() if f_options else None
-        peers_block = f_peers.result() if f_peers else None
-        analog = f_analog.result()
-        crypto_extras = f_crypto_extras.result() if f_crypto_extras else None
-        portfolio_value = f_portfolio_value.result() or 0.0
-        correlation = f_correlation.result() or {"available": False}
+    _did_serial = False
+    try:
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            try:
+                if asset_class == "crypto":
+                    f_score = pool.submit(_safe_call, scanner._score_crypto, symbol, profile, weights)
+                    f_insider = None
+                    f_congress = None
+                    f_options = None
+                    f_peers = None
+                else:
+                    f_score = pool.submit(_safe_call, scanner._score_equity, symbol, profile, weights)
+                    f_insider = pool.submit(_safe_call, sec_edgar.get_form4_transactions, symbol, 30)
+                    f_congress = pool.submit(_safe_call, congress_module.get_trades_for_ticker, symbol, 180)
+                    f_options = pool.submit(_safe_call, fetcher.get_unusual_options_flow, symbol)
+                    f_peers = pool.submit(_safe_call, _compute_peers, symbol, sector)
+
+                f_ml = pool.submit(_safe_call, ml_forecast.ml_forecast, yf_symbol)
+                f_analog = pool.submit(_safe_call, _compute_historical_analog, yf_symbol)
+                f_crypto_extras = (
+                    pool.submit(_safe_call, fetcher.get_crypto_extras, _resolve_crypto_id(symbol))
+                    if asset_class == "crypto" and _resolve_crypto_id(symbol) else None
+                )
+                # Decision-support fetches that don't depend on scanner/ML output
+                f_portfolio_value = pool.submit(_safe_call, _portfolio_total_value)
+                f_correlation = pool.submit(_safe_call, _compute_correlation_to_holdings, symbol, asset_class)
+            except RuntimeError as e:
+                if "interpreter shutdown" in str(e) or "cannot schedule new futures" in str(e):
+                    logger.warning(
+                        "idea_generator._build_enrichment: submit failed (%s); going serial for %s",
+                        e, symbol,
+                    )
+                    (score_result, ml_result, insider_txns, congress_trades,
+                     options_flow, peers_block, analog, crypto_extras,
+                     portfolio_value, correlation) = _serial_enrich()
+                    _did_serial = True
+                else:
+                    raise
+            else:
+                score_result = f_score.result()
+                ml_result = f_ml.result()
+                insider_txns = f_insider.result() if f_insider else []
+                congress_trades = f_congress.result() if f_congress else []
+                options_flow = f_options.result() if f_options else None
+                peers_block = f_peers.result() if f_peers else None
+                analog = f_analog.result()
+                crypto_extras = f_crypto_extras.result() if f_crypto_extras else None
+                portfolio_value = f_portfolio_value.result() or 0.0
+                correlation = f_correlation.result() or {"available": False}
+    except RuntimeError as e:
+        if "interpreter shutdown" in str(e) or "cannot schedule new futures" in str(e):
+            if not _did_serial:
+                logger.warning(
+                    "idea_generator._build_enrichment: pool ctor failed (%s); going serial for %s",
+                    e, symbol,
+                )
+                (score_result, ml_result, insider_txns, congress_trades,
+                 options_flow, peers_block, analog, crypto_extras,
+                 portfolio_value, correlation) = _serial_enrich()
+        else:
+            raise
 
     strength = _build_strength_block(score_result, strategy)
     forecast = _build_forecast_block(ml_result)
@@ -996,37 +1102,73 @@ def _compute_peers(symbol: str, sector: Optional[str]):
         return {"available": False, "reason": "No peer tickers for sector " + sector}
 
     rows = []  # one row per ticker (including the picked symbol)
-    with ThreadPoolExecutor(max_workers=6) as pool:
-        all_symbols = [symbol] + candidates
-        future_map = {
-            sym: (
-                pool.submit(_safe_call, fetcher.get_quote, sym),
-                pool.submit(_safe_call, fetcher.get_fundamentals, sym),
-            )
-            for sym in all_symbols
+    all_symbols = [symbol] + candidates
+
+    def _row_for(sym, q, f):
+        if not q.get("price"):
+            return None
+        return {
+            "symbol": sym,
+            "is_pick": sym.upper() == symbol.upper(),
+            "name": f.get("name") or sym,
+            "price": q.get("price"),
+            "change_pct": q.get("change_pct"),
+            "market_cap": f.get("market_cap") or q.get("market_cap"),
+            "pe_ratio": f.get("pe_ratio"),
+            "forward_pe": f.get("forward_pe"),
+            "ps_ratio": f.get("ps_ratio"),
+            "dividend_yield": f.get("dividend_yield"),
+            "revenue_growth": f.get("revenue_growth"),
+            "earnings_growth": f.get("earnings_growth"),
+            "return_on_equity": f.get("return_on_equity"),
+            "profit_margin": f.get("profit_margin"),
+            "beta": f.get("beta"),
         }
-        for sym, (fq, ff) in future_map.items():
-            q = fq.result() or {}
-            f = ff.result() or {}
-            if not q.get("price"):
-                continue
-            rows.append({
-                "symbol": sym,
-                "is_pick": sym.upper() == symbol.upper(),
-                "name": f.get("name") or sym,
-                "price": q.get("price"),
-                "change_pct": q.get("change_pct"),
-                "market_cap": f.get("market_cap") or q.get("market_cap"),
-                "pe_ratio": f.get("pe_ratio"),
-                "forward_pe": f.get("forward_pe"),
-                "ps_ratio": f.get("ps_ratio"),
-                "dividend_yield": f.get("dividend_yield"),
-                "revenue_growth": f.get("revenue_growth"),
-                "earnings_growth": f.get("earnings_growth"),
-                "return_on_equity": f.get("return_on_equity"),
-                "profit_margin": f.get("profit_margin"),
-                "beta": f.get("beta"),
-            })
+
+    # Bundle-state guard: if Python's `_shutdown` flag has flipped, fall
+    # back to serial fetches so peers still render rather than 500-ing.
+    def _serial_peers():
+        for sym in all_symbols:
+            q = _safe_call(fetcher.get_quote, sym) or {}
+            f = _safe_call(fetcher.get_fundamentals, sym) or {}
+            row = _row_for(sym, q, f)
+            if row is not None:
+                rows.append(row)
+
+    try:
+        with ThreadPoolExecutor(max_workers=6) as pool:
+            try:
+                future_map = {
+                    sym: (
+                        pool.submit(_safe_call, fetcher.get_quote, sym),
+                        pool.submit(_safe_call, fetcher.get_fundamentals, sym),
+                    )
+                    for sym in all_symbols
+                }
+            except RuntimeError as e:
+                if "interpreter shutdown" in str(e) or "cannot schedule new futures" in str(e):
+                    logger.warning(
+                        "idea_generator._compute_peers: submit failed (%s); going serial",
+                        e,
+                    )
+                    future_map = {}
+                    _serial_peers()
+                else:
+                    raise
+            for sym, (fq, ff) in future_map.items():
+                q = fq.result() or {}
+                f = ff.result() or {}
+                row = _row_for(sym, q, f)
+                if row is not None:
+                    rows.append(row)
+    except RuntimeError as e:
+        if "interpreter shutdown" in str(e) or "cannot schedule new futures" in str(e):
+            logger.warning(
+                "idea_generator._compute_peers: pool ctor failed (%s); going serial", e,
+            )
+            _serial_peers()
+        else:
+            raise
 
     if not any(r["is_pick"] for r in rows):
         return {"available": False, "reason": "Pick failed to load comparable metrics"}
