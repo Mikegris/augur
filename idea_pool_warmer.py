@@ -394,20 +394,60 @@ def warm_pool(target_count: int = 200) -> Dict[str, Any]:
         logger.info("idea_pool: starting warm pass — %d targets, %d workers",
                     len(targets), _WARM_MAX_WORKERS)
 
-        with ThreadPoolExecutor(max_workers=_WARM_MAX_WORKERS) as pool:
-            futures = {pool.submit(_warm_one_with_cleanup, t): t for t in targets}
-            for fut in as_completed(futures):
+        # Bundle-state can flip `concurrent.futures.thread._shutdown` (atexit
+        # fires while Flask is still serving). After that, every submit
+        # raises `RuntimeError: cannot schedule new futures after interpreter
+        # shutdown`. The warmer is a long-lived background thread itself, so
+        # this would normally kill the warm pass silently. Fall back to a
+        # serial loop in that state — the pass takes longer, but the cache
+        # still gets populated.
+        def _serial_warm():
+            nonlocal warmed, errors
+            for t in targets:
                 try:
-                    ok = fut.result()
+                    ok = _warm_one_with_cleanup(t)
                 except Exception as exc:  # noqa: BLE001
-                    t = futures[fut]
-                    logger.exception("idea_pool: worker crashed on %s: %s",
+                    logger.exception("idea_pool: serial worker crashed on %s: %s",
                                      t.get("symbol"), exc)
                     ok = False
                 if ok:
                     warmed += 1
                 else:
                     errors += 1
+
+        try:
+            with ThreadPoolExecutor(max_workers=_WARM_MAX_WORKERS) as pool:
+                try:
+                    futures = {pool.submit(_warm_one_with_cleanup, t): t for t in targets}
+                except RuntimeError as exc:
+                    if "interpreter shutdown" in str(exc) or "cannot schedule new futures" in str(exc):
+                        logger.warning(
+                            "idea_pool: submit failed (%s); running pass serially", exc,
+                        )
+                        futures = {}
+                        _serial_warm()
+                    else:
+                        raise
+                for fut in as_completed(futures):
+                    try:
+                        ok = fut.result()
+                    except Exception as exc:  # noqa: BLE001
+                        t = futures[fut]
+                        logger.exception("idea_pool: worker crashed on %s: %s",
+                                         t.get("symbol"), exc)
+                        ok = False
+                    if ok:
+                        warmed += 1
+                    else:
+                        errors += 1
+        except RuntimeError as exc:
+            if "interpreter shutdown" in str(exc) or "cannot schedule new futures" in str(exc):
+                logger.warning(
+                    "idea_pool: ThreadPoolExecutor ctor failed (%s); running pass serially", exc,
+                )
+                _serial_warm()
+            else:
+                raise
     finally:
         elapsed = time.time() - start
         finished_iso = _now_iso()
