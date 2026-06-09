@@ -435,6 +435,61 @@ def get_recent_calls(signal_name: str, limit: int = 20) -> List[Dict[str, Any]]:
     return out
 
 
+def get_scored_rows(
+    signal_name: str,
+    since: Optional[str] = None,
+    symbol: Optional[str] = None,
+    limit: int = 5000,
+) -> List[Dict[str, Any]]:
+    """Scored rows for a signal, chronological, with metadata JSON parsed.
+
+    Unlike get_recent_calls (newest-first, no metadata), this returns the
+    full scored history with the parsed `metadata` dict, which downstream
+    calibration code (forecast_accountability) needs to recover the
+    predicted probability for Brier scoring.
+    """
+    init_tracker_db()
+    conn = _get_conn()
+    q = [
+        "SELECT signal_name, symbol, issued_at, scored_at, horizon_days,",
+        "predicted_direction, confidence, realized_return, hit, metadata",
+        "FROM signal_forecasts WHERE signal_name = ? AND scored_at IS NOT NULL",
+    ]
+    params: List[Any] = [signal_name]
+    if since:
+        q.append("AND scored_at >= ?")
+        params.append(since)
+    if symbol:
+        q.append("AND symbol = ?")
+        params.append(symbol.upper())
+    q.append("ORDER BY scored_at ASC LIMIT ?")
+    params.append(int(limit))
+    rows = conn.execute(" ".join(q), params).fetchall()
+    out: List[Dict[str, Any]] = []
+    for r in rows:
+        md: Dict[str, Any] = {}
+        if r["metadata"]:
+            try:
+                parsed = json.loads(r["metadata"])
+                if isinstance(parsed, dict):
+                    md = parsed
+            except Exception:
+                md = {}
+        out.append({
+            "signal_name": r["signal_name"],
+            "symbol": r["symbol"],
+            "issued_at": r["issued_at"],
+            "scored_at": r["scored_at"],
+            "horizon_days": r["horizon_days"],
+            "direction": r["predicted_direction"],
+            "confidence": r["confidence"],
+            "realized_return": r["realized_return"],
+            "hit": r["hit"],
+            "metadata": md,
+        })
+    return out
+
+
 def prune_old_forecasts(max_age_days: int = 365) -> int:
     """Delete signal_forecasts rows older than `max_age_days`.
 

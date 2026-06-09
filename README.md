@@ -28,6 +28,8 @@
   - Portfolio correlation analysis (diversifies / concentrates verdict)
   - Auto-generated trade plan (entry zone, stop, two profit targets, R:R quality)
   - AI-generated thesis (bull case / bear case / conviction / catalyst / suggested action)
+- **Forecast Ensemble** — a single *calibrated* meta-forecast that fuses every forecasting engine (RandomForest classifier, trend regression, mean-reversion, block-bootstrap return distribution, narrative phase) into one directional probability + return cone. Cross-signal **disagreement** shrinks conviction toward neutral, so the headline call only expresses edge the underlying signals actually agree on. Shows per-signal contributions, agreement flags, and a p05–p95 return cone. (`RESEARCH → Forecast`)
+- **Forecast accountability loop** — every ensemble forecast (and each contributing engine) is logged, then re-priced once its horizon elapses. The Forecast view surfaces the ensemble's realized **hit-rate**, **Brier score** + reliability curve, and a **component leaderboard** showing which engines actually earn their weight. Proven performers then get their fusion weight tilted up automatically (**adaptive weights**) — so the platform learns from its own track record.
 - **Portfolio tracking** — multi-account positions, transaction log, P&L, dividend income projection
 - **Watchlist** with price alerts
 - **Markets dashboard** — indices, sectors, top movers

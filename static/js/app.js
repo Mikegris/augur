@@ -350,6 +350,7 @@ const NAV_GROUPS = {
     label: 'RESEARCH',
     items: [
       { view: 'research',     label: 'Research' },
+      { view: 'forecast',     label: 'Forecast' },
       { view: 'analytics',    label: 'Analytics' },
       { view: 'backtest',     label: 'Backtest' },
       { view: 'optimizer',    label: 'Optimizer' },
@@ -445,6 +446,7 @@ function navigate(view) {
     case 'screener':     loadScreener(); break;
     case 'settings':     loadSettings(); break;
     case 'research':     loadResearchDefault(); break;
+    case 'forecast':     loadForecastView(); break;
     case 'analytics':    loadAnalyticsView(); break;
     case 'intel':        loadIntelView(); break;
     case 'earnings':     loadEarningsView(); break;
@@ -6639,6 +6641,271 @@ async function assessContagionImpact() {
 // ══════════════════════════════════════════════════════════════════════════════
 // ALPHA ENGINE — NARRATIVE VELOCITY ENGINE
 // ══════════════════════════════════════════════════════════════════════════════
+
+// ══════════════════════════════════════════════════════════════════════════════
+// FORECAST ENSEMBLE — calibrated meta-forecast fusing every signal
+// ══════════════════════════════════════════════════════════════════════════════
+
+async function loadForecastView() {
+  var view = document.getElementById('view-forecast');
+  view.innerHTML = '<div class="panel">'
+    + '<div class="panel-header"><span class="panel-title">FORECAST ENSEMBLE</span></div>'
+    + '<div class="panel-body">'
+    + '<p style="color:var(--text-secondary);font-size:11px;margin-bottom:12px">Fuses every forecasting engine (RandomForest, trend, mean-reversion, bootstrap distribution, narrative phase) into one <b>calibrated</b> directional probability. Conviction is shrunk toward neutral when the signals disagree.</p>'
+    + '<div style="display:flex;gap:8px;align-items:center;margin-bottom:12px;flex-wrap:wrap">'
+    + '<input id="forecast-symbol" type="text" class="form-input" placeholder="Symbol..." style="width:120px" onkeydown="if(event.key===\'Enter\')analyzeForecast()" />'
+    + '<select id="forecast-horizon" class="form-input" style="width:130px">'
+    + '<option value="5">5d horizon</option>'
+    + '<option value="10">10d horizon</option>'
+    + '<option value="20" selected>20d horizon</option>'
+    + '<option value="40">40d horizon</option>'
+    + '<option value="60">60d horizon</option>'
+    + '</select>'
+    + '<button class="btn btn-green" onclick="analyzeForecast()">FORECAST</button>'
+    + '</div>'
+    + '<div style="display:flex;gap:6px;margin-bottom:16px">'
+    + _alphaQuickPicks('forecast-symbol', 'analyzeForecast', ['AAPL','NVDA','TSLA','SPY','QQQ','AMZN'])
+    + '</div>'
+    + '<div id="forecast-results">'
+    + '<div class="empty-state"><span style="color:var(--text-dim)">Enter a symbol to generate a unified forecast</span></div>'
+    + '</div>'
+    + '</div></div>'
+    + '<div id="forecast-accountability"></div>';
+  loadForecastAccountability();
+}
+
+async function loadForecastAccountability() {
+  var el = document.getElementById('forecast-accountability');
+  if (!el) return;
+  try {
+    var data = await API.get('/api/forecast/accountability');
+    if (data.error) throw new Error(data.error);
+    var tr = (data.ensemble && data.ensemble.track_record) || {};
+    var cal = (data.ensemble && data.ensemble.calibration) || {};
+    var board = data.leaderboard || [];
+    var weights = data.weights || [];
+
+    var html = '<div class="panel mt-8"><div class="panel-header">'
+      + '<span class="panel-title">FORECAST ACCOUNTABILITY — LIVE CALIBRATION</span>'
+      + (data.weights_adapted ? '<span class="signal-badge col-positive" style="font-size:9px;margin-left:8px">ADAPTIVE WEIGHTS ON</span>' : '<span class="signal-badge" style="font-size:9px;margin-left:8px;color:var(--text-dim)">STATIC WEIGHTS</span>')
+      + '</div><div class="panel-body">';
+    html += '<p style="color:var(--text-secondary);font-size:11px;margin-bottom:12px">Every forecast is logged and re-priced once its horizon elapses. Brier score grades probability calibration (lower is better); component skill feeds back into the fusion weights.</p>';
+
+    if (!tr.n) {
+      html += '<div class="empty-state"><span style="color:var(--text-dim)">No scored forecasts yet — calibration appears once forecasts mature past their horizon (scored every 6h).</span></div>';
+      html += '</div></div>';
+      el.innerHTML = html;
+      // Still show the (cold-start) leaderboard/weights below.
+    } else {
+      var hitPct = tr.hit_rate != null ? Math.round(tr.hit_rate * 100) + '%' : '—';
+      var verdict = cal.verdict || '—';
+      var vColor = verdict === 'WELL CALIBRATED' ? 'var(--green)' : verdict === 'SLIGHT EDGE' ? 'var(--amber,#f0a020)' : verdict === 'MISCALIBRATED' ? 'var(--red,#ff4444)' : 'var(--text-dim)';
+      html += '<div class="kpi-grid" style="display:grid;grid-template-columns:repeat(5,1fr);gap:12px;margin-bottom:16px">'
+        + '<div class="kpi-card"><div class="form-label">Hit Rate</div><div style="font-size:20px;font-weight:700;color:var(--green)">' + hitPct + '</div><div style="font-size:9px;color:var(--text-dim)">n=' + _esc(tr.n_directional || 0) + ' directional</div></div>'
+        + '<div class="kpi-card"><div class="form-label">Brier Score</div><div style="font-size:20px;font-weight:700">' + (cal.brier != null ? _esc(cal.brier) : '—') + '</div><div style="font-size:9px;color:var(--text-dim)">0=perfect</div></div>'
+        + '<div class="kpi-card"><div class="form-label">Brier Skill</div><div style="font-size:20px;font-weight:700;color:' + (cal.brier_skill > 0 ? 'var(--green)' : 'var(--red,#ff4444)') + '">' + (cal.brier_skill != null ? _esc(cal.brier_skill) : '—') + '</div><div style="font-size:9px;color:var(--text-dim)">vs base rate</div></div>'
+        + '<div class="kpi-card"><div class="form-label">Calibration</div><div style="font-size:13px;font-weight:700;color:' + vColor + ';margin-top:4px">' + _esc(verdict) + '</div></div>'
+        + '<div class="kpi-card"><div class="form-label">Total Logged</div><div style="font-size:20px;font-weight:700">' + _esc(tr.n) + '</div><div style="font-size:9px;color:var(--text-dim)">avg ' + (tr.avg_return != null ? (tr.avg_return >= 0 ? '+' : '') + (tr.avg_return * 100).toFixed(1) + '%' : '—') + '</div></div>'
+        + '</div>';
+
+      // Reliability curve — predicted prob vs realized frequency per bucket.
+      var rel = cal.reliability || [];
+      if (rel.length) {
+        html += '<div style="font-size:11px;color:var(--green);font-weight:600;margin:4px 0 8px">RELIABILITY CURVE <span style="color:var(--text-dim);font-weight:400">(predicted P(up) vs realized frequency — closer to diagonal = better)</span></div>';
+        html += '<table class="data-table" style="margin-bottom:16px"><thead><tr><th>Predicted bucket</th><th>Mean predicted</th><th style="width:200px">Realized freq</th><th>n</th></tr></thead><tbody>';
+        for (var i = 0; i < rel.length; i++) {
+          var b = rel[i];
+          var pm = Math.round(b.predicted_mean * 100), rf = Math.round(b.realized_freq * 100);
+          var diff = Math.abs(pm - rf);
+          var barColor = diff <= 10 ? 'var(--green)' : diff <= 20 ? 'var(--amber,#f0a020)' : 'var(--red,#ff4444)';
+          html += '<tr>'
+            + '<td style="font-size:11px">' + Math.round(b.bucket_low*100) + '–' + Math.round(b.bucket_high*100) + '%</td>'
+            + '<td style="font-size:11px;color:var(--text-secondary)">' + pm + '%</td>'
+            + '<td><div style="display:flex;align-items:center;gap:6px"><div style="flex:1;height:8px;background:var(--bg-secondary);border-radius:4px;overflow:hidden;position:relative">'
+            + '<div style="position:absolute;left:' + pm + '%;top:0;bottom:0;width:1px;background:var(--text-dim);z-index:2"></div>'
+            + '<div style="height:100%;width:' + rf + '%;background:' + barColor + '"></div></div><span style="font-size:10px;color:' + barColor + '">' + rf + '%</span></div></td>'
+            + '<td style="font-size:11px;color:var(--text-dim)">' + _esc(b.count) + '</td>'
+            + '</tr>';
+        }
+        html += '</tbody></table>';
+      }
+      html += '</div></div>';
+      el.innerHTML = html;
+    }
+
+    // ── Component leaderboard (appended to whatever we built above) ────
+    if (board.length) {
+      var wmap = {};
+      for (var w = 0; w < weights.length; w++) wmap[weights[w].key] = weights[w];
+      var lb = '<div class="panel mt-8"><div class="panel-header"><span class="panel-title">COMPONENT LEADERBOARD — WHICH ENGINES EARN THEIR WEIGHT</span></div>'
+        + '<div class="panel-body"><table class="data-table"><thead><tr>'
+        + '<th>#</th><th>Engine</th><th>Hit Rate</th><th>Brier</th><th>Skill</th><th>n</th><th>Base → Effective Weight</th>'
+        + '</tr></thead><tbody>';
+      for (var j = 0; j < board.length; j++) {
+        var r = board[j];
+        var hr = r.hit_rate != null ? Math.round(r.hit_rate * 100) + '%' : '—';
+        var sk = r.brier_skill;
+        var skColor = sk == null ? 'var(--text-dim)' : sk > 0 ? 'var(--green)' : 'var(--red,#ff4444)';
+        var winfo = wmap[r.key];
+        var wHtml = '—';
+        if (winfo) {
+          var up = winfo.effective_weight > winfo.base_weight + 1e-6;
+          var down = winfo.effective_weight < winfo.base_weight - 1e-6;
+          var wColor = up ? 'var(--green)' : down ? 'var(--red,#ff4444)' : 'var(--text-secondary)';
+          wHtml = '<span style="color:var(--text-dim)">' + Math.round(winfo.base_weight*100) + '%</span> → <span style="color:' + wColor + ';font-weight:600">' + Math.round(winfo.effective_weight*100) + '%</span>' + (up ? ' ▲' : down ? ' ▼' : '');
+        }
+        lb += '<tr>'
+          + '<td style="color:var(--text-dim)">' + (j+1) + '</td>'
+          + '<td style="font-size:11px;font-weight:600">' + _esc(r.key) + '</td>'
+          + '<td style="font-size:11px">' + hr + '</td>'
+          + '<td style="font-size:11px;color:var(--text-secondary)">' + (r.brier != null ? _esc(r.brier) : '—') + '</td>'
+          + '<td style="font-size:11px;color:' + skColor + '">' + (sk != null ? _esc(sk) : '—') + '</td>'
+          + '<td style="font-size:11px;color:var(--text-dim)">' + _esc(r.n) + '</td>'
+          + '<td style="font-size:11px">' + wHtml + '</td>'
+          + '</tr>';
+      }
+      lb += '</tbody></table>';
+      lb += '<div style="font-size:10px;color:var(--text-dim);margin-top:8px">Weights tilt toward proven components once an engine has ≥20 scored directional calls. Until then the ensemble uses static base weights.</div>';
+      lb += '</div></div>';
+      el.innerHTML += lb;
+    }
+  } catch (e) {
+    el.innerHTML = '<div class="panel mt-8"><div class="panel-body"><span class="col-negative" style="font-size:11px">Accountability unavailable: ' + _esc(e.message) + '</span></div></div>';
+  }
+}
+
+function _forecastVerdictColor(verdict) {
+  var v = (verdict || '').toUpperCase();
+  if (v.indexOf('STRONG BUY') >= 0) return 'var(--green)';
+  if (v.indexOf('BUY') >= 0 || v.indexOf('LONG') >= 0) return 'var(--green)';
+  if (v.indexOf('STRONG SELL') >= 0 || v.indexOf('SELL') >= 0 || v.indexOf('SHORT') >= 0) return 'var(--red, #ff4444)';
+  return 'var(--amber, #f0a020)';
+}
+
+async function analyzeForecast(sym) {
+  var input = document.getElementById('forecast-symbol');
+  var symbol = sym || (input ? input.value.trim().toUpperCase() : '');
+  if (!symbol) return;
+  if (input) input.value = symbol;
+  var hsel = document.getElementById('forecast-horizon');
+  var horizon = hsel ? hsel.value : 20;
+  var results = document.getElementById('forecast-results');
+  if (!results) return;
+  results.innerHTML = '<div class="loading"><div class="spinner"></div> Fusing forecast signals for ' + _esc(symbol) + '...</div>';
+
+  try {
+    var data = await API.get('/api/forecast/ensemble/' + symbol + '?horizon=' + horizon);
+    if (data.error) throw new Error(data.error);
+    var ens = data.ensemble;
+    if (!ens) throw new Error('No ensemble produced');
+
+    var probPct = Math.round(ens.prob_up * 100);
+    var probRawPct = Math.round(ens.prob_up_raw * 100);
+    var vColor = _forecastVerdictColor(ens.verdict);
+    var dirArrow = ens.direction === 'UP' ? '▲' : ens.direction === 'DOWN' ? '▼' : '◆';
+    var consensusPct = Math.round(ens.consensus * 100);
+
+    // ── Hero verdict + probability gauge ──────────────────────────────
+    var html = '<div class="panel mb-8"><div class="panel-body" style="display:grid;grid-template-columns:1.2fr 1fr 1fr 1fr;gap:16px;align-items:center">';
+    html += '<div>'
+      + '<div class="form-label">VERDICT (' + _esc(data.horizon_days) + 'd)</div>'
+      + '<div style="font-size:26px;font-weight:800;color:' + vColor + ';line-height:1.1">' + dirArrow + ' ' + _esc(ens.verdict) + '</div>'
+      + '<div style="font-size:11px;color:var(--text-dim);margin-top:4px">Conviction: <b style="color:var(--text-secondary)">' + _esc(ens.conviction) + '</b> · ' + _esc(data.n_signals) + ' signals</div>'
+      + '</div>';
+    // P(up) gauge bar
+    html += '<div>'
+      + '<div class="form-label">P(UP) — CALIBRATED</div>'
+      + '<div style="font-size:24px;font-weight:700;color:' + vColor + '">' + probPct + '%</div>'
+      + '<div style="height:8px;background:var(--bg-secondary);border-radius:4px;overflow:hidden;margin-top:4px;position:relative">'
+      + '<div style="position:absolute;left:50%;top:0;bottom:0;width:1px;background:var(--text-dim);z-index:2"></div>'
+      + '<div style="height:100%;width:' + probPct + '%;background:' + vColor + '"></div>'
+      + '</div>'
+      + '<div style="font-size:9px;color:var(--text-dim);margin-top:3px">raw ' + probRawPct + '% · edge ' + (ens.edge_pct_pts >= 0 ? '+' : '') + _esc(ens.edge_pct_pts) + 'pp</div>'
+      + '</div>';
+    // Consensus
+    var conColor = consensusPct >= 70 ? 'var(--green)' : consensusPct >= 40 ? 'var(--amber,#f0a020)' : 'var(--red,#ff4444)';
+    html += '<div>'
+      + '<div class="form-label">SIGNAL CONSENSUS</div>'
+      + '<div style="font-size:24px;font-weight:700;color:' + conColor + '">' + consensusPct + '%</div>'
+      + '<div style="font-size:9px;color:var(--text-dim);margin-top:6px">' + _esc(ens.agree_count) + ' agree · ' + _esc(ens.disagree_count) + ' disagree</div>'
+      + '</div>';
+    // Expected return cone center
+    var cone = ens.return_cone;
+    var er = cone && cone.expected_return_pct != null ? cone.expected_return_pct : null;
+    var erColor = er == null ? 'var(--text-dim)' : er >= 0 ? 'var(--green)' : 'var(--red,#ff4444)';
+    html += '<div>'
+      + '<div class="form-label">EXPECTED RETURN</div>'
+      + '<div style="font-size:24px;font-weight:700;color:' + erColor + '">' + (er != null ? (er >= 0 ? '+' : '') + er + '%' : '—') + '</div>'
+      + '<div style="font-size:9px;color:var(--text-dim);margin-top:6px">' + _esc(cone ? cone.source : 'n/a') + '</div>'
+      + '</div>';
+    html += '</div></div>';
+
+    // ── Return cone visualization (p05..p95) ──────────────────────────
+    if (cone && cone.p05 != null && cone.p95 != null) {
+      var lo = cone.p05, hi = cone.p95, span = (hi - lo) || 1;
+      function pos(v) { return Math.max(0, Math.min(100, ((v - lo) / span) * 100)); }
+      var p25 = pos(cone.p25), p75 = pos(cone.p75), med = pos(cone.median), zero = pos(0);
+      html += '<div class="panel mb-8"><div class="panel-header"><span class="panel-title">RETURN CONE — ' + _esc(data.horizon_days) + 'd</span></div>'
+        + '<div class="panel-body">'
+        + '<div style="position:relative;height:40px;margin:8px 4px 24px">'
+        + '<div style="position:absolute;top:16px;left:0;right:0;height:8px;background:var(--bg-secondary);border-radius:4px"></div>'
+        + '<div style="position:absolute;top:16px;left:' + p25 + '%;width:' + Math.max(0,(p75-p25)) + '%;height:8px;background:rgba(80,200,120,0.35);border-radius:4px"></div>'
+        + '<div style="position:absolute;top:10px;left:' + med + '%;width:2px;height:20px;background:var(--green)"></div>'
+        + '<div style="position:absolute;top:10px;left:' + zero + '%;width:1px;height:20px;background:var(--text-dim)"></div>'
+        + '<div style="position:absolute;top:30px;left:0;font-size:9px;color:var(--text-dim)">' + _esc(cone.p05) + '% (p05)</div>'
+        + '<div style="position:absolute;top:30px;right:0;font-size:9px;color:var(--text-dim)">' + _esc(cone.p95) + '% (p95)</div>'
+        + '<div style="position:absolute;top:-4px;left:' + med + '%;transform:translateX(-50%);font-size:9px;color:var(--green);white-space:nowrap">median ' + _esc(cone.median) + '%</div>'
+        + '</div>'
+        + '<div style="font-size:10px;color:var(--text-dim)">Shaded band = interquartile (p25–p75). Grey tick = breakeven (0%).'
+        + (cone.tilt_applied_pct ? ' Ensemble lean tilted the central estimate by ' + (cone.tilt_applied_pct >= 0 ? '+' : '') + _esc(cone.tilt_applied_pct) + '%.' : '')
+        + '</div>'
+        + '</div></div>';
+    }
+
+    // ── Per-signal contribution table ─────────────────────────────────
+    var sigs = data.signals || [];
+    if (sigs.length) {
+      html += '<div class="panel mb-8"><div class="panel-header"><span class="panel-title">SIGNAL CONTRIBUTIONS</span></div>'
+        + '<div class="panel-body"><table class="data-table"><thead><tr>'
+        + '<th>Signal</th><th>Direction</th><th>P(up)</th><th style="width:160px">Lean</th><th>Weight</th><th>Agrees</th>'
+        + '</tr></thead><tbody>';
+      for (var i = 0; i < sigs.length; i++) {
+        var s = sigs[i];
+        var sp = Math.round(s.prob_up * 100);
+        var sColor = s.direction === 'UP' ? 'var(--green)' : s.direction === 'DOWN' ? 'var(--red,#ff4444)' : 'var(--text-dim)';
+        var agreeHtml = s.agrees === true ? '<span style="color:var(--green)">✓</span>'
+          : s.agrees === false ? '<span style="color:var(--red,#ff4444)">✗</span>'
+          : '<span style="color:var(--text-dim)">—</span>';
+        html += '<tr>'
+          + '<td style="font-size:11px"><b>' + _esc(s.name) + '</b><div style="font-size:9px;color:var(--text-dim)">' + _esc(s.detail) + '</div></td>'
+          + '<td><span class="signal-badge" style="font-size:9px;color:' + sColor + '">' + _esc(s.direction) + '</span></td>'
+          + '<td style="color:' + sColor + ';font-weight:600">' + sp + '%</td>'
+          + '<td><div style="height:6px;background:var(--bg-secondary);border-radius:3px;overflow:hidden;position:relative">'
+          + '<div style="position:absolute;left:50%;top:0;bottom:0;width:1px;background:var(--text-dim)"></div>'
+          + '<div style="height:100%;width:' + sp + '%;background:' + sColor + '"></div></div></td>'
+          + '<td style="font-size:11px;color:var(--text-secondary)">' + Math.round(s.weight * 100) + '%</td>'
+          + '<td style="text-align:center">' + agreeHtml + '</td>'
+          + '</tr>';
+      }
+      html += '</tbody></table></div></div>';
+    }
+
+    // ── Notes ─────────────────────────────────────────────────────────
+    var notes = data.notes || [];
+    if (notes.length) {
+      html += '<div class="panel"><div class="panel-header"><span class="panel-title">CALIBRATION NOTES</span></div>'
+        + '<div class="panel-body"><ul style="margin:0;padding-left:18px;font-size:11px;color:var(--text-secondary)">';
+      for (var n = 0; n < notes.length; n++) {
+        html += '<li style="margin-bottom:4px">' + _esc(notes[n]) + '</li>';
+      }
+      html += '</ul></div></div>';
+    }
+
+    results.innerHTML = html;
+  } catch (e) {
+    results.innerHTML = '<div class="empty-state"><span class="col-negative">Error: ' + _esc(e.message) + '</span></div>';
+  }
+}
 
 async function loadNarrativeView() {
   var view = document.getElementById('view-narrative');
