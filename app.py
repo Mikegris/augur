@@ -2426,6 +2426,12 @@ except Exception as _pf_err:
     log.warning("research_probforecast unavailable: %s", _pf_err)
 
 try:
+    import forecast_ensemble as _ens_mod
+except Exception as _ens_err:
+    _ens_mod = None
+    log.warning("forecast_ensemble unavailable: %s", _ens_err)
+
+try:
     import research_tracker
     research_tracker.init_tracker_db()  # idempotent — creates signal_forecasts table
 except Exception as _rt_err:
@@ -2841,6 +2847,21 @@ def research_probforecast_vs_point(symbol):
     try:
         horizon = _safe_int(request.args.get("horizon"), 20)
         return jsonify(_pf_mod.compare_to_point(symbol.upper(), horizon_days=horizon))
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/forecast/ensemble/<symbol>", methods=["GET"])
+def forecast_ensemble_route(symbol):
+    """Calibrated meta-forecast fusing all available forecasting signals
+    into one directional probability + return cone."""
+    if not _ens_mod:
+        return jsonify({"error": "forecast_ensemble module not available"}), 500
+    if not _valid_ticker(symbol):
+        return jsonify({"error": "Invalid symbol"}), 400
+    try:
+        horizon = _safe_int(request.args.get("horizon"), 20)
+        return jsonify(_ens_mod.ensemble_forecast(symbol.upper(), horizon_days=horizon))
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
