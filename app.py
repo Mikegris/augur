@@ -2866,6 +2866,21 @@ def forecast_ensemble_route(symbol):
         return jsonify({"error": str(e)}), 500
 
 
+@app.route("/api/forecast/accountability", methods=["GET"])
+def forecast_accountability_route():
+    """Realized track record + Brier calibration for the ensemble, plus the
+    per-component leaderboard and current adaptive weights."""
+    try:
+        import forecast_accountability
+    except Exception as e:
+        return jsonify({"error": "forecast_accountability unavailable: {}".format(e)}), 500
+    try:
+        since = request.args.get("since")
+        return jsonify(forecast_accountability.accountability_report(since=since))
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
 # ── 10. Signal Tracker ─────────────────────────────────────────────
 @app.route("/api/research/track/<signal_name>")
 def research_track_record(signal_name):

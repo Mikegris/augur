@@ -317,12 +317,26 @@ def _run_uncached(symbol: str, horizon_days: int) -> Dict[str, Any]:
             "signals": [], "ensemble": None,
         }
 
+    # Weights — tilted toward components with a proven realized edge once
+    # there's enough scored history (the accountability loop). Falls back to
+    # the static base weights on a cold-start install or any failure.
+    weights = dict(_BASE_WEIGHTS)
+    weights_source = "base"
+    try:
+        import forecast_accountability
+        weights = forecast_accountability.adaptive_weights(_BASE_WEIGHTS, horizon_days)
+        if forecast_accountability.weights_are_adapted(_BASE_WEIGHTS):
+            weights_source = "adaptive"
+    except Exception as e:
+        log.debug("adaptive_weights unavailable: %s", e)
+        weights = dict(_BASE_WEIGHTS)
+
     # Renormalize weights over the available signals.
-    total_w = sum(_BASE_WEIGHTS.get(k, 0.1) for k in raw_signals)
+    total_w = sum(weights.get(k, 0.1) for k in raw_signals)
     weighted_sum = 0.0
     signal_rows: List[Dict[str, Any]] = []
     for key, sig in raw_signals.items():
-        w = _BASE_WEIGHTS.get(key, 0.1) / total_w
+        w = weights.get(key, 0.1) / total_w
         p = float(sig["prob_up"])
         weighted_sum += p * w
         signal_rows.append({
@@ -378,12 +392,15 @@ def _run_uncached(symbol: str, horizon_days: int) -> Dict[str, Any]:
                      .format(len(signal_rows)))
     if bootstrap is None:
         notes.append("No bootstrap distribution — return cone is a point trend estimate.")
+    if weights_source == "adaptive":
+        notes.append("Weights adapted from realized component track records.")
 
-    return {
+    result = {
         "symbol": symbol,
         "horizon_days": horizon_days,
         "as_of": _now_iso(),
         "n_signals": len(signal_rows),
+        "weights_source": weights_source,
         "ensemble": {
             "prob_up": round(prob_up_cal, 4),
             "prob_up_raw": round(prob_up_raw, 4),
@@ -401,6 +418,17 @@ def _run_uncached(symbol: str, horizon_days: int) -> Dict[str, Any]:
         "notes": notes,
         "computed_in_ms": round((time.time() - t0) * 1000),
     }
+
+    # Accountability loop: record this forecast so it gets scored once the
+    # horizon elapses. Runs only on the uncached path (≈ once per symbol per
+    # cache-TTL), and is fire-and-forget — never breaks the forecast.
+    try:
+        import forecast_accountability
+        forecast_accountability.log_ensemble(symbol, horizon_days, result)
+    except Exception as e:
+        log.debug("log_ensemble failed for %s: %s", symbol, e)
+
+    return result
 
 
 def ensemble_forecast(symbol: str, horizon_days: int = 20) -> Dict[str, Any]:

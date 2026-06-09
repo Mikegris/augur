@@ -6669,7 +6669,109 @@ async function loadForecastView() {
     + '<div id="forecast-results">'
     + '<div class="empty-state"><span style="color:var(--text-dim)">Enter a symbol to generate a unified forecast</span></div>'
     + '</div>'
-    + '</div></div>';
+    + '</div></div>'
+    + '<div id="forecast-accountability"></div>';
+  loadForecastAccountability();
+}
+
+async function loadForecastAccountability() {
+  var el = document.getElementById('forecast-accountability');
+  if (!el) return;
+  try {
+    var data = await API.get('/api/forecast/accountability');
+    if (data.error) throw new Error(data.error);
+    var tr = (data.ensemble && data.ensemble.track_record) || {};
+    var cal = (data.ensemble && data.ensemble.calibration) || {};
+    var board = data.leaderboard || [];
+    var weights = data.weights || [];
+
+    var html = '<div class="panel mt-8"><div class="panel-header">'
+      + '<span class="panel-title">FORECAST ACCOUNTABILITY — LIVE CALIBRATION</span>'
+      + (data.weights_adapted ? '<span class="signal-badge col-positive" style="font-size:9px;margin-left:8px">ADAPTIVE WEIGHTS ON</span>' : '<span class="signal-badge" style="font-size:9px;margin-left:8px;color:var(--text-dim)">STATIC WEIGHTS</span>')
+      + '</div><div class="panel-body">';
+    html += '<p style="color:var(--text-secondary);font-size:11px;margin-bottom:12px">Every forecast is logged and re-priced once its horizon elapses. Brier score grades probability calibration (lower is better); component skill feeds back into the fusion weights.</p>';
+
+    if (!tr.n) {
+      html += '<div class="empty-state"><span style="color:var(--text-dim)">No scored forecasts yet — calibration appears once forecasts mature past their horizon (scored every 6h).</span></div>';
+      html += '</div></div>';
+      el.innerHTML = html;
+      // Still show the (cold-start) leaderboard/weights below.
+    } else {
+      var hitPct = tr.hit_rate != null ? Math.round(tr.hit_rate * 100) + '%' : '—';
+      var verdict = cal.verdict || '—';
+      var vColor = verdict === 'WELL CALIBRATED' ? 'var(--green)' : verdict === 'SLIGHT EDGE' ? 'var(--amber,#f0a020)' : verdict === 'MISCALIBRATED' ? 'var(--red,#ff4444)' : 'var(--text-dim)';
+      html += '<div class="kpi-grid" style="display:grid;grid-template-columns:repeat(5,1fr);gap:12px;margin-bottom:16px">'
+        + '<div class="kpi-card"><div class="form-label">Hit Rate</div><div style="font-size:20px;font-weight:700;color:var(--green)">' + hitPct + '</div><div style="font-size:9px;color:var(--text-dim)">n=' + _esc(tr.n_directional || 0) + ' directional</div></div>'
+        + '<div class="kpi-card"><div class="form-label">Brier Score</div><div style="font-size:20px;font-weight:700">' + (cal.brier != null ? _esc(cal.brier) : '—') + '</div><div style="font-size:9px;color:var(--text-dim)">0=perfect</div></div>'
+        + '<div class="kpi-card"><div class="form-label">Brier Skill</div><div style="font-size:20px;font-weight:700;color:' + (cal.brier_skill > 0 ? 'var(--green)' : 'var(--red,#ff4444)') + '">' + (cal.brier_skill != null ? _esc(cal.brier_skill) : '—') + '</div><div style="font-size:9px;color:var(--text-dim)">vs base rate</div></div>'
+        + '<div class="kpi-card"><div class="form-label">Calibration</div><div style="font-size:13px;font-weight:700;color:' + vColor + ';margin-top:4px">' + _esc(verdict) + '</div></div>'
+        + '<div class="kpi-card"><div class="form-label">Total Logged</div><div style="font-size:20px;font-weight:700">' + _esc(tr.n) + '</div><div style="font-size:9px;color:var(--text-dim)">avg ' + (tr.avg_return != null ? (tr.avg_return >= 0 ? '+' : '') + (tr.avg_return * 100).toFixed(1) + '%' : '—') + '</div></div>'
+        + '</div>';
+
+      // Reliability curve — predicted prob vs realized frequency per bucket.
+      var rel = cal.reliability || [];
+      if (rel.length) {
+        html += '<div style="font-size:11px;color:var(--green);font-weight:600;margin:4px 0 8px">RELIABILITY CURVE <span style="color:var(--text-dim);font-weight:400">(predicted P(up) vs realized frequency — closer to diagonal = better)</span></div>';
+        html += '<table class="data-table" style="margin-bottom:16px"><thead><tr><th>Predicted bucket</th><th>Mean predicted</th><th style="width:200px">Realized freq</th><th>n</th></tr></thead><tbody>';
+        for (var i = 0; i < rel.length; i++) {
+          var b = rel[i];
+          var pm = Math.round(b.predicted_mean * 100), rf = Math.round(b.realized_freq * 100);
+          var diff = Math.abs(pm - rf);
+          var barColor = diff <= 10 ? 'var(--green)' : diff <= 20 ? 'var(--amber,#f0a020)' : 'var(--red,#ff4444)';
+          html += '<tr>'
+            + '<td style="font-size:11px">' + Math.round(b.bucket_low*100) + '–' + Math.round(b.bucket_high*100) + '%</td>'
+            + '<td style="font-size:11px;color:var(--text-secondary)">' + pm + '%</td>'
+            + '<td><div style="display:flex;align-items:center;gap:6px"><div style="flex:1;height:8px;background:var(--bg-secondary);border-radius:4px;overflow:hidden;position:relative">'
+            + '<div style="position:absolute;left:' + pm + '%;top:0;bottom:0;width:1px;background:var(--text-dim);z-index:2"></div>'
+            + '<div style="height:100%;width:' + rf + '%;background:' + barColor + '"></div></div><span style="font-size:10px;color:' + barColor + '">' + rf + '%</span></div></td>'
+            + '<td style="font-size:11px;color:var(--text-dim)">' + _esc(b.count) + '</td>'
+            + '</tr>';
+        }
+        html += '</tbody></table>';
+      }
+      html += '</div></div>';
+      el.innerHTML = html;
+    }
+
+    // ── Component leaderboard (appended to whatever we built above) ────
+    if (board.length) {
+      var wmap = {};
+      for (var w = 0; w < weights.length; w++) wmap[weights[w].key] = weights[w];
+      var lb = '<div class="panel mt-8"><div class="panel-header"><span class="panel-title">COMPONENT LEADERBOARD — WHICH ENGINES EARN THEIR WEIGHT</span></div>'
+        + '<div class="panel-body"><table class="data-table"><thead><tr>'
+        + '<th>#</th><th>Engine</th><th>Hit Rate</th><th>Brier</th><th>Skill</th><th>n</th><th>Base → Effective Weight</th>'
+        + '</tr></thead><tbody>';
+      for (var j = 0; j < board.length; j++) {
+        var r = board[j];
+        var hr = r.hit_rate != null ? Math.round(r.hit_rate * 100) + '%' : '—';
+        var sk = r.brier_skill;
+        var skColor = sk == null ? 'var(--text-dim)' : sk > 0 ? 'var(--green)' : 'var(--red,#ff4444)';
+        var winfo = wmap[r.key];
+        var wHtml = '—';
+        if (winfo) {
+          var up = winfo.effective_weight > winfo.base_weight + 1e-6;
+          var down = winfo.effective_weight < winfo.base_weight - 1e-6;
+          var wColor = up ? 'var(--green)' : down ? 'var(--red,#ff4444)' : 'var(--text-secondary)';
+          wHtml = '<span style="color:var(--text-dim)">' + Math.round(winfo.base_weight*100) + '%</span> → <span style="color:' + wColor + ';font-weight:600">' + Math.round(winfo.effective_weight*100) + '%</span>' + (up ? ' ▲' : down ? ' ▼' : '');
+        }
+        lb += '<tr>'
+          + '<td style="color:var(--text-dim)">' + (j+1) + '</td>'
+          + '<td style="font-size:11px;font-weight:600">' + _esc(r.key) + '</td>'
+          + '<td style="font-size:11px">' + hr + '</td>'
+          + '<td style="font-size:11px;color:var(--text-secondary)">' + (r.brier != null ? _esc(r.brier) : '—') + '</td>'
+          + '<td style="font-size:11px;color:' + skColor + '">' + (sk != null ? _esc(sk) : '—') + '</td>'
+          + '<td style="font-size:11px;color:var(--text-dim)">' + _esc(r.n) + '</td>'
+          + '<td style="font-size:11px">' + wHtml + '</td>'
+          + '</tr>';
+      }
+      lb += '</tbody></table>';
+      lb += '<div style="font-size:10px;color:var(--text-dim);margin-top:8px">Weights tilt toward proven components once an engine has ≥20 scored directional calls. Until then the ensemble uses static base weights.</div>';
+      lb += '</div></div>';
+      el.innerHTML += lb;
+    }
+  } catch (e) {
+    el.innerHTML = '<div class="panel mt-8"><div class="panel-body"><span class="col-negative" style="font-size:11px">Accountability unavailable: ' + _esc(e.message) + '</span></div></div>';
+  }
 }
 
 function _forecastVerdictColor(verdict) {
