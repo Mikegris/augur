@@ -33,6 +33,8 @@ LOCAL_MODULES = [
     "database",
     "earnings",
     "fetcher",
+    "forecast_accountability",
+    "forecast_ensemble",
     "gex_engine",
     "historical_analog",
     "idea_generator",
