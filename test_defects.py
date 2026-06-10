@@ -216,6 +216,19 @@ def test_xss_escaping_intact():
           "' + e.message + '" not in src)
 
 
+# ── 15. Chart.js time-scale date adapter is loaded ───────────────────────────
+def test_chart_date_adapter_present():
+    html = open(os.path.join(os.path.dirname(__file__), "templates/index.html")).read()
+    js = open(os.path.join(os.path.dirname(__file__),
+                           "static/js/synth_catalyst.js")).read()
+    # The catalysts chart uses a Chart.js time axis; index.html must load a date
+    # adapter or the chart throws "complete date adapter required" at runtime.
+    uses_time = "type: 'time'" in js
+    has_adapter = "chartjs-adapter" in html
+    check("Chart.js date adapter loaded when a time scale is used",
+          (not uses_time) or has_adapter)
+
+
 def main():
     tests = [
         ("CoinGecko quote math", test_coingecko_math),
@@ -232,6 +245,7 @@ def main():
         ("database zero-shares guard", test_database_zero_shares),
         ("cli quote None fields", test_cli_quote_none_fields),
         ("xss escaping intact", test_xss_escaping_intact),
+        ("chart date adapter present", test_chart_date_adapter_present),
     ]
     for title, fn in tests:
         print("── %s" % title)

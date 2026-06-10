@@ -7,6 +7,10 @@
   <link rel="stylesheet" href="/static/css/terminal.css">
   <!-- Chart.js -->
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+  <!-- Date adapter for Chart.js time scales (the catalysts scatter plots events
+       on a time axis; without an adapter Chart.js throws "complete date adapter
+       required" and the chart fails to render). -->
+  <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns@3.0.0/dist/chartjs-adapter-date-fns.bundle.min.js"></script>
   <!-- TradingView Lightweight Charts -->
   <script src="https://unpkg.com/lightweight-charts@4.1.3/dist/lightweight-charts.standalone.production.js"></script>
 </head>
