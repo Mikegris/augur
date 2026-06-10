@@ -272,8 +272,8 @@ def _finviz_quote_fallback(symbol: str) -> dict:
         "exchange": fund.get("Exchange", ""),
         "day_high": None,
         "day_low": None,
-        "fifty_two_week_high": _num((fund.get("52W High") or "").split()[0] if fund.get("52W High") else None),
-        "fifty_two_week_low":  _num((fund.get("52W Low")  or "").split()[0] if fund.get("52W Low")  else None),
+        "fifty_two_week_high": _num(((fund.get("52W High") or "").split() or [None])[0]),
+        "fifty_two_week_low":  _num(((fund.get("52W Low")  or "").split() or [None])[0]),
         "source": f"finviz-via-{proxy_used}" if proxy_used else "finviz",
         "proxy_symbol": proxy_used,
         "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -1190,7 +1190,7 @@ def get_crypto_quote(coin_id: str) -> dict:
             "id": data.get("id") or coin_id,
             "symbol": str(sym).upper(),
             "name": data.get("name") or coin_id,
-            "description": (data.get("description") or {}).get("en", "")[:500],
+            "description": ((data.get("description") or {}).get("en") or "")[:500],
             # CoinGecko returns null (not omitted) sub-objects for delisted
             # / pre-market coins — md.get("current_price", {}) won't supply
             # the default in that case because the key DOES exist with
@@ -1428,6 +1428,9 @@ def get_correlation_matrix(symbols: list, period: str = "3mo") -> dict:
             return out
 
         returns = returns[available].dropna(axis=1, how="all")
+        # drop duplicate columns (case-insensitive symbol collisions) so
+        # corr.loc[sym, sym2] returns a scalar, not a DataFrame, downstream.
+        returns = returns.loc[:, ~returns.columns.duplicated()]
         corr = returns.corr()
 
         matrix = {}
@@ -1540,6 +1543,8 @@ def get_benchmark_history(symbol: str = "SPY", period: str = "1y", base_value: f
         if not bars:
             return []
         first_close = float(bars[0]["close"])
+        if not first_close:  # avoid ZeroDivisionError on a 0 first bar
+            return []
         out = []
         for b in bars:
             normalized = (float(b["close"]) / first_close) * (base_value if base_value else 1.0)
@@ -1580,6 +1585,8 @@ def compute_indicators(ohlcv: list) -> dict:
         return [round(sum(data[i - period:i]) / period, 4) for i in range(period, len(data) + 1)]
 
     def ema(data, period):
+        if len(data) < period:
+            return []  # not enough data to seed — avoid a wrong sum(data[:period])/period
         k = 2 / (period + 1)
         result = [sum(data[:period]) / period]
         for price in data[period:]:
@@ -1600,7 +1607,9 @@ def compute_indicators(ohlcv: list) -> dict:
         for i in range(period, len(gains)):
             avg_gain = (avg_gain * (period - 1) + gains[i]) / period
             avg_loss = (avg_loss * (period - 1) + losses[i]) / period
-            rs = avg_gain / avg_loss if avg_loss else float("inf")
+            # avg_loss==0 with no gains either is a perfectly flat window → RSI
+            # 50 (neutral), not 100. rs=1 maps to 50 via the formula below.
+            rs = avg_gain / avg_loss if avg_loss else (1.0 if avg_gain == 0 else float("inf"))
             rsi_vals.append(round(100 - 100 / (1 + rs), 2))
         return rsi_vals[-1] if rsi_vals else None
 
@@ -1907,7 +1916,7 @@ def get_macro_indicators() -> dict:
     try:
         y10 = result.get("yield_10y", {}).get("value")
         y2  = result.get("yield_2y",  {}).get("value")
-        if y10 and y2:
+        if y10 is not None and y2 is not None:  # a 0.0 short yield (ZIRP) is valid
             result["yield_curve_spread"] = round(y10 - y2, 3)
             result["yield_curve_inverted"] = result["yield_curve_spread"] < 0
         else:
