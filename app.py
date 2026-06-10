@@ -2200,6 +2200,124 @@ def alt_stocktwits_trending():
     return jsonify({"trending": alt_signals.stocktwits_trending(limit=20)})
 
 
+def _social_composite(sources):
+    """Blend the working social sources into a single 0-100 buzz score and a
+    -1..1 sentiment, tolerating any source being missing/rate-limited."""
+    st = sources.get("stocktwits") or {}
+    hn = sources.get("hackernews") or {}
+    wk = sources.get("wikipedia") or {}
+
+    def _live(s):
+        return s.get("status") == "live"
+
+    # Buzz components, each normalized to ~0-100.
+    parts = []
+    if _live(st):
+        parts.append(min(100.0, (st.get("messages_total") or 0) / 30.0 * 100.0))
+    if _live(hn):
+        parts.append(min(100.0, (hn.get("mention_count") or 0) / 50.0 * 100.0))
+    spike = ((wk.get("stats") or {}).get("spike_pct_vs_baseline"))
+    if _live(wk) and spike is not None:
+        # 0% spike -> 50 (baseline attention), +50% -> 100, -50% -> 0.
+        parts.append(min(100.0, max(0.0, 50.0 + float(spike))))
+    buzz = round(sum(parts) / len(parts)) if parts else None
+
+    # Sentiment direction in -1..1 from StockTwits bull ratio + HN polarity.
+    sent = []
+    br = st.get("bull_ratio")
+    if _live(st) and br is not None:
+        sent.append((float(br) - 0.5) * 2.0)
+    ap = (hn.get("stats") or {}).get("avg_polarity")
+    if _live(hn) and ap is not None:
+        sent.append(max(-1.0, min(1.0, float(ap) * 5.0)))
+    sentiment = round(sum(sent) / len(sent), 2) if sent else None
+    if sentiment is None:
+        label = "—"
+    elif sentiment > 0.15:
+        label = "BULLISH"
+    elif sentiment < -0.15:
+        label = "BEARISH"
+    else:
+        label = "NEUTRAL"
+
+    n_live = sum(1 for s in (st, hn, wk) if _live(s))
+    return {
+        "buzz_score": buzz,
+        "sentiment": sentiment,
+        "sentiment_label": label,
+        "spike_pct": round(float(spike), 1) if spike is not None else None,
+        "sources_live": n_live,
+    }
+
+
+@app.route("/api/alt-data/social/<symbol>")
+def alt_social_pulse(symbol):
+    """Aggregate per-symbol social signals (StockTwits sentiment, Hacker News
+    mentions, Wikipedia attention) into one 'social pulse' with a composite buzz
+    score. Each source is captured independently so a rate-limited/erroring one
+    degrades gracefully instead of blanking the panel. Reddit is reported as
+    unavailable — its public JSON API now 403s unauthenticated apps."""
+    if not _valid_ticker(symbol):
+        return jsonify({"error": "Invalid symbol"}), 400
+    sym = symbol.upper()
+    out = {
+        "symbol": sym,
+        "as_of": datetime.now(timezone.utc).isoformat(),
+        "sources": {},
+        "reddit": {
+            "status": "unavailable",
+            "note": "Reddit no longer serves its public JSON API to apps (HTTP 403) — "
+                    "even OAuth's data host is IP-blocked. StockTwits/HN/Wiki used instead.",
+        },
+    }
+
+    # StockTwits per-symbol sentiment.
+    try:
+        st = alt_signals.stocktwits_symbol_sentiment(sym)
+        if st and (st.get("messages_total") or 0) > 0:
+            st = dict(st)
+            st["status"] = "live"
+            out["sources"]["stocktwits"] = st
+        else:
+            # None = cached failure / rate-limit; dict with 0 = genuinely quiet.
+            out["sources"]["stocktwits"] = {
+                "status": "ratelimited" if st is None else "quiet",
+                "messages_total": (st or {}).get("messages_total", 0),
+            }
+    except Exception as e:
+        out["sources"]["stocktwits"] = {"status": "error", "note": str(e)[:140]}
+
+    # Hacker News mentions.
+    if hn_sentiment:
+        try:
+            hn = hn_sentiment.fetch_mentions(sym, hours=168)
+            out["sources"]["hackernews"] = {
+                "status": "error" if hn.get("error") else "live",
+                "mention_count": hn.get("mention_count", 0),
+                "stats": hn.get("stats", {}),
+                "mentions": (hn.get("mentions") or [])[:5],
+            }
+        except Exception as e:
+            out["sources"]["hackernews"] = {"status": "error", "note": str(e)[:140]}
+
+    # Wikipedia attention.
+    if wiki_attention:
+        try:
+            w = wiki_attention.fetch_pageviews(sym, days=30)
+            out["sources"]["wikipedia"] = {
+                "status": "error" if w.get("error") else "live",
+                "stats": w.get("stats", {}),
+                "article": w.get("article"),
+                "article_url": w.get("article_url"),
+                "points": w.get("points", []),
+            }
+        except Exception as e:
+            out["sources"]["wikipedia"] = {"status": "error", "note": str(e)[:140]}
+
+    out["composite"] = _social_composite(out["sources"])
+    return jsonify(out)
+
+
 # ── Wikipedia pageviews — retail-attention proxy ──────────────────
 # Free, key-less. Daily pageview series for a stock's article + spike
 # detection vs. a 7-day baseline.
