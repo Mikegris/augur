@@ -2804,7 +2804,7 @@ async function loadDividendsView() {
                     <td class="col-number" style="color:${yocColor}">${p.yield_on_cost != null ? p.yield_on_cost.toFixed(2) + '%' : '—'}</td>
                     <td class="col-number">$${p.div_rate ? p.div_rate.toFixed(4) : '—'}</td>
                     <td class="col-number col-green">$${fmt.currency(p.annual_income)}</td>
-                    <td class="col-number">${p.income_weight.toFixed(1)}%</td>
+                    <td class="col-number">${p.income_weight != null ? p.income_weight.toFixed(1) + '%' : '—'}</td>
                     <td style="font-size:10px;color:var(--text-dim)">${p.frequency || '—'}</td>
                     <td style="font-size:10px;color:${p.ex_date ? 'var(--amber)' : 'var(--text-dim)'}">${p.ex_date || '—'}</td>
                     <td class="${(p.div_growth_5y || 0) > 0 ? 'col-green' : 'col-red'}">${p.div_growth_5y != null ? (p.div_growth_5y >= 0 ? '+' : '') + p.div_growth_5y.toFixed(1) + '%/yr' : '—'}</td>
@@ -3064,7 +3064,7 @@ function renderStressResults(data) {
         const lossColor = s.total_loss_pct < -30 ? 'var(--red)' : s.total_loss_pct < -15 ? 'var(--amber)' : 'var(--text-secondary)';
         const isCustom = name === 'Custom Scenario';
         return `
-          <div class="stress-card ${isCustom ? 'stress-card-custom' : ''}" onclick="showScenarioDetail('${name.replace(/'/g,"\\'")}', ${JSON.stringify(s).replace(/'/g,"\\'")} )">
+          <div class="stress-card ${isCustom ? 'stress-card-custom' : ''}" onclick="showScenarioDetail('${_jesc(name)}', ${_esc(JSON.stringify(s))})">
             <div style="font-size:10px;color:${isCustom ? 'var(--amber)' : 'var(--blue)'};letter-spacing:.08em;margin-bottom:6px">${name.toUpperCase()}</div>
             <div style="font-size:11px;color:var(--text-dim);margin-bottom:10px;line-height:1.5">${s.description}</div>
             <div style="font-size:22px;font-weight:bold;color:${lossColor}">${s.total_loss_pct.toFixed(1)}%</div>
@@ -3301,7 +3301,7 @@ function renderEarningsDossier(panel, d) {
   const moveRows = (d.post_earnings_moves || []).map(m => `
     <tr>
       <td>${m.date || '—'}</td>
-      <td class="${m.move_pct >= 0 ? 'col-green' : 'col-red'}">${m.move_pct >= 0 ? '+' : ''}${m.move_pct.toFixed(2)}%</td>
+      <td class="${(m.move_pct || 0) >= 0 ? 'col-green' : 'col-red'}">${m.move_pct != null ? (m.move_pct >= 0 ? '+' : '') + m.move_pct.toFixed(2) + '%' : '—'}</td>
       <td><span style="color:${m.move_pct >= 0 ? 'var(--green)' : 'var(--red)'}">${m.direction}</span></td>
     </tr>`).join('');
 
@@ -4928,7 +4928,7 @@ function renderInstitutional(data, panel) {
     // between e.g. "Berkshire Hathaway" and "Berkshire  Hathaway" (double
     // space), and broke entirely on names with non-alphanumeric chars.
     return `
-      <div class="fund-card" id="fcard-${i}" onclick="showFundHoldings('${_jesc(name)}')">
+      <div class="fund-card" id="fcard-${i}" onclick="showFundHoldings('${_jesc(name)}', ${i})">
         <div style="font-size:11px;font-weight:700;color:var(--green);margin-bottom:6px">${_esc(name)}</div>
         ${hasError
           ? `<div style="font-size:10px;color:var(--red)">Data unavailable</div>`
@@ -4949,10 +4949,12 @@ function renderInstitutional(data, panel) {
   `;
 }
 
-function showFundHoldings(fundName) {
-  // Update active card
+function showFundHoldings(fundName, idx) {
+  // Update active card. Cards use index-based IDs (fcard-${i}); look up by the
+  // same index — the old fundName-based lookup never matched, so the active
+  // highlight silently never applied.
   document.querySelectorAll('.fund-card').forEach(c => c.classList.remove('active'));
-  const card = document.getElementById('fcard-' + fundName.replace(/\s+/g,'_'));
+  const card = idx != null ? document.getElementById('fcard-' + idx) : null;
   if (card) card.classList.add('active');
 
   const panel = document.getElementById('fund-holdings-panel');
@@ -5833,8 +5835,8 @@ function renderOptionsResult(data) {
     `;
   }).join('');
 
-  const bulls = unusual.filter(c => c.sentiment.includes('BULL') || (c.side === 'CALL' && !c.sentiment.includes('SPEC'))).length;
-  const bears = unusual.filter(c => c.sentiment.includes('BEAR') || (c.side === 'PUT' && !c.sentiment.includes('SPEC'))).length;
+  const bulls = unusual.filter(c => (c.sentiment || '').includes('BULL') || (c.side === 'CALL' && !(c.sentiment || '').includes('SPEC'))).length;
+  const bears = unusual.filter(c => (c.sentiment || '').includes('BEAR') || (c.side === 'PUT' && !(c.sentiment || '').includes('SPEC'))).length;
   const overall = bulls > bears * 1.5 ? 'BULLISH FLOW' : bears > bulls * 1.5 ? 'BEARISH FLOW' : 'MIXED FLOW';
   const overallColor = overall.includes('BULL') ? 'col-positive' : overall.includes('BEAR') ? 'col-negative' : 'col-yellow';
 
