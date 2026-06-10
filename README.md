@@ -57,11 +57,11 @@ _(Add screenshots here after first run.)_
 
 ## Installation
 
-### Download the macOS app (easiest) — v0.4.0
+### Download the macOS app (easiest) — v0.4.1
 
 Grab the prebuilt bundle from the latest release:
 
-**[⬇ Download AUGUR.dmg (v0.4.0)](https://github.com/Mikegris/augur/releases/download/v0.4.0/AUGUR.dmg)** · [all releases](https://github.com/Mikegris/augur/releases/latest)
+**[⬇ Download AUGUR.dmg (v0.4.1)](https://github.com/Mikegris/augur/releases/download/v0.4.1/AUGUR.dmg)** · [all releases](https://github.com/Mikegris/augur/releases/latest)
 
 Open the DMG and drag **AUGUR** to Applications. No Python or setup required.
 
