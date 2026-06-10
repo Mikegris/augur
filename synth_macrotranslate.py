@@ -643,9 +643,16 @@ def macro_translate(release_id: str,
                     latest_date = pts[-1].get("date")
                     latest_value = pts[-1].get("value")
                     if len(pts) >= 2:
-                        prev = pts[-2].get("value")
-                        if prev:
-                            delta_pct = round((latest_value - prev) / prev * 100.0, 4)
+                        # FRED point values can be numeric strings; coerce so the
+                        # subtraction doesn't TypeError (which the bare except
+                        # below would swallow, silently losing delta_pct).
+                        try:
+                            lv = float(latest_value)
+                            pv = float(pts[-2].get("value"))
+                        except (TypeError, ValueError):
+                            lv = pv = None
+                        if pv:
+                            delta_pct = round((lv - pv) / pv * 100.0, 4)
             except Exception:
                 pass
 

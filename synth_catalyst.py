@@ -360,7 +360,9 @@ def _implied_move_pct(symbol: str, event_date: datetime.date) -> Optional[float]
         expiries = []
 
     ev_iso = event_date.isoformat()
-    for exp in expiries:
+    # sorted() so "first expiry on/after the event" is genuinely the nearest,
+    # even if the provider returns expiry dates out of order.
+    for exp in sorted(expiries):
         if exp >= ev_iso:
             chosen = exp
             break

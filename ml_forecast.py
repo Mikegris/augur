@@ -72,8 +72,10 @@ def _build_features(hist):
     # Bollinger Band width and position
     bb_mid = close.rolling(20).mean()
     bb_std = close.rolling(20).std()
-    df["bb_width"] = (2 * bb_std) / bb_mid
-    df["bb_position"] = (close - (bb_mid - 2 * bb_std)) / (4 * bb_std)
+    # Guard the denominators: a perfectly flat 20-day window (halted / brand-new
+    # listing) makes bb_std == 0 → inf/NaN that poisons the feature scaling.
+    df["bb_width"] = (2 * bb_std) / bb_mid.replace(0, np.nan)
+    df["bb_position"] = (close - (bb_mid - 2 * bb_std)) / (4 * bb_std).replace(0, np.nan)
 
     # Volume features
     if "Volume" in df.columns:
@@ -579,8 +581,11 @@ def ml_forecast(symbol, bypass_cache=False):
         signals.append(("RF", p))
     if results.get("trend_forecast"):
         fp = results["trend_forecast"]["forecast_pct"]
-        # Map forecast % to 0-1 probability-like
-        p = 0.5 + min(0.4, max(-0.4, fp / 20))
+        # forecast_pct is a 30-day projection but the RF/MR votes are 20-day;
+        # rescale to a 20d-equivalent (fp*20/30) before mapping to a probability
+        # so the trend vote isn't over-weighted vs the other channels.
+        fp20 = fp * 20.0 / 30.0
+        p = 0.5 + min(0.4, max(-0.4, fp20 / 20))
         signals.append(("Trend", p))
     if results.get("mean_reversion"):
         mr = results["mean_reversion"]

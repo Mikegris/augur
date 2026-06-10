@@ -220,16 +220,15 @@ def _close_price_on_or_before(symbol: str, target: datetime) -> Optional[float]:
         if ts is None:
             continue
         if int(ts) <= target_ts:
-            c = bar.get("close")
+            c = _safe_float(bar.get("close"))
             if c is not None:
-                last_close = float(c)
+                last_close = c
         else:
             break
     if last_close is not None:
         return last_close
     # Target may pre-date all bars (rare); fall back to the first bar's close.
-    first_close = bars[0].get("close")
-    return float(first_close) if first_close is not None else None
+    return _safe_float(bars[0].get("close"))
 
 
 def _direction_matches(direction: Optional[str], realized_return: Optional[float]) -> Optional[int]:
@@ -310,7 +309,7 @@ def score_due_forecasts(max_rows: int = 200) -> Dict[str, int]:
                        SET scored_at = ?, realized_return = ?, hit = ?,
                            issue_price = COALESCE(issue_price, ?),
                            score_price = ?
-                     WHERE id = ?
+                     WHERE id = ? AND scored_at IS NULL
                     """,
                     (
                         _utc_now_iso(),

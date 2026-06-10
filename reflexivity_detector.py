@@ -562,8 +562,10 @@ def _detect_short_squeeze(price_data, fundamentals):
             if vol_surge > 1.5:
                 strength += 15
 
-            # Proximity: combination of short% and price movement
-            proximity = min(100, short_pct * 200 + (pct_20d or 0) * 1.5)
+            # Proximity: combination of short% and recent price movement.
+            # short_pct*200 saturated at 100 from a 50%-of-float short alone
+            # (no room for the price-move term); *100 lets both contribute.
+            proximity = min(100, short_pct * 100 + (pct_20d or 0) * 1.5)
             proximity = max(0, proximity)
 
             if strength > 70:

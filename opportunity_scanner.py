@@ -428,7 +428,9 @@ def _score_equity(symbol, profile, weights):
         import congress as cong_mod
         trades = cong_mod.get_trades_for_ticker(symbol, days=90)
         buys = [t for t in trades if t.get("txn_type_raw") in ("P", "PE")]
-        sells = [t for t in trades if "S" in (t.get("txn_type_raw") or "")]
+        # exact codes, not substring `"S" in ...` (which also matched buy codes
+        # containing an S and double-counted them as sells).
+        sells = [t for t in trades if t.get("txn_type_raw") in ("S", "SE", "SP")]
         if buys or sells:
             ratio = len(buys) / max(len(buys) + len(sells), 1)
             congress_score = round(ratio * 100)

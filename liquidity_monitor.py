@@ -401,7 +401,7 @@ def _compute_history_sparkline():
     # Get dates from VIX chart
     vix_dates = []
     for d in vix_chart:
-        ts = d.get("date")
+        ts = d.get("time")  # fetcher chart bars key the epoch as "time", not "date"
         if ts is not None:
             try:
                 vix_dates.append(datetime.utcfromtimestamp(int(ts)).strftime("%Y-%m-%d"))

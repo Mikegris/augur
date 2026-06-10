@@ -957,7 +957,7 @@ def prune_portfolio_snapshots(keep_daily_days=365):
                WHERE date < date('now', ?)
                  AND date NOT IN (
                      SELECT MAX(date) FROM portfolio_snapshots
-                     WHERE date < date('now', ?)
+                     WHERE date < date('now', ?) AND date IS NOT NULL
                      GROUP BY substr(date, 1, 7)
                  )""",
             (f"-{int(keep_daily_days)} days", f"-{int(keep_daily_days)} days")
