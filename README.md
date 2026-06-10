@@ -158,6 +158,9 @@ The local SQLite database at `wealth.db` holds your portfolio, transactions, wat
 ./venv/bin/python test_phase6.py
 ./venv/bin/python test_phase7.py
 
+# Defect-regression suite (offline, deterministic — pins the bug fixes)
+./venv/bin/python test_defects.py
+
 # CLI (alternative to the web UI)
 ./venv/bin/python cli.py quote AAPL
 ./venv/bin/python cli.py scanner scan
