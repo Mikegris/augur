@@ -807,8 +807,8 @@ function _portfolioTableHtml(items, summary, acctOptsHtml, showAccount) {
     var acctDot = acctColor ? '<span style="display:inline-block;width:6px;height:6px;border-radius:50%;background:' + acctColor + ';margin-right:4px"></span>' : '';
     var acctLabel = p.account_name || '<span class="text-dim">--</span>';
     h += '<tr>'
-      + '<td><span class="col-symbol" onclick="openResearch(\'' + p.symbol + '\')">' + p.symbol + '</span></td>'
-      + '<td class="col-name truncate" style="max-width:120px" title="' + (p.name || '') + '">' + (p.name || '\u2014') + '</td>'
+      + '<td><span class="col-symbol" onclick="openResearch(\'' + _jesc(p.symbol) + '\')">' + _esc(p.symbol) + '</span></td>'
+      + '<td class="col-name truncate" style="max-width:120px" title="' + _esc(p.name || '') + '">' + _esc(p.name || '\u2014') + '</td>'
       + '<td><span class="badge badge-dim">' + p.asset_type + '</span></td>';
     if (showAccount) {
       h += '<td style="font-size:10px">'
@@ -816,7 +816,7 @@ function _portfolioTableHtml(items, summary, acctOptsHtml, showAccount) {
         + 'onchange="changePositionAccount(' + p.id + ',this.value)">';
       h += '<option value=""' + (!p.account_id ? ' selected' : '') + '>--</option>';
       (State.accounts || []).forEach(function(a) {
-        h += '<option value="' + a.id + '"' + (p.account_id == a.id ? ' selected' : '') + '>' + a.name + '</option>';
+        h += '<option value="' + a.id + '"' + (p.account_id == a.id ? ' selected' : '') + '>' + _esc(a.name) + '</option>';
       });
       h += '</select></td>';
     }
@@ -1918,11 +1918,11 @@ async function loadCrypto() {
             </tr></thead>
             <tbody>
               ${market.map(c => `
-                <tr style="cursor:pointer" onclick="openCryptoResearch('${c.id}', '${c.symbol}')">
+                <tr style="cursor:pointer" onclick="openCryptoResearch('${_jesc(c.id)}', '${_jesc(c.symbol)}')">
                   <td class="crypto-rank">${c.market_cap_rank}</td>
-                  <td><img src="${c.image}" class="crypto-logo" onerror="this.style.display='none'" loading="lazy"></td>
+                  <td><img src="${_esc(c.image)}" class="crypto-logo" onerror="this.style.display='none'" loading="lazy"></td>
                   <td>
-                    <div class="col-symbol">${c.symbol}</div>
+                    <div class="col-symbol">${_esc(c.symbol)}</div>
                     <div class="col-name" style="font-size:10px">${_esc(c.name)}</div>
                   </td>
                   <td class="col-price">$${fmt.price(c.price)}</td>
@@ -2262,9 +2262,9 @@ async function loadGlobalNews() {
         </div>
         <div style="max-height:calc(100vh - 200px);overflow-y:auto">
           ${all.length ? all.map(n => `
-            <div class="news-item" onclick="window.open('${n.url}', '_blank')">
+            <div class="news-item" onclick="window.open('${_jesc(n.url || '')}', '_blank')">
               <div class="news-title">${_esc(n.title)}</div>
-              <div class="news-summary">${n.summary ? n.summary.substring(0, 200) + '...' : ''}</div>
+              <div class="news-summary">${_esc(n.summary ? n.summary.substring(0, 200) + '...' : '')}</div>
               <div class="news-meta">
                 <span class="news-source">${_esc(n.source)}</span>
                 <span class="news-time">${fmt.timeAgo(n.published)}</span>
@@ -3376,7 +3376,7 @@ function renderEarningsDossier(panel, d) {
           <div style="flex:1;min-width:280px">
             ${b.headline ? `<div style="font-size:13px;color:var(--text-primary);font-weight:bold;margin-bottom:8px">${_esc(b.headline)}</div>` : ''}
             <div style="font-size:12px;color:var(--text-secondary);line-height:1.7;background:var(--bg-secondary);padding:12px;border-left:2px solid ${setupColor}">
-              ${b.brief || 'Configure OpenAI API key for analyst brief.'}
+              ${_esc(b.brief) || 'Configure OpenAI API key for analyst brief.'}
             </div>
           </div>
         </div>
