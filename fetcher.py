@@ -518,10 +518,15 @@ def get_quote(symbol: str) -> dict:
 
 def get_quotes_batch(symbols: list) -> dict:
     results = {}
-    # yfinance batch download for speed
+    # yfinance's fast_info is lazy and per-ticker — iterating it serially fires
+    # one network round-trip per symbol (≈16s for the 36-name movers list, ≈8s
+    # for indices), which stalled the Markets/movers/alerts/watchlist panels.
+    # Resolve symbols concurrently. This one function feeds movers, indices,
+    # portfolio, alerts and watchlist, so the speedup is broad.
     try:
         tickers = yf.Tickers(" ".join(symbols))
-        for sym in symbols:
+
+        def _resolve(sym):
             try:
                 t = tickers.tickers.get(sym.upper()) or yf.Ticker(sym)
                 info = t.fast_info
@@ -535,7 +540,7 @@ def get_quotes_batch(symbols: list) -> dict:
                 # "missing data" gaps on the UI for any ticker that didn't move.
                 chg = round(price - prev, 4) if (price is not None and prev) else None
                 chg_pct = round((chg / prev) * 100, 4) if (chg is not None and prev) else None
-                results[sym.upper()] = {
+                return {
                     "symbol": sym.upper(),
                     "price": price,
                     "prev_close": prev,
@@ -548,13 +553,21 @@ def get_quotes_batch(symbols: list) -> dict:
             except Exception as e:
                 # Mirror get_quote's fallback chain so batch users aren't
                 # left with errors when only yfinance is broken.
-                got = None
                 for fb in (_yahoo_chart_direct, _finviz_quote_fallback):
                     fbq = fb(sym)
                     if fbq and "error" not in fbq and fbq.get("price") is not None:
-                        got = fbq
-                        break
-                results[sym.upper()] = got or {"symbol": sym.upper(), "error": str(e)}
+                        return fbq
+                return {"symbol": sym.upper(), "error": str(e)}
+
+        import safe_executor
+        resolved = safe_executor.parallel_map(
+            _resolve, symbols,
+            max_workers=min(12, max(1, len(symbols))),
+            thread_name_prefix="quotes-batch",
+        )
+        for sym, q in zip(symbols, resolved):
+            results[sym.upper()] = q if q is not None else {
+                "symbol": sym.upper(), "error": "fetch failed"}
     except Exception as e:
         # Fallback: individual fetches
         for sym in symbols:

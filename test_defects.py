@@ -227,6 +227,10 @@ def test_perf_fixes_present():
     sf = inspect.getsource(synth_sectorflow)
     check("sectorflow builds sectors in parallel (not a serial loop)",
           "_build_sector_row" in sf and "parallel_map(" in sf)
+    import fetcher
+    fb = inspect.getsource(fetcher.get_quotes_batch)
+    check("get_quotes_batch resolves symbols in parallel (Markets/movers/alerts)",
+          "parallel_map(" in fb)
 
 
 # ── 19. Research/Alpha tab fixes: window globals, API errors, reflexivity ────
