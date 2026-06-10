@@ -216,6 +216,25 @@ def test_xss_escaping_intact():
           "' + e.message + '" not in src)
 
 
+# ── 17. safe_executor falls back to serial on thread exhaustion ──────────────
+def test_safe_executor_thread_exhaustion():
+    import concurrent.futures as cf
+    import safe_executor as se
+    check("recognizes 'can't start new thread'",
+          se._looks_like_global_shutdown(RuntimeError("can't start new thread")))
+    orig = se.ThreadPoolExecutor
+    class _BoomPool:
+        def __init__(self, *a, **k):
+            raise RuntimeError("can't start new thread")
+    se.ThreadPoolExecutor = _BoomPool
+    try:
+        out = se.parallel_map(lambda x: x * 2, [1, 2, 3, 4])
+    finally:
+        se.ThreadPoolExecutor = orig
+    check("parallel_map serial-fallback on thread exhaustion", out == [2, 4, 6, 8],
+          "out=%r" % out)
+
+
 # ── 16. Yahoo chart UA isn't the rate-limited Chrome string ──────────────────
 def test_yahoo_ua_not_blocked():
     import fetcher
@@ -258,6 +277,7 @@ def main():
         ("xss escaping intact", test_xss_escaping_intact),
         ("chart date adapter present", test_chart_date_adapter_present),
         ("yahoo UA not blocked", test_yahoo_ua_not_blocked),
+        ("safe_executor thread exhaustion", test_safe_executor_thread_exhaustion),
     ]
     for title, fn in tests:
         print("── %s" % title)

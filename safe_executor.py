@@ -37,11 +37,22 @@ log = logging.getLogger("augur.safe_executor")
 
 
 def _looks_like_global_shutdown(exc: BaseException) -> bool:
-    """The exact message thrown by concurrent.futures.thread.submit when
-    the module-level `_shutdown` flag is set (atexit fired). We use a
-    string check because Python doesn't expose a distinct exception type."""
+    """RuntimeErrors that mean the ThreadPool can't run, so we should fall back
+    to serial. Two distinct conditions, same remedy:
+      • interpreter-shutdown: the module-level `_shutdown` flag is set (atexit
+        fired) — "cannot schedule new futures after interpreter shutdown".
+      • thread exhaustion: the OS/process can't allocate another thread —
+        "can't start new thread" / "failed to create thread". Observed under
+        concurrent load (warmer + many in-flight requests each spawning pools).
+    Serial execution spawns no threads, so it works in both cases. String match
+    because Python doesn't expose distinct exception types for these."""
     msg = str(exc).lower()
-    return "interpreter shutdown" in msg or "cannot schedule new futures" in msg
+    return (
+        "interpreter shutdown" in msg
+        or "cannot schedule new futures" in msg
+        or "can't start new thread" in msg
+        or "failed to create thread" in msg
+    )
 
 
 def parallel_map(
