@@ -44,7 +44,7 @@ NEG = {
     "bad", "terrible", "hate", "worst", "miss", "missed", "loss", "losses",
     "weak", "fall", "falls", "plunges", "tanks", "crash", "crashes",
     "downgrade", "downgraded", "sell", "bearish", "decline", "drops",
-    "layoffs", "fraud", "scam", "lawsuit", "investigation", "sec",
+    "layoffs", "fraud", "scam", "lawsuit", "investigation",
     "scandal", "bankruptcy", "delisted", "halted",
 }
 

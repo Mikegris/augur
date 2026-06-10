@@ -91,7 +91,9 @@ def _calendar_for_one(symbol):
                 if len(paired) >= 2:
                     beats = int((paired["epsActual"] > paired["epsEstimate"]).sum())
                     beat_rate = round(beats / len(paired) * 100)
-                    surprises = eh["surprisePercent"].dropna().tolist()
+                    # Align surprises to the same quarters as beat_rate (paired
+                    # index) instead of the full, independently-NaN'd column.
+                    surprises = eh.loc[paired.index, "surprisePercent"].dropna().tolist()
                     if surprises:
                         avg_surprise = round(float(np.mean(surprises)) * 100, 2)
         except Exception:
@@ -268,10 +270,13 @@ def get_earnings_dossier(symbol):
                         # Convert to tz-naive for comparison
                         dt_naive = dt.tz_localize(None) if dt.tzinfo else dt
                         idx = price_hist.index.tz_localize(None).searchsorted(dt_naive)
-                        if idx > 0 and idx < len(price_hist):
-                            before = float(price_hist["Close"].iloc[idx - 1])
-                            after = float(price_hist["Close"].iloc[min(idx, len(price_hist) - 1)])
-                            move_pct = round((after - before) / before * 100, 2)
+                        # Measure the POST-earnings reaction (announcement day ->
+                        # next session), not the run-up into it. The old idx-1 ->
+                        # idx window ended on the earnings day itself.
+                        if 0 <= idx and idx + 1 < len(price_hist):
+                            before = float(price_hist["Close"].iloc[idx])
+                            after = float(price_hist["Close"].iloc[idx + 1])
+                            move_pct = round((after - before) / before * 100, 2) if before else None
                             post_moves.append({
                                 "date": _date_str(dt),
                                 "move_pct": move_pct,

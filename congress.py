@@ -109,7 +109,9 @@ def _fetch_fd_index(year):
 
 def _parse_filing_date(date_str):
     """Parse M/D/YYYY or MM/DD/YYYY to datetime."""
-    for fmt in ("%m/%d/%Y", "%-m/%-d/%Y"):
+    # %m/%d/%Y already parses unpadded "1/5/2024"; the "%-m/%-d/%Y" variant is
+    # platform-dependent (undefined on non-glibc/Windows) and redundant.
+    for fmt in ("%m/%d/%Y",):
         try:
             return datetime.strptime(date_str, fmt)
         except ValueError:
