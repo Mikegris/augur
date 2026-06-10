@@ -180,6 +180,15 @@ def test_routes():
     check("GET /api/synth/whatif -> 200 JSON", r4.status_code == 200 and r4.is_json)
 
 
+# ── 12. XSS hardening stays in place (static guard) ──────────────────────────
+def test_xss_escaping_intact():
+    src = open(os.path.join(os.path.dirname(__file__), "static/js/app.js")).read()
+    check("no unescaped ${e.message} in app.js innerHTML",
+          "${e.message}" not in src)
+    check("no unescaped concat ' + e.message + ' in app.js",
+          "' + e.message + '" not in src)
+
+
 def main():
     tests = [
         ("CoinGecko quote math", test_coingecko_math),
@@ -193,6 +202,7 @@ def main():
         ("finviz stocks parse", test_finviz_stocks_parse),
         ("forecast edge cases", test_forecast_edge_cases),
         ("route handlers", test_routes),
+        ("xss escaping intact", test_xss_escaping_intact),
     ]
     for title, fn in tests:
         print("── %s" % title)

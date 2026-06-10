@@ -171,7 +171,7 @@
       <div class="consensus-panel">
         <div class="section-header"
              style="display:flex;align-items:baseline;justify-content:space-between;">
-          <h3 style="margin:0;">CONSENSUS — ${_esc(symbol.toUpperCase())}</h3>
+          <h3 style="margin:0;">CONSENSUS — ${_esc(String(symbol).toUpperCase())}</h3>
           <span style="color:var(--text-dim);font-size:11px;">
             ${_esc(n)} contributors · ${_esc(data.as_of || "")}
           </span>

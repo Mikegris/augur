@@ -289,7 +289,8 @@
       ? `<div style="color:var(--text-dim);font-size:11px;">no significant drivers</div>`
       : drivers.map((d) => {
           const sign = d.val > 0 ? "+" : "";
-          const valTxt = Math.abs(d.val) < 1e6 ? d.val.toFixed(2) : d.val.toExponential(1);
+          const _v = Number(d.val) || 0;
+          const valTxt = Math.abs(_v) < 1e6 ? _v.toFixed(2) : _v.toExponential(1);
           return `<div style="display:flex;justify-content:space-between;font-size:11px;padding:2px 0;">
             <span style="color:var(--text-dim);">${_esc(d.key)}</span>
             <span style="font-family:var(--font-mono,monospace);">${sign}${valTxt}${_esc(d.suffix)}</span>

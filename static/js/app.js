@@ -533,7 +533,7 @@ function renderTicker(items) {
     const cls = chg == null ? 'flat' : chg > 0 ? 'up' : chg < 0 ? 'down' : 'flat';
     const arrow = chg > 0 ? '▲' : chg < 0 ? '▼' : '';
     return `<span class="ticker-item">
-      <span class="ticker-label">${item.label || item.symbol}</span>
+      <span class="ticker-label">${_esc(item.label || item.symbol)}</span>
       <span class="ticker-price">${fmt.price(item.price)}</span>
       <span class="ticker-chg ${cls}">${arrow}${fmt.pct(chg)}</span>
     </span>`;
@@ -625,7 +625,7 @@ async function loadOverview() {
     if (el('ov-kpi-vix'))  el('ov-kpi-vix').innerHTML  = `<div class="kpi-label">VIX (FEAR INDEX)</div>${renderIndexKpi(vix, true)}`;
     if (el('ov-kpi-gold')) el('ov-kpi-gold').innerHTML = `<div class="kpi-label">GOLD</div>${renderIndexKpi(gold)}`;
     const tbody = indices.map(idx => `<tr>
-      <td><span class="col-symbol" onclick="openResearch('${idx.symbol}')">${idx.label || idx.symbol}</span></td>
+      <td><span class="col-symbol" onclick="openResearch('${idx.symbol}')">${_esc(idx.label || idx.symbol)}</span></td>
       <td class="col-price">${fmt.price(idx.price)}</td>
       <td class="${col.pnl(idx.change)}">${fmt.price(idx.change)}</td>
       <td class="${col.pct(idx.change_pct)}">${fmt.pct(idx.change_pct)}</td>
@@ -751,7 +751,7 @@ function renderSectors(sectors) {
     const barW = Math.min(50, Math.abs(pct) / (max || 1) * 50);
     const cls = pct >= 0 ? 'col-positive' : 'col-negative';
     return `<div class="sector-row">
-      <span class="sector-name">${s.sector}</span>
+      <span class="sector-name">${_esc(s.sector)}</span>
       <div class="sector-bar-wrap">
         <div class="sector-divider"></div>
         <div class="sector-bar ${pct >= 0 ? 'pos' : 'neg'}" style="width:${barW}%"></div>
@@ -1292,7 +1292,7 @@ async function loadMarkets() {
           <div class="panel" style="cursor:pointer" onclick="openResearch('${idx.symbol}')">
             <div class="panel-body" style="padding:10px">
               <div class="flex-between">
-                <span style="color:var(--text-dim);font-size:10px">${idx.label || idx.symbol}</span>
+                <span style="color:var(--text-dim);font-size:10px">${_esc(idx.label || idx.symbol)}</span>
                 <span class="badge ${idx.change_pct >= 0 ? 'badge-green' : 'badge-red'}">${fmt.pct(idx.change_pct)}</span>
               </div>
               <div style="font-size:18px;font-weight:600;margin-top:4px;color:var(--text-primary)">${fmt.price(idx.price)}</div>
@@ -1357,7 +1357,7 @@ async function loadMarkets() {
                 : `rgba(255,51,85,${intensity/300})`;
               const border = pct >= 0 ? `rgba(0,255,159,${intensity/200})` : `rgba(255,51,85,${intensity/200})`;
               return `<div style="background:${bg};border:1px solid ${border};padding:10px;cursor:pointer;border-radius:2px" onclick="openResearch('${s.symbol}')">
-                <div style="font-size:10px;color:var(--text-dim)">${s.sector}</div>
+                <div style="font-size:10px;color:var(--text-dim)">${_esc(s.sector)}</div>
                 <div style="font-size:16px;font-weight:600;${pct>=0?'color:var(--green)':'color:var(--red)'}">${fmt.pct(pct)}</div>
                 <div style="font-size:10px;color:var(--text-secondary)">${s.symbol} $${fmt.price(s.price)}</div>
               </div>`;
@@ -1900,7 +1900,7 @@ async function loadCrypto() {
                   <td><img src="${c.image}" class="crypto-logo" onerror="this.style.display='none'" loading="lazy"></td>
                   <td>
                     <div class="col-symbol">${c.symbol}</div>
-                    <div class="col-name" style="font-size:10px">${c.name}</div>
+                    <div class="col-name" style="font-size:10px">${_esc(c.name)}</div>
                   </td>
                   <td class="col-price">$${fmt.price(c.price)}</td>
                   <td class="${col.pct(c.change_1h)}">${fmt.pct(c.change_1h)}</td>
@@ -2170,7 +2170,7 @@ async function loadTransactions() {
               ${txns.map(t => `<tr>
                 <td class="text-dim">${t.date || '—'}</td>
                 <td><span class="col-symbol" onclick="openResearch('${t.symbol}')">${t.symbol}</span></td>
-                <td><span class="badge ${t.action==='BUY' ? 'badge-green' : 'badge-red'}">${t.action}</span></td>
+                <td><span class="badge ${t.action==='BUY' ? 'badge-green' : 'badge-red'}">${_esc(t.action)}</span></td>
                 <td class="col-number">${fmt.num(t.shares, 4)}</td>
                 <td class="col-number">$${fmt.price(t.price)}</td>
                 <td class="col-number">$${fmt.currency(t.total)}</td>
@@ -2961,9 +2961,9 @@ async function loadMacroView() {
               },
             ].map(item => `
               <div style="background:var(--bg-secondary);padding:12px;border:1px solid var(--border)">
-                <div style="font-size:9px;color:var(--text-dim);letter-spacing:.1em;margin-bottom:6px">${item.label}</div>
+                <div style="font-size:9px;color:var(--text-dim);letter-spacing:.1em;margin-bottom:6px">${_esc(item.label)}</div>
                 <div style="font-size:15px;font-weight:bold;color:${item.color}">${item.value}</div>
-                <div style="font-size:10px;color:var(--text-dim);margin-top:4px">${item.note}</div>
+                <div style="font-size:10px;color:var(--text-dim);margin-top:4px">${_esc(item.note)}</div>
               </div>`).join('')}
           </div>
         </div>
@@ -3302,7 +3302,7 @@ function renderEarningsDossier(panel, d) {
     <tr>
       <td>${m.date || '—'}</td>
       <td class="${(m.move_pct || 0) >= 0 ? 'col-green' : 'col-red'}">${m.move_pct != null ? (m.move_pct >= 0 ? '+' : '') + m.move_pct.toFixed(2) + '%' : '—'}</td>
-      <td><span style="color:${m.move_pct >= 0 ? 'var(--green)' : 'var(--red)'}">${m.direction}</span></td>
+      <td><span style="color:${m.move_pct >= 0 ? 'var(--green)' : 'var(--red)'}">${_esc(m.direction)}</span></td>
     </tr>`).join('');
 
   // Insider summary
@@ -4986,7 +4986,7 @@ function showFundHoldings(fundName, idx) {
         ${overlapItems.map(h => `
           <div style="background:var(--bg-elevated);border:1px solid var(--amber-dim);padding:6px 10px;border-radius:2px">
             <div style="font-size:11px;font-weight:700;color:var(--amber)">${h.portfolio_symbol}</div>
-            <div style="font-size:10px;color:var(--text-dim)">${h.name}</div>
+            <div style="font-size:10px;color:var(--text-dim)">${_esc(h.name)}</div>
             <div style="font-size:10px;color:var(--text-primary)">$${fmt.compact(h.value_usd)}</div>
             <div style="font-size:10px;color:var(--text-dim)">${fmt.num(h.pct_of_portfolio)}% of fund</div>
           </div>
@@ -5052,7 +5052,7 @@ async function loadResearchSecTab(symbol) {
           <div style="padding:8px;border-bottom:1px solid var(--border)">
             <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px">
               <span class="badge badge-blue">${f.form_type}</span>
-              <span class="signal-badge ${sigClass}">${f.signal}</span>
+              <span class="signal-badge ${sigClass}">${_esc(f.signal)}</span>
               <span style="font-size:10px;color:var(--text-dim)">${f.filing_date}</span>
               ${f.ai_powered ? '<span class="ai-badge">AI</span>' : ''}
               <a href="${f.filing_url}" target="_blank" rel="noopener" style="font-size:10px;color:var(--blue);margin-left:auto">VIEW ↗</a>
@@ -5262,7 +5262,7 @@ function buildSignalCard(s) {
     return `
       <div style="margin-bottom:5px">
         <div style="display:flex;justify-content:space-between;font-size:9px;color:var(--text-dim);margin-bottom:2px">
-          <span>${isML ? '⚡ ' : ''}${c.label}</span><span>${c.score}/${c.max}</span>
+          <span>${isML ? '⚡ ' : ''}${_esc(c.label)}</span><span>${c.score}/${c.max}</span>
         </div>
         <div style="height:5px;background:var(--border);border-radius:3px;overflow:hidden">
           <div class="score-bar-fill" style="width:${pct}%;height:100%;background:${isML ? 'var(--cyan, #0ff)' : barColor};border-radius:3px"></div>
@@ -5302,7 +5302,7 @@ function buildSignalCard(s) {
           <div style="font-size:15px;font-weight:700;color:var(--text-primary)">${s.symbol}</div>
           <div style="font-size:10px;color:var(--text-dim);max-width:140px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${s.name || ''}</div>
           <div style="margin-top:6px">
-            <span class="signal-badge ${signalColors[s.signal] || ''}" style="font-size:11px">${s.signal}</span>
+            <span class="signal-badge ${signalColors[s.signal] || ''}" style="font-size:11px">${_esc(s.signal)}</span>
             <span class="sm-track-badge" data-signal="smart_money" style="margin-left:6px"></span>
           </div>
           ${s.price ? `<div style="font-size:11px;color:var(--text-secondary);margin-top:4px">$${fmt.price(s.price)}</div>` : ''}
@@ -5821,16 +5821,16 @@ function renderOptionsResult(data) {
     const volOI = c.vol_oi_ratio ? `${c.vol_oi_ratio}x` : 'NEW';
     return `
       <tr>
-        <td><span class="${sideColor}" style="font-weight:700">${c.side}</span></td>
+        <td><span class="${sideColor}" style="font-weight:700">${_esc(c.side)}</span></td>
         <td>$${c.strike}</td>
-        <td>${c.expiry} <span style="color:var(--text-dim)">(${c.dte}d)</span></td>
+        <td>${_esc(c.expiry)} <span style="color:var(--text-dim)">(${c.dte}d)</span></td>
         <td style="font-weight:600">${fmt.compact(c.volume)}</td>
         <td>${fmt.compact(c.open_interest)}</td>
         <td style="color:var(--amber);font-weight:700">${volOI}</td>
         <td>${c.iv_pct}%</td>
         <td>${c.otm_pct > 0 ? '+' : ''}${c.otm_pct}%</td>
         <td>$${fmt.compact(c.notional)}</td>
-        <td><span class="signal-badge ${sColor}" style="font-size:9px">${c.sentiment}</span></td>
+        <td><span class="signal-badge ${sColor}" style="font-size:9px">${_esc(c.sentiment)}</span></td>
       </tr>
     `;
   }).join('');
@@ -5945,8 +5945,8 @@ function renderCongressView(data) {
     const color = t.sentiment === 'BULLISH' ? 'var(--green)' : t.sentiment === 'BEARISH' ? 'var(--red)' : 'var(--amber)';
     const opacity = Math.max(0.4, Math.min(1.0, t.total_trades / (topTickers[0]?.total_trades || 1)));
     return `
-      <div class="congress-heatmap-item" onclick="filterCongressByTicker('${t.ticker}')" style="border-color:${color};opacity:${opacity + 0.1}">
-        <div style="font-size:12px;font-weight:700;color:${color}">${t.ticker}</div>
+      <div class="congress-heatmap-item" onclick="filterCongressByTicker('${_esc(t.ticker)}')" style="border-color:${color};opacity:${opacity + 0.1}">
+        <div style="font-size:12px;font-weight:700;color:${color}">${_esc(t.ticker)}</div>
         <div style="font-size:9px;color:var(--text-dim)">${t.total_trades} trades</div>
         <div style="font-size:9px;color:${color}">${t.buy_pct}% BUY</div>
       </div>
@@ -5962,7 +5962,7 @@ function renderCongressView(data) {
   const tradeRows = trades.slice(0, 100).map(t => `
     <tr>
       <td style="font-size:10px;color:var(--text-dim)">${t.txn_date || '—'}</td>
-      <td style="font-weight:700;color:var(--green);cursor:pointer" onclick="filterCongressByTicker('${t.ticker}')">${t.ticker}</td>
+      <td style="font-weight:700;color:var(--green);cursor:pointer" onclick="filterCongressByTicker('${_esc(t.ticker)}')">${_esc(t.ticker)}</td>
       <td><span class="signal-badge ${txnTypeColor(t.txn_type)}" style="font-size:9px">${t.txn_type}</span></td>
       <td style="font-size:10px">${t.amount_str || '—'}</td>
       <td style="font-size:10px;color:var(--text-secondary)">${_esc(t.member_name)}</td>
@@ -6003,10 +6003,10 @@ function renderCongressView(data) {
             ${tickerSummary.map(t => {
               const sentColor = t.sentiment === 'BULLISH' ? 'col-positive' : t.sentiment === 'BEARISH' ? 'col-negative' : 'col-yellow';
               return `<tr>
-                <td style="font-weight:700;color:var(--green);cursor:pointer" onclick="filterCongressByTicker('${t.ticker}')">${t.ticker}</td>
+                <td style="font-weight:700;color:var(--green);cursor:pointer" onclick="filterCongressByTicker('${_esc(t.ticker)}')">${_esc(t.ticker)}</td>
                 <td>${t.total_trades}</td><td class="col-positive">${t.buys}</td><td class="col-negative">${t.sells}</td>
                 <td>${t.buy_pct}%</td><td>${t.member_count}</td><td style="color:var(--text-dim)">${t.latest_date}</td>
-                <td><span class="signal-badge ${sentColor}">${t.sentiment}</span></td>
+                <td><span class="signal-badge ${sentColor}">${_esc(t.sentiment)}</span></td>
               </tr>`;
             }).join('')}
           </tbody>
@@ -6036,7 +6036,7 @@ function filterCongressByTicker(ticker) {
     tbody.innerHTML = trades.map(t => `
       <tr>
         <td style="font-size:10px;color:var(--text-dim)">${t.txn_date || '—'}</td>
-        <td style="font-weight:700;color:var(--green)">${t.ticker}</td>
+        <td style="font-weight:700;color:var(--green)">${_esc(t.ticker)}</td>
         <td><span class="signal-badge ${txnTypeColor(t.txn_type)}" style="font-size:9px">${t.txn_type}</span></td>
         <td style="font-size:10px">${t.amount_str || '—'}</td>
         <td style="font-size:10px;color:var(--text-secondary)">${_esc(t.member_name)}</td>
