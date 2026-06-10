@@ -446,13 +446,17 @@ def _build_congress_block(trades):
     buys = sells = 0
     members = set()
     for t in trades:
-        ttype = (t.get("transaction_type") or "").lower()
+        # congress.get_trades_for_ticker emits txn_type / member_name / txn_date /
+        # amount_str — the old transaction_type/member keys never matched, so this
+        # whole block was dead (signal always "MIXED", 0 members).
+        ttype = (t.get("txn_type") or t.get("transaction_type") or "").lower()
         if "purchase" in ttype or "buy" in ttype:
             buys += 1
         elif "sale" in ttype or "sell" in ttype:
             sells += 1
-        if t.get("member"):
-            members.add(t.get("member"))
+        member = t.get("member_name") or t.get("member")
+        if member:
+            members.add(member)
 
     if buys > sells * 2:
         signal = "BULLISH"
@@ -464,11 +468,11 @@ def _build_congress_block(trades):
     sample = []
     for t in trades[:3]:
         sample.append({
-            "date": t.get("transaction_date") or t.get("filing_date"),
-            "member": t.get("member"),
+            "date": t.get("txn_date") or t.get("transaction_date") or t.get("filing_date"),
+            "member": t.get("member_name") or t.get("member"),
             "party": t.get("party"),
-            "transaction_type": t.get("transaction_type"),
-            "amount": t.get("amount") or t.get("amount_range"),
+            "transaction_type": t.get("txn_type") or t.get("transaction_type"),
+            "amount": t.get("amount_str") or t.get("amount") or t.get("amount_range"),
         })
 
     return {
@@ -1276,7 +1280,10 @@ def _portfolio_total_value():
         sym = h.get("symbol")
         shares = float(h.get("shares") or 0)
         q = quotes.get(sym) or {}
-        price = q.get("price") or h.get("avg_cost") or 0
+        # explicit None — a real quoted price of 0 must not silently fall back
+        # to avg_cost (which would overstate the book value).
+        _qp = q.get("price")
+        price = _qp if _qp is not None else (h.get("avg_cost") or 0)
         total += shares * float(price or 0)
     return round(total, 2)
 

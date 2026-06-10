@@ -134,7 +134,7 @@ const ChartEngine = (() => {
   function addSMAOverlay(chartRef, data, period, color) {
     if (!chartRef) return;
     const { chart } = chartRef;
-    const closes = data.map(d => d.close || d.value);
+    const closes = data.map(d => d.close ?? d.value);  // ?? not || — a real 0 close must survive
     const smaData = [];
     for (let i = period - 1; i < closes.length; i++) {
       const sum = closes.slice(i - period + 1, i + 1).reduce((a, b) => a + b, 0);

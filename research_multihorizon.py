@@ -73,6 +73,9 @@ def _load_history(symbol: str) -> Optional[pd.DataFrame]:
         "close": "Close", "volume": "Volume",
     })
     df = df[df["Close"] > 0]
+    # Sort + de-duplicate timestamps (matches research_backtest._load_history):
+    # unordered/duplicate bars would corrupt rolling stats and iloc[-1] reads.
+    df = df[~df.index.duplicated(keep="last")].sort_index()
     if len(df) < _MIN_BARS:
         return None
     return df

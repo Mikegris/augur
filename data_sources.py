@@ -28,7 +28,9 @@ import requests
 
 log = logging.getLogger("augur.datasources")
 
-UA = "AUGUR/1.0 research@augur.local"
+# SEC's fair-access policy rejects reserved/.local contact domains with 429.
+# Use a routable contact so data.sec.gov XBRL fetches aren't silently throttled.
+UA = "AUGUR/1.0 (contact: augur-research@gmail.com)"
 HEADERS = {"User-Agent": UA, "Accept": "application/json"}
 
 # ── Shared TTL cache ────────────────────────────────────────────────
@@ -193,7 +195,8 @@ def gdelt_tone_timeline(query, *, timespan="2w"):
     data = _get(GDELT_DOC, params=params, ttl=1800)
     if not data:
         return []
-    series = (data.get("timeline") or [{}])[0].get("data") or []
+    _tl = data.get("timeline") or []
+    series = (_tl[0].get("data") if (_tl and isinstance(_tl[0], dict)) else []) or []
     return [{"date": d.get("date"), "value": d.get("value")} for d in series]
 
 

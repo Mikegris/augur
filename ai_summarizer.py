@@ -439,7 +439,7 @@ def _earnings_brief_uncached(dossier, model, key):
 
     # Build context string for the prompt
     history_lines = "\n".join([
-        f"  {r['date']}: estimate ${r['estimate']}, actual ${r['actual']}, surprise {r['surprise_pct']:+.1f}%"
+        f"  {r['date']}: estimate ${r['estimate']}, actual ${r['actual']}, surprise {(r.get('surprise_pct') or 0):+.1f}%"
         for r in dossier.get("history", [])[:8]
         if r.get("estimate") and r.get("actual")
     ]) or "  No history available"
