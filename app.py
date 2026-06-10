@@ -593,6 +593,10 @@ def add_transaction():
         return jsonify({"error": "Missing required fields"}), 400
     if not _valid_ticker(data["symbol"]):
         return jsonify({"error": "Invalid symbol"}), 400
+    # action must be a string — db.add_transaction calls action.upper(), which
+    # raises AttributeError (→ 500) on a numeric/JSON-object action.
+    if not isinstance(data["action"], str):
+        return jsonify({"error": "action must be a string"}), 400
     try:
         shares = float(data["shares"])
         price = float(data["price"])
@@ -1027,7 +1031,9 @@ def macro_dashboard():
 
 @app.route("/api/stress-test", methods=["POST"])
 def stress_test():
-    body = request.json or {}
+    # get_json(silent=True) degrades to None (then {}) on a missing/wrong
+    # Content-Type or malformed body; request.json would raise 415/400 instead.
+    body = request.get_json(silent=True) or {}
     custom_drop = body.get("custom_drop_pct")   # e.g. -30.0
 
     holdings = db.get_portfolio()
@@ -1786,7 +1792,7 @@ def scanner_profile_get():
 def scanner_profile_save():
     """Save/update the scanner profile."""
     import opportunity_scanner as scanner
-    data = request.get_json(force=True)
+    data = request.get_json(force=True, silent=True)
     if not data:
         return jsonify({"error": "No data provided"}), 400
     scanner.save_scanner_profile(data)
@@ -3252,20 +3258,22 @@ def synth_whatif_get():
     if action not in ("add", "remove", "resize_to"):
         return jsonify({"error": "action must be add|remove|resize_to"}), 400
     acct = request.args.get("account_id")
-    holdings_raw = db.get_portfolio(account_id=int(acct) if acct and acct.isdigit() else None)
-    enriched = []
-    for h in holdings_raw or []:
-        mv_h = (h.get("shares") or 0) * (h.get("avg_cost") or 0)
-        if mv_h <= 0:
-            continue
-        enriched.append({
-            "symbol": h["symbol"],
-            "market_value": float(mv_h),
-            "asset_type": h.get("asset_type", "stock"),
-            "shares": h.get("shares"),
-            "avg_cost": h.get("avg_cost"),
-        })
     try:
+        holdings_raw = db.get_portfolio(account_id=int(acct) if acct and acct.isdigit() else None)
+        enriched = []
+        for h in holdings_raw or []:
+            if not h.get("symbol"):
+                continue
+            mv_h = (h.get("shares") or 0) * (h.get("avg_cost") or 0)
+            if mv_h <= 0:
+                continue
+            enriched.append({
+                "symbol": h["symbol"],
+                "market_value": float(mv_h),
+                "asset_type": h.get("asset_type", "stock"),
+                "shares": h.get("shares"),
+                "avg_cost": h.get("avg_cost"),
+            })
         return jsonify(synth_whatif.whatif(enriched, {
             "symbol": sym, "market_value": mv, "action": action,
         }))
