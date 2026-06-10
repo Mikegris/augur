@@ -134,9 +134,11 @@ def cmd_quote(args):
         if not q or "error" in q:
             print(_c(f"  {sym}: no data", RED))
             continue
-        price = q.get("price", 0)
-        change = q.get("change", 0)
-        pct = q.get("change_pct", 0)
+        # `or 0` (not get(...,0)) because the API may emit the key with an
+        # explicit None, which would crash the f'{change:+.2f}' / _pnl_color below.
+        price = q.get("price") or 0
+        change = q.get("change") or 0
+        pct = q.get("change_pct") or 0
         col = _pnl_color(change)
         name = q.get("name", sym)
         mcap = fmt_number(q.get("market_cap"))

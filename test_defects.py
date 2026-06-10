@@ -180,7 +180,34 @@ def test_routes():
     check("GET /api/synth/whatif -> 200 JSON", r4.status_code == 200 and r4.is_json)
 
 
-# ── 12. XSS hardening stays in place (static guard) ──────────────────────────
+# ── 12. database add_position: offsetting to zero shares must not crash ──────
+def test_database_zero_shares():
+    import database
+    database.init_db()
+    database.add_position("ZZZTEST", "Test Co", 10, 100.0)
+    # Fully offsetting add -> total_shares == 0; must not ZeroDivisionError.
+    database.add_position("ZZZTEST", "Test Co", -10, 100.0)
+    pos = [p for p in database.get_portfolio() if p["symbol"] == "ZZZTEST"]
+    check("database add_position offset-to-zero doesn't crash",
+          bool(pos) and abs(pos[0]["shares"]) < 1e-9)
+
+
+# ── 13. cli cmd_quote: explicit None fields must not crash ───────────────────
+def test_cli_quote_none_fields():
+    import cli, fetcher
+    fetcher.get_quote = lambda s: {"price": None, "change": None,
+                                   "change_pct": None, "name": "X",
+                                   "market_cap": None, "volume": None}
+    class _Args:
+        symbols = ["AAA"]
+    try:
+        cli.cmd_quote(_Args())  # prints; the point is it doesn't raise
+        check("cli cmd_quote survives None-valued quote fields", True)
+    except Exception as e:
+        check("cli cmd_quote survives None-valued quote fields", False, repr(e))
+
+
+# ── 14. XSS hardening stays in place (static guard) ──────────────────────────
 def test_xss_escaping_intact():
     src = open(os.path.join(os.path.dirname(__file__), "static/js/app.js")).read()
     check("no unescaped ${e.message} in app.js innerHTML",
@@ -202,6 +229,8 @@ def main():
         ("finviz stocks parse", test_finviz_stocks_parse),
         ("forecast edge cases", test_forecast_edge_cases),
         ("route handlers", test_routes),
+        ("database zero-shares guard", test_database_zero_shares),
+        ("cli quote None fields", test_cli_quote_none_fields),
         ("xss escaping intact", test_xss_escaping_intact),
     ]
     for title, fn in tests:

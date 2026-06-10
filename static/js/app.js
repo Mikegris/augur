@@ -553,9 +553,9 @@ async function loadSidebarWatchlist() {
       return;
     }
     el.innerHTML = items.map(i => `
-      <div class="swl-item" onclick="openResearch('${i.symbol}')">
+      <div class="swl-item" onclick="openResearch('${_esc(i.symbol)}')">
         <div>
-          <div class="swl-sym">${i.symbol}</div>
+          <div class="swl-sym">${_esc(i.symbol)}</div>
           <div class="swl-price">${fmt.price(i.price)}</div>
         </div>
         <div class="swl-chg ${i.change_pct > 0 ? 'up' : i.change_pct < 0 ? 'down' : ''}">${fmt.pct(i.change_pct)}</div>
@@ -625,7 +625,7 @@ async function loadOverview() {
     if (el('ov-kpi-vix'))  el('ov-kpi-vix').innerHTML  = `<div class="kpi-label">VIX (FEAR INDEX)</div>${renderIndexKpi(vix, true)}`;
     if (el('ov-kpi-gold')) el('ov-kpi-gold').innerHTML = `<div class="kpi-label">GOLD</div>${renderIndexKpi(gold)}`;
     const tbody = indices.map(idx => `<tr>
-      <td><span class="col-symbol" onclick="openResearch('${idx.symbol}')">${_esc(idx.label || idx.symbol)}</span></td>
+      <td><span class="col-symbol" onclick="openResearch('${_esc(idx.symbol)}')">${_esc(idx.label || idx.symbol)}</span></td>
       <td class="col-price">${fmt.price(idx.price)}</td>
       <td class="${col.pnl(idx.change)}">${fmt.price(idx.change)}</td>
       <td class="${col.pct(idx.change_pct)}">${fmt.pct(idx.change_pct)}</td>
@@ -648,7 +648,7 @@ async function loadOverview() {
   const moversP = API.get('/api/market/movers').then(movers => {
     const el = id => document.getElementById(id);
     const moverRows = (list, cls) => (list || []).map(g => `<tr>
-      <td><span class="col-symbol" onclick="openResearch('${g.symbol}')">${g.symbol}</span></td>
+      <td><span class="col-symbol" onclick="openResearch('${_esc(g.symbol)}')">${_esc(g.symbol)}</span></td>
       <td class="col-price">${fmt.price(g.price)}</td>
       <td class="${cls}">${fmt.pct(g.change_pct)}</td>
       <td class="col-number">${fmt.compact(g.market_cap)}</td>
@@ -677,8 +677,8 @@ async function loadOverview() {
           <th style="text-align:right">CUR PRICE</th><th style="text-align:right">MKT VALUE</th>
           <th style="text-align:right">P&L</th><th style="text-align:right">P&L %</th>
         </tr></thead><tbody>${portfolio.holdings.map(h => `<tr>
-          <td><span class="col-symbol" onclick="openResearch('${h.symbol}')">${h.symbol}</span></td>
-          <td class="col-name">${h.name || '—'}</td>
+          <td><span class="col-symbol" onclick="openResearch('${_esc(h.symbol)}')">${_esc(h.symbol)}</span></td>
+          <td class="col-name">${_esc(h.name || '—')}</td>
           <td class="col-number">${fmt.num(h.shares, 4)}</td>
           <td class="col-number">$${fmt.price(h.avg_cost)}</td>
           <td class="col-price">${fmt.price(h.current_price)}</td>
@@ -1027,7 +1027,7 @@ function renderPortfolioAnalysis(r) {
   const actionRows = (r.action_items || []).map(a => {
     const priColor = a.priority === 'HIGH' ? 'var(--red)' : a.priority === 'MEDIUM' ? 'var(--amber)' : 'var(--text-dim)';
     return `<div style="display:flex;gap:8px;padding:6px 0;border-bottom:1px solid var(--border)">
-      <span style="font-size:9px;color:${priColor};min-width:48px;padding-top:1px">${a.priority}</span>
+      <span style="font-size:9px;color:${priColor};min-width:48px;padding-top:1px">${_esc(a.priority)}</span>
       <div>
         <div style="font-size:11px;color:var(--text-primary)">${_esc(a.action)}</div>
         <div style="font-size:10px;color:var(--text-dim);margin-top:2px">${_esc(a.rationale)}</div>
@@ -1039,8 +1039,8 @@ function renderPortfolioAnalysis(r) {
   const assessColor = { HOLD: 'var(--text-dim)', ADD: 'var(--green)', TRIM: 'var(--amber)', EXIT: 'var(--red)', REVIEW: 'var(--amber)' };
   const posRows = (r.position_insights || []).map(p =>
     `<tr>
-      <td><span class="col-symbol" onclick="openResearch('${p.symbol}')">${p.symbol}</span></td>
-      <td><span style="color:${assessColor[p.assessment] || 'var(--text-dim)'}; font-size:10px;font-weight:bold">${p.assessment}</span></td>
+      <td><span class="col-symbol" onclick="openResearch('${_esc(p.symbol)}')">${_esc(p.symbol)}</span></td>
+      <td><span style="color:${assessColor[p.assessment] || 'var(--text-dim)'}; font-size:10px;font-weight:bold">${_esc(p.assessment)}</span></td>
       <td style="color:var(--text-secondary);font-size:10px">${_esc(p.note)}</td>
     </tr>`
   ).join('');
@@ -1060,7 +1060,7 @@ function renderPortfolioAnalysis(r) {
   content.innerHTML = `
     <!-- Header row: signal, score, model -->
     <div style="display:flex;align-items:center;gap:12px;margin-bottom:16px;flex-wrap:wrap">
-      <span class="signal-badge ${signalClass}" style="font-size:12px;padding:4px 10px">${r.overall_signal}</span>
+      <span class="signal-badge ${signalClass}" style="font-size:12px;padding:4px 10px">${_esc(r.overall_signal)}</span>
       <div style="display:flex;align-items:baseline;gap:4px">
         <span style="font-size:22px;font-weight:bold;color:${scoreColor}">${r.overall_score}</span>
         <span style="font-size:11px;color:var(--text-dim)">/10 PORTFOLIO HEALTH</span>
@@ -1070,7 +1070,7 @@ function renderPortfolioAnalysis(r) {
 
     <!-- Executive summary -->
     <div style="background:var(--bg-secondary);border-left:2px solid var(--green);padding:10px 14px;margin-bottom:16px;font-size:12px;color:var(--text-primary);line-height:1.6">
-      ${r.executive_summary}
+      ${_esc(r.executive_summary)}
     </div>
 
     <div class="panel-grid grid-2" style="gap:12px;margin-bottom:16px">
@@ -1099,7 +1099,7 @@ function renderPortfolioAnalysis(r) {
           <span style="font-size:18px;font-weight:bold;color:${divColor}">${divScore}</span>
           <span style="font-size:10px;color:var(--text-dim)">/10</span>
         </div>
-        <div style="font-size:11px;color:var(--text-secondary)">${r.diversification?.assessment || ''}</div>
+        <div style="font-size:11px;color:var(--text-secondary)">${_esc(r.diversification?.assessment || '')}</div>
         ${concWarnings}
       </div>
     </div>
@@ -1124,7 +1124,7 @@ function renderPortfolioAnalysis(r) {
     <!-- Market context -->
     ${r.market_context ? `
     <div style="font-size:10px;color:var(--text-dim);border-top:1px solid var(--border);padding-top:10px;line-height:1.6">
-      <span style="color:var(--text-secondary);letter-spacing:.05em">MACRO CONTEXT:</span> ${r.market_context}
+      <span style="color:var(--text-secondary);letter-spacing:.05em">MACRO CONTEXT:</span> ${_esc(r.market_context)}
     </div>` : ''}
   `;
 }
@@ -1289,7 +1289,7 @@ async function loadMarkets() {
     view.innerHTML = `
       <div class="panel-grid grid-3" style="margin-bottom:8px">
         ${indices.map(idx => `
-          <div class="panel" style="cursor:pointer" onclick="openResearch('${idx.symbol}')">
+          <div class="panel" style="cursor:pointer" onclick="openResearch('${_esc(idx.symbol)}')">
             <div class="panel-body" style="padding:10px">
               <div class="flex-between">
                 <span style="color:var(--text-dim);font-size:10px">${_esc(idx.label || idx.symbol)}</span>
@@ -1313,7 +1313,7 @@ async function loadMarkets() {
               <tbody>
                 ${(movers.gainers||[]).map((g,i)=>`<tr>
                   <td class="text-dim" style="font-size:10px">${i+1}</td>
-                  <td><span class="col-symbol" onclick="openResearch('${g.symbol}')">${g.symbol}</span></td>
+                  <td><span class="col-symbol" onclick="openResearch('${_esc(g.symbol)}')">${_esc(g.symbol)}</span></td>
                   <td class="col-price">$${fmt.price(g.price)}</td>
                   <td class="col-positive">+$${fmt.price(g.change)}</td>
                   <td class="col-positive">${fmt.pct(g.change_pct)}</td>
@@ -1332,7 +1332,7 @@ async function loadMarkets() {
               <tbody>
                 ${(movers.losers||[]).map((g,i)=>`<tr>
                   <td class="text-dim" style="font-size:10px">${i+1}</td>
-                  <td><span class="col-symbol" onclick="openResearch('${g.symbol}')">${g.symbol}</span></td>
+                  <td><span class="col-symbol" onclick="openResearch('${_esc(g.symbol)}')">${_esc(g.symbol)}</span></td>
                   <td class="col-price">$${fmt.price(g.price)}</td>
                   <td class="col-negative">-$${fmt.price(Math.abs(g.change))}</td>
                   <td class="col-negative">${fmt.pct(g.change_pct)}</td>
@@ -1356,10 +1356,10 @@ async function loadMarkets() {
                 ? `rgba(0,255,159,${intensity/300})`
                 : `rgba(255,51,85,${intensity/300})`;
               const border = pct >= 0 ? `rgba(0,255,159,${intensity/200})` : `rgba(255,51,85,${intensity/200})`;
-              return `<div style="background:${bg};border:1px solid ${border};padding:10px;cursor:pointer;border-radius:2px" onclick="openResearch('${s.symbol}')">
+              return `<div style="background:${bg};border:1px solid ${border};padding:10px;cursor:pointer;border-radius:2px" onclick="openResearch('${_esc(s.symbol)}')">
                 <div style="font-size:10px;color:var(--text-dim)">${_esc(s.sector)}</div>
                 <div style="font-size:16px;font-weight:600;${pct>=0?'color:var(--green)':'color:var(--red)'}">${fmt.pct(pct)}</div>
-                <div style="font-size:10px;color:var(--text-secondary)">${s.symbol} $${fmt.price(s.price)}</div>
+                <div style="font-size:10px;color:var(--text-secondary)">${_esc(s.symbol)} $${fmt.price(s.price)}</div>
               </div>`;
             }).join('')}
           </div>
@@ -1425,8 +1425,8 @@ async function loadResearchFor(symbol) {
       <div class="research-header">
         <div>
           <div class="rh-symbol">${symbol}</div>
-          <div class="rh-name">${fund.name || ''}</div>
-          ${fund.sector ? `<div style="margin-top:4px"><span class="badge badge-blue">${fund.sector}</span> <span class="badge badge-dim">${fund.industry || ''}</span></div>` : ''}
+          <div class="rh-name">${_esc(fund.name || '')}</div>
+          ${fund.sector ? `<div style="margin-top:4px"><span class="badge badge-blue">${_esc(fund.sector)}</span> <span class="badge badge-dim">${_esc(fund.industry || '')}</span></div>` : ''}
         </div>
         <div style="margin-left:auto;text-align:right">
           <div class="rh-price">$${fmt.price(quote.price)}</div>
@@ -1956,7 +1956,7 @@ async function openCryptoResearch(coinId, symbol) {
     view.innerHTML = `
       <div class="research-header">
         <div>
-          <div class="rh-symbol">${coin.symbol}</div>
+          <div class="rh-symbol">${_esc(coin.symbol)}</div>
           <div class="rh-name">${_esc(coin.name)}</div>
           <div style="margin-top:4px"><span class="badge badge-purple">CRYPTO</span> <span class="badge badge-dim">RANK #${coin.market_cap_rank}</span></div>
         </div>
@@ -1970,13 +1970,13 @@ async function openCryptoResearch(coinId, symbol) {
           </div>
         </div>
         <div style="display:flex;flex-direction:column;gap:4px;margin-left:16px">
-          <button class="btn btn-green btn-sm" onclick="quickAddToPortfolio('${coin.symbol}', '${_jesc(coin.name)}', 'crypto')">+ PORTFOLIO</button>
-          <button class="btn btn-blue btn-sm" onclick="quickAddToWatchlist('${coin.symbol}', '${_jesc(coin.name)}')">+ WATCHLIST</button>
+          <button class="btn btn-green btn-sm" onclick="quickAddToPortfolio('${_esc(coin.symbol)}', '${_jesc(coin.name)}', 'crypto')">+ PORTFOLIO</button>
+          <button class="btn btn-blue btn-sm" onclick="quickAddToWatchlist('${_esc(coin.symbol)}', '${_jesc(coin.name)}')">+ WATCHLIST</button>
         </div>
       </div>
 
       <div class="panel" style="margin-bottom:8px">
-        <div class="panel-header"><span class="panel-title">PRICE CHART — ${coin.symbol} / USD</span>
+        <div class="panel-header"><span class="panel-title">PRICE CHART — ${_esc(coin.symbol)} / USD</span>
           <div class="chart-controls" id="crypto-period-btns">
             ${[7,14,30,90,180,365].map(d=>`<button class="chart-btn ${d===90?'active':''}" onclick="loadCryptoChart('${coinId}',${d})">${d}D</button>`).join('')}
           </div>
@@ -2004,7 +2004,7 @@ async function openCryptoResearch(coinId, symbol) {
         <div class="panel">
           <div class="panel-header"><span class="panel-title">ABOUT</span></div>
           <div class="panel-body">
-            <p style="font-size:11px;color:var(--text-secondary);line-height:1.6">${coin.description || 'No description available.'}</p>
+            <p style="font-size:11px;color:var(--text-secondary);line-height:1.6">${_esc(coin.description || 'No description available.')}</p>
           </div>
         </div>
       </div>
@@ -2063,12 +2063,12 @@ async function loadWatchlistView() {
                 const alertLow  = i.alert_low  && i.price <= i.alert_low;
                 return `<tr ${alertHigh || alertLow ? 'style="background:rgba(255,170,0,0.05)"' : ''}>
                   <td>
-                    <span class="col-symbol" onclick="openResearch('${i.symbol}')">${i.symbol}</span>
+                    <span class="col-symbol" onclick="openResearch('${_esc(i.symbol)}')">${_esc(i.symbol)}</span>
                     ${alertHigh ? '<span class="badge badge-amber" style="margin-left:4px">ALERT ▲</span>' : ''}
                     ${alertLow  ? '<span class="badge badge-red" style="margin-left:4px">ALERT ▼</span>' : ''}
                   </td>
-                  <td class="col-name">${i.name || '—'}</td>
-                  <td><span class="badge badge-dim">${i.asset_type}</span></td>
+                  <td class="col-name">${_esc(i.name || '—')}</td>
+                  <td><span class="badge badge-dim">${_esc(i.asset_type)}</span></td>
                   <td class="col-price">${fmt.price(i.price)}</td>
                   <td class="${col.pnl(i.change)}">${fmt.price(i.change)}</td>
                   <td class="${col.pct(i.change_pct)}">${fmt.pct(i.change_pct)}</td>
@@ -2077,8 +2077,8 @@ async function loadWatchlistView() {
                   <td class="col-number ${alertHigh ? 'text-amber' : ''}">${i.alert_high ? '$' + fmt.price(i.alert_high) : '—'}</td>
                   <td class="col-number ${alertLow ? 'text-red' : ''}">${i.alert_low ? '$' + fmt.price(i.alert_low) : '—'}</td>
                   <td class="col-actions">
-                    <button class="btn btn-ghost btn-sm" onclick="openResearch('${i.symbol}')">CHART</button>
-                    <button class="btn btn-red btn-sm" onclick="removeWatchlist(${i.id}, '${i.symbol}')">✕</button>
+                    <button class="btn btn-ghost btn-sm" onclick="openResearch('${_esc(i.symbol)}')">CHART</button>
+                    <button class="btn btn-red btn-sm" onclick="removeWatchlist(${i.id}, '${_esc(i.symbol)}')">✕</button>
                   </td>
                 </tr>`;
               }).join('')}
@@ -2168,14 +2168,14 @@ async function loadTransactions() {
             </tr></thead>
             <tbody>
               ${txns.map(t => `<tr>
-                <td class="text-dim">${t.date || '—'}</td>
-                <td><span class="col-symbol" onclick="openResearch('${t.symbol}')">${t.symbol}</span></td>
+                <td class="text-dim">${_esc(t.date || '—')}</td>
+                <td><span class="col-symbol" onclick="openResearch('${_esc(t.symbol)}')">${_esc(t.symbol)}</span></td>
                 <td><span class="badge ${t.action==='BUY' ? 'badge-green' : 'badge-red'}">${_esc(t.action)}</span></td>
                 <td class="col-number">${fmt.num(t.shares, 4)}</td>
                 <td class="col-number">$${fmt.price(t.price)}</td>
                 <td class="col-number">$${fmt.currency(t.total)}</td>
                 <td class="col-number">${t.fees ? '$' + fmt.num(t.fees) : '—'}</td>
-                <td class="text-dim" style="font-size:10px">${t.notes || ''}</td>
+                <td class="text-dim" style="font-size:10px">${_esc(t.notes || '')}</td>
                 <td class="tx-id">#${String(t.id).padStart(6,'0')}</td>
               </tr>`).join('')}
             </tbody>
@@ -2494,7 +2494,7 @@ async function runScreener() {
             </tr></thead>
             <tbody>
               ${rows.map(q => `<tr>
-                <td><span class="col-symbol" onclick="openResearch('${q.symbol}')">${q.symbol}</span></td>
+                <td><span class="col-symbol" onclick="openResearch('${_esc(q.symbol)}')">${_esc(q.symbol)}</span></td>
                 <td class="col-price">$${fmt.price(q.price)}</td>
                 <td class="${col.pnl(q.change)}">${q.change >= 0 ? '+' : ''}$${fmt.price(q.change)}</td>
                 <td class="${col.pct(q.change_pct)}">${fmt.pct(q.change_pct)}</td>
@@ -2502,8 +2502,8 @@ async function runScreener() {
                 <td class="col-number">$${fmt.price(q.day_low)}</td>
                 <td class="col-number">${fmt.compact(q.market_cap)}</td>
                 <td class="col-actions">
-                  <button class="btn btn-green btn-sm" onclick="quickAddToPortfolio('${q.symbol}', '')">+PORT</button>
-                  <button class="btn btn-blue btn-sm"  onclick="quickAddToWatchlist('${q.symbol}', '')">+WATCH</button>
+                  <button class="btn btn-green btn-sm" onclick="quickAddToPortfolio('${_esc(q.symbol)}', '')">+PORT</button>
+                  <button class="btn btn-blue btn-sm"  onclick="quickAddToWatchlist('${_esc(q.symbol)}', '')">+WATCH</button>
                 </td>
               </tr>`).join('')}
             </tbody>
@@ -2550,8 +2550,8 @@ async function loadAlertsView() {
                   (a.alert_type === 'above' && a.distance_pct < 0) ? 'var(--green)' :
                   (a.alert_type === 'below' && a.distance_pct > 0) ? 'var(--green)' : 'var(--text-dim)';
                 return `<tr>
-                  <td><span class="col-symbol" onclick="openResearch('${a.symbol}')">${a.symbol}</span></td>
-                  <td><span class="badge ${a.alert_type === 'above' ? 'badge-green' : 'badge-red'}">${a.alert_type.toUpperCase()}</span></td>
+                  <td><span class="col-symbol" onclick="openResearch('${_esc(a.symbol)}')">${_esc(a.symbol)}</span></td>
+                  <td><span class="badge ${a.alert_type === 'above' ? 'badge-green' : 'badge-red'}">${_esc(a.alert_type.toUpperCase())}</span></td>
                   <td class="col-number">$${fmt.price(a.price)}</td>
                   <td class="col-number">${a.current_price ? '$' + fmt.price(a.current_price) : '—'}</td>
                   <td class="col-number" style="color:${distColor}">${a.distance_pct !== null ? (a.distance_pct >= 0 ? '+' : '') + a.distance_pct.toFixed(2) + '%' : '—'}</td>
@@ -2572,8 +2572,8 @@ async function loadAlertsView() {
             <thead><tr><th>SYMBOL</th><th>TYPE</th><th style="text-align:right">TARGET</th><th style="text-align:right">TRIGGERED AT</th></tr></thead>
             <tbody>
               ${triggered.map(a => `<tr style="opacity:.7">
-                <td><span class="col-symbol">${a.symbol}</span></td>
-                <td><span class="badge badge-dim">${a.alert_type.toUpperCase()}</span></td>
+                <td><span class="col-symbol">${_esc(a.symbol)}</span></td>
+                <td><span class="badge badge-dim">${_esc(a.alert_type.toUpperCase())}</span></td>
                 <td class="col-number">$${fmt.price(a.price)}</td>
                 <td style="font-size:10px;color:var(--amber)">${fmt.date(a.triggered_at?.slice(0,10))}</td>
               </tr>`).join('')}
@@ -2687,7 +2687,7 @@ async function _pollTriggeredAlerts() {
       if (a.id == null || seen.has(a.id)) continue;
       const dir = a.alert_type === 'above' ? '↑' : '↓';
       const cur = a.current_price != null ? '$' + fmt.price(a.current_price) : '—';
-      Toast.warn(`${dir} ALERT ${a.symbol} @ ${cur} (target $${fmt.price(a.price)})`);
+      Toast.warn(`${dir} ALERT ${_esc(a.symbol)} @ ${cur} (target $${fmt.price(a.price)})`);
       seen.add(a.id);
       dirty = true;
     }
@@ -2798,21 +2798,21 @@ async function loadDividendsView() {
                   const yieldColor = (p.div_yield || 0) > 4 ? 'var(--green)' : (p.div_yield || 0) > 1.5 ? 'var(--amber)' : 'var(--text-secondary)';
                   const yocColor   = (p.yield_on_cost || 0) > (p.div_yield || 0) ? 'var(--green)' : 'var(--text-secondary)';
                   return `<tr>
-                    <td><span class="col-symbol" onclick="openResearch('${p.symbol}')">${p.symbol}</span></td>
-                    <td class="col-name truncate" style="max-width:120px">${p.name || '—'}</td>
+                    <td><span class="col-symbol" onclick="openResearch('${_esc(p.symbol)}')">${_esc(p.symbol)}</span></td>
+                    <td class="col-name truncate" style="max-width:120px">${_esc(p.name || '—')}</td>
                     <td class="col-number" style="color:${yieldColor}">${p.div_yield != null ? p.div_yield.toFixed(2) + '%' : '—'}</td>
                     <td class="col-number" style="color:${yocColor}">${p.yield_on_cost != null ? p.yield_on_cost.toFixed(2) + '%' : '—'}</td>
                     <td class="col-number">$${p.div_rate ? p.div_rate.toFixed(4) : '—'}</td>
                     <td class="col-number col-green">$${fmt.currency(p.annual_income)}</td>
                     <td class="col-number">${p.income_weight != null ? p.income_weight.toFixed(1) + '%' : '—'}</td>
-                    <td style="font-size:10px;color:var(--text-dim)">${p.frequency || '—'}</td>
-                    <td style="font-size:10px;color:${p.ex_date ? 'var(--amber)' : 'var(--text-dim)'}">${p.ex_date || '—'}</td>
+                    <td style="font-size:10px;color:var(--text-dim)">${_esc(p.frequency || '—')}</td>
+                    <td style="font-size:10px;color:${p.ex_date ? 'var(--amber)' : 'var(--text-dim)'}">${_esc(p.ex_date || '—')}</td>
                     <td class="${(p.div_growth_5y || 0) > 0 ? 'col-green' : 'col-red'}">${p.div_growth_5y != null ? (p.div_growth_5y >= 0 ? '+' : '') + p.div_growth_5y.toFixed(1) + '%/yr' : '—'}</td>
                   </tr>`;
                 }).join('')}
                 ${noDivPositions.map(p => `<tr style="opacity:.4">
-                  <td><span class="col-symbol">${p.symbol}</span></td>
-                  <td class="col-name truncate" style="max-width:120px">${p.name || '—'}</td>
+                  <td><span class="col-symbol">${_esc(p.symbol)}</span></td>
+                  <td class="col-name truncate" style="max-width:120px">${_esc(p.name || '—')}</td>
                   <td colspan="8" style="font-size:10px;color:var(--text-dim)">No dividend</td>
                 </tr>`).join('')}
               </tbody>
@@ -2830,7 +2830,7 @@ async function loadDividendsView() {
             const daysUntil = Math.round((new Date(p.ex_date) - new Date()) / 86400000);
             const urgColor = daysUntil <= 7 ? 'var(--red)' : daysUntil <= 30 ? 'var(--amber)' : 'var(--text-dim)';
             return `<div style="display:flex;align-items:center;gap:16px;padding:6px 0;border-bottom:1px solid var(--border)">
-              <span class="col-symbol" style="min-width:60px" onclick="openResearch('${p.symbol}')">${p.symbol}</span>
+              <span class="col-symbol" style="min-width:60px" onclick="openResearch('${_esc(p.symbol)}')">${_esc(p.symbol)}</span>
               <span style="font-size:11px;color:var(--text-secondary);min-width:100px">${fmt.date(p.ex_date)}</span>
               <span style="font-size:10px;color:${urgColor}">${daysUntil <= 0 ? 'PASSED' : daysUntil + 'd away'}</span>
               ${(() => {
@@ -3066,7 +3066,7 @@ function renderStressResults(data) {
         return `
           <div class="stress-card ${isCustom ? 'stress-card-custom' : ''}" onclick="showScenarioDetail('${_jesc(name)}', ${_esc(JSON.stringify(s))})">
             <div style="font-size:10px;color:${isCustom ? 'var(--amber)' : 'var(--blue)'};letter-spacing:.08em;margin-bottom:6px">${name.toUpperCase()}</div>
-            <div style="font-size:11px;color:var(--text-dim);margin-bottom:10px;line-height:1.5">${s.description}</div>
+            <div style="font-size:11px;color:var(--text-dim);margin-bottom:10px;line-height:1.5">${_esc(s.description)}</div>
             <div style="font-size:22px;font-weight:bold;color:${lossColor}">${s.total_loss_pct.toFixed(1)}%</div>
             <div style="font-size:11px;color:var(--text-dim)">portfolio drawdown</div>
             <div style="margin-top:8px;display:flex;justify-content:space-between;font-size:11px">
@@ -3126,8 +3126,8 @@ function showScenarioDetail(name, scenario) {
             ${positions.map(p => {
               const dropColor = p.drop_pct < -30 ? 'var(--red)' : p.drop_pct < -10 ? 'var(--amber)' : p.drop_pct > 0 ? 'var(--green)' : 'var(--text-secondary)';
               return `<tr>
-                <td><span class="col-symbol" onclick="openResearch('${p.symbol}')">${p.symbol}</span></td>
-                <td style="font-size:10px;color:var(--text-dim)">${p.sector || '—'}</td>
+                <td><span class="col-symbol" onclick="openResearch('${_esc(p.symbol)}')">${_esc(p.symbol)}</span></td>
+                <td style="font-size:10px;color:var(--text-dim)">${_esc(p.sector || '—')}</td>
                 <td class="col-number">${p.beta?.toFixed(2) || '—'}</td>
                 <td class="col-number">$${fmt.currency(p.current_value)}</td>
                 <td class="col-number" style="color:${dropColor}">${p.drop_pct >= 0 ? '+' : ''}${p.drop_pct?.toFixed(1)}%</td>
@@ -3214,9 +3214,9 @@ function renderEarningsGrid(events) {
       const beatColor = e.beat_rate >= 75 ? 'var(--green)' : e.beat_rate >= 50 ? 'var(--amber)' : 'var(--red)';
       const urgencyBorder = e.days_until <= 3 ? 'var(--red)' : e.days_until <= 7 ? 'var(--amber)' : 'var(--border)';
       return `
-      <div class="earnings-card" style="border-color:${urgencyBorder}" onclick="loadEarningsDossier('${e.symbol}')">
+      <div class="earnings-card" style="border-color:${urgencyBorder}" onclick="loadEarningsDossier('${_esc(e.symbol)}')">
         <div class="earnings-card-header">
-          <span class="col-symbol" style="font-size:14px">${e.symbol}</span>
+          <span class="col-symbol" style="font-size:14px">${_esc(e.symbol)}</span>
           <span class="earnings-days-badge" style="color:${e.days_until <= 7 ? 'var(--red)' : 'var(--text-dim)'}">
             ${e.days_until === 0 ? 'TODAY' : e.days_until === 1 ? 'TOMORROW' : `${e.days_until}d`}
           </span>
@@ -3290,7 +3290,7 @@ function renderEarningsDossier(panel, d) {
   // History table rows
   const histRows = (d.history || []).map(h => `
     <tr class="${h.beat ? 'insider-buy-row' : 'insider-sell-row'}">
-      <td>${h.date || '—'}</td>
+      <td>${_esc(h.date || '—')}</td>
       <td class="col-number">${h.estimate != null ? '$' + h.estimate.toFixed(2) : '—'}</td>
       <td class="col-number">${h.actual != null ? '$' + h.actual.toFixed(2) : '—'}</td>
       <td class="${h.beat ? 'col-green' : 'col-red'}">${h.surprise_pct != null ? (h.surprise_pct >= 0 ? '+' : '') + h.surprise_pct.toFixed(1) + '%' : '—'}</td>
@@ -3300,7 +3300,7 @@ function renderEarningsDossier(panel, d) {
   // Post-earnings moves
   const moveRows = (d.post_earnings_moves || []).map(m => `
     <tr>
-      <td>${m.date || '—'}</td>
+      <td>${_esc(m.date || '—')}</td>
       <td class="${(m.move_pct || 0) >= 0 ? 'col-green' : 'col-red'}">${m.move_pct != null ? (m.move_pct >= 0 ? '+' : '') + m.move_pct.toFixed(2) + '%' : '—'}</td>
       <td><span style="color:${m.move_pct >= 0 ? 'var(--green)' : 'var(--red)'}">${_esc(m.direction)}</span></td>
     </tr>`).join('');
@@ -3325,11 +3325,11 @@ function renderEarningsDossier(panel, d) {
     <div class="panel" style="margin-top:8px;border-color:var(--green-dim)">
       <div class="panel-header" style="border-bottom:1px solid var(--green-dim)">
         <div class="flex gap-8 align-center">
-          <span class="panel-title" style="color:var(--green)">⚡ ${d.symbol} — ${d.name || d.symbol}</span>
+          <span class="panel-title" style="color:var(--green)">⚡ ${_esc(d.symbol)} — ${_esc(d.name || d.symbol)}</span>
           ${modelBadge}
         </div>
         <div class="flex gap-8 align-center">
-          <button class="btn btn-ghost btn-sm" onclick="loadEarningsDossier('${d.symbol}')">↻ REFRESH</button>
+          <button class="btn btn-ghost btn-sm" onclick="loadEarningsDossier('${_esc(d.symbol)}')">↻ REFRESH</button>
           <button class="btn btn-ghost btn-sm" onclick="document.getElementById('earnings-dossier-panel').innerHTML=''">✕</button>
         </div>
       </div>
@@ -3338,10 +3338,10 @@ function renderEarningsDossier(panel, d) {
         <!-- AI Brief banner -->
         <div style="display:flex;gap:16px;align-items:flex-start;margin-bottom:20px;flex-wrap:wrap">
           <div style="display:flex;flex-direction:column;gap:6px;min-width:160px">
-            <span class="signal-badge ${setupClass}" style="font-size:13px;padding:6px 14px;align-self:flex-start">${b.setup_signal || 'NEUTRAL'}</span>
+            <span class="signal-badge ${setupClass}" style="font-size:13px;padding:6px 14px;align-self:flex-start">${_esc(b.setup_signal || 'NEUTRAL')}</span>
             <div style="display:flex;align-items:center;gap:6px">
               <span style="font-size:10px;color:var(--text-dim)">CONVICTION:</span>
-              <span style="font-size:11px;font-weight:bold;color:${convictionColor}">${b.conviction || '—'}</span>
+              <span style="font-size:11px;font-weight:bold;color:${convictionColor}">${_esc(b.conviction || '—')}</span>
             </div>
             <div style="font-size:10px;color:var(--text-dim)">
               REPORTS: <span style="color:var(--text-primary)">${fmt.date(d.earnings_date)}</span>
@@ -3405,7 +3405,7 @@ function renderEarningsDossier(panel, d) {
                 <div style="font-size:12px;font-weight:bold;color:${ivColor}">${ivLabel}</div>
               </div>
             </div>
-            ${b.options_take ? `<div style="font-size:11px;color:var(--text-dim);margin-top:10px;border-top:1px solid var(--border);padding-top:8px">${b.options_take}</div>` : ''}
+            ${b.options_take ? `<div style="font-size:11px;color:var(--text-dim);margin-top:10px;border-top:1px solid var(--border);padding-top:8px">${_esc(b.options_take)}</div>` : ''}
           </div>
         </div>
 
@@ -3414,10 +3414,10 @@ function renderEarningsDossier(panel, d) {
           <!-- Bull/Bear cases + positioning -->
           <div style="background:var(--bg-secondary);padding:12px;border:1px solid var(--border)">
             <div style="font-size:10px;color:var(--green);letter-spacing:.1em;margin-bottom:8px">POSITIONING ADVICE</div>
-            ${b.positioning_advice ? `<div style="font-size:12px;color:var(--text-primary);margin-bottom:10px;line-height:1.6">${b.positioning_advice}</div>` : ''}
+            ${b.positioning_advice ? `<div style="font-size:12px;color:var(--text-primary);margin-bottom:10px;line-height:1.6">${_esc(b.positioning_advice)}</div>` : ''}
             <div style="display:flex;flex-direction:column;gap:6px">
-              ${b.bull_case ? `<div style="font-size:11px"><span style="color:var(--green)">▲ BULL:</span> <span style="color:var(--text-secondary)">${b.bull_case}</span></div>` : ''}
-              ${b.bear_case ? `<div style="font-size:11px"><span style="color:var(--red)">▼ BEAR:</span> <span style="color:var(--text-secondary)">${b.bear_case}</span></div>` : ''}
+              ${b.bull_case ? `<div style="font-size:11px"><span style="color:var(--green)">▲ BULL:</span> <span style="color:var(--text-secondary)">${_esc(b.bull_case)}</span></div>` : ''}
+              ${b.bear_case ? `<div style="font-size:11px"><span style="color:var(--red)">▼ BEAR:</span> <span style="color:var(--text-secondary)">${_esc(b.bear_case)}</span></div>` : ''}
             </div>
             ${b.key_metrics_to_watch ? `
             <div style="margin-top:10px;border-top:1px solid var(--border);padding-top:8px">
@@ -3432,7 +3432,7 @@ function renderEarningsDossier(panel, d) {
             <div style="display:flex;gap:20px;flex-wrap:wrap;margin-bottom:10px">
               <div>
                 <div style="font-size:10px;color:var(--text-dim)">SIGNAL</div>
-                <div style="font-size:14px;font-weight:bold;color:${insColor}">${ins.signal || 'NEUTRAL'}</div>
+                <div style="font-size:14px;font-weight:bold;color:${insColor}">${_esc(ins.signal || 'NEUTRAL')}</div>
               </div>
               <div>
                 <div style="font-size:10px;color:var(--text-dim)">BUYS</div>
@@ -3492,7 +3492,7 @@ async function loadSettings() {
             </div>
             <div class="form-group">
               <label class="form-label">BENCHMARK SYMBOL</label>
-              <input class="form-input" id="set-benchmark" value="${settings.benchmark || 'SPY'}">
+              <input class="form-input" id="set-benchmark" value="${_esc(settings.benchmark || 'SPY')}">
             </div>
             <div class="form-group">
               <label class="form-label">CURRENCY</label>
@@ -3932,7 +3932,7 @@ async function loadResearchIntelTab(symbol) {
     const cell = (label, obj, money = true) => {
       if (!obj || obj.value == null) return `<div class="kpi-card"><div class="kpi-label">${label}</div><div class="kpi-value text-dim">—</div></div>`;
       const v = money ? '$' + fmt.compact(obj.value) : fmt.num(obj.value);
-      return `<div class="kpi-card"><div class="kpi-label">${label}</div><div class="kpi-value">${v}</div><div class="kpi-sub" style="font-size:9px">${obj.form || ''} · ${obj.end || ''}</div></div>`;
+      return `<div class="kpi-card"><div class="kpi-label">${label}</div><div class="kpi-value">${v}</div><div class="kpi-sub" style="font-size:9px">${_esc(obj.form || '')} · ${_esc(obj.end || '')}</div></div>`;
     };
     xbrlHtml = `
       <div class="kpi-grid" style="grid-template-columns:repeat(auto-fill,minmax(150px,1fr))">
@@ -4728,12 +4728,12 @@ function renderFilingFeed(filings, panel) {
       : '<span class="rule-badge">AUTO</span>';
     return `
       <tr onclick="toggleFilingExpand('fexpand-${idx}')" style="cursor:pointer">
-        <td style="white-space:nowrap;font-size:11px;color:var(--text-dim)">${f.filing_date || '—'}</td>
-        <td><span class="col-symbol" style="cursor:pointer" onclick="event.stopPropagation();openResearch('${f.ticker}')">${f.ticker}</span></td>
-        <td><span class="badge badge-blue">${f.form_type}</span></td>
-        <td style="max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:11px">${f.event_type || f.description || '—'}</td>
-        <td><span class="signal-badge ${sigClass}">${f.signal || 'NEUTRAL'}</span></td>
-        <td style="max-width:260px;font-size:11px;color:var(--text-secondary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${f.summary || '—'}</td>
+        <td style="white-space:nowrap;font-size:11px;color:var(--text-dim)">${_esc(f.filing_date || '—')}</td>
+        <td><span class="col-symbol" style="cursor:pointer" onclick="event.stopPropagation();openResearch('${_esc(f.ticker)}')">${_esc(f.ticker)}</span></td>
+        <td><span class="badge badge-blue">${_esc(f.form_type)}</span></td>
+        <td style="max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:11px">${_esc(f.event_type || f.description || '—')}</td>
+        <td><span class="signal-badge ${sigClass}">${_esc(f.signal || 'NEUTRAL')}</span></td>
+        <td style="max-width:260px;font-size:11px;color:var(--text-secondary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${_esc(f.summary || '—')}</td>
         <td>
           ${aiBadge}
           <button class="btn btn-ghost btn-sm" style="margin-left:4px" onclick="event.stopPropagation();toggleFilingExpand('fexpand-${idx}')">ANALYZE</button>
@@ -4751,7 +4751,7 @@ function renderFilingFeed(filings, panel) {
             </div>
             <div style="flex:2">
               <div style="font-size:10px;color:var(--text-dim);margin-bottom:4px">SUMMARY</div>
-              <div style="font-size:11px;color:var(--text-secondary);line-height:1.6">${f.summary || '—'}</div>
+              <div style="font-size:11px;color:var(--text-secondary);line-height:1.6">${_esc(f.summary || '—')}</div>
             </div>
             <div>
               <a href="${f.filing_url}" target="_blank" rel="noopener" class="btn btn-ghost btn-sm">VIEW FILING ↗</a>
@@ -4847,8 +4847,8 @@ function renderInsiders(data, panel, symbol) {
   const sigClass = 'signal-' + (pattern.signal || 'neutral').toLowerCase();
   const patternBar = `
     <div class="insider-pattern-bar">
-      <span class="signal-badge ${sigClass}">${pattern.signal || 'NEUTRAL'}</span>
-      <span style="flex:1;color:var(--text-secondary)">${pattern.summary || '—'}</span>
+      <span class="signal-badge ${sigClass}">${_esc(pattern.signal || 'NEUTRAL')}</span>
+      <span style="flex:1;color:var(--text-secondary)">${_esc(pattern.summary || '—')}</span>
       ${pattern.buy_value ? `<span style="color:var(--green);font-size:10px">BUY: $${fmt.compact(pattern.buy_value)}</span>` : ''}
       ${pattern.sell_value ? `<span style="color:var(--red);font-size:10px">SELL: $${fmt.compact(pattern.sell_value)}</span>` : ''}
       ${pattern.ai_powered ? '<span class="ai-badge">AI ANALYSIS</span>' : '<span class="rule-badge">AUTO</span>'}
@@ -4866,11 +4866,11 @@ function renderInsiders(data, panel, symbol) {
     const actionCls = isBuy ? 'col-positive' : 'col-negative';
     return `
       <tr class="${rowCls}">
-        <td style="font-size:11px;color:var(--text-dim)">${t.date || '—'}</td>
-        <td style="font-size:11px">${t.insider_name || '—'}</td>
+        <td style="font-size:11px;color:var(--text-dim)">${_esc(t.date || '—')}</td>
+        <td style="font-size:11px">${_esc(t.insider_name || '—')}</td>
         <td style="font-size:10px;color:var(--text-dim)">${t.title || (t.is_director ? 'Director' : t.is_officer ? 'Officer' : '—')}</td>
-        <td><span class="${actionCls}" style="font-weight:700;font-size:11px">${t.transaction_type}</span></td>
-        <td style="font-size:11px">${t.security || 'Common Stock'}</td>
+        <td><span class="${actionCls}" style="font-weight:700;font-size:11px">${_esc(t.transaction_type)}</span></td>
+        <td style="font-size:11px">${_esc(t.security || 'Common Stock')}</td>
         <td style="font-size:11px;text-align:right">${t.shares ? fmt.compact(t.shares) : '—'}</td>
         <td style="font-size:11px;text-align:right">${t.price ? '$' + fmt.price(t.price) : '—'}</td>
         <td style="font-size:11px;text-align:right;color:${isBuy ? 'var(--green)' : 'var(--red)'}">${t.value ? '$' + fmt.compact(t.value) : '—'}</td>
@@ -4985,7 +4985,7 @@ function showFundHoldings(fundName, idx) {
       <div class="panel-body" style="display:flex;flex-wrap:wrap;gap:8px">
         ${overlapItems.map(h => `
           <div style="background:var(--bg-elevated);border:1px solid var(--amber-dim);padding:6px 10px;border-radius:2px">
-            <div style="font-size:11px;font-weight:700;color:var(--amber)">${h.portfolio_symbol}</div>
+            <div style="font-size:11px;font-weight:700;color:var(--amber)">${_esc(h.portfolio_symbol)}</div>
             <div style="font-size:10px;color:var(--text-dim)">${_esc(h.name)}</div>
             <div style="font-size:10px;color:var(--text-primary)">$${fmt.compact(h.value_usd)}</div>
             <div style="font-size:10px;color:var(--text-dim)">${fmt.num(h.pct_of_portfolio)}% of fund</div>
@@ -5000,7 +5000,7 @@ function showFundHoldings(fundName, idx) {
     return `
       <tr class="${isOverlap ? 'overlap-highlight' : ''}">
         <td style="font-size:11px;color:var(--text-dim)">${i + 1}</td>
-        <td style="font-size:11px;font-weight:600">${h.name || '—'}</td>
+        <td style="font-size:11px;font-weight:600">${_esc(h.name || '—')}</td>
         <td style="font-size:11px;text-align:right">$${fmt.compact(h.value_usd)}</td>
         <td style="font-size:11px;text-align:right">${h.shares ? fmt.compact(h.shares) : '—'}</td>
         <td style="font-size:11px;text-align:right;color:var(--text-dim)">${fmt.num(h.pct_of_portfolio)}%</td>
@@ -5013,7 +5013,7 @@ function showFundHoldings(fundName, idx) {
     <div class="panel">
       <div class="panel-header">
         <span class="panel-title">TOP HOLDINGS — ${fundName}</span>
-        <span style="font-size:10px;color:var(--text-dim)">Period: ${fd.period_of_report || '—'} | AUM: $${fmt.compact(fd.total_value)}</span>
+        <span style="font-size:10px;color:var(--text-dim)">Period: ${_esc(fd.period_of_report || '—')} | AUM: $${fmt.compact(fd.total_value)}</span>
       </div>
       <div style="overflow-x:auto">
         <table class="data-table">
@@ -5051,13 +5051,13 @@ async function loadResearchSecTab(symbol) {
         return `
           <div style="padding:8px;border-bottom:1px solid var(--border)">
             <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px">
-              <span class="badge badge-blue">${f.form_type}</span>
+              <span class="badge badge-blue">${_esc(f.form_type)}</span>
               <span class="signal-badge ${sigClass}">${_esc(f.signal)}</span>
-              <span style="font-size:10px;color:var(--text-dim)">${f.filing_date}</span>
+              <span style="font-size:10px;color:var(--text-dim)">${_esc(f.filing_date)}</span>
               ${f.ai_powered ? '<span class="ai-badge">AI</span>' : ''}
               <a href="${f.filing_url}" target="_blank" rel="noopener" style="font-size:10px;color:var(--blue);margin-left:auto">VIEW ↗</a>
             </div>
-            <div style="font-size:11px;color:var(--text-secondary)">${f.summary || f.description || '—'}</div>
+            <div style="font-size:11px;color:var(--text-secondary)">${_esc(f.summary || f.description || '—')}</div>
           </div>
         `;
       }).join('');
@@ -5076,10 +5076,10 @@ async function loadResearchSecTab(symbol) {
         return `
           <div style="padding:6px 8px;border-bottom:1px solid var(--border);border-left:3px solid ${isBuy ? 'var(--green)' : 'var(--red)'}">
             <div style="display:flex;justify-content:space-between;font-size:11px">
-              <span style="font-weight:600">${t.insider_name}</span>
-              <span class="${isBuy ? 'col-positive' : 'col-negative'}" style="font-weight:700">${t.transaction_type}</span>
+              <span style="font-weight:600">${_esc(t.insider_name)}</span>
+              <span class="${isBuy ? 'col-positive' : 'col-negative'}" style="font-weight:700">${_esc(t.transaction_type)}</span>
             </div>
-            <div style="font-size:10px;color:var(--text-dim)">${t.title || ''} &bull; ${t.date}</div>
+            <div style="font-size:10px;color:var(--text-dim)">${_esc(t.title || '')} &bull; ${_esc(t.date)}</div>
             <div style="font-size:11px">${t.shares ? fmt.compact(t.shares) + ' shares' : ''} ${t.price ? '@ $' + fmt.price(t.price) : ''} ${t.value ? '= $' + fmt.compact(t.value) : ''}</div>
           </div>
         `;
@@ -5299,8 +5299,8 @@ function buildSignalCard(s) {
     <div class="smart-money-card">
       <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:10px">
         <div>
-          <div style="font-size:15px;font-weight:700;color:var(--text-primary)">${s.symbol}</div>
-          <div style="font-size:10px;color:var(--text-dim);max-width:140px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${s.name || ''}</div>
+          <div style="font-size:15px;font-weight:700;color:var(--text-primary)">${_esc(s.symbol)}</div>
+          <div style="font-size:10px;color:var(--text-dim);max-width:140px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${_esc(s.name || '')}</div>
           <div style="margin-top:6px">
             <span class="signal-badge ${signalColors[s.signal] || ''}" style="font-size:11px">${_esc(s.signal)}</span>
             <span class="sm-track-badge" data-signal="smart_money" style="margin-left:6px"></span>
@@ -5311,7 +5311,7 @@ function buildSignalCard(s) {
       </div>
       <div style="margin-top:4px">${bars}</div>
       <div style="margin-top:8px;border-top:1px solid var(--border);padding-top:8px">
-        <button class="btn btn-ghost btn-sm" style="width:100%;font-size:10px" onclick="toggleMLPanel('${cardId}', '${s.symbol}')">
+        <button class="btn btn-ghost btn-sm" style="width:100%;font-size:10px" onclick="toggleMLPanel('${cardId}', '${_esc(s.symbol)}')">
           ⚡ ML FORECAST DETAIL ▾
         </button>
         <div id="${cardId}" class="ml-detail-panel" style="display:none;margin-top:8px"></div>
@@ -5392,7 +5392,7 @@ function renderMLForecastPanel(data) {
   const featBars = feats.map(f => {
     const pct = Math.round((f.importance / maxImp) * 100);
     return `<div style="display:flex;align-items:center;gap:6px;margin-bottom:3px">
-      <span style="font-size:9px;color:var(--text-dim);width:80px;text-align:right;flex-shrink:0">${f.name}</span>
+      <span style="font-size:9px;color:var(--text-dim);width:80px;text-align:right;flex-shrink:0">${_esc(f.name)}</span>
       <div style="flex:1;height:4px;background:var(--border);border-radius:2px;overflow:hidden">
         <div style="width:${pct}%;height:100%;background:var(--cyan, #0ff);border-radius:2px"></div>
       </div>
@@ -5476,7 +5476,7 @@ function renderMLForecastPanel(data) {
         </div>
         <div class="ml-stat-box">
           <div class="ml-stat-label">TREND</div>
-          <div class="ml-stat-value" style="color:${(trend.trend_short || '') === 'UP' ? 'var(--green)' : 'var(--red)'}">${trend.trend_short || 'N/A'}</div>
+          <div class="ml-stat-value" style="color:${(trend.trend_short || '') === 'UP' ? 'var(--green)' : 'var(--red)'}">${_esc(trend.trend_short || 'N/A')}</div>
           <div class="ml-stat-sub">${trend.trends_aligned ? 'Trends aligned' : 'Mixed signals'}</div>
         </div>
       </div>
@@ -5963,7 +5963,7 @@ function renderCongressView(data) {
     <tr>
       <td style="font-size:10px;color:var(--text-dim)">${t.txn_date || '—'}</td>
       <td style="font-weight:700;color:var(--green);cursor:pointer" onclick="filterCongressByTicker('${_esc(t.ticker)}')">${_esc(t.ticker)}</td>
-      <td><span class="signal-badge ${txnTypeColor(t.txn_type)}" style="font-size:9px">${t.txn_type}</span></td>
+      <td><span class="signal-badge ${txnTypeColor(t.txn_type)}" style="font-size:9px">${_esc(t.txn_type)}</span></td>
       <td style="font-size:10px">${t.amount_str || '—'}</td>
       <td style="font-size:10px;color:var(--text-secondary)">${_esc(t.member_name)}</td>
       <td style="font-size:10px;color:var(--text-dim)">${t.state || ''}</td>
@@ -6005,7 +6005,7 @@ function renderCongressView(data) {
               return `<tr>
                 <td style="font-weight:700;color:var(--green);cursor:pointer" onclick="filterCongressByTicker('${_esc(t.ticker)}')">${_esc(t.ticker)}</td>
                 <td>${t.total_trades}</td><td class="col-positive">${t.buys}</td><td class="col-negative">${t.sells}</td>
-                <td>${t.buy_pct}%</td><td>${t.member_count}</td><td style="color:var(--text-dim)">${t.latest_date}</td>
+                <td>${t.buy_pct}%</td><td>${t.member_count}</td><td style="color:var(--text-dim)">${_esc(t.latest_date)}</td>
                 <td><span class="signal-badge ${sentColor}">${_esc(t.sentiment)}</span></td>
               </tr>`;
             }).join('')}
@@ -6037,7 +6037,7 @@ function filterCongressByTicker(ticker) {
       <tr>
         <td style="font-size:10px;color:var(--text-dim)">${t.txn_date || '—'}</td>
         <td style="font-weight:700;color:var(--green)">${_esc(t.ticker)}</td>
-        <td><span class="signal-badge ${txnTypeColor(t.txn_type)}" style="font-size:9px">${t.txn_type}</span></td>
+        <td><span class="signal-badge ${txnTypeColor(t.txn_type)}" style="font-size:9px">${_esc(t.txn_type)}</span></td>
         <td style="font-size:10px">${t.amount_str || '—'}</td>
         <td style="font-size:10px;color:var(--text-secondary)">${_esc(t.member_name)}</td>
         <td style="font-size:10px;color:var(--text-dim)">${t.state || ''}</td>

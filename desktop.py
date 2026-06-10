@@ -195,8 +195,13 @@ def _check_for_updates(window) -> None:
 
 def _port_in_use(port: int, host: str = "127.0.0.1") -> bool:
     s = socket.socket()
+    s.settimeout(0.5)
     try:
         return s.connect_ex((host, port)) == 0
+    except OSError:
+        # A transient socket/DNS error during the startup poll shouldn't crash
+        # the launcher — treat it as "not yet up" and let the caller retry.
+        return False
     finally:
         s.close()
 
