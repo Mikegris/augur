@@ -216,6 +216,36 @@ def test_xss_escaping_intact():
           "' + e.message + '" not in src)
 
 
+# ── 18. Alt-data social pulse: composite math + graceful per-source failure ──
+def test_alt_social_pulse():
+    import app
+    # Composite math (offline).
+    comp = app._social_composite({
+        "stocktwits": {"status": "live", "messages_total": 30, "bull_ratio": 0.75},
+        "hackernews": {"status": "live", "mention_count": 25, "stats": {"avg_polarity": 0.12}},
+        "wikipedia": {"status": "live", "stats": {"spike_pct_vs_baseline": 40}},
+    })
+    check("social buzz score in 0-100",
+          comp["buzz_score"] is not None and 0 <= comp["buzz_score"] <= 100)
+    check("social sentiment label BULLISH on bullish inputs",
+          comp["sentiment_label"] == "BULLISH")
+    # Route stays 200 + honest Reddit even when every source raises (no network).
+    boom = lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom"))
+    app.alt_signals.stocktwits_symbol_sentiment = boom
+    if getattr(app, "hn_sentiment", None):
+        app.hn_sentiment.fetch_mentions = boom
+    if getattr(app, "wiki_attention", None):
+        app.wiki_attention.fetch_pageviews = boom
+    r = app.app.test_client().get("/api/alt-data/social/AAPL")
+    d = r.get_json()
+    check("social route 200 even when sources error",
+          r.status_code == 200 and r.is_json)
+    check("erroring source flagged, not crashed",
+          d.get("sources", {}).get("stocktwits", {}).get("status") == "error")
+    check("reddit honestly marked unavailable",
+          d.get("reddit", {}).get("status") == "unavailable")
+
+
 # ── 17. safe_executor falls back to serial on thread exhaustion ──────────────
 def test_safe_executor_thread_exhaustion():
     import concurrent.futures as cf
@@ -278,6 +308,7 @@ def main():
         ("chart date adapter present", test_chart_date_adapter_present),
         ("yahoo UA not blocked", test_yahoo_ua_not_blocked),
         ("safe_executor thread exhaustion", test_safe_executor_thread_exhaustion),
+        ("alt-data social pulse", test_alt_social_pulse),
     ]
     for title, fn in tests:
         print("── %s" % title)

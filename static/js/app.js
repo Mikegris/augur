@@ -7384,9 +7384,9 @@ async function loadLiquidityData() {
 async function loadAltDataView() {
   var view = document.getElementById('view-alt-data');
   view.innerHTML = '<div class="panel">'
-    + '<div class="panel-header"><span class="panel-title">REVENUE NOWCASTING</span></div>'
+    + '<div class="panel-header"><span class="panel-title">REVENUE NOWCAST + SOCIAL PULSE</span></div>'
     + '<div class="panel-body">'
-    + '<p style="color:var(--text-secondary);font-size:11px;margin-bottom:12px">Alternative data earnings surprise predictor</p>'
+    + '<p style="color:var(--text-secondary);font-size:11px;margin-bottom:12px">Alt-data earnings-surprise predictor, plus a live per-symbol <b>Social Pulse</b> — StockTwits sentiment, Hacker News chatter, and Wikipedia attention.</p>'
     + '<div style="display:flex;gap:8px;align-items:center;margin-bottom:12px;flex-wrap:wrap">'
     + '<input id="altdata-symbol" type="text" class="form-input" placeholder="Symbol..." style="width:120px" onkeydown="if(event.key===\'Enter\')nowcastAltData()" />'
     + '<button class="btn btn-green" onclick="nowcastAltData()">NOWCAST</button>'
@@ -7453,9 +7453,134 @@ async function nowcastAltData(sym) {
       html += '</tbody></table></div></div>';
     }
 
-    results.innerHTML = html;
+    // Per-symbol SOCIAL PULSE (StockTwits + Hacker News + Wikipedia) — this is
+    // the live social data for the looked-up symbol, rendered below the nowcast.
+    results.innerHTML = html + '<div id="altdata-social"></div>';
+    renderSocialPulse(symbol);
   } catch (e) {
     results.innerHTML = '<div class="empty-state"><span class="col-negative">Error: ' + _esc(e.message) + '</span></div>';
+  }
+}
+
+// Status badge for a social source.
+function _socialBadge(status) {
+  var map = {
+    live:        ['● LIVE', 'var(--green)'],
+    ratelimited: ['◐ RATE-LIMITED', 'var(--amber, #f0a020)'],
+    quiet:       ['○ QUIET', 'var(--text-dim)'],
+    unavailable: ['✕ UNAVAILABLE', 'var(--text-dim)'],
+    error:       ['✕ ERROR', 'var(--red, #ff4444)'],
+  };
+  var m = map[status] || ['—', 'var(--text-dim)'];
+  return '<span style="font-size:9px;font-weight:700;color:' + m[1] + '">' + m[0] + '</span>';
+}
+
+// Tiny inline bar sparkline from [{date,views}] (Wikipedia pageviews).
+function _miniSparkline(points, color) {
+  if (!points || !points.length) return '';
+  var vals = points.map(function (p) { return p.views || 0; });
+  var max = Math.max.apply(null, vals) || 1, min = Math.min.apply(null, vals);
+  var span = (max - min) || 1;
+  var bars = vals.map(function (v) {
+    var h = 3 + Math.round((v - min) / span * 21);  // 3..24px
+    return '<div title="' + _esc(String(v)) + '" style="flex:1;height:' + h + 'px;background:' + color + ';opacity:.55;border-radius:1px"></div>';
+  }).join('');
+  return '<div style="display:flex;align-items:flex-end;gap:1px;height:24px;margin-top:4px">' + bars + '</div>';
+}
+
+async function renderSocialPulse(symbol) {
+  var el = document.getElementById('altdata-social');
+  if (!el) return;
+  el.innerHTML = '<div class="panel mt-8"><div class="panel-body"><div class="loading"><div class="spinner"></div> Pulling social signals for ' + _esc(symbol) + '...</div></div></div>';
+  try {
+    var d = await API.get('/api/alt-data/social/' + symbol);
+    if (d.error) throw new Error(d.error);
+    var comp = d.composite || {};
+    var src = d.sources || {};
+    var st = src.stocktwits || {}, hn = src.hackernews || {}, wk = src.wikipedia || {};
+
+    // ── Composite KPI row ──────────────────────────────────────────────
+    var buzz = comp.buzz_score;
+    var buzzColor = buzz == null ? 'var(--text-dim)' : buzz >= 70 ? 'var(--green)' : buzz >= 40 ? 'var(--amber,#f0a020)' : 'var(--text-secondary)';
+    var sentLabel = comp.sentiment_label || '—';
+    var sentColor = sentLabel === 'BULLISH' ? 'var(--green)' : sentLabel === 'BEARISH' ? 'var(--red,#ff4444)' : 'var(--text-dim)';
+    var spike = comp.spike_pct;
+    var spikeColor = spike == null ? 'var(--text-dim)' : spike > 15 ? 'var(--green)' : spike < -15 ? 'var(--red,#ff4444)' : 'var(--text-secondary)';
+
+    var html = '<div class="panel mt-8"><div class="panel-header"><span class="panel-title">SOCIAL PULSE — ' + _esc(symbol) + '</span>'
+      + '<span style="font-size:9px;color:var(--text-dim);margin-left:8px">' + _esc(comp.sources_live || 0) + '/3 sources live · StockTwits · Hacker News · Wikipedia</span></div>'
+      + '<div class="panel-body">'
+      + '<div class="kpi-grid" style="display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:16px">'
+      + '<div class="kpi-card"><div class="form-label">Social Buzz</div><div style="font-size:22px;font-weight:800;color:' + buzzColor + '">' + (buzz != null ? buzz : '—') + '</div>'
+      + '<div style="height:5px;background:var(--bg-secondary);border-radius:3px;margin-top:4px;overflow:hidden"><div style="height:100%;width:' + (buzz || 0) + '%;background:' + buzzColor + '"></div></div></div>'
+      + '<div class="kpi-card"><div class="form-label">Social Sentiment</div><div style="font-size:16px;font-weight:700;color:' + sentColor + ';margin-top:4px">' + _esc(sentLabel) + '</div><div style="font-size:9px;color:var(--text-dim)">' + (comp.sentiment != null ? (comp.sentiment >= 0 ? '+' : '') + comp.sentiment : '—') + '</div></div>'
+      + '<div class="kpi-card"><div class="form-label">Wiki Attention</div><div style="font-size:18px;font-weight:700;color:' + spikeColor + '">' + (spike != null ? (spike >= 0 ? '+' : '') + spike + '%' : '—') + '</div><div style="font-size:9px;color:var(--text-dim)">vs 7d baseline</div></div>'
+      + '<div class="kpi-card"><div class="form-label">HN Mentions</div><div style="font-size:18px;font-weight:700">' + _esc(hn.mention_count != null ? hn.mention_count : '—') + '</div><div style="font-size:9px;color:var(--text-dim)">7-day window</div></div>'
+      + '</div>';
+
+    // ── StockTwits sentiment + sample messages ─────────────────────────
+    html += '<div class="panel mb-8"><div class="panel-header"><span class="panel-title">STOCKTWITS</span> ' + _socialBadge(st.status) + '</div><div class="panel-body">';
+    if (st.status === 'live') {
+      var bull = st.bullish || 0, bear = st.bearish || 0, tot = bull + bear;
+      var bullPct = tot ? Math.round(bull / tot * 100) : 50;
+      html += '<div style="display:flex;justify-content:space-between;font-size:11px;margin-bottom:4px"><span style="color:var(--green)">▲ ' + bull + ' bullish</span>'
+        + '<span style="color:var(--text-dim)">' + _esc(st.messages_total || 0) + ' msgs</span>'
+        + '<span style="color:var(--red,#ff4444)">' + bear + ' bearish ▼</span></div>'
+        + '<div style="height:10px;background:var(--red,#ff4444);border-radius:5px;overflow:hidden;margin-bottom:12px"><div style="height:100%;width:' + bullPct + '%;background:var(--green)"></div></div>';
+      var samples = st.sample || [];
+      for (var i = 0; i < samples.length; i++) {
+        var m = samples[i];
+        var sc = m.sentiment === 'Bullish' ? 'var(--green)' : m.sentiment === 'Bearish' ? 'var(--red,#ff4444)' : 'var(--text-dim)';
+        html += '<div style="border-left:2px solid ' + sc + ';padding:4px 8px;margin-bottom:6px;background:var(--bg-secondary);border-radius:0 3px 3px 0">'
+          + '<div style="font-size:11px;color:var(--text-secondary)">' + _esc(m.body || '') + '</div>'
+          + '<div style="font-size:9px;color:var(--text-dim);margin-top:2px">@' + _esc(m.user || '?') + (m.sentiment ? ' · <span style="color:' + sc + '">' + _esc(m.sentiment) + '</span>' : '') + '</div></div>';
+      }
+    } else if (st.status === 'ratelimited') {
+      html += '<div style="font-size:11px;color:var(--amber,#f0a020)">StockTwits is rate-limiting (~200 req/hr unauthenticated). Try again shortly.</div>';
+    } else {
+      html += '<div style="font-size:11px;color:var(--text-dim)">No recent StockTwits sentiment for ' + _esc(symbol) + '.</div>';
+    }
+    html += '</div></div>';
+
+    // ── Wikipedia attention with sparkline ─────────────────────────────
+    html += '<div class="panel mb-8"><div class="panel-header"><span class="panel-title">WIKIPEDIA ATTENTION</span> ' + _socialBadge(wk.status) + '</div><div class="panel-body">';
+    if (wk.status === 'live') {
+      var ws = wk.stats || {};
+      html += '<div style="display:flex;justify-content:space-between;font-size:11px;color:var(--text-secondary)">'
+        + '<span>Latest: <b>' + _esc((ws.latest != null ? ws.latest.toLocaleString('en-US') : '—')) + '</b> views/day</span>'
+        + '<span>7d baseline: ' + _esc((ws.baseline_7d != null ? Math.round(ws.baseline_7d).toLocaleString('en-US') : '—')) + '</span></div>'
+        + _miniSparkline(wk.points, 'var(--blue)')
+        + (wk.article_url ? '<div style="margin-top:6px"><a href="' + _esc(wk.article_url) + '" target="_blank" rel="noopener" style="font-size:10px;color:var(--blue)">' + _esc(wk.article || 'article') + ' ↗</a></div>' : '');
+    } else {
+      html += '<div style="font-size:11px;color:var(--text-dim)">Wikipedia attention unavailable for ' + _esc(symbol) + '.</div>';
+    }
+    html += '</div></div>';
+
+    // ── Hacker News mentions ───────────────────────────────────────────
+    html += '<div class="panel mb-8"><div class="panel-header"><span class="panel-title">HACKER NEWS</span> ' + _socialBadge(hn.status) + '</div><div class="panel-body">';
+    if (hn.status === 'live' && (hn.mention_count || 0) > 0) {
+      var hs = hn.stats || {};
+      var np = hs.net_polarity;
+      var npColor = np == null ? 'var(--text-dim)' : np > 0 ? 'var(--green)' : np < 0 ? 'var(--red,#ff4444)' : 'var(--text-dim)';
+      html += '<div style="font-size:11px;color:var(--text-secondary);margin-bottom:6px">' + _esc(hn.mention_count) + ' mentions · net polarity <span style="color:' + npColor + ';font-weight:700">' + (np != null ? (np >= 0 ? '+' : '') + np : '—') + '</span> (' + _esc(hs.positive_count || 0) + '▲ / ' + _esc(hs.negative_count || 0) + '▼)</div>';
+      var hm = hn.mentions || [];
+      for (var j = 0; j < Math.min(hm.length, 4); j++) {
+        var it = hm[j];
+        html += '<div style="font-size:10px;margin-bottom:3px">' + (it.url ? '<a href="' + _esc(it.url) + '" target="_blank" rel="noopener" style="color:var(--blue)">' : '<span style="color:var(--text-secondary)">') + _esc((it.title || it.text || '').slice(0, 110)) + (it.url ? ' ↗</a>' : '</span>') + '</div>';
+      }
+    } else {
+      html += '<div style="font-size:11px;color:var(--text-dim)">No Hacker News chatter on ' + _esc(symbol) + ' in the last 7 days.</div>';
+    }
+    html += '</div></div>';
+
+    // ── Reddit honest status ───────────────────────────────────────────
+    var rd = d.reddit || {};
+    html += '<div style="font-size:10px;color:var(--text-dim);padding:6px 2px">REDDIT ' + _socialBadge(rd.status) + ' — ' + _esc(rd.note || '') + '</div>';
+
+    html += '</div></div>';
+    el.innerHTML = html;
+  } catch (e) {
+    el.innerHTML = '<div class="panel mt-8"><div class="panel-body"><span class="col-negative" style="font-size:11px">Social pulse unavailable: ' + _esc(e.message) + '</span></div></div>';
   }
 }
 
@@ -7745,7 +7870,7 @@ const DataPanels = {
           <div class="panel">
             <div class="panel-header"><span class="panel-title">REDDIT TICKER MENTIONS — WSB / stocks / investing</span></div>
             <table class="data-table"><thead><tr><th>Ticker</th><th>Mentions</th><th>Σ Karma</th><th>Sample</th></tr></thead>
-              <tbody>${redditRows || '<tr><td colspan="4" class="empty-state">No mentions found</td></tr>'}</tbody></table>
+              <tbody>${redditRows || '<tr><td colspan="4" class="empty-state" style="font-size:10px;line-height:1.5">Reddit\'s public JSON API now returns HTTP&nbsp;403 to apps (OAuth data host is IP-blocked too), so ticker mentions are unavailable.<br>Live social data flows via the per-symbol <b>Social Pulse</b> (StockTwits · Hacker News · Wikipedia) — enter a symbol above.</td></tr>'}</tbody></table>
           </div>
           <div class="panel">
             <div class="panel-header"><span class="panel-title">STOCKTWITS TRENDING</span></div>
