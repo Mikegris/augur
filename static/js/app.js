@@ -101,25 +101,35 @@ const col = {
 };
 
 // ── API helper ────────────────────────────────────────────────────────────────
+// Surface the server's JSON {"error": ...} message on a non-2xx instead of a
+// bare "HTTP 400" — routes return helpful messages (e.g. "Rate limited. Try
+// after a while.") that were being discarded, leaving users with an opaque code.
+async function _apiError(r) {
+  try {
+    const d = await r.json();
+    if (d && d.error) return new Error(d.error);
+  } catch (_) { /* non-JSON body */ }
+  return new Error(`HTTP ${r.status}`);
+}
 const API = {
   async get(path) {
     const r = await fetch(path);
-    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    if (!r.ok) throw await _apiError(r);
     return r.json();
   },
   async post(path, body) {
     const r = await fetch(path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
-    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    if (!r.ok) throw await _apiError(r);
     return r.json();
   },
   async del(path) {
     const r = await fetch(path, { method: 'DELETE' });
-    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    if (!r.ok) throw await _apiError(r);
     return r.json();
   },
   async put(path, body) {
     const r = await fetch(path, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
-    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    if (!r.ok) throw await _apiError(r);
     return r.json();
   },
 };
@@ -316,6 +326,19 @@ const State = {
   settings: {},
   accounts: [],
 };
+
+// Expose the core helpers on `window`. They're declared with `const` (script
+// scope), so they are NOT automatically properties of `window`. Several feature
+// modules (research_montecarlo, research_probforecast, synth_consensus/peerdiv/
+// divmap/whatif/sectorflow, research_factors) are IIFEs invoked as `(window)`
+// and read `global.API` / `global.State` / `global.fmt` / `global.Toast` — which
+// were silently undefined, crashing those panels (e.g. Monte Carlo:
+// "undefined is not an object (global.API.get)"). Publishing them here fixes
+// every such module at once. (Chart is already global via its UMD bundle.)
+window.API = API;
+window.State = State;
+window.fmt = fmt;
+window.Toast = Toast;
 
 // ── Navigation ────────────────────────────────────────────────────────────────
 // Five top-level groups, each fans out to its full feature set via a
@@ -7200,7 +7223,12 @@ async function detectReflexivity(sym) {
     var data = await API.get('/api/reflexivity/' + symbol);
     if (data.error) throw new Error(data.error);
 
-    var activeLoops = data.active_loops != null ? data.active_loops : 0;
+    // Backend returns active_loops as an ARRAY of loop objects (+ a loop_count).
+    // Use the count for the KPI; render the array as text would show
+    // "[object Object],[object Object]".
+    var loopList = Array.isArray(data.active_loops) ? data.active_loops : [];
+    var activeLoops = data.loop_count != null ? data.loop_count
+                      : loopList.filter(function (l) { return l && l.detected; }).length;
     var maxStrength = data.max_strength != null ? data.max_strength : 0;
     var dominant = data.dominant_loop || '—';
     var overallRisk = (data.overall_risk || 'LOW').toUpperCase();
@@ -7223,7 +7251,14 @@ async function detectReflexivity(sym) {
       {key: 'index_inclusion', label: 'INDEX INCLUSION'},
       {key: 'short_squeeze', label: 'SHORT SQUEEZE'}
     ];
-    var loops = data.loops || data.feedback_loops || {};
+    // Index the active_loops array by its `type` field so the per-type cards
+    // populate (the old code read data.loops[key], but the backend sends an
+    // array under active_loops, so every card showed "Detected: NO").
+    var loops = data.loops || data.feedback_loops || null;
+    if (!loops) {
+      loops = {};
+      loopList.forEach(function (l) { if (l && l.type) loops[l.type] = l; });
+    }
 
     html += '<div style="display:grid;grid-template-columns:repeat(2,1fr);gap:12px;margin-bottom:16px">';
     for (var i = 0; i < loopTypes.length; i++) {

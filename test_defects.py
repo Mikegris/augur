@@ -216,6 +216,43 @@ def test_xss_escaping_intact():
           "' + e.message + '" not in src)
 
 
+# ── 19. Research/Alpha tab fixes: window globals, API errors, reflexivity ────
+def test_research_alpha_fixes():
+    base = os.path.dirname(__file__)
+    appjs = open(os.path.join(base, "static/js/app.js")).read()
+    # (a) Core helpers exposed on window so global.API-style modules (Monte
+    #     Carlo, whatif, probforecast, consensus, peerdiv, divmap, factors,
+    #     sectorflow) stop crashing with "global.API is undefined".
+    check("window.API exposed for global.API modules", "window.API = API" in appjs)
+    check("window.State/fmt/Toast exposed",
+          "window.State = State" in appjs and "window.fmt = fmt" in appjs
+          and "window.Toast = Toast" in appjs)
+    # (b) API wrappers surface the server's {"error": ...} instead of "HTTP 400".
+    check("API surfaces server error body", "_apiError" in appjs)
+    # (c) Reflexivity uses loop_count (not the raw active_loops array) for the
+    #     count, and indexes the array by `type` for the per-loop cards.
+    check("reflexivity uses loop_count for the count", "data.loop_count" in appjs)
+    check("reflexivity indexes active_loops by type",
+          "loops[l.type] = l" in appjs)
+
+
+# ── 20. Options-flow distinguishes rate-limit from genuine no-data ───────────
+def test_options_flow_ratelimit_message():
+    import fetcher
+    class _RL:
+        @property
+        def options(self):
+            raise RuntimeError("Too Many Requests. Rate limited.")
+    orig = fetcher.yf.Ticker
+    fetcher.yf.Ticker = lambda s: _RL()
+    try:
+        out = fetcher.get_unusual_options_flow("AAPL")
+    finally:
+        fetcher.yf.Ticker = orig
+    check("options-flow flags rate-limit (not generic no-data)",
+          "rate-limited" in (out.get("error") or "").lower())
+
+
 # ── 18. Alt-data social pulse: composite math + graceful per-source failure ──
 def test_alt_social_pulse():
     import app
@@ -309,6 +346,8 @@ def main():
         ("yahoo UA not blocked", test_yahoo_ua_not_blocked),
         ("safe_executor thread exhaustion", test_safe_executor_thread_exhaustion),
         ("alt-data social pulse", test_alt_social_pulse),
+        ("research/alpha tab fixes", test_research_alpha_fixes),
+        ("options-flow rate-limit msg", test_options_flow_ratelimit_message),
     ]
     for title, fn in tests:
         print("── %s" % title)

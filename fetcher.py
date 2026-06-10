@@ -2100,8 +2100,15 @@ def get_unusual_options_flow(symbol):
 
     try:
         exps = ticker.options
-    except Exception:
-        return {"symbol": symbol, "error": "No options data", "unusual": []}
+    except Exception as e:
+        # Distinguish a transient rate-limit (retryable) from a symbol that
+        # genuinely has no chain, so the UI can tell the user which.
+        msg = str(e).lower()
+        if "rate" in msg or "too many" in msg or "429" in msg:
+            err = "Options data rate-limited upstream — try again shortly."
+        else:
+            err = "No options data for this symbol."
+        return {"symbol": symbol, "error": err, "unusual": []}
 
     if not exps:
         return {"symbol": symbol, "error": "No expirations found", "unusual": []}
