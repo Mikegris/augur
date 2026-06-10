@@ -486,10 +486,21 @@ def update_position(pos_id):
             acct_id = int(acct_id)
         except (TypeError, ValueError):
             return jsonify({"error": "account_id must be an integer"}), 400
+    # Coerce numerics (mirror add_position) — a non-numeric shares/avg_cost was
+    # written to the DB verbatim and later crashed avg_cost*shares arithmetic.
+    shares = data.get("shares")
+    avg_cost = data.get("avg_cost")
+    try:
+        if shares is not None:
+            shares = float(shares)
+        if avg_cost is not None:
+            avg_cost = float(avg_cost)
+    except (TypeError, ValueError):
+        return jsonify({"error": "shares and avg_cost must be numeric"}), 400
     ok = db.update_position(
         pos_id,
-        shares=data.get("shares"),
-        avg_cost=data.get("avg_cost"),
+        shares=shares,
+        avg_cost=avg_cost,
         notes=data.get("notes"),
         account_id=acct_id,
     )
@@ -530,12 +541,21 @@ def add_watchlist():
         return jsonify({"error": "symbol required"}), 400
     if not _valid_ticker(data["symbol"]):
         return jsonify({"error": "Invalid symbol"}), 400
+    # Coerce alert thresholds to float-or-None — a string would be stored and
+    # then break the numeric alert comparison downstream.
+    def _opt_float(v):
+        return None if v in (None, "") else float(v)
+    try:
+        alert_high = _opt_float(data.get("alert_high"))
+        alert_low = _opt_float(data.get("alert_low"))
+    except (TypeError, ValueError):
+        return jsonify({"error": "alert_high/alert_low must be numeric"}), 400
     is_new = db.add_to_watchlist(
         symbol=data["symbol"],
         name=data.get("name", ""),
         asset_type=data.get("asset_type", "stock"),
-        alert_high=data.get("alert_high"),
-        alert_low=data.get("alert_low"),
+        alert_high=alert_high,
+        alert_low=alert_low,
         notes=data.get("notes", ""),
     )
     return jsonify({"status": "added" if is_new else "updated"})
@@ -710,8 +730,8 @@ def transactions_export():
     writer.writerow(["date", "symbol", "action", "shares", "price", "total", "fees", "notes"])
     for t in txns:
         writer.writerow([
-            t.get("date", ""), t["symbol"], t["action"], t["shares"],
-            t["price"], t["total"], t.get("fees", 0), t.get("notes", ""),
+            t.get("date", ""), t.get("symbol", ""), t.get("action", ""), t.get("shares", ""),
+            t.get("price", ""), t.get("total", ""), t.get("fees", 0), t.get("notes", ""),
         ])
     output.seek(0)
     return Response(
@@ -726,7 +746,10 @@ def portfolio_import():
     if "file" not in request.files:
         return jsonify({"error": "No file uploaded"}), 400
     f = request.files["file"]
-    content = f.read().decode("utf-8-sig")  # Handle BOM
+    try:
+        content = f.read().decode("utf-8-sig")  # Handle BOM
+    except (UnicodeDecodeError, AttributeError):
+        return jsonify({"error": "File must be UTF-8 encoded CSV"}), 400
     reader = csv.DictReader(io.StringIO(content))
     headers = [h.strip().strip('"').lower() for h in (reader.fieldnames or [])]
 
@@ -915,8 +938,10 @@ def add_alert():
         price = float(data.get("price", 0))
     except (TypeError, ValueError):
         return jsonify({"error": "Invalid price"}), 400
-    if not symbol or not price or alert_type not in ("above", "below"):
-        return jsonify({"error": "symbol, valid alert_type, and price required"}), 400
+    # price must be a positive number — `not price` rejected a legitimate 0 and
+    # let negatives through (creating an alert that can never trigger).
+    if not symbol or price <= 0 or alert_type not in ("above", "below"):
+        return jsonify({"error": "symbol, valid alert_type, and price > 0 required"}), 400
     if not _valid_ticker(symbol):
         return jsonify({"error": "Invalid symbol"}), 400
     row_id = db.add_price_alert(symbol, alert_type, price)
@@ -1126,7 +1151,7 @@ def portfolio_ai_analysis():
     Run GPT-4o analysis across the entire portfolio.
     Accepts optional { model: "gpt-4o" } in POST body to let UI choose model.
     """
-    body = request.json or {}
+    body = request.get_json(silent=True) or {}
     model = body.get("model", "gpt-4o")
 
     holdings = db.get_portfolio()
@@ -1483,6 +1508,8 @@ def intel_institutional_fund(fund_name):
 def smart_money_score(symbol):
     """Compute Smart Money Convergence Score for one symbol."""
     import smart_money
+    if not _valid_ticker(symbol):
+        return jsonify({"error": "Invalid symbol"}), 400
     try:
         result = smart_money.compute_score(symbol.upper())
         # Best-effort tracker log; never let a tracker hiccup break the panel.
@@ -1500,7 +1527,7 @@ def smart_money_score(symbol):
 def smart_money_scores_bulk():
     """Compute Smart Money scores for multiple symbols."""
     import smart_money
-    data = request.get_json() or {}
+    data = request.get_json(silent=True) or {}
     symbols = data.get("symbols", [])
     if not symbols:
         # Default: portfolio symbols
@@ -1520,6 +1547,8 @@ def smart_money_scores_bulk():
 @app.route("/api/options-flow/<symbol>")
 def options_flow_symbol(symbol):
     """Scan unusual options activity for a single symbol."""
+    if not _valid_ticker(symbol):
+        return jsonify({"error": "Invalid symbol"}), 400
     try:
         result = fetcher.get_unusual_options_flow(symbol.upper())
         return jsonify(result)
@@ -1530,7 +1559,7 @@ def options_flow_symbol(symbol):
 @app.route("/api/options-flow/scan", methods=["POST"])
 def options_flow_scan():
     """Scan unusual options activity for portfolio symbols."""
-    data = request.get_json() or {}
+    data = request.get_json(silent=True) or {}
     symbols = data.get("symbols", [])
     if not symbols:
         holdings = db.get_portfolio()
@@ -1563,6 +1592,8 @@ def congress_trades():
 def congress_trades_symbol(symbol):
     """Get recent congressional trades for a specific ticker."""
     import congress
+    if not _valid_ticker(symbol):
+        return jsonify({"error": "Invalid symbol"}), 400
     days = _safe_int(request.args.get("days"), 180)
     try:
         trades = congress.get_trades_for_ticker(symbol.upper(), days=days)
@@ -1574,7 +1605,7 @@ def congress_trades_symbol(symbol):
 @app.route("/api/terminal", methods=["POST"])
 def terminal_exec():
     """Execute a CLI command and return ANSI output."""
-    data = request.get_json(force=True) or {}
+    data = request.get_json(force=True, silent=True) or {}
     command = (data.get("command") or "").strip()
     if not command:
         return jsonify({"output": "", "error": "No command provided"}), 400
@@ -1706,7 +1737,7 @@ def synthetic_insider_route(symbol):
 @app.route("/api/synthetic-insider/scan", methods=["POST"])
 def synthetic_insider_scan():
     import synthetic_insider
-    data = request.get_json() or {}
+    data = request.get_json(silent=True) or {}
     symbols = data.get("symbols", [])
     if not symbols:
         holdings = db.get_portfolio()
@@ -1765,7 +1796,7 @@ def alt_data_nowcast(symbol):
 @app.route("/api/alt-data/scan", methods=["POST"])
 def alt_data_scan():
     import alt_data_engine
-    data = request.get_json() or {}
+    data = request.get_json(silent=True) or {}
     symbols = data.get("symbols", [])
     if not symbols:
         holdings = db.get_portfolio()

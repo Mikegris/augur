@@ -377,7 +377,7 @@ def _finviz_fundamentals_fallback(symbol: str) -> dict:
         "description": "",
         "website": "",
         "country": fund.get("Country", ""),
-        "employees": int(_num(fund.get("Employees"))) if _num(fund.get("Employees")) else None,
+        "employees": (int(_e) if (_e := _num(fund.get("Employees"))) is not None else None),
         "market_cap": _num(fund.get("Market Cap")),
         "enterprise_value": _num(fund.get("Enterprise Value")),
         "pe_ratio":   _num(fund.get("P/E")),
@@ -471,7 +471,8 @@ def get_quote(symbol: str) -> dict:
         # cache miss (which on Yahoo's broken-crumb fast path costs us
         # rate-limit budget for nothing).
 
-        price = _safe(info.last_price) or _safe(info.regular_market_price)
+        _lp = _safe(info.last_price)
+        price = _lp if _lp is not None else _safe(info.regular_market_price)
         prev_close = _safe(info.previous_close)
 
         change = None
@@ -530,7 +531,8 @@ def get_quotes_batch(symbols: list) -> dict:
             try:
                 t = tickers.tickers.get(sym.upper()) or yf.Ticker(sym)
                 info = t.fast_info
-                price = _safe(info.last_price) or _safe(info.regular_market_price)
+                _lp = _safe(info.last_price)
+                price = _lp if _lp is not None else _safe(info.regular_market_price)
                 prev = _safe(info.previous_close)
                 if price is None:
                     raise RuntimeError("no price from yfinance")
@@ -1676,8 +1678,9 @@ def get_dividend_data(symbol: str) -> dict:
         info = t.info or {}
         fast = t.fast_info
 
-        # Current price
-        price = _safe(fast.last_price) or _safe(info.get("regularMarketPrice"))
+        # Current price (explicit None — a genuine 0.0 must not fall through)
+        _flp = _safe(fast.last_price)
+        price = _flp if _flp is not None else _safe(info.get("regularMarketPrice"))
 
         # Annual dividend rate and yield
         div_rate   = _safe(info.get("dividendRate"))    # annual $/share
@@ -1999,7 +2002,8 @@ def get_portfolio_stress_test(holdings: list, custom_drop_pct: float = None) -> 
                 t = yf.Ticker(sym)
                 info = t.info or {}
                 entry["sector"] = info.get("sector") or info.get("sectorKey") or "Unknown"
-                entry["beta"] = _safe(info.get("beta")) or 1.0
+                _bv = _safe(info.get("beta"))
+                entry["beta"] = _bv if _bv is not None else 1.0  # don't coerce a real 0.0 beta to 1.0
                 # Clamp beta to reasonable range
                 if entry["beta"]:
                     entry["beta"] = max(0.1, min(3.0, entry["beta"]))
@@ -2153,7 +2157,10 @@ def get_unusual_options_flow(symbol):
                 exp_dt = exp_date.replace(hour=16, minute=0, second=0, tzinfo=_NY_TZ)
             else:
                 exp_dt = exp_date.replace(hour=16, minute=0, second=0, tzinfo=timezone.utc)
-            dte = int((exp_dt - now_utc).total_seconds() // 86400)
+            # Calendar-day difference, not floor of fractional seconds: the old
+            # `//86400` undercounted (23h to expiry → 0) and over-counted past
+            # expiries to -1.
+            dte = (exp_dt.date() - now_utc.date()).days
         except Exception:
             dte = 0
 
@@ -2215,7 +2222,7 @@ def get_unusual_options_flow(symbol):
                     "volume":       int(vol),
                     "open_interest": int(oi),
                     "vol_oi_ratio": round(vol_oi_ratio, 1) if oi > 0 else None,
-                    "iv_pct":       round(iv * 100, 1),
+                    "iv_pct":       round(iv * 100, 1) if iv else None,
                     "notional":     round(notional),
                     "otm_pct":      round(otm_pct, 1),
                     "is_otm":       is_otm,
