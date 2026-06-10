@@ -332,12 +332,12 @@
       return;
     }
     if (data.error && !data.average_response) {
-      headerEl.innerHTML = _renderHeader(data.release);
+      if (headerEl) headerEl.innerHTML = _renderHeader(data.release);
       bodyEl.innerHTML = _emptyCard(data.error);
       return;
     }
 
-    headerEl.innerHTML = _renderHeader(data.release);
+    if (headerEl) headerEl.innerHTML = _renderHeader(data.release);
     bodyEl.innerHTML = _renderAverage(data.average_response) + _renderProjection(data.portfolio_projection);
     _renderHistory(containerEl, data.historical_episodes);
 
