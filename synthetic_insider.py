@@ -11,7 +11,7 @@ Alert levels:  DORMANT -> AWAKENING -> CONVERGING -> CRITICAL
 
 import logging
 import time
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 from datetime import datetime, timedelta, timezone
 
 import fetcher
@@ -28,6 +28,11 @@ logger = logging.getLogger(__name__)
 _cache = {}
 _cache_ts = {}
 _CACHE_TTL = 1800  # seconds
+
+# Wall-clock budget for the parallel channel scan. Channels that overrun this
+# fall back to a neutral score so one rate-limited upstream can't drag the whole
+# composite to ~30s. Generous enough for the fast channels on a warm cache.
+_CHANNEL_BUDGET_S = 12.0
 
 
 def _cache_get(key):
@@ -331,31 +336,50 @@ def compute_composite(symbol):
                 _score_technical_regime(symbol),
             )
 
+        # Channels run in parallel; the composite is gated by the SLOWEST one.
+        # A single rate-limited upstream (SEC 429-retry, congress download) used
+        # to drag the whole call to ~30s because we blocked on fut.result() with
+        # no deadline AND `with` exit waited on stragglers. Bound the wall clock:
+        # collect against a shared deadline, fall back to a neutral channel for
+        # any that overrun, and shutdown(wait=False) so we never block on a
+        # straggler (it finishes in the background and dies with the pool).
+        pool = None
         try:
-            with ThreadPoolExecutor(max_workers=6) as pool:
-                try:
-                    fut_options = pool.submit(_score_options_flow, symbol)
-                    fut_volume = pool.submit(_score_volume_anomaly, symbol)
-                    fut_insider = pool.submit(_score_insider_cluster, symbol)
-                    fut_congress = pool.submit(_score_congress_cluster, symbol)
-                    fut_inst = pool.submit(_score_institutional_signal, symbol)
-                    fut_tech = pool.submit(_score_technical_regime, symbol)
-                except RuntimeError as e:
-                    if "interpreter shutdown" in str(e) or "cannot schedule new futures" in str(e):
-                        logger.warning(
-                            "synthetic_insider: submit failed (%s); going serial for %s",
-                            e, symbol,
-                        )
-                        ch_options, ch_volume, ch_insider, ch_congress, ch_inst, ch_tech = _serial_channels()
-                    else:
-                        raise
+            pool = ThreadPoolExecutor(max_workers=6)
+            try:
+                fut_options = pool.submit(_score_options_flow, symbol)
+                fut_volume = pool.submit(_score_volume_anomaly, symbol)
+                fut_insider = pool.submit(_score_insider_cluster, symbol)
+                fut_congress = pool.submit(_score_congress_cluster, symbol)
+                fut_inst = pool.submit(_score_institutional_signal, symbol)
+                fut_tech = pool.submit(_score_technical_regime, symbol)
+            except RuntimeError as e:
+                if "interpreter shutdown" in str(e) or "cannot schedule new futures" in str(e):
+                    logger.warning(
+                        "synthetic_insider: submit failed (%s); going serial for %s",
+                        e, symbol,
+                    )
+                    ch_options, ch_volume, ch_insider, ch_congress, ch_inst, ch_tech = _serial_channels()
                 else:
-                    ch_options = fut_options.result()
-                    ch_volume = fut_volume.result()
-                    ch_insider = fut_insider.result()
-                    ch_congress = fut_congress.result()
-                    ch_inst = fut_inst.result()
-                    ch_tech = fut_tech.result()
+                    raise
+            else:
+                deadline = time.monotonic() + _CHANNEL_BUDGET_S
+
+                def _collect(fut, weight):
+                    try:
+                        return fut.result(timeout=max(0.1, deadline - time.monotonic()))
+                    except FuturesTimeoutError:
+                        return {"score": 50, "detail": "timed out", "firing": False, "weight": weight}
+                    except Exception as e:
+                        logger.debug("synthetic_insider channel error %s: %s", symbol, e)
+                        return {"score": 50, "detail": "data unavailable", "firing": False, "weight": weight}
+
+                ch_options = _collect(fut_options, 0.20)
+                ch_volume = _collect(fut_volume, 0.10)
+                ch_insider = _collect(fut_insider, 0.25)
+                ch_congress = _collect(fut_congress, 0.15)
+                ch_inst = _collect(fut_inst, 0.10)
+                ch_tech = _collect(fut_tech, 0.20)
         except RuntimeError as e:
             if "interpreter shutdown" in str(e) or "cannot schedule new futures" in str(e):
                 logger.warning(
@@ -365,6 +389,9 @@ def compute_composite(symbol):
                 ch_options, ch_volume, ch_insider, ch_congress, ch_inst, ch_tech = _serial_channels()
             else:
                 raise
+        finally:
+            if pool is not None:
+                pool.shutdown(wait=False)
 
         # Weighted composite
         composite = (

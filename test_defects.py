@@ -216,6 +216,19 @@ def test_xss_escaping_intact():
           "' + e.message + '" not in src)
 
 
+# ── 21. Perf: synthetic-insider channel budget + sectorflow parallel sectors ─
+def test_perf_fixes_present():
+    import synthetic_insider, synth_sectorflow, inspect
+    si = inspect.getsource(synthetic_insider)
+    check("synthetic_insider has a per-channel wall-clock budget",
+          "_CHANNEL_BUDGET_S" in si and ".result(timeout=" in si)
+    check("synthetic_insider doesn't block on stragglers (shutdown wait=False)",
+          "shutdown(wait=False)" in si)
+    sf = inspect.getsource(synth_sectorflow)
+    check("sectorflow builds sectors in parallel (not a serial loop)",
+          "_build_sector_row" in sf and "parallel_map(" in sf)
+
+
 # ── 19. Research/Alpha tab fixes: window globals, API errors, reflexivity ────
 def test_research_alpha_fixes():
     base = os.path.dirname(__file__)
@@ -348,6 +361,7 @@ def main():
         ("alt-data social pulse", test_alt_social_pulse),
         ("research/alpha tab fixes", test_research_alpha_fixes),
         ("options-flow rate-limit msg", test_options_flow_ratelimit_message),
+        ("perf fixes present", test_perf_fixes_present),
     ]
     for title, fn in tests:
         print("── %s" % title)
