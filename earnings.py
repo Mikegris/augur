@@ -83,11 +83,14 @@ def _calendar_for_one(symbol):
         try:
             eh = t.earnings_history
             if eh is not None and not eh.empty:
-                actuals = eh["epsActual"].dropna()
-                estimates = eh["epsEstimate"].dropna()
-                if len(actuals) >= 2:
-                    beats = sum(1 for a, e in zip(actuals, estimates) if a > e)
-                    beat_rate = round(beats / len(actuals) * 100)
+                # Pair actual & estimate per row first. Dropping NaNs from each
+                # column independently and zip-ing positionally misaligns
+                # quarters whenever one column has a gap, and divides by the
+                # wrong (un-truncated) count.
+                paired = eh[["epsActual", "epsEstimate"]].dropna()
+                if len(paired) >= 2:
+                    beats = int((paired["epsActual"] > paired["epsEstimate"]).sum())
+                    beat_rate = round(beats / len(paired) * 100)
                     surprises = eh["surprisePercent"].dropna().tolist()
                     if surprises:
                         avg_surprise = round(float(np.mean(surprises)) * 100, 2)

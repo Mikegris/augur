@@ -534,6 +534,31 @@ def _eval_component_safe(name, fn, symbol, direction):
     }
 
 
+def _finalize_scan(symbol: str, sources: List[Optional[Dict[str, Any]]]) -> Dict[str, Any]:
+    """Fill any empty component slots, compute the composite, and return the
+    per-symbol envelope dict. Called from every return path in _scan_symbol —
+    including the interpreter-shutdown fallbacks, which previously returned the
+    raw `sources` list and made the caller's `.get()` blow up (AttributeError)
+    on the exact shutdown path the fallback was meant to survive."""
+    for i, (name, _) in enumerate(COMPONENTS):
+        if sources[i] is None:
+            sources[i] = {"name": name, "fired": False,
+                          "value": "timeout", "note": "future not completed"}
+
+    n_fired = sum(1 for s in sources if s.get("fired"))
+    total_w = sum(SOURCE_WEIGHTS.values()) or 1.0
+    weighted = sum(SOURCE_WEIGHTS.get(s["name"], 0) for s in sources if s.get("fired"))
+    base = weighted / total_w
+    bonus = max(0, n_fired - 2) ** 1.5 * 0.04
+    composite = min(1.0, base + bonus)
+    return {
+        "symbol":           symbol,
+        "n_sources_firing": n_fired,
+        "sources":          sources,
+        "composite_score":  round(composite, 4),
+    }
+
+
 def _scan_symbol(symbol: str, direction: str) -> Dict[str, Any]:
     """Run all components for one symbol, in parallel, with a hard timeout
     per component. Returns the per-symbol cluster dict (no min_sources
@@ -561,7 +586,7 @@ def _scan_symbol(symbol: str, direction: str) -> Dict[str, Any]:
                 except Exception as exc:
                     sources[i] = {"name": name, "fired": False, "value": "error",
                                   "note": f"{type(exc).__name__}: {exc}"}
-            return sources
+            return _finalize_scan(symbol, sources)
         raise
     try:
         try:
@@ -580,7 +605,7 @@ def _scan_symbol(symbol: str, direction: str) -> Dict[str, Any]:
                         except Exception as exc:
                             sources[i] = {"name": name, "fired": False, "value": "error",
                                           "note": f"{type(exc).__name__}: {exc}"}
-                return sources
+                return _finalize_scan(symbol, sources)
             raise
         # We iterate `as_completed` with a timeout; if the symbol-level
         # deadline triggers we catch the TimeoutError and fall through to
@@ -603,29 +628,9 @@ def _scan_symbol(symbol: str, direction: str) -> Dict[str, Any]:
         # blocking us when EDGAR/PDF parses go slow.
         pool.shutdown(wait=False)
 
-    # Fill any slot whose future never completed (e.g. outer pool timeout)
-    for i, (name, _) in enumerate(COMPONENTS):
-        if sources[i] is None:
-            sources[i] = {"name": name, "fired": False, "value": "timeout", "note": "future not completed"}
-
-    n_fired = sum(1 for s in sources if s.get("fired"))
-
-    # Composite score: weighted sum of fired flags / sum of all weights.
-    # Then a small bonus for *how many* fired (a 5-source agreement is
-    # qualitatively different from 4 — the scale rewards this).
-    total_w = sum(SOURCE_WEIGHTS.values()) or 1.0
-    weighted = sum(SOURCE_WEIGHTS.get(s["name"], 0) for s in sources if s.get("fired"))
-    base = weighted / total_w
-    # nonlinear bonus: 0 extra for 0–2 sources, scales up at 4+
-    bonus = max(0, n_fired - 2) ** 1.5 * 0.04
-    composite = min(1.0, base + bonus)
-
-    return {
-        "symbol":           symbol,
-        "n_sources_firing": n_fired,
-        "sources":          sources,
-        "composite_score":  round(composite, 4),
-    }
+    # Composite score: weighted sum of fired flags / sum of all weights, plus
+    # a nonlinear bonus for breadth of agreement. See _finalize_scan.
+    return _finalize_scan(symbol, sources)
 
 
 # ---------------------------------------------------------------------------
