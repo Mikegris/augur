@@ -26,7 +26,11 @@ Python 3.9 compatible.
 from __future__ import annotations
 
 import logging
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import (
+    ThreadPoolExecutor,
+    TimeoutError as FuturesTimeoutError,
+    as_completed,
+)
 from typing import Any, Callable, Iterable, List, Optional
 
 log = logging.getLogger("augur.safe_executor")
@@ -79,13 +83,24 @@ def parallel_map(
                     return _serial_map(work_fn, items_list, timeout_per_item)
                 raise
 
-            for fut in as_completed(future_to_idx, timeout=timeout_per_item):
-                idx = future_to_idx[fut]
-                try:
-                    results[idx] = fut.result(timeout=timeout_per_item)
-                except Exception as e:
-                    log.debug("parallel_map work_fn raised at idx %d: %s", idx, e)
-                    results[idx] = None
+            try:
+                for fut in as_completed(future_to_idx, timeout=timeout_per_item):
+                    idx = future_to_idx[fut]
+                    try:
+                        results[idx] = fut.result(timeout=timeout_per_item)
+                    except Exception as e:
+                        log.debug("parallel_map work_fn raised at idx %d: %s", idx, e)
+                        results[idx] = None
+            except FuturesTimeoutError:
+                # `as_completed` applies the timeout to the WHOLE iteration and
+                # raises if the batch as a whole outruns it. Honor the module's
+                # "always return a list, never 500" contract: leave any
+                # still-unfinished slots as None rather than propagating.
+                done = sum(1 for r in results if r is not None)
+                log.warning(
+                    "parallel_map overall timeout (%ss); %d/%d items done, rest None",
+                    timeout_per_item, done, len(results),
+                )
         return results
     except RuntimeError as e:
         # Entering `with ThreadPoolExecutor(...)` can itself raise on

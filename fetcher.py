@@ -77,8 +77,12 @@ def _coingecko_quote(coin_id: str, yf_symbol: str) -> dict:
         return {"symbol": yf_symbol.upper(), "error": "coingecko returned no data"}
     price = d.get("usd")
     change_pct = d.get("usd_24h_change")
-    change = (price * change_pct / 100) if (price and change_pct is not None) else None
-    prev = (price - change) if (price and change is not None) else None
+    # usd_24h_change is the % move relative to the price 24h ago, so the
+    # prior close is price / (1 + pct/100) — NOT price * pct/100, which would
+    # use the current price as the base and overstate the move.
+    _denom = (1 + change_pct / 100) if change_pct is not None else None
+    prev = (price / _denom) if (price and _denom) else None
+    change = (price - prev) if (price is not None and prev is not None) else None
     return {
         "symbol": yf_symbol.upper(),
         "price": price,
@@ -586,8 +590,10 @@ def get_quotes_batch(symbols: list) -> dict:
                     continue
                 price = d["usd"]
                 change_pct = d.get("usd_24h_change")
-                change = (price * change_pct / 100) if change_pct is not None else None
-                prev = (price - change) if change is not None else None
+                # prior close = price / (1 + pct/100); see _coingecko_quote.
+                _denom = (1 + change_pct / 100) if change_pct is not None else None
+                prev = (price / _denom) if (price and _denom) else None
+                change = (price - prev) if (price is not None and prev is not None) else None
                 quote = {
                     "symbol": yf_sym,
                     "price": price,

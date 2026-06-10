@@ -237,14 +237,15 @@ def _make_cache_key(clean: List[Dict[str, Any]], horizon_days: int,
 def _empty_response(holdings: List[Dict[str, Any]], horizon_days: int,
                     method: str, n_paths: int,
                     reason: str = "") -> Dict[str, Any]:
-    zeros = [0.0] * horizon_days
+    # Independent lists per key — aliasing one `zeros` list into all five
+    # would let any in-place edit of one cone silently mutate the others.
     return {
         "holdings": holdings or [],
         "initial_nav": 0.0,
         "n_paths": n_paths,
         "horizon_days": horizon_days,
         "method": method,
-        "percentiles": {"p05": zeros, "p25": zeros, "p50": zeros, "p75": zeros, "p95": zeros},
+        "percentiles": {k: [0.0] * horizon_days for k in ("p05", "p25", "p50", "p75", "p95")},
         "terminal_distribution": {"p05": 0.0, "p25": 0.0, "p50": 0.0, "p75": 0.0, "p95": 0.0,
                                    "mean": 0.0, "std": 0.0},
         "summary": {"prob_loss": 0.0, "prob_drawdown_10pct": 0.0,

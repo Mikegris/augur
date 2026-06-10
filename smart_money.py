@@ -102,8 +102,11 @@ def _score_insiders(symbol, days=90):
     raw = buy_ratio * 25
     score = round(raw)
 
-    # Boost for cluster buying (≥3 different insiders)
-    buyers = set(t.get("insider_name", "") for t in recent if t.get("transaction_type", "").upper() in ("P", "A"))
+    # Boost for cluster buying (≥3 different insiders). sec_edgar normalizes
+    # open-market purchases to transaction_type "BUY" (grants/awards become
+    # "OTHER:A"), so match "BUY" — the old ("P","A") check never matched the
+    # normalized values and the boost silently never fired.
+    buyers = set(t.get("insider_name", "") for t in recent if t.get("transaction_type", "").upper() == "BUY")
     if len(buyers) >= 3:
         score = min(25, score + 3)
 
