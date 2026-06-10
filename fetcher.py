@@ -143,9 +143,12 @@ def _safe(val):
 
 _YAHOO_CHART_BASE = "https://query1.finance.yahoo.com/v8/finance/chart"
 _YAHOO_DIRECT_HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-                  "AppleWebKit/537.36 (KHTML, like Gecko) "
-                  "Chrome/120.0.0.0 Safari/537.36",
+    # Yahoo's v8 chart endpoint now 429s the full desktop-Chrome UA string (and
+    # python-requests' default UA) but reliably serves a bare "Mozilla/5.0" —
+    # verified deterministically against the live endpoint. With the blocked UA
+    # the chart-data fallback returns [] and silently starves ml_forecast,
+    # prob_forecast, the ensemble, and every chart. Keep this minimal UA.
+    "User-Agent": "Mozilla/5.0",
     "Accept": "application/json",
 }
 

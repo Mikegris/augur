@@ -216,6 +216,17 @@ def test_xss_escaping_intact():
           "' + e.message + '" not in src)
 
 
+# ── 16. Yahoo chart UA isn't the rate-limited Chrome string ──────────────────
+def test_yahoo_ua_not_blocked():
+    import fetcher
+    ua = (fetcher._YAHOO_DIRECT_HEADERS or {}).get("User-Agent", "")
+    # The full "...Chrome/120... Safari/537.36" UA gets 429'd by Yahoo's v8
+    # chart endpoint, which silently kills the chart-data fallback. Guard so it
+    # can't be reintroduced.
+    check("Yahoo direct UA is not the rate-limited Chrome string",
+          "Chrome/" not in ua, "UA=%r" % ua)
+
+
 # ── 15. Chart.js time-scale date adapter is loaded ───────────────────────────
 def test_chart_date_adapter_present():
     html = open(os.path.join(os.path.dirname(__file__), "templates/index.html")).read()
@@ -246,6 +257,7 @@ def main():
         ("cli quote None fields", test_cli_quote_none_fields),
         ("xss escaping intact", test_xss_escaping_intact),
         ("chart date adapter present", test_chart_date_adapter_present),
+        ("yahoo UA not blocked", test_yahoo_ua_not_blocked),
     ]
     for title, fn in tests:
         print("── %s" % title)
