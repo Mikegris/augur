@@ -427,7 +427,9 @@ def add_position(symbol, name, shares, avg_cost, asset_type="stock", sector="", 
         if existing:
             total_shares = existing["shares"] + shares
             total_cost = (existing["shares"] * existing["avg_cost"]) + (shares * avg_cost)
-            new_avg = total_cost / total_shares
+            # A fully-offsetting add (shares == -existing) zeroes the position;
+            # guard the average so it doesn't ZeroDivisionError and abort the write.
+            new_avg = (total_cost / total_shares) if total_shares else 0.0
             conn.execute(
                 "UPDATE portfolio SET shares = ?, avg_cost = ?, name = ? WHERE id = ?",
                 (total_shares, new_avg, name or existing["name"], existing["id"])
