@@ -980,7 +980,7 @@ async function loadPortfolio() {
     }
 
   } catch(e) {
-    view.innerHTML = '<div class="empty-state"><span class="empty-icon">\u26A0</span><span class="text-red">' + e.message + '</span></div>';
+    view.innerHTML = '<div class="empty-state"><span class="empty-icon">\u26A0</span><span class="text-red">' + _esc(e.message) + '</span></div>';
   }
 }
 
@@ -1002,7 +1002,7 @@ async function runPortfolioAnalysis() {
     const result = await API.post('/api/portfolio/ai-analysis', { model });
     renderPortfolioAnalysis(result);
   } catch(e) {
-    content.innerHTML = `<div class="text-red" style="padding:8px;font-size:11px">Analysis failed: ${e.message}</div>`;
+    content.innerHTML = `<div class="text-red" style="padding:8px;font-size:11px">Analysis failed: ${_esc(e.message)}</div>`;
   } finally {
     btn.disabled = false;
     btn.textContent = '↻ RE-ANALYZE';
@@ -1029,8 +1029,8 @@ function renderPortfolioAnalysis(r) {
     return `<div style="display:flex;gap:8px;padding:6px 0;border-bottom:1px solid var(--border)">
       <span style="font-size:9px;color:${priColor};min-width:48px;padding-top:1px">${a.priority}</span>
       <div>
-        <div style="font-size:11px;color:var(--text-primary)">${a.action}</div>
-        <div style="font-size:10px;color:var(--text-dim);margin-top:2px">${a.rationale}</div>
+        <div style="font-size:11px;color:var(--text-primary)">${_esc(a.action)}</div>
+        <div style="font-size:10px;color:var(--text-dim);margin-top:2px">${_esc(a.rationale)}</div>
       </div>
     </div>`;
   }).join('');
@@ -1041,7 +1041,7 @@ function renderPortfolioAnalysis(r) {
     `<tr>
       <td><span class="col-symbol" onclick="openResearch('${p.symbol}')">${p.symbol}</span></td>
       <td><span style="color:${assessColor[p.assessment] || 'var(--text-dim)'}; font-size:10px;font-weight:bold">${p.assessment}</span></td>
-      <td style="color:var(--text-secondary);font-size:10px">${p.note}</td>
+      <td style="color:var(--text-secondary);font-size:10px">${_esc(p.note)}</td>
     </tr>`
   ).join('');
 
@@ -1367,7 +1367,7 @@ async function loadMarkets() {
       </div>
     `;
   } catch(e) {
-    view.innerHTML = `<div class="empty-state"><span class="empty-icon">⚠</span><span class="text-red">${e.message}</span></div>`;
+    view.innerHTML = `<div class="empty-state"><span class="empty-icon">⚠</span><span class="text-red">${_esc(e.message)}</span></div>`;
   }
 }
 
@@ -1633,7 +1633,7 @@ async function loadResearchFor(symbol) {
 
   } catch(e) {
     if (gen !== _researchGen) return;
-    view.innerHTML = `<div class="empty-state"><span class="empty-icon">⚠</span><span class="text-red">${e.message}</span></div>`;
+    view.innerHTML = `<div class="empty-state"><span class="empty-icon">⚠</span><span class="text-red">${_esc(e.message)}</span></div>`;
   }
 }
 
@@ -1936,7 +1936,7 @@ async function loadCrypto() {
     DataPanels.appendFinvizSectors(view);
 
   } catch(e) {
-    view.innerHTML = `<div class="empty-state"><span class="empty-icon">⚠</span><span class="text-red">${e.message}</span></div>`;
+    view.innerHTML = `<div class="empty-state"><span class="empty-icon">⚠</span><span class="text-red">${_esc(e.message)}</span></div>`;
   }
 }
 
@@ -1957,7 +1957,7 @@ async function openCryptoResearch(coinId, symbol) {
       <div class="research-header">
         <div>
           <div class="rh-symbol">${coin.symbol}</div>
-          <div class="rh-name">${coin.name}</div>
+          <div class="rh-name">${_esc(coin.name)}</div>
           <div style="margin-top:4px"><span class="badge badge-purple">CRYPTO</span> <span class="badge badge-dim">RANK #${coin.market_cap_rank}</span></div>
         </div>
         <div style="margin-left:auto;text-align:right">
@@ -2015,7 +2015,7 @@ async function openCryptoResearch(coinId, symbol) {
       ChartEngine.createPriceChart('crypto-chart-container', chartData, { type: 'line', height: 380, showVolume: false });
     }
   } catch(e) {
-    view.innerHTML = `<div class="empty-state"><span class="empty-icon">⚠</span><span class="text-red">${e.message}</span></div>`;
+    view.innerHTML = `<div class="empty-state"><span class="empty-icon">⚠</span><span class="text-red">${_esc(e.message)}</span></div>`;
   }
 }
 
@@ -2087,7 +2087,7 @@ async function loadWatchlistView() {
         </div>
       </div>`;
   } catch(e) {
-    view.innerHTML = `<div class="empty-state"><span class="text-red">${e.message}</span></div>`;
+    view.innerHTML = `<div class="empty-state"><span class="text-red">${_esc(e.message)}</span></div>`;
   }
 }
 
@@ -2183,7 +2183,7 @@ async function loadTransactions() {
         </div>
       </div>`;
   } catch(e) {
-    view.innerHTML = `<div class="empty-state"><span class="text-red">${e.message}</span></div>`;
+    view.innerHTML = `<div class="empty-state"><span class="text-red">${_esc(e.message)}</span></div>`;
   }
 }
 
@@ -2240,10 +2240,10 @@ async function loadGlobalNews() {
         <div style="max-height:calc(100vh - 200px);overflow-y:auto">
           ${all.length ? all.map(n => `
             <div class="news-item" onclick="window.open('${n.url}', '_blank')">
-              <div class="news-title">${n.title}</div>
+              <div class="news-title">${_esc(n.title)}</div>
               <div class="news-summary">${n.summary ? n.summary.substring(0, 200) + '...' : ''}</div>
               <div class="news-meta">
-                <span class="news-source">${n.source}</span>
+                <span class="news-source">${_esc(n.source)}</span>
                 <span class="news-time">${fmt.timeAgo(n.published)}</span>
               </div>
             </div>`).join('')
@@ -2251,7 +2251,7 @@ async function loadGlobalNews() {
         </div>
       </div>`;
   } catch(e) {
-    view.innerHTML = `<div class="empty-state"><span class="text-red">${e.message}</span></div>`;
+    view.innerHTML = `<div class="empty-state"><span class="text-red">${_esc(e.message)}</span></div>`;
   }
 }
 
@@ -2388,7 +2388,7 @@ async function loadScreenerFacets() {
     setSel('su-industry', f.industries || []);
     setSel('su-exchange', f.exchanges  || []);
   } catch(e) {
-    Toast.warn(`Facets failed: ${e.message}`);
+    Toast.warn(`Facets failed: ${_esc(e.message)}`);
   }
 }
 
@@ -2511,7 +2511,7 @@ async function runScreener() {
         </div>
       </div>`;
   } catch(e) {
-    results.innerHTML = `<div class="empty-state"><span class="text-red">${e.message}</span></div>`;
+    results.innerHTML = `<div class="empty-state"><span class="text-red">${_esc(e.message)}</span></div>`;
   }
 }
 
@@ -2613,7 +2613,7 @@ async function loadAlertsView() {
       </div>
     `;
   } catch(e) {
-    view.innerHTML = `<div class="empty-state"><span class="text-red">${e.message}</span></div>`;
+    view.innerHTML = `<div class="empty-state"><span class="text-red">${_esc(e.message)}</span></div>`;
   }
 }
 
@@ -2804,7 +2804,7 @@ async function loadDividendsView() {
                     <td class="col-number" style="color:${yocColor}">${p.yield_on_cost != null ? p.yield_on_cost.toFixed(2) + '%' : '—'}</td>
                     <td class="col-number">$${p.div_rate ? p.div_rate.toFixed(4) : '—'}</td>
                     <td class="col-number col-green">$${fmt.currency(p.annual_income)}</td>
-                    <td class="col-number">${p.income_weight.toFixed(1)}%</td>
+                    <td class="col-number">${p.income_weight != null ? p.income_weight.toFixed(1) + '%' : '—'}</td>
                     <td style="font-size:10px;color:var(--text-dim)">${p.frequency || '—'}</td>
                     <td style="font-size:10px;color:${p.ex_date ? 'var(--amber)' : 'var(--text-dim)'}">${p.ex_date || '—'}</td>
                     <td class="${(p.div_growth_5y || 0) > 0 ? 'col-green' : 'col-red'}">${p.div_growth_5y != null ? (p.div_growth_5y >= 0 ? '+' : '') + p.div_growth_5y.toFixed(1) + '%/yr' : '—'}</td>
@@ -2849,7 +2849,7 @@ async function loadDividendsView() {
       </div>` : ''}
     `;
   } catch(e) {
-    view.innerHTML = `<div class="empty-state"><span class="text-red">${e.message}</span></div>`;
+    view.innerHTML = `<div class="empty-state"><span class="text-red">${_esc(e.message)}</span></div>`;
   }
 }
 
@@ -2990,7 +2990,7 @@ async function loadMacroView() {
       catch(e) { mtHost.innerHTML = '<div style="color:var(--red);padding:12px">' + (e.message||e) + '</div>'; }
     }
   } catch(e) {
-    view.innerHTML = `<div class="empty-state"><span class="text-red">${e.message}</span></div>`;
+    view.innerHTML = `<div class="empty-state"><span class="text-red">${_esc(e.message)}</span></div>`;
   }
 }
 
@@ -3041,7 +3041,7 @@ async function runStressTest() {
     const data = await API.post('/api/stress-test', { custom_drop_pct: customDrop });
     renderStressResults(data);
   } catch(e) {
-    resultsDiv.innerHTML = `<div class="text-red" style="padding:12px;font-size:11px">Stress test failed: ${e.message}</div>`;
+    resultsDiv.innerHTML = `<div class="text-red" style="padding:12px;font-size:11px">Stress test failed: ${_esc(e.message)}</div>`;
   } finally {
     btn.disabled = false;
     btn.textContent = '↻ RE-RUN';
@@ -3064,7 +3064,7 @@ function renderStressResults(data) {
         const lossColor = s.total_loss_pct < -30 ? 'var(--red)' : s.total_loss_pct < -15 ? 'var(--amber)' : 'var(--text-secondary)';
         const isCustom = name === 'Custom Scenario';
         return `
-          <div class="stress-card ${isCustom ? 'stress-card-custom' : ''}" onclick="showScenarioDetail('${name.replace(/'/g,"\\'")}', ${JSON.stringify(s).replace(/'/g,"\\'")} )">
+          <div class="stress-card ${isCustom ? 'stress-card-custom' : ''}" onclick="showScenarioDetail('${_jesc(name)}', ${_esc(JSON.stringify(s))})">
             <div style="font-size:10px;color:${isCustom ? 'var(--amber)' : 'var(--blue)'};letter-spacing:.08em;margin-bottom:6px">${name.toUpperCase()}</div>
             <div style="font-size:11px;color:var(--text-dim);margin-bottom:10px;line-height:1.5">${s.description}</div>
             <div style="font-size:22px;font-weight:bold;color:${lossColor}">${s.total_loss_pct.toFixed(1)}%</div>
@@ -3204,7 +3204,7 @@ async function loadEarningsView() {
       <div id="earnings-dossier-panel"></div>
     `;
   } catch(e) {
-    view.innerHTML = `<div class="empty-state"><span class="text-red">${e.message}</span></div>`;
+    view.innerHTML = `<div class="empty-state"><span class="text-red">${_esc(e.message)}</span></div>`;
   }
 }
 
@@ -3301,7 +3301,7 @@ function renderEarningsDossier(panel, d) {
   const moveRows = (d.post_earnings_moves || []).map(m => `
     <tr>
       <td>${m.date || '—'}</td>
-      <td class="${m.move_pct >= 0 ? 'col-green' : 'col-red'}">${m.move_pct >= 0 ? '+' : ''}${m.move_pct.toFixed(2)}%</td>
+      <td class="${(m.move_pct || 0) >= 0 ? 'col-green' : 'col-red'}">${m.move_pct != null ? (m.move_pct >= 0 ? '+' : '') + m.move_pct.toFixed(2) + '%' : '—'}</td>
       <td><span style="color:${m.move_pct >= 0 ? 'var(--green)' : 'var(--red)'}">${m.direction}</span></td>
     </tr>`).join('');
 
@@ -3351,7 +3351,7 @@ function renderEarningsDossier(panel, d) {
             </div>
           </div>
           <div style="flex:1;min-width:280px">
-            ${b.headline ? `<div style="font-size:13px;color:var(--text-primary);font-weight:bold;margin-bottom:8px">${b.headline}</div>` : ''}
+            ${b.headline ? `<div style="font-size:13px;color:var(--text-primary);font-weight:bold;margin-bottom:8px">${_esc(b.headline)}</div>` : ''}
             <div style="font-size:12px;color:var(--text-secondary);line-height:1.7;background:var(--bg-secondary);padding:12px;border-left:2px solid ${setupColor}">
               ${b.brief || 'Configure OpenAI API key for analyst brief.'}
             </div>
@@ -4076,7 +4076,7 @@ async function loadOptionsForSymbol(symbol) {
     selectEl.innerHTML = dates.map(d => '<option value="' + d + '">' + d + '</option>').join('');
     loadOptionsChain(symbol, dates[0]);
   } catch(e) {
-    bodyEl.innerHTML = '<div class="empty-state"><span class="text-red">Failed to load options: ' + e.message + '</span></div>';
+    bodyEl.innerHTML = '<div class="empty-state"><span class="text-red">Failed to load options: ' + _esc(e.message) + '</span></div>';
   }
 }
 
@@ -4136,7 +4136,7 @@ async function loadOptionsChain(symbol, date) {
       '</tbody></table>';
   } catch(e) {
     if (gen !== _optionsChainGen) return;
-    bodyEl.innerHTML = '<div class="empty-state"><span class="text-red">Failed to load chain: ' + e.message + '</span></div>';
+    bodyEl.innerHTML = '<div class="empty-state"><span class="text-red">Failed to load chain: ' + _esc(e.message) + '</span></div>';
   }
 }
 
@@ -4237,7 +4237,7 @@ async function loadAnalyticsView() {
     }
 
   } catch(e) {
-    view.innerHTML = '<div class="empty-state"><span class="empty-icon">⚠</span><span class="text-red">' + e.message + '</span></div>';
+    view.innerHTML = '<div class="empty-state"><span class="empty-icon">⚠</span><span class="text-red">' + _esc(e.message) + '</span></div>';
   }
 }
 
@@ -4507,7 +4507,7 @@ async function loadRiskTable(period) {
     const data = await API.get('/api/analytics/risk?period=' + period);
     el.innerHTML = renderRiskTable(data);
   } catch(e) {
-    el.innerHTML = '<div class="empty-state"><span class="text-red">' + e.message + '</span></div>';
+    el.innerHTML = '<div class="empty-state"><span class="text-red">' + _esc(e.message) + '</span></div>';
   }
 }
 
@@ -4549,7 +4549,7 @@ async function loadCorrMatrix(period) {
     const data = await API.get('/api/analytics/correlation?period=' + period);
     el.innerHTML = renderCorrMatrix(data);
   } catch(e) {
-    el.innerHTML = '<div class="empty-state"><span class="text-red">' + e.message + '</span></div>';
+    el.innerHTML = '<div class="empty-state"><span class="text-red">' + _esc(e.message) + '</span></div>';
   }
 }
 
@@ -4638,7 +4638,7 @@ async function submitCsvImport() {
     document.getElementById('csv-file-input').value = '';
     setTimeout(() => { Modal.close('modal-csv-import'); loadPortfolio(); }, 1500);
   } catch(e) {
-    statusEl.innerHTML = '<span class="text-red">Failed: ' + e.message + '</span>';
+    statusEl.innerHTML = '<span class="text-red">Failed: ' + _esc(e.message) + '</span>';
   }
 }
 
@@ -4705,7 +4705,7 @@ async function loadIntelFeed(refresh) {
     IntelState.intelFeed = data;
     renderFilingFeed(data, panel);
   } catch(e) {
-    panel.innerHTML = `<div class="empty-state"><span class="text-red">Failed to load feed: ${e.message}</span></div>`;
+    panel.innerHTML = `<div class="empty-state"><span class="text-red">Failed to load feed: ${_esc(e.message)}</span></div>`;
   }
 }
 
@@ -4836,7 +4836,7 @@ async function loadInsidersFor(symbol) {
     const data = await API.get(`/api/intel/insiders/${symbol}`);
     renderInsiders(data, panel, symbol);
   } catch(e) {
-    panel.innerHTML = `<div class="empty-state"><span class="text-red">Failed: ${e.message}</span></div>`;
+    panel.innerHTML = `<div class="empty-state"><span class="text-red">Failed: ${_esc(e.message)}</span></div>`;
   }
 }
 
@@ -4907,7 +4907,7 @@ async function loadIntelInstitutional() {
     IntelState.institutionalData = data;
     renderInstitutional(data, panel);
   } catch(e) {
-    panel.innerHTML = `<div class="empty-state"><span class="text-red">Failed: ${e.message}</span></div>`;
+    panel.innerHTML = `<div class="empty-state"><span class="text-red">Failed: ${_esc(e.message)}</span></div>`;
   }
 }
 
@@ -4928,7 +4928,7 @@ function renderInstitutional(data, panel) {
     // between e.g. "Berkshire Hathaway" and "Berkshire  Hathaway" (double
     // space), and broke entirely on names with non-alphanumeric chars.
     return `
-      <div class="fund-card" id="fcard-${i}" onclick="showFundHoldings('${_jesc(name)}')">
+      <div class="fund-card" id="fcard-${i}" onclick="showFundHoldings('${_jesc(name)}', ${i})">
         <div style="font-size:11px;font-weight:700;color:var(--green);margin-bottom:6px">${_esc(name)}</div>
         ${hasError
           ? `<div style="font-size:10px;color:var(--red)">Data unavailable</div>`
@@ -4949,10 +4949,12 @@ function renderInstitutional(data, panel) {
   `;
 }
 
-function showFundHoldings(fundName) {
-  // Update active card
+function showFundHoldings(fundName, idx) {
+  // Update active card. Cards use index-based IDs (fcard-${i}); look up by the
+  // same index — the old fundName-based lookup never matched, so the active
+  // highlight silently never applied.
   document.querySelectorAll('.fund-card').forEach(c => c.classList.remove('active'));
-  const card = document.getElementById('fcard-' + fundName.replace(/\s+/g,'_'));
+  const card = idx != null ? document.getElementById('fcard-' + idx) : null;
   if (card) card.classList.add('active');
 
   const panel = document.getElementById('fund-holdings-panel');
@@ -5200,7 +5202,7 @@ async function runSignalsScan(extraSymbols) {
     if (meta) meta.textContent = `${_signalsCache.length} symbols scored — ranked by conviction`;
   } catch (e) {
     loader.stop();
-    grid.innerHTML = `<div class="empty-state"><span class="col-red">Error: ${e.message}</span></div>`;
+    grid.innerHTML = `<div class="empty-state"><span class="col-red">Error: ${_esc(e.message)}</span></div>`;
     if (meta) meta.textContent = '';
   } finally {
     if (btn) { btn.disabled = false; btn.textContent = '⟳ SCAN PORTFOLIO'; }
@@ -5228,7 +5230,7 @@ async function addSignalSymbol() {
     if (meta) meta.textContent = `${sym} added — ${_signalsCache.length} symbols scored`;
     Toast.show(`${sym} score: ${data.score}/100 — ${data.signal}`, data.score >= 60 ? 'green' : 'amber');
   } catch(e) {
-    Toast.show(`${sym}: ${e.message}`, 'red');
+    Toast.show(`${sym}: ${_esc(e.message)}`, 'red');
     if (meta) meta.textContent = _signalsCache.length ? `${_signalsCache.length} symbols scored` : '';
   }
 }
@@ -5354,7 +5356,7 @@ async function toggleMLPanel(panelId, symbol) {
       }
     }
   } catch(e) {
-    panel.innerHTML = `<div style="font-size:10px;color:var(--red);padding:8px">ML Error: ${e.message}</div>`;
+    panel.innerHTML = `<div style="font-size:10px;color:var(--red);padding:8px">ML Error: ${_esc(e.message)}</div>`;
   }
 }
 
@@ -5766,7 +5768,7 @@ async function scanOptionsFlow() {
     body.innerHTML = renderOptionsResult(data);
   } catch(e) {
     loader.stop();
-    body.innerHTML = `<div class="empty-state"><span class="col-red">${e.message}</span></div>`;
+    body.innerHTML = `<div class="empty-state"><span class="col-red">${_esc(e.message)}</span></div>`;
   } finally {
     if (btn) { btn.disabled = false; btn.textContent = 'SCAN'; }
   }
@@ -5799,7 +5801,7 @@ async function scanPortfolioOptions() {
     body.innerHTML = html;
   } catch(e) {
     loader.stop();
-    body.innerHTML = `<div class="empty-state"><span class="col-red">${e.message}</span></div>`;
+    body.innerHTML = `<div class="empty-state"><span class="col-red">${_esc(e.message)}</span></div>`;
   } finally {
     if (btn) { btn.disabled = false; btn.textContent = 'PORTFOLIO SCAN'; }
   }
@@ -5833,8 +5835,8 @@ function renderOptionsResult(data) {
     `;
   }).join('');
 
-  const bulls = unusual.filter(c => c.sentiment.includes('BULL') || (c.side === 'CALL' && !c.sentiment.includes('SPEC'))).length;
-  const bears = unusual.filter(c => c.sentiment.includes('BEAR') || (c.side === 'PUT' && !c.sentiment.includes('SPEC'))).length;
+  const bulls = unusual.filter(c => (c.sentiment || '').includes('BULL') || (c.side === 'CALL' && !(c.sentiment || '').includes('SPEC'))).length;
+  const bears = unusual.filter(c => (c.sentiment || '').includes('BEAR') || (c.side === 'PUT' && !(c.sentiment || '').includes('SPEC'))).length;
   const overall = bulls > bears * 1.5 ? 'BULLISH FLOW' : bears > bulls * 1.5 ? 'BEARISH FLOW' : 'MIXED FLOW';
   const overallColor = overall.includes('BULL') ? 'col-positive' : overall.includes('BEAR') ? 'col-negative' : 'col-yellow';
 
@@ -5918,7 +5920,7 @@ async function loadCongressData() {
     DataPanels.appendSenatePanel(body);
   } catch(e) {
     loader.stop();
-    body.innerHTML = `<div class="empty-state"><span class="col-red">Error: ${e.message}</span></div>`;
+    body.innerHTML = `<div class="empty-state"><span class="col-red">Error: ${_esc(e.message)}</span></div>`;
   } finally {
     if (btn) { btn.disabled = false; btn.textContent = '⟳ REFRESH'; }
   }
@@ -5963,7 +5965,7 @@ function renderCongressView(data) {
       <td style="font-weight:700;color:var(--green);cursor:pointer" onclick="filterCongressByTicker('${t.ticker}')">${t.ticker}</td>
       <td><span class="signal-badge ${txnTypeColor(t.txn_type)}" style="font-size:9px">${t.txn_type}</span></td>
       <td style="font-size:10px">${t.amount_str || '—'}</td>
-      <td style="font-size:10px;color:var(--text-secondary)">${t.member_name}</td>
+      <td style="font-size:10px;color:var(--text-secondary)">${_esc(t.member_name)}</td>
       <td style="font-size:10px;color:var(--text-dim)">${t.state || ''}</td>
       <td style="font-size:10px;color:var(--text-dim)">${t.owner || ''}</td>
       <td><a href="${t.pdf_url || '#'}" target="_blank" rel="noopener" style="font-size:10px;color:var(--blue)">PDF ↗</a></td>
@@ -6037,7 +6039,7 @@ function filterCongressByTicker(ticker) {
         <td style="font-weight:700;color:var(--green)">${t.ticker}</td>
         <td><span class="signal-badge ${txnTypeColor(t.txn_type)}" style="font-size:9px">${t.txn_type}</span></td>
         <td style="font-size:10px">${t.amount_str || '—'}</td>
-        <td style="font-size:10px;color:var(--text-secondary)">${t.member_name}</td>
+        <td style="font-size:10px;color:var(--text-secondary)">${_esc(t.member_name)}</td>
         <td style="font-size:10px;color:var(--text-dim)">${t.state || ''}</td>
         <td style="font-size:10px;color:var(--text-dim)">${t.owner || ''}</td>
         <td><a href="${t.pdf_url || '#'}" target="_blank" rel="noopener" style="font-size:10px;color:var(--blue)">PDF ↗</a></td>
@@ -6511,7 +6513,7 @@ async function analyzeGex(sym) {
       if (slot) { try { window.renderTrackBadge(slot, 'gex'); } catch(_) {} }
     }
   } catch (e) {
-    results.innerHTML = '<div class="empty-state"><span class="col-negative">Error: ' + e.message + '</span></div>';
+    results.innerHTML = '<div class="empty-state"><span class="col-negative">Error: ' + _esc(e.message) + '</span></div>';
   }
 }
 
@@ -6585,7 +6587,7 @@ async function mapContagion(sym) {
     window._contagionSymbol = symbol;
     results.innerHTML = html;
   } catch (e) {
-    results.innerHTML = '<div class="empty-state"><span class="col-negative">Error: ' + e.message + '</span></div>';
+    results.innerHTML = '<div class="empty-state"><span class="col-negative">Error: ' + _esc(e.message) + '</span></div>';
   }
 }
 
@@ -6634,7 +6636,7 @@ async function assessContagionImpact() {
     }
   } catch (e) {
     var loadEl2 = document.getElementById('contagion-impact-loading');
-    if (loadEl2) loadEl2.innerHTML = '<span class="col-negative">Impact error: ' + e.message + '</span>';
+    if (loadEl2) loadEl2.innerHTML = '<span class="col-negative">Impact error: ' + _esc(e.message) + '</span>';
   }
 }
 
@@ -7101,7 +7103,7 @@ async function analyzeSyntheticInsider(sym) {
 
     results.innerHTML = html;
   } catch (e) {
-    results.innerHTML = '<div class="empty-state"><span class="col-negative">Error: ' + e.message + '</span></div>';
+    results.innerHTML = '<div class="empty-state"><span class="col-negative">Error: ' + _esc(e.message) + '</span></div>';
   }
 }
 
@@ -7138,7 +7140,7 @@ async function scanSyntheticInsiderPortfolio() {
     html += '</tbody></table></div></div>';
     results.innerHTML = html;
   } catch (e) {
-    results.innerHTML = '<div class="empty-state"><span class="col-negative">Error: ' + e.message + '</span></div>';
+    results.innerHTML = '<div class="empty-state"><span class="col-negative">Error: ' + _esc(e.message) + '</span></div>';
   }
 }
 
@@ -7256,7 +7258,7 @@ async function detectReflexivity(sym) {
 
     results.innerHTML = html;
   } catch (e) {
-    results.innerHTML = '<div class="empty-state"><span class="col-negative">Error: ' + e.message + '</span></div>';
+    results.innerHTML = '<div class="empty-state"><span class="col-negative">Error: ' + _esc(e.message) + '</span></div>';
   }
 }
 
@@ -7351,7 +7353,7 @@ async function loadLiquidityData() {
 
     results.innerHTML = html;
   } catch (e) {
-    results.innerHTML = '<div class="empty-state"><span class="col-negative">Error: ' + e.message + '</span></div>';
+    results.innerHTML = '<div class="empty-state"><span class="col-negative">Error: ' + _esc(e.message) + '</span></div>';
   }
 }
 
@@ -7433,7 +7435,7 @@ async function nowcastAltData(sym) {
 
     results.innerHTML = html;
   } catch (e) {
-    results.innerHTML = '<div class="empty-state"><span class="col-negative">Error: ' + e.message + '</span></div>';
+    results.innerHTML = '<div class="empty-state"><span class="col-negative">Error: ' + _esc(e.message) + '</span></div>';
   }
 }
 
@@ -7491,7 +7493,7 @@ async function scanAltDataPortfolio() {
     html += '</tbody></table></div></div>';
     results.innerHTML = html;
   } catch (e) {
-    results.innerHTML = '<div class="empty-state"><span class="col-negative">Error: ' + e.message + '</span></div>';
+    results.innerHTML = '<div class="empty-state"><span class="col-negative">Error: ' + _esc(e.message) + '</span></div>';
   }
 }
 

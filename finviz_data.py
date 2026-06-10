@@ -98,7 +98,10 @@ def sector_heatmap() -> dict:
     for _, r in df.iterrows():
         rows.append({
             "name":         r.get("Name"),
-            "stocks":       int(r["Stocks"]) if r.get("Stocks") else None,
+            # Route through the tolerant float parser — Finviz can return the
+            # count comma-formatted ("2,345") or as a placeholder ("-"), and a
+            # bare int() here would raise and kill the whole (unguarded) loop.
+            "stocks":       int(_safe_float(r.get("Stocks"))) if _safe_float(r.get("Stocks")) is not None else None,
             "market_cap":   _safe_float(r.get("Market Cap")),
             "dividend":     _safe_float(r.get("Dividend")),
             "pe":           _safe_float(r.get("P/E")),

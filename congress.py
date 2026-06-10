@@ -192,7 +192,9 @@ def _parse_ptr_pdf(pdf_bytes, member_name, doc_id, filing_year):
     # Date pattern: MM/DD/YYYY
     DATE_RE = r"(\d{1,2}/\d{1,2}/\d{4})"
     AMOUNT_RE = r"(\$[\d,]+\s*-\s*\$[\d,]+|Over\s*\$[\d,]+)"
-    TICKER_RE = r"\(([A-Z]{1,5})\)\s*\[(ST|OP|MF|GS|OT|RE|PF|HC|VI)\]"
+    # Allow dotted/class tickers like BRK.B; the [asset-type] bracket anchors
+    # the match so broadening the char class can't grab stray parentheticals.
+    TICKER_RE = r"\(([A-Z][A-Z.]{0,5})\)\s*\[(ST|OP|MF|GS|OT|RE|PF|HC|VI)\]"
     TXN_TYPE_RE = r"\b(S\s*\(partial\)|S\s*\(Exchange\)|E\s*\(Exchange\)|P|S|PE|SE)\b"
     OWNER_RE = r"^(JT|SP|DC)\s+"
 

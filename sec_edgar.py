@@ -234,7 +234,7 @@ def get_cik(ticker):
         resp = _edgar_get("https://www.sec.gov/files/company_tickers.json")
         data = resp.json()
         for _, entry in data.items():
-            entry_ticker = entry.get("ticker", "").upper()
+            entry_ticker = (entry.get("ticker") or "").upper()
             # SEC stores hyphenated; we already normalised on the way in,
             # but normalise the SEC side too in case the dataset ever
             # introduces dot-form tickers.
