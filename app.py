@@ -816,7 +816,7 @@ def portfolio_import():
             name = norm.get("name") or norm.get("description") or norm.get("\"description\"") or ""
             name = str(name).strip('"').strip() if name else ""
 
-            if not symbol or not symbol.isalpha() and not "-" in symbol:
+            if not symbol or not re.match(r"^[A-Z0-9.\-]{1,10}$", symbol):
                 skipped += 1
                 continue
             if shares is None or shares <= 0:
@@ -1001,7 +1001,8 @@ def portfolio_dividends():
         if h["asset_type"] == "crypto":
             continue
         div_data = div_map.get(h["symbol"], {})
-        cur_price = prices.get(h["symbol"], {}).get("price") or h["avg_cost"]
+        _px = prices.get(h["symbol"], {}).get("price")
+        cur_price = _px if _px is not None else h["avg_cost"]  # real 0 isn't missing
         market_value = cur_price * h["shares"]
         total_portfolio_value += market_value
 
@@ -1074,12 +1075,16 @@ def stress_test():
     if crypto_syms:
         cp = fetcher.get_quotes_batch([s + "-USD" for s in crypto_syms])
         for s in crypto_syms:
-            if (s + "-USD") in cp:
-                prices[s] = cp[s + "-USD"]
+            # get_quotes_batch returns UPPER-cased keys; match accordingly so a
+            # lowercase-stored crypto symbol doesn't silently miss its live price.
+            k = (s + "-USD").upper()
+            if k in cp:
+                prices[s] = cp[k]
 
     enriched = []
     for h in holdings:
-        cur = prices.get(h["symbol"], {}).get("price") or h["avg_cost"]
+        _cp = prices.get(h["symbol"], {}).get("price")
+        cur = _cp if _cp is not None else h["avg_cost"]  # a real 0 price isn't "missing"
         h["market_value"] = round(cur * h["shares"], 2)
         h["current_price"] = cur
         enriched.append(h)
@@ -1180,7 +1185,7 @@ def portfolio_ai_analysis():
         q = prices.get(sym, {})
         price = q.get("price")
         cost_basis = h["avg_cost"] * h["shares"]
-        market_value = price * h["shares"] if price else cost_basis
+        market_value = price * h["shares"] if price is not None else cost_basis
         unrealized_pnl = market_value - cost_basis
         unrealized_pct = (unrealized_pnl / cost_basis * 100) if cost_basis else 0
         total_value += market_value
@@ -1374,7 +1379,7 @@ def intel_filing_detail(accession):
             idx_data = resp.json()
             primary_doc = None
             for doc in idx_data.get("documents", []):
-                if doc.get("type") == form_type or doc.get("sequence") == "1":
+                if doc.get("type") == form_type or str(doc.get("sequence")) == "1":
                     primary_doc = doc.get("document", "")
                     break
             if not primary_doc and idx_data.get("documents"):
@@ -1863,8 +1868,10 @@ def scanner_results():
 @app.route("/api/scanner/watchlist")
 def scanner_watchlist():
     """Symbols that have appeared in recent scans, ranked by appearance + max score."""
-    days = _safe_int(request.args.get("days"), 30)
-    limit = _safe_int(request.args.get("limit"), 20)
+    # clamp positive — a negative limit becomes SQL LIMIT -1 (all rows) and a
+    # negative days builds a "--N days" modifier that yields an empty window.
+    days = max(1, _safe_int(request.args.get("days"), 30))
+    limit = max(1, _safe_int(request.args.get("limit"), 20))
     return jsonify({"watchlist": db.get_scanner_watchlist(limit=limit, days=days)})
 
 
@@ -1894,7 +1901,7 @@ def congress_senate():
 def congress_all():
     """Combined House + Senate trades, sorted newest first."""
     symbol = request.args.get("symbol")
-    limit = _safe_int(request.args.get("limit"), 200)
+    limit = max(1, _safe_int(request.args.get("limit"), 200))  # clamp: -1 would slice off the last row
     senate = ds.get_senate_trades(symbol=symbol, limit=limit)
     try:
         import congress as house_mod

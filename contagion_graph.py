@@ -440,7 +440,9 @@ def _parse_company_mentions(text):
         for ticker, entry in mentions.items():
             # Check if this ticker/company name appears near the revenue mention
             name = entry["name"]
-            if ticker in surrounding or (name and name.lower() in surrounding.lower()):
+            # word-boundary match — bare `ticker in surrounding` let 1-char
+            # tickers (C, V, F, T) match inside unrelated words.
+            if re.search(r"\b" + re.escape(ticker) + r"\b", surrounding) or (name and name.lower() in surrounding.lower()):
                 entry["revenue_pct"] = pct
                 entry["_weight"] += 5.0  # Revenue concentration is very significant
                 break

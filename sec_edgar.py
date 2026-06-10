@@ -605,8 +605,8 @@ def get_form4_transactions(ticker, limit=30):
                 root.findtext(".//reportingOwner/reportingOwnerRelationship/officerTitle") or
                 root.findtext(".//officerTitle") or ""
             )
-            is_director = is_director_text.strip() in ("1", "true", "True")
-            is_officer = is_officer_text.strip() in ("1", "true", "True")
+            is_director = is_director_text.strip().lower() in ("1", "true", "y", "yes")
+            is_officer = is_officer_text.strip().lower() in ("1", "true", "y", "yes")
 
             def _parse_txn(txn, derivative=False):
                 security = txn.findtext("securityTitle/value") or txn.findtext("securityTitle") or ""

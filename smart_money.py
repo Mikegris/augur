@@ -199,8 +199,8 @@ def _score_earnings_quality(info, ticker):
     # P/E relative to sector (rough heuristic)
     pe = _safe_float(info.get("trailingPE"))
     fpe = _safe_float(info.get("forwardPE"))
-    if pe and fpe:
-        if fpe < pe * 0.85:
+    if pe and fpe and pe > 0 and fpe > 0:  # both must be positive — a negative
+        if fpe < pe * 0.85:                 # forwardPE (loss forecast) isn't "PE contracting"
             score += 2  # PE contracting = earnings growth
         elif fpe > pe * 1.15:
             score -= 2
