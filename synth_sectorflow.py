@@ -648,6 +648,29 @@ def _factor_contribution(sector: str, factor_panel: Dict[str, Any]) -> Optional[
 
 # ─── public API ──────────────────────────────────────────────────────
 
+def _build_sector_row(spec: Dict[str, str], insiders, congress, factors,
+                      spy_bars) -> Dict[str, Any]:
+    """Build one sector's row. Each call makes ~6 independent upstream fetches
+    (price / narrative / reddit / hn / wiki / options); cheap individually but
+    serial across 11 sectors was the ~113s cold-cache cost. Shared indices /
+    factors / SPY bars are computed once and passed in; this runs per-sector in
+    parallel (see _compute)."""
+    sector = spec["sector"]
+    etf = spec["etf"]
+    row: Dict[str, Any] = {"sector": sector, "etf": etf}
+    row.update(_price_panel(etf, spy_bars=spy_bars))          # price + RS
+    row.update(_narrative_panel(etf))                          # narrative
+    row["factor_1d_return_pct"] = _factor_contribution(sector, factors)
+    row["insider_buy_ratio_30d"] = _insider_buy_ratio(insiders, sector)
+    row["congress_net_30d_usd"] = congress.get(sector, 0.0) or None
+    row.update(_reddit_panel(sector))
+    row.update(_hn_panel(etf, sector))
+    row.update(_wiki_panel(etf))
+    row["options_pcr"] = _options_pcr(etf)
+    row["composite_flow_score"] = _composite_score(row)
+    return row
+
+
 def _compute() -> Dict[str, Any]:
     insiders = _insider_index()
     congress = _congress_index()
@@ -659,43 +682,21 @@ def _compute() -> Dict[str, Any]:
     # cheap-but-not-free per call (lock, dict lookup, optional Event wait).
     spy_bars = _spy_bars()
 
-    rows: List[Dict[str, Any]] = []
-    for spec in SECTORS:
-        sector = spec["sector"]
-        etf = spec["etf"]
-        row: Dict[str, Any] = {"sector": sector, "etf": etf}
-
-        # price + RS
-        row.update(_price_panel(etf, spy_bars=spy_bars))
-
-        # narrative
-        row.update(_narrative_panel(etf))
-
-        # factor return (per-sector tilt)
-        row["factor_1d_return_pct"] = _factor_contribution(sector, factors)
-
-        # insider
-        row["insider_buy_ratio_30d"] = _insider_buy_ratio(insiders, sector)
-
-        # congress
-        row["congress_net_30d_usd"] = congress.get(sector, 0.0) or None
-
-        # reddit
-        row.update(_reddit_panel(sector))
-
-        # hn
-        row.update(_hn_panel(etf, sector))
-
-        # wikipedia
-        row.update(_wiki_panel(etf))
-
-        # options PCR
-        row["options_pcr"] = _options_pcr(etf)
-
-        # composite
-        row["composite_flow_score"] = _composite_score(row)
-
-        rows.append(row)
+    # Build the 11 sector rows concurrently. Serially this was ~113s cold
+    # (11 sectors × ~6 upstream calls each); parallel_map collapses it to
+    # roughly the slowest single sector. safe_executor falls back to serial
+    # if the process can't spawn threads, and Nones-out any sector that raises.
+    import safe_executor
+    # One worker per sector → a single wave (the sectors are independent and
+    # I/O-bound). 6 workers left it at ~2 waves (~54s); a full wave roughly
+    # halves that. safe_executor degrades to serial if the process can't spawn
+    # threads.
+    rows: List[Dict[str, Any]] = [
+        r for r in safe_executor.parallel_map(
+            lambda spec: _build_sector_row(spec, insiders, congress, factors, spy_bars),
+            SECTORS, max_workers=len(SECTORS), thread_name_prefix="sectorflow",
+        ) if r is not None
+    ]
 
     # leader / laggard by composite
     scored = [r for r in rows if r.get("composite_flow_score") is not None]
