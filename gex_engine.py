@@ -391,8 +391,9 @@ def compute_gex(symbol):
     prev_strike = None
     for item in gex_by_strike:
         cumulative += item["net_gex"]
-        if prev_strike is not None and prev_cum != 0.0:
-            # Check for sign change
+        if prev_strike is not None:
+            # Check for sign change (the prev_cum != 0 guard wrongly skipped the
+            # first interval; the sign-change test below already handles prev==0)
             if (prev_cum < 0 and cumulative >= 0) or (prev_cum > 0 and cumulative <= 0):
                 # Linear interpolation between prev_strike and current strike
                 denom = cumulative - prev_cum

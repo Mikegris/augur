@@ -256,7 +256,7 @@
           legend: { labels: { color: 'rgba(255,255,255,0.85)', boxWidth: 10 } },
           tooltip: {
             callbacks: {
-              title: items => items[0].raw.symbol + ' — ' + _typeMeta(items[0].raw.type).label,
+              title: items => { const r0 = (items[0] && items[0].raw) || {}; return (r0.symbol || '?') + ' — ' + _typeMeta(r0.type).label; },
               label: it => {
                 const r = it.raw;
                 const lines = [

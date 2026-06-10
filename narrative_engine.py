@@ -362,8 +362,9 @@ def analyze_narrative(symbol):
         published = item.get("published")
         dt = _parse_date(published)
         if dt is None:
-            # If we can't parse the date, assume it's recent (today)
-            dt = now
+            # Skip undated articles — stamping them "now" put them in every
+            # window and inflated recent counts / flipped the phase.
+            continue
 
         bucket = _classify_article(title, summary)
         overall_buckets[bucket] = overall_buckets.get(bucket, 0) + 1

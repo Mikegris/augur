@@ -599,8 +599,19 @@ def score_hypothesis(hypothesis_id: int) -> Dict[str, Any]:
             c.commit()
         return {"id": hypothesis_id, "status": "INVALIDATED", "reason": "no issued price"}
 
+    # A zero entry price can never resolve (realized_pct would divide by zero);
+    # treat it like a missing price and invalidate instead of OPEN-forever.
+    if float(issued) == 0:
+        with _conn() as c:
+            c.execute(
+                "UPDATE hypotheses SET status='INVALIDATED', closed_at=? WHERE id=?",
+                (_now_iso(), hypothesis_id),
+            )
+            c.commit()
+        return {"id": hypothesis_id, "status": "INVALIDATED", "reason": "zero issued price"}
+
     current = _current_price(h["symbol"])
-    if current is None or float(issued) == 0:
+    if current is None:
         return {"id": hypothesis_id, "status": "OPEN", "reason": "no current price"}
 
     realized_pct = ((current - float(issued)) / float(issued)) * 100.0

@@ -177,7 +177,7 @@
         + '<tr>'
         + '<td>' + label + '</td>'
         + '<td><span class="pf-bar ' + cls + '" '
-        +     'style="width:' + (w * 100).toFixed(1) + 'px;background:'
+        +     'style="width:' + Math.max(0, Math.min(100, w * 100)).toFixed(1) + '%;background:'
         +     (r[2] === 'pos' ? 'var(--green, #2bd47d)' : 'var(--red, #ff5e5e)') + '"></span></td>'
         + '<td class="' + cls + '">' + pct + '</td>'
         + '</tr>';

@@ -43,6 +43,7 @@ def _c(text, color):
     return f"{color}{text}{RESET}"
 
 def _pnl_color(val):
+    if val is None: return DIM   # None > 0 raises TypeError in py3
     if val > 0: return GREEN
     if val < 0: return RED
     return DIM
@@ -293,7 +294,7 @@ def cmd_market(args):
         rows = []
         for s in data:
             name = s.get("name", s.get("symbol",""))
-            chg = s.get("change_pct", 0)
+            chg = s.get("change_pct") or 0   # `or 0`: a present-but-None value would crash int(abs(chg)*3)
             bar_len = int(abs(chg) * 3)
             bar = ("█" * min(bar_len, 20))
             rows.append((name, _c(fmt_pct(chg), _pnl_color(chg)), _c(bar, _pnl_color(chg))))
@@ -710,7 +711,7 @@ def cmd_dividends(args):
         if not data or not data.get("dividend_rate"):
             continue
         rate = data.get("dividend_rate", 0)
-        yld = data.get("dividend_yield", 0) * 100
+        yld = (data.get("dividend_yield") or 0) * 100
         annual = rate * h["shares"]
         total_annual += annual
         ex_date = data.get("ex_date", "N/A")
@@ -906,7 +907,7 @@ def cmd_smart_money(args):
         # Component bars
         comps = data.get("components", {})
         for key, c in comps.items():
-            pct = round(c["score"] / c["max"] * 100)
+            pct = round(c.get("score", 0) / c["max"] * 100) if c.get("max") else 0
             bar_filled = int(pct / 5)
             bar = _c("█" * bar_filled, GREEN if pct >= 70 else (YELLOW if pct >= 40 else RED))
             bar += _c("░" * (20 - bar_filled), DIM)
@@ -996,7 +997,7 @@ def cmd_ml_forecast(args):
         feats = rf.get("top_features", [])
         if feats:
             print(f"\n  {_c('Feature Importance:', DIM)}")
-            max_imp = max(f["importance"] for f in feats) if feats else 1
+            max_imp = max((f["importance"] for f in feats), default=1) or 1  # avoid /0 when all importances are 0
             for f in feats[:8]:
                 pct = int(f["importance"] / max_imp * 20)
                 print(f"    {f['name']:<16} {_c('█' * pct, CYAN)}{'░' * (20 - pct)} {f['importance']*100:.1f}%")
@@ -1192,8 +1193,8 @@ def cmd_crypto(args):
             d = data.get("data", data)
             print(f"  Total Market Cap:   {fmt_number(d.get('total_market_cap', {}).get('usd', 0))}")
             print(f"  24h Volume:         {fmt_number(d.get('total_volume', {}).get('usd', 0))}")
-            print(f"  BTC Dominance:      {d.get('market_cap_percentage', {}).get('btc', 0):.1f}%")
-            print(f"  ETH Dominance:      {d.get('market_cap_percentage', {}).get('eth', 0):.1f}%")
+            print(f"  BTC Dominance:      {(d.get('market_cap_percentage') or {}).get('btc') or 0:.1f}%")
+            print(f"  ETH Dominance:      {(d.get('market_cap_percentage') or {}).get('eth') or 0:.1f}%")
             print(f"  Active Coins:       {d.get('active_cryptocurrencies', 0):,}")
 
 
@@ -1387,7 +1388,7 @@ def cmd_gex(args):
         for w in walls[:10]:
             wtype = w.get("type", "")
             color = GREEN if wtype == "support" else RED
-            rows.append((fmt_price(w["strike"]), _c(w.get("net_gex_formatted", str(int(w.get("net_gex", 0)))), color), _c(wtype.upper(), color)))
+            rows.append((fmt_price(w.get("strike")), _c(w.get("net_gex_formatted", str(int(w.get("net_gex", 0)))), color), _c(wtype.upper(), color)))
         table(rows, ["Strike", "Net GEX", "Type"], [12, 16, 12])
     hedges = data.get("dealer_hedge_estimates", {})
     if hedges:

@@ -809,7 +809,7 @@ function _portfolioTableHtml(items, summary, acctOptsHtml, showAccount) {
     h += '<tr>'
       + '<td><span class="col-symbol" onclick="openResearch(\'' + _jesc(p.symbol) + '\')">' + _esc(p.symbol) + '</span></td>'
       + '<td class="col-name truncate" style="max-width:120px" title="' + _esc(p.name || '') + '">' + _esc(p.name || '\u2014') + '</td>'
-      + '<td><span class="badge badge-dim">' + p.asset_type + '</span></td>';
+      + '<td><span class="badge badge-dim">' + _esc(p.asset_type) + '</span></td>';
     if (showAccount) {
       h += '<td style="font-size:10px">'
         + '<select class="form-select" style="font-size:9px;padding:1px 4px;height:20px;width:auto;min-width:80px;background:transparent;border-color:var(--border)" '
@@ -829,8 +829,8 @@ function _portfolioTableHtml(items, summary, acctOptsHtml, showAccount) {
       + '<td class="' + col.pct(p.day_change_pct) + '">' + fmt.pct(p.day_change_pct) + '</td>'
       + '<td class="col-number">' + weight.toFixed(1) + '%</td>'
       + '<td class="col-actions">'
-      + '<button class="btn btn-ghost btn-sm" onclick="openResearch(\'' + p.symbol + '\')">CHART</button>'
-      + '<button class="btn btn-red btn-sm" onclick="deletePosition(' + p.id + ', \'' + p.symbol + '\')">\u2715</button>'
+      + '<button class="btn btn-ghost btn-sm" onclick="openResearch(\'' + _jesc(p.symbol) + '\')">CHART</button>'
+      + '<button class="btn btn-red btn-sm" onclick="deletePosition(' + p.id + ', \'' + _jesc(p.symbol) + '\')">\u2715</button>'
       + '</td></tr>';
   });
   h += '</tbody></table>';
@@ -1137,7 +1137,7 @@ function renderPortfolioAnalysis(r) {
     <!-- Position insights -->
     ${posRows ? `
     <div style="margin-bottom:12px">
-      <div style="font-size:10px;color:var(--text-dim);margin-bottom:8px;letter-spacing:.1em">▸ POSITION ASSESSMENTS</div>
+      <div style="font-size:10px;color:var(--text-dim);margin-bottom:8px;letter-spacing:.1em">▸ ${_esc(m)}POSITION ASSESSMENTS</div>
       <table class="data-table" style="font-size:11px">
         <thead><tr><th>SYMBOL</th><th>ASSESSMENT</th><th>INSIGHT</th></tr></thead>
         <tbody>${posRows}</tbody>
@@ -2568,7 +2568,7 @@ async function loadAlertsView() {
             <thead><tr><th>SYMBOL</th><th>TYPE</th><th style="text-align:right">TARGET</th><th style="text-align:right">CURRENT</th><th style="text-align:right">DISTANCE</th><th>CREATED</th><th></th></tr></thead>
             <tbody>
               ${active.map(a => {
-                const atTarget = a.distance_pct !== null && Math.abs(a.distance_pct) < 1;
+                const atTarget = a.distance_pct != null && Math.abs(a.distance_pct) < 1;
                 const distColor = atTarget ? 'var(--amber)' :
                   (a.alert_type === 'above' && a.distance_pct < 0) ? 'var(--green)' :
                   (a.alert_type === 'below' && a.distance_pct > 0) ? 'var(--green)' : 'var(--text-dim)';
@@ -2577,7 +2577,7 @@ async function loadAlertsView() {
                   <td><span class="badge ${a.alert_type === 'above' ? 'badge-green' : 'badge-red'}">${_esc(a.alert_type.toUpperCase())}</span></td>
                   <td class="col-number">$${fmt.price(a.price)}</td>
                   <td class="col-number">${a.current_price ? '$' + fmt.price(a.current_price) : '—'}</td>
-                  <td class="col-number" style="color:${distColor}">${a.distance_pct !== null ? (a.distance_pct >= 0 ? '+' : '') + a.distance_pct.toFixed(2) + '%' : '—'}</td>
+                  <td class="col-number" style="color:${distColor}">${a.distance_pct != null ? (a.distance_pct >= 0 ? '+' : '') + a.distance_pct.toFixed(2) + '%' : '—'}</td>
                   <td style="font-size:10px;color:var(--text-dim)">${fmt.date(a.created_at?.slice(0,10))}</td>
                   <td><button class="btn btn-red btn-sm" onclick="deleteAlert(${a.id})">✕</button></td>
                 </tr>`;
@@ -2751,7 +2751,7 @@ async function loadDividendsView() {
   view.innerHTML = `<div class="loading"><div class="spinner"></div> FETCHING DIVIDEND DATA...</div>`;
   try {
     const data = await API.get('/api/dividends/portfolio');
-    const { positions, summary } = data;
+    const { positions = [], summary = {} } = data || {};  // tolerate an error/empty shape
 
     if (!positions.length) {
       view.innerHTML = `<div class="empty-state"><span class="empty-icon">⊛</span><span>No stock positions found. Add stocks to track dividend income.</span></div>`;
@@ -3095,7 +3095,7 @@ function renderStressResults(data) {
             <div style="margin-top:8px;display:flex;justify-content:space-between;font-size:11px">
               <span style="color:var(--text-dim)">$${fmt.currency(current)} → <span style="color:${lossColor}">$${fmt.currency(s.new_portfolio_value)}</span></span>
             </div>
-            <div style="margin-top:6px;font-size:9px;color:var(--text-dim)">▸ CLICK FOR POSITION BREAKDOWN</div>
+            <div style="margin-top:6px;font-size:9px;color:var(--text-dim)">▸ ${_esc(m)}CLICK FOR POSITION BREAKDOWN</div>
           </div>`;
       }).join('')}
     </div>
@@ -3219,7 +3219,7 @@ async function loadEarningsView() {
 
       ${later.length ? `
       <div style="margin-bottom:16px">
-        <div style="font-size:10px;color:var(--text-dim);letter-spacing:.1em;margin-bottom:6px">▸ LATER (${later.length})</div>
+        <div style="font-size:10px;color:var(--text-dim);letter-spacing:.1em;margin-bottom:6px">▸ ${_esc(m)}LATER (${later.length})</div>
         ${renderEarningsGrid(later)}
       </div>` : ''}
 
@@ -3264,7 +3264,7 @@ function renderEarningsGrid(events) {
           </div>
         </div>
         <div style="margin-top:8px;font-size:10px;color:var(--green);letter-spacing:.05em">
-          ▸ CLICK FOR FULL DOSSIER + AI BRIEF
+          ▸ ${_esc(m)}CLICK FOR FULL DOSSIER + AI BRIEF
         </div>
       </div>`;
     }).join('')}
@@ -3445,7 +3445,7 @@ function renderEarningsDossier(panel, d) {
             ${b.key_metrics_to_watch ? `
             <div style="margin-top:10px;border-top:1px solid var(--border);padding-top:8px">
               <div style="font-size:10px;color:var(--text-dim);margin-bottom:6px">KEY METRICS TO WATCH</div>
-              ${b.key_metrics_to_watch.map(m => `<div style="font-size:11px;color:var(--text-secondary);padding:2px 0">▸ ${m}</div>`).join('')}
+              ${b.key_metrics_to_watch.map(m => `<div style="font-size:11px;color:var(--text-secondary);padding:2px 0">▸ ${_esc(m)}</div>`).join('')}
             </div>` : ''}
           </div>
 
@@ -4789,7 +4789,7 @@ function renderFilingFeed(filings, panel) {
             <div style="flex:1">
               <div style="font-size:10px;color:var(--text-dim);margin-bottom:6px">KEY POINTS</div>
               <ul class="key-points-list">
-                ${(f.key_points || []).map(p => `<li>${p}</li>`).join('')}
+                ${(f.key_points || []).map(p => `<li>${_esc(p)}</li>`).join('')}
               </ul>
             </div>
             <div style="flex:2">
@@ -4911,7 +4911,7 @@ function renderInsiders(data, panel, symbol) {
       <tr class="${rowCls}">
         <td style="font-size:11px;color:var(--text-dim)">${_esc(t.date || '—')}</td>
         <td style="font-size:11px">${_esc(t.insider_name || '—')}</td>
-        <td style="font-size:10px;color:var(--text-dim)">${t.title || (t.is_director ? 'Director' : t.is_officer ? 'Officer' : '—')}</td>
+        <td style="font-size:10px;color:var(--text-dim)">${_esc(t.title || (t.is_director ? 'Director' : t.is_officer ? 'Officer' : '—'))}</td>
         <td><span class="${actionCls}" style="font-weight:700;font-size:11px">${_esc(t.transaction_type)}</span></td>
         <td style="font-size:11px">${_esc(t.security || 'Common Stock')}</td>
         <td style="font-size:11px;text-align:right">${t.shares ? fmt.compact(t.shares) : '—'}</td>
@@ -5055,7 +5055,7 @@ function showFundHoldings(fundName, idx) {
   panel.innerHTML = overlapSection + `
     <div class="panel">
       <div class="panel-header">
-        <span class="panel-title">TOP HOLDINGS — ${fundName}</span>
+        <span class="panel-title">TOP HOLDINGS — ${_esc(fundName)}</span>
         <span style="font-size:10px;color:var(--text-dim)">Period: ${_esc(fd.period_of_report || '—')} | AUM: $${fmt.compact(fd.total_value)}</span>
       </div>
       <div style="overflow-x:auto">
@@ -5299,7 +5299,7 @@ function buildSignalCard(s) {
   const cardId = 'ml-panel-' + s.symbol.replace(/[^A-Z0-9]/g, '');
 
   const bars = Object.entries(components).map(([key, c]) => {
-    const pct = Math.round((c.score / c.max) * 100);
+    const pct = c.max ? Math.round((c.score / c.max) * 100) : 0;  // avoid NaN/Infinity width
     const barColor = pct >= 70 ? 'var(--green)' : pct >= 40 ? 'var(--amber)' : 'var(--red)';
     const isML = key === 'ml_forecast';
     return `
@@ -5549,7 +5549,7 @@ function loadTerminalView() {
   el.innerHTML = `
     <div class="term-container">
       <div class="term-header">
-        <span class="term-title">▸ AUGUR SHELL</span>
+        <span class="term-title">▸ ${_esc(m)}AUGUR SHELL</span>
         <span class="term-subtitle">Type a command below — try <code>help</code> or <code>quote AAPL</code></span>
         <button class="btn btn-ghost btn-sm" onclick="termClear()" style="margin-left:auto">CLEAR</button>
       </div>
@@ -5997,6 +5997,7 @@ function renderCongressView(data) {
   }).join('');
 
   const txnTypeColor = (t) => {
+    t = t || '';  // a null/undefined txn_type would crash .includes
     if (t.includes('Buy') || t === 'P') return 'col-positive';
     if (t.includes('Sell') || t === 'S') return 'col-negative';
     return 'col-amber';
@@ -6071,6 +6072,7 @@ function filterCongressByTicker(ticker) {
   const title = document.getElementById('congress-table-title');
   const clearBtn = document.getElementById('congress-clear-filter');
   const txnTypeColor = (t) => {
+    t = t || '';  // a null/undefined txn_type would crash .includes
     if (t.includes('Buy') || t === 'P') return 'col-positive';
     if (t.includes('Sell') || t === 'S') return 'col-negative';
     return 'col-amber';
@@ -6614,12 +6616,12 @@ async function mapContagion(sym) {
         var c = connections[i];
         var relCls = (c.relationship || '').toLowerCase().indexOf('supplier') >= 0 ? 'col-positive' : 'col-amber';
         html += '<tr>'
-          + '<td><span class="col-symbol" style="cursor:pointer" onclick="openResearch(\'' + (c.ticker || '') + '\')">' + (c.ticker || '—') + '</span></td>'
-          + '<td>' + (c.name || '—') + '</td>'
-          + '<td><span class="signal-badge ' + relCls + '" style="font-size:9px">' + (c.relationship || '—') + '</span></td>'
+          + '<td><span class="col-symbol" style="cursor:pointer" onclick="openResearch(\'' + _jesc(c.ticker || '') + '\')">' + _esc(c.ticker || '—') + '</span></td>'
+          + '<td>' + _esc(c.name || '—') + '</td>'
+          + '<td><span class="signal-badge ' + relCls + '" style="font-size:9px">' + _esc(c.relationship || '—') + '</span></td>'
           + '<td>' + _alphaFmtNum(c.weight, 2) + '</td>'
           + '<td>' + (c.revenue_pct != null ? _alphaFmtNum(c.revenue_pct, 1) + '%' : '—') + '</td>'
-          + '<td style="font-size:10px;color:var(--text-dim);max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + (c.context || '—') + '</td>'
+          + '<td style="font-size:10px;color:var(--text-dim);max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + _esc(c.context || '—') + '</td>'
           + '</tr>';
       }
       html += '</tbody></table></div></div>';
@@ -6667,7 +6669,7 @@ async function assessContagionImpact() {
         else if (riskLvl === 'MEDIUM' || riskLvl === 'MODERATE') riskCls = 'col-amber';
         else riskCls = 'col-positive';
         impactHtml += '<tr>'
-          + '<td><span class="col-symbol" style="cursor:pointer" onclick="openResearch(\'' + (imp.ticker || '') + '\')">' + (imp.ticker || '—') + '</span></td>'
+          + '<td><span class="col-symbol" style="cursor:pointer" onclick="openResearch(\'' + _jesc(imp.ticker || '') + '\')">' + _esc(imp.ticker || '—') + '</span></td>'
           + '<td style="color:' + _alphaScoreColor(imp.score || 0) + '">' + _alphaFmtNum(imp.score, 1) + '</td>'
           + '<td>' + _alphaFmtNum(imp.correlation, 2) + '</td>'
           + '<td>' + (imp.lag_days != null ? imp.lag_days : '—') + '</td>'
@@ -8694,7 +8696,7 @@ const Ideas = {
         </div>
         <div class="panel-body" style="padding:10px">
           <div style="border-left:3px solid var(--blue);padding:6px 10px;margin-bottom:6px;background:rgba(0,200,255,0.04)">
-            <div style="font-size:9px;color:var(--blue);letter-spacing:.1em;margin-bottom:2px">▸ ENTRY ZONE</div>
+            <div style="font-size:9px;color:var(--blue);letter-spacing:.1em;margin-bottom:2px">▸ ${_esc(m)}ENTRY ZONE</div>
             <div style="font-size:11px;color:var(--text-primary)">$${fmt.price(p.entry.low)} – $${fmt.price(p.entry.high)} <span class="text-dim">· spot $${fmt.price(p.entry.current)}</span></div>
           </div>
           <div style="border-left:3px solid var(--red);padding:6px 10px;margin-bottom:6px;background:rgba(255,51,85,0.04)">
@@ -9188,7 +9190,7 @@ const Ideas = {
         }).join('');
 
     const earlySignals = (str.early_signals || []).map(s =>
-      `<div style="font-size:10px;color:var(--amber);margin-bottom:2px">▸ ${_esc(s)}</div>`
+      `<div style="font-size:10px;color:var(--amber);margin-bottom:2px">▸ ${_esc(m)}${_esc(s)}</div>`
     ).join('') || '<div style="font-size:10px;color:var(--text-dim)">None detected</div>';
 
     return `
