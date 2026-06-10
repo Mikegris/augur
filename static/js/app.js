@@ -3478,9 +3478,18 @@ function renderEarningsDossier(panel, d) {
 // ── Settings View ─────────────────────────────────────────────────────────────
 async function loadSettings() {
   const view = document.getElementById('view-settings');
+  // Fetch settings, but NEVER let a fetch error blank the page — the OpenAI key
+  // input lives here, so the form must always render (with defaults on failure)
+  // or the user has no way to configure their key. (Previously a silent
+  // catch(e){} left the whole Settings view empty on any error.)
+  let settings = {};
   try {
-    const settings = await API.get('/api/settings');
+    settings = (await API.get('/api/settings')) || {};
     State.settings = settings;
+  } catch (e) {
+    settings = State.settings || {};
+  }
+  try {
     view.innerHTML = `
       <div class="panel-grid grid-2">
         <div class="panel">
@@ -3535,7 +3544,18 @@ async function loadSettings() {
         </div>
       </div>
     `;
-  } catch(e) {}
+  } catch(e) {
+    // Render failed — show the error plus a minimal key form rather than a
+    // blank page, so the OpenAI key input is always reachable.
+    view.innerHTML =
+      '<div class="panel"><div class="panel-header"><span class="panel-title">SETTINGS</span></div>'
+      + '<div class="panel-body">'
+      + '<div class="col-negative" style="font-size:11px;margin-bottom:12px">Settings failed to render: ' + _esc(e.message) + '</div>'
+      + '<div class="form-group"><label class="form-label">OPENAI API KEY</label>'
+      + '<input class="form-input" id="set-openai-key" type="password" placeholder="sk-..." autocomplete="off"></div>'
+      + '<button class="btn btn-green" onclick="saveSettings()" style="margin-top:8px">SAVE SETTINGS</button>'
+      + '</div></div>';
+  }
 }
 
 async function saveSettings() {
