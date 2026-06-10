@@ -227,7 +227,7 @@
       ["P05 (worst-case)", mcDelta.p05_shift, true],   // invert: a higher p05 is good
       ["MEDIAN", mcDelta.median_shift, true],
       ["P95 (best-case)", mcDelta.p95_shift, true],
-      ["PROB OF LOSS", mcDelta.prob_loss_delta_pct, false],
+      ["PROB OF LOSS", mcDelta.prob_loss_delta_pct, true],  // invert: a LOWER prob of loss is good
     ];
     return `
       <div style="display:grid;grid-template-columns:repeat(auto-fit, minmax(150px,1fr));gap:8px;">
@@ -509,7 +509,7 @@
       .then((data) => {
         const holdings = (data && Array.isArray(data.holdings)) ? data.holdings : [];
         state.holdings = holdings
-          .filter((h) => h && h.symbol && h.market_value)
+          .filter((h) => h && h.symbol && h.market_value != null)  // != null: a real 0 mark isn't "missing"
           .map((h) => ({
             symbol: h.symbol,
             market_value: Number(h.market_value),

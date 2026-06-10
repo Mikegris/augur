@@ -283,7 +283,7 @@
     }
     const color = sentiment === "leader" ? "var(--accent, #4ade80)" : "var(--danger, #f87171)";
     const score = row.composite_flow_score;
-    const scoreTxt = score == null ? "—" : (score > 0 ? "+" : "") + score.toFixed(2);
+    const scoreTxt = (typeof score !== "number" || !isFinite(score)) ? "—" : (score > 0 ? "+" : "") + score.toFixed(2);
     const drivers = _topContributors(row);
     const driverHtml = drivers.length === 0
       ? `<div style="color:var(--text-dim);font-size:11px;">no significant drivers</div>`

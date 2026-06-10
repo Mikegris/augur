@@ -263,7 +263,7 @@
             ticks: {
               color: '#7a8794',
               font: { family: 'JetBrains Mono', size: 9 },
-              callback: v => v.toExponential(0),
+              callback: v => (typeof v === 'number' ? v.toExponential(0) : v),
             },
             grid: { color: 'rgba(255,255,255,0.04)' },
             title: {
@@ -367,7 +367,7 @@
     // Pre-fill with spot to give the user a starting point that yields a
     // meaningful probability (P[K > spot] is the standard "above"
     // baseline).
-    strikeEl.value = String(rnd.spot);
+    if (rnd.spot != null && isFinite(rnd.spot)) strikeEl.value = String(rnd.spot);  // avoid literal "null"
     const update = () => {
       const x = parseFloat(strikeEl.value);
       if (!isFinite(x) || x <= 0) {

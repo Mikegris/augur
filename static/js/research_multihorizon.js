@@ -205,7 +205,7 @@
       return `<div class="mh-consensus"><span class="mh-c-label">Consensus</span><span class="mh-c-value mh-flat">N/A</span></div>`;
     }
     const dir = consensus.direction || 'UNKNOWN';
-    const score = consensus.agreement_score;
+    const score = consensus.agreement_score == null ? 0 : consensus.agreement_score;  // undefined would silently downgrade to BIASED
     let cls = 'mh-flat', labelText;
     if (dir === 'UP') {
       cls = 'mh-up';
