@@ -229,7 +229,29 @@ def init_db():
         count INTEGER NOT NULL DEFAULT 0
     )""")
 
+    # ── Jarvis statefulness (v1.4): conversations + durable memory ──
+    c.execute("""CREATE TABLE IF NOT EXISTS jarvis_conversations (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        started_at TEXT DEFAULT CURRENT_TIMESTAMP,
+        archived INTEGER DEFAULT 0
+    )""")
+    c.execute("""CREATE TABLE IF NOT EXISTS jarvis_messages (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        conversation_id INTEGER NOT NULL REFERENCES jarvis_conversations(id) ON DELETE CASCADE,
+        role TEXT NOT NULL,
+        content TEXT NOT NULL,
+        symbol TEXT,
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP
+    )""")
+    c.execute("""CREATE TABLE IF NOT EXISTS jarvis_memory (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        fact TEXT NOT NULL,
+        source TEXT,
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP
+    )""")
+
     # ── Indexes for performance ──
+    c.execute("CREATE INDEX IF NOT EXISTS idx_jarvis_messages_conv ON jarvis_messages(conversation_id, id)")
     c.execute("CREATE INDEX IF NOT EXISTS idx_portfolio_symbol ON portfolio(symbol)")
     c.execute("CREATE INDEX IF NOT EXISTS idx_transactions_symbol ON transactions(symbol)")
     c.execute("CREATE INDEX IF NOT EXISTS idx_transactions_date ON transactions(date)")
@@ -596,6 +618,89 @@ def clear_triggered_alerts():
         conn.execute("DELETE FROM price_alerts WHERE triggered=1")
         conn.commit()
         # connection reused (thread-local pool)
+
+
+# ── Jarvis statefulness: conversations + durable memory (v1.4) ─────────────────
+
+_JARVIS_TURN_LIMIT = 200  # per-conversation message cap (prune oldest beyond)
+
+
+def jarvis_active_conversation():
+    """Id of the latest non-archived conversation, creating one if none."""
+    conn = get_conn()
+    row = conn.execute(
+        "SELECT id FROM jarvis_conversations WHERE archived=0 "
+        "ORDER BY id DESC LIMIT 1").fetchone()
+    if row:
+        return row["id"]
+    return jarvis_new_conversation()
+
+
+def jarvis_new_conversation():
+    """Archive open threads and start a fresh one."""
+    with _write_lock:
+        conn = get_conn()
+        conn.execute("UPDATE jarvis_conversations SET archived=1 WHERE archived=0")
+        cur = conn.execute("INSERT INTO jarvis_conversations DEFAULT VALUES")
+        conn.commit()
+        return cur.lastrowid
+
+
+def jarvis_add_message(conversation_id, role, content, symbol=None):
+    with _write_lock:
+        conn = get_conn()
+        conn.execute(
+            "INSERT INTO jarvis_messages (conversation_id, role, content, symbol) "
+            "VALUES (?,?,?,?)",
+            (conversation_id, role, (content or "")[:4000], symbol))
+        # Cap the thread so a long-running install can't grow unbounded.
+        conn.execute(
+            "DELETE FROM jarvis_messages WHERE conversation_id=? AND id NOT IN "
+            "(SELECT id FROM jarvis_messages WHERE conversation_id=? "
+            " ORDER BY id DESC LIMIT ?)",
+            (conversation_id, conversation_id, _JARVIS_TURN_LIMIT))
+        conn.commit()
+
+
+def jarvis_get_messages(conversation_id, limit=40):
+    """Last `limit` messages, oldest→newest."""
+    conn = get_conn()
+    rows = conn.execute(
+        "SELECT role, content, symbol, created_at FROM jarvis_messages "
+        "WHERE conversation_id=? ORDER BY id DESC LIMIT ?",
+        (conversation_id, limit)).fetchall()
+    return [dict(r) for r in reversed(rows)]
+
+
+def jarvis_list_memories():
+    conn = get_conn()
+    rows = conn.execute(
+        "SELECT id, fact, source, created_at FROM jarvis_memory ORDER BY id").fetchall()
+    return [dict(r) for r in rows]
+
+
+def jarvis_add_memory(fact, source="user"):
+    fact = (fact or "").strip()[:500]
+    if not fact:
+        return None
+    with _write_lock:
+        conn = get_conn()
+        # Idempotent on exact duplicates — "remember X" twice keeps one row.
+        row = conn.execute("SELECT id FROM jarvis_memory WHERE fact=?", (fact,)).fetchone()
+        if row:
+            return row["id"]
+        cur = conn.execute(
+            "INSERT INTO jarvis_memory (fact, source) VALUES (?,?)", (fact, source))
+        conn.commit()
+        return cur.lastrowid
+
+
+def jarvis_delete_memory(memory_id):
+    with _write_lock:
+        conn = get_conn()
+        cur = conn.execute("DELETE FROM jarvis_memory WHERE id=?", (memory_id,))
+        conn.commit()
+        return cur.rowcount > 0
 
 
 # ── Settings ───────────────────────────────────────────────────────────────────

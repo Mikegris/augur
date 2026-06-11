@@ -452,6 +452,55 @@ def test_keys_and_agent():
               for t in jarvis_tools.openai_schemas()))
 
 
+# ── 11d. v1.4: server-persisted conversations + durable memory ───────────────
+def test_jarvis_state():
+    import jarvis
+    import database as db_
+    import app
+    c = app.app.test_client()
+
+    orig_quote = jarvis.fetcher.get_quote
+    jarvis.fetcher.get_quote = lambda s: {"symbol": s, "price": 50.0, "change_pct": 1.0,
+                                          "fifty_two_week_high": 60.0,
+                                          "fifty_two_week_low": 40.0}
+    try:
+        conv0 = db_.jarvis_new_conversation()  # clean thread for the test
+        r1 = c.post("/api/jarvis/ask", json={"query": "price of NVDA"}).get_json()
+        check("state: ask returns conversation_id", r1.get("conversation_id") == conv0,
+              repr(r1.get("conversation_id")))
+        # No history sent — the follow-up must resolve from the SERVER thread.
+        r2 = c.post("/api/jarvis/ask", json={"query": "how about a quote on it"}).get_json()
+        check("state: server-side follow-up resolves symbol",
+              r2.get("symbol") == "NVDA" and r2["intent"] == "quote", repr(r2)[:80])
+        conv = c.get("/api/jarvis/conversation").get_json()
+        check("state: conversation route returns persisted turns",
+              conv["conversation_id"] == conv0 and len(conv["messages"]) >= 4)
+        newer = c.post("/api/jarvis/conversation/new", json={}).get_json()
+        check("state: new thread archives the old one",
+              newer["conversation_id"] != conv0
+              and db_.jarvis_active_conversation() == newer["conversation_id"])
+        r3 = c.post("/api/jarvis/ask", json={"query": "how about a quote on it"}).get_json()
+        check("state: fresh thread does NOT inherit the old symbol",
+              r3.get("symbol") is None, repr(r3.get("symbol")))
+
+        # Durable memory: remember / list / inject / forget
+        m1 = c.post("/api/jarvis/ask", json={"query": "remember: I prefer ETFs"}).get_json()
+        check("memory: remember intent", m1["intent"] == "memory" and "ETFs" in m1["answer"])
+        check("memory: injected into prompts", "I prefer ETFs" in jarvis._memory_block())
+        lst = c.get("/api/jarvis/memory").get_json()
+        check("memory: route lists facts",
+              any("ETFs" in m["fact"] for m in lst["memories"]))
+        m2 = c.post("/api/jarvis/ask", json={"query": "what do you remember"}).get_json()
+        check("memory: list intent", "ETFs" in m2["answer"])
+        mid = [m["id"] for m in lst["memories"] if "ETFs" in m["fact"]][0]
+        m3 = c.post("/api/jarvis/ask", json={"query": "forget {}".format(mid)}).get_json()
+        check("memory: forget intent", m3["answer"].startswith("Forgotten"))
+        check("memory: gone after forget", jarvis._memory_block() == ""
+              or "ETFs" not in jarvis._memory_block())
+    finally:
+        jarvis.fetcher.get_quote = orig_quote
+
+
 # ── 12. database add_position: offsetting to zero shares must not crash ──────
 def test_database_zero_shares():
     import database
@@ -678,6 +727,7 @@ def main():
         ("route handlers", test_routes),
         ("jarvis briefing + ask", test_jarvis),
         ("key console + tool agent", test_keys_and_agent),
+        ("jarvis statefulness + memory", test_jarvis_state),
         ("database zero-shares guard", test_database_zero_shares),
         ("cli quote None fields", test_cli_quote_none_fields),
         ("xss escaping intact", test_xss_escaping_intact),

@@ -3219,9 +3219,47 @@ def jarvis_ask_route():
         return jsonify({"error": "expected JSON body with a 'query' string"}), 400
     if len(query) > 500:
         return jsonify({"error": "query too long (max 500 chars)"}), 400
-    history = data.get("history")  # optional conversation turns; jarvis clamps shape
+    history = data.get("history")  # optional explicit turns; jarvis clamps shape
+    conversation_id = data.get("conversation_id")
     try:
-        return jsonify(jarvis.ask(query, history=history))
+        return jsonify(jarvis.ask(query, history=history,
+                                  conversation_id=conversation_id))
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/jarvis/conversation", methods=["GET"])
+def jarvis_conversation_route():
+    """Active conversation id + its recent messages (for palette resume)."""
+    try:
+        conv_id = db.jarvis_active_conversation()
+        return jsonify({"conversation_id": conv_id,
+                        "messages": db.jarvis_get_messages(conv_id, limit=12)})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/jarvis/conversation/new", methods=["POST"])
+def jarvis_new_conversation_route():
+    try:
+        return jsonify({"conversation_id": db.jarvis_new_conversation()})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/jarvis/memory", methods=["GET"])
+def jarvis_memory_route():
+    try:
+        return jsonify({"memories": db.jarvis_list_memories()})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/jarvis/memory/<int:memory_id>", methods=["DELETE"])
+def jarvis_memory_delete_route(memory_id):
+    try:
+        ok = db.jarvis_delete_memory(memory_id)
+        return jsonify({"status": "deleted" if ok else "not found"})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
