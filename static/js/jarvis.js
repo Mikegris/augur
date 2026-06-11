@@ -474,14 +474,37 @@
         if (this._history.length > 8) this._history.shift();
         const action = r.action
           ? `<button class="jarvis-go" id="jp-answer-go">OPEN →</button>` : '';
+        // Agent proposals: mutating actions await explicit confirmation here.
+        const proposal = r.proposal
+          ? `<div class="jp-proposal">
+               <span>⚡ ${esc(r.proposal.label)}</span>
+               <button class="jarvis-go" id="jp-confirm">CONFIRM</button>
+               <button class="jarvis-go jp-dismiss" id="jp-dismiss">DISMISS</button>
+             </div>` : '';
+        const usedLine = (r.used && r.used.length)
+          ? `<div class="jp-answer-detail">◉ consulted: ${esc([...new Set(r.used)].join(', ').replace(/_/g, ' '))}</div>` : '';
         this.answer.innerHTML = `
           <div class="jp-answer">
             <div class="jp-answer-text">${esc(r.answer)}</div>
             ${r.detail ? `<div class="jp-answer-detail">${esc(r.detail)}</div>` : ''}
+            ${usedLine}
+            ${proposal}
             ${action}
           </div>`;
         const go = document.getElementById('jp-answer-go');
         if (go) go.addEventListener('click', () => { this.close(); runAction(r.action); });
+        const confirmBtn = document.getElementById('jp-confirm');
+        if (confirmBtn) confirmBtn.addEventListener('click', async () => {
+          try {
+            const out = await API.post('/api/jarvis/act', { tool: r.proposal.tool, args: r.proposal.args });
+            Toast.success('◉ JARVIS: done — ' + (out.label || r.proposal.label));
+            this.answer.innerHTML = `<div class="jp-answer"><div class="jp-answer-text">Done. ${esc(out.label || r.proposal.label)}.</div></div>`;
+          } catch (e) {
+            this.answer.innerHTML = `<div class="jp-answer error">${esc(e.message)}</div>`;
+          }
+        });
+        const dismissBtn = document.getElementById('jp-dismiss');
+        if (dismissBtn) dismissBtn.addEventListener('click', () => { this.answer.innerHTML = ''; });
         // Speak the reply; after a spoken question, hand the mic back for
         // the follow-up — that's the back-and-forth loop.
         const spoken = opts && opts.spoken;

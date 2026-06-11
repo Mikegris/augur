@@ -79,7 +79,7 @@ def _is_model_not_found(exc):
 
 
 def _chat_completion(client, model, messages, max_tokens=None, temperature=None,
-                     json_mode=True):
+                     json_mode=True, tools=None, tool_choice=None):
     """Single seam for every OpenAI chat call in the app.
 
     - Maps parameters per model family (gpt-5.x/o-series get
@@ -92,6 +92,10 @@ def _chat_completion(client, model, messages, max_tokens=None, temperature=None,
         kwargs = {"model": m, "messages": messages}
         if json_mode:
             kwargs["response_format"] = {"type": "json_object"}
+        if tools:
+            kwargs["tools"] = tools
+            if tool_choice:
+                kwargs["tool_choice"] = tool_choice
         if _uses_reasoning_params(m):
             if max_tokens is not None:
                 kwargs["max_completion_tokens"] = max_tokens
@@ -121,10 +125,21 @@ _IDEA_THESIS_TTL       = 12 * 3600        # picks change but inputs are stable
 
 
 def _daily_cap() -> int:
+    """Env override > console setting (ai_daily_cap) > default 200."""
+    env = os.environ.get("AUGUR_AI_DAILY_CAP")
+    if env:
+        try:
+            return int(env)
+        except (TypeError, ValueError):
+            pass
     try:
-        return int(os.environ.get("AUGUR_AI_DAILY_CAP", "200"))
-    except (TypeError, ValueError):
-        return 200
+        import database as db
+        saved = db.get_settings().get("ai_daily_cap")
+        if saved:
+            return max(1, int(saved))
+    except Exception:
+        pass
+    return 200
 
 
 def _cap_exceeded() -> bool:
@@ -154,16 +169,20 @@ def _cap_error_envelope(context: str) -> dict:
 
 
 def get_openai_key():
-    """Check env var first, then DB setting."""
-    key = os.environ.get("OPENAI_API_KEY", "")
-    if not key:
-        try:
-            import database as db
-            settings = db.get_settings()
-            key = settings.get("openai_api_key", "")
-        except Exception:
-            pass
-    return key.strip()
+    """Resolve via the central provider registry (env > DB)."""
+    try:
+        import api_keys
+        return api_keys.get_api_key("openai")
+    except Exception:
+        # registry unavailable (partial install) — legacy direct path
+        key = os.environ.get("OPENAI_API_KEY", "")
+        if not key:
+            try:
+                import database as db
+                key = db.get_settings().get("openai_api_key", "")
+            except Exception:
+                pass
+        return key.strip()
 
 
 def summarize_filing(filing_text, form_type, ticker, description=""):

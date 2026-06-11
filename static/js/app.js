@@ -3545,14 +3545,12 @@ async function loadSettings() {
               </select>
             </div>
             <div class="form-group" style="margin-top:16px;padding-top:16px;border-top:1px solid var(--border)">
-              <label class="form-label" style="color:var(--amber)">▲ AI INTELLIGENCE (OPENAI)</label>
-              <label class="form-label" style="margin-top:4px">OPENAI API KEY</label>
-              <input class="form-input" id="set-openai-key" type="password"
-                placeholder="${settings.openai_api_key ? '••••••••••••' + (settings.openai_api_key.slice(-4)||'') : 'sk-...'}"
-                autocomplete="off">
+              <label class="form-label" style="color:var(--amber)">▲ AI BUDGET</label>
+              <label class="form-label" style="margin-top:4px">DAILY AI CALL CAP</label>
+              <input class="form-input" id="set-ai-cap" type="number" min="1" max="100000" value="${parseInt(settings.ai_daily_cap, 10) || 200}">
               <div style="font-size:10px;color:var(--text-dim);margin-top:4px">
-                Used for AI filing summaries in INTEL hub. Key stored locally in SQLite.
-                ${settings.openai_api_key ? '<span style="color:var(--green)">● KEY CONFIGURED</span>' : '<span style="color:var(--text-dim)">○ NOT SET — rule-based analysis only</span>'}
+                Jarvis answers, voice lines and summaries per day. The
+                AUGUR_AI_DAILY_CAP environment variable overrides this.
               </div>
             </div>
             <button class="btn btn-green btn-lg" onclick="saveSettings()" style="margin-top:8px">SAVE SETTINGS</button>
@@ -3563,7 +3561,7 @@ async function loadSettings() {
           <div class="panel-body">
             <div class="fund-grid">
               ${[
-                ['SYSTEM', 'AUGUR v1.2.0'],
+                ['SYSTEM', 'AUGUR v1.3.0'],
                 ['DATA SOURCE', 'YAHOO FINANCE + COINGECKO'],
                 ['DATABASE', 'SQLITE3 (LOCAL)'],
                 ['BACKEND', 'PYTHON / FLASK'],
@@ -3576,7 +3574,14 @@ async function loadSettings() {
           </div>
         </div>
       </div>
+      <div class="panel" style="margin-top:8px">
+        <div class="panel-header"><span class="panel-title">API KEYS</span>
+          <span style="font-size:9px;color:var(--text-dim);letter-spacing:.06em">BRING YOUR OWN — STORED LOCALLY, NEVER SENT ANYWHERE BUT THE PROVIDER</span>
+        </div>
+        <div class="panel-body" id="keys-panel"><div class="loading"><div class="spinner"></div></div></div>
+      </div>
     `;
+    loadKeysPanel();
   } catch(e) {
     // Render failed — show the error plus a minimal key form rather than a
     // blank page, so the OpenAI key input is always reachable.
@@ -3591,6 +3596,73 @@ async function loadSettings() {
   }
 }
 
+// ── API key console (Settings → API KEYS panel) ──────────────────────────────
+async function loadKeysPanel() {
+  const el = document.getElementById('keys-panel');
+  if (!el) return;
+  try {
+    const { providers } = await API.get('/api/keys');
+    el.innerHTML = providers.map(p => `
+      <div class="key-row" id="key-row-${p.provider}">
+        <div class="key-row-head">
+          <span class="key-label">${_esc(p.label)}</span>
+          ${p.configured
+            ? `<span style="color:var(--green);font-size:10px">● ${_esc(p.masked)}${p.source === 'env' ? ' (from environment)' : ''}</span>`
+            : '<span style="color:var(--text-dim);font-size:10px">○ NOT SET</span>'}
+        </div>
+        <div style="font-size:10px;color:var(--text-secondary);margin:3px 0 6px">${_esc(p.unlocks)}</div>
+        <div style="display:flex;gap:6px;flex-wrap:wrap">
+          <input class="form-input" id="key-input-${p.provider}" type="password" style="flex:1;min-width:200px"
+                 placeholder="${p.configured ? 'Paste a new key to replace ' + _esc(p.masked) : _esc(p.hint)}" autocomplete="off">
+          <button class="btn btn-green btn-sm" onclick="saveProviderKey('${p.provider}')">SAVE</button>
+          <button class="btn btn-ghost btn-sm" onclick="testProviderKey('${p.provider}')" ${p.configured ? '' : 'disabled'}>TEST</button>
+          <button class="btn btn-ghost btn-sm" onclick="removeProviderKey('${p.provider}')" ${p.configured && p.source !== 'env' ? '' : 'disabled'}>REMOVE</button>
+        </div>
+        <div id="key-status-${p.provider}" style="font-size:10px;margin-top:4px"></div>
+      </div>`).join('');
+  } catch (e) {
+    el.innerHTML = `<div class="col-negative" style="font-size:11px">Key console unavailable: ${_esc(e.message)}</div>`;
+  }
+}
+
+async function saveProviderKey(provider) {
+  const input = document.getElementById(`key-input-${provider}`);
+  const status = document.getElementById(`key-status-${provider}`);
+  const key = input ? input.value.trim() : '';
+  if (!key) { Toast.warn('Paste a key first'); return; }
+  try {
+    const r = await API.post(`/api/keys/${provider}`, { key });
+    Toast.success(`${provider} key saved (${r.masked})`);
+    loadKeysPanel();
+  } catch (e) {
+    if (status) status.innerHTML = `<span class="col-negative">${_esc(e.message)}</span>`;
+  }
+}
+
+async function testProviderKey(provider) {
+  const status = document.getElementById(`key-status-${provider}`);
+  if (status) status.innerHTML = '<span style="color:var(--text-dim)">Testing…</span>';
+  try {
+    const r = await API.post(`/api/keys/${provider}/test`, {});
+    if (status) status.innerHTML = r.ok
+      ? `<span class="col-positive">✓ ${_esc(r.detail)}</span>`
+      : `<span class="col-negative">✗ ${_esc(r.detail)}</span>`;
+  } catch (e) {
+    if (status) status.innerHTML = `<span class="col-negative">✗ ${_esc(e.message)}</span>`;
+  }
+}
+
+async function removeProviderKey(provider) {
+  if (!confirm(`Remove the ${provider} key? AI features fall back to rule-based behavior.`)) return;
+  try {
+    const r = await API.del(`/api/keys/${provider}`);
+    Toast.info(`${provider} key removed${r.note ? ' — ' + r.note : ''}`);
+    loadKeysPanel();
+  } catch (e) {
+    Toast.error(e.message);
+  }
+}
+
 async function saveSettings() {
   try {
     const payload = {
@@ -3598,7 +3670,9 @@ async function saveSettings() {
       benchmark: document.getElementById('set-benchmark').value,
       currency: document.getElementById('set-currency').value,
     };
-    const keyField = document.getElementById('set-openai-key');
+    const capField = document.getElementById('set-ai-cap');
+    if (capField && capField.value) payload.ai_daily_cap = capField.value;
+    const keyField = document.getElementById('set-openai-key');  // fallback-render path only
     if (keyField && keyField.value.trim()) {
       payload.openai_api_key = keyField.value.trim();
     }
