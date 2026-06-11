@@ -8,6 +8,7 @@ import re
 import io
 import zipfile
 import logging
+import threading
 import requests
 import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta, timezone
@@ -32,6 +33,19 @@ _PTR_CACHE_TTL = 30 * 24 * 3600
 # pdfplumber occasionally hangs on malformed PDFs. Bound any single parse to
 # 20 s — past that we abandon the PDF rather than starve the pool.
 _PDF_PARSE_TIMEOUT_S = 20
+
+# pdfplumber is pure-Python and CPU-bound: unbounded concurrent parses (the
+# warmer's cluster sweep hits congress for ~100 symbols) monopolize the GIL
+# until Flask's accept loop starves and the server stops answering. At most
+# 2 parses run at once; the rest queue inside their daemon workers.
+_PDF_PARSE_GATE = threading.BoundedSemaphore(2)
+
+# Negative-result TTL: timeouts, parse failures, 404s and legitimately
+# trade-less PTRs were never cached, so every sweep re-downloaded and
+# re-ground the same documents (observed: one doc_id parsed 3× in 2s by
+# concurrent sweeps). 30 min of "known bad/empty" stops the thundering herd;
+# a doc that timed out only because the gate was busy gets retried next sweep.
+_PTR_NEG_TTL = 1800
 
 HOUSE_FD_BASE = "https://disclosures-clerk.house.gov"
 HOUSE_PTR_PDF = HOUSE_FD_BASE + "/public_disc/ptr-pdfs/{year}/{doc_id}.pdf"
@@ -394,13 +408,22 @@ def get_recent_trades(days=90, max_pdfs=100, tickers=None):
             if cached is not None:
                 return _rehydrate_dt(cached)
 
+        def _neg_cache():
+            """Remember a bad/empty doc so concurrent + later sweeps skip it."""
+            if cache_store is not None:
+                try:
+                    cache_store.cache_set(cache_key, [], _PTR_NEG_TTL)
+                except Exception:
+                    pass
+
         try:
             resp = requests.get(url, headers=_HOUSE_HEADERS, timeout=15)
             if resp.status_code != 200:
+                _neg_cache()  # 404s are permanent; don't re-fetch each sweep
                 return []
         except Exception as e:
             log.warning("PTR fetch error for %s: %s", doc_id, e)
-            return []
+            return []  # transient network error — no negative cache
 
         # Bound the pdfplumber parse so a single malformed PDF can't stall
         # the whole batch. A plain DAEMON thread + join(timeout) gives the
@@ -416,7 +439,8 @@ def get_recent_trades(days=90, max_pdfs=100, tickers=None):
 
         def _parse_worker():
             try:
-                parse_out["trades"] = _parse_ptr_pdf(resp.content, member, doc_id, year)
+                with _PDF_PARSE_GATE:  # cap concurrent CPU-bound parses
+                    parse_out["trades"] = _parse_ptr_pdf(resp.content, member, doc_id, year)
             except Exception as ex:  # surfaced after join below
                 parse_out["err"] = ex
 
@@ -445,15 +469,21 @@ def get_recent_trades(days=90, max_pdfs=100, tickers=None):
         t.join(_PDF_PARSE_TIMEOUT_S)
         if t.is_alive():
             log.warning("PTR parse timeout for %s — abandoning", doc_id)
+            _neg_cache()
             return []
         if "err" in parse_out:
             log.warning("congress: parse failed for %s: %s", doc_id, parse_out["err"])
+            _neg_cache()
             return []
         trades = parse_out.get("trades", [])
 
-        if cache_store is not None and trades:
+        if cache_store is not None:
             try:
-                cache_store.cache_set(cache_key, trades, _PTR_CACHE_TTL)
+                # Cache empty results too (short TTL): a legitimately
+                # trade-less PTR used to be re-downloaded and re-parsed on
+                # every sweep because only truthy lists were cached.
+                cache_store.cache_set(cache_key, trades,
+                                      _PTR_CACHE_TTL if trades else _PTR_NEG_TTL)
             except Exception:
                 pass
         return trades
