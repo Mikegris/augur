@@ -46,9 +46,10 @@ import logging
 import math
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone, timedelta
 from typing import Any, Callable, Dict, List, Optional, Tuple
+
+import safe_executor
 
 log = logging.getLogger(__name__)
 
@@ -633,46 +634,21 @@ def _gather_metrics(
         with lock:
             metrics[metric_name][sym] = v
 
-    # Bundle-state can flip `concurrent.futures.thread._shutdown` (atexit
-    # fires while Flask is still serving), after which every submit raises
-    # `RuntimeError: cannot schedule new futures after interpreter shutdown`
-    # and the peerdiv panel 500s. Fall back to a serial loop in that state.
-    def _serial_metrics():
-        for metric_name, fn, _desc in _METRIC_REGISTRY:
-            for sym in all_syms:
-                _worker(metric_name, fn, sym)
-
-    futures = []
-    try:
-        with ThreadPoolExecutor(max_workers=16) as pool:
-            try:
-                for metric_name, fn, _desc in _METRIC_REGISTRY:
-                    for sym in all_syms:
-                        futures.append(pool.submit(_worker, metric_name, fn, sym))
-            except RuntimeError as e:
-                if "interpreter shutdown" in str(e) or "cannot schedule new futures" in str(e):
-                    log.warning(
-                        "synth_peerdiv: submit failed (%s); going serial", e,
-                    )
-                    futures = []
-                    _serial_metrics()
-                else:
-                    raise
-            for fut in as_completed(futures):
-                # ``_worker`` swallows exceptions, but be paranoid in case the
-                # future itself fails (e.g. pool was shut down).
-                try:
-                    fut.result()
-                except Exception as e:  # pragma: no cover
-                    errors.append(f"future:{type(e).__name__}: {e}")
-    except RuntimeError as e:
-        if "interpreter shutdown" in str(e) or "cannot schedule new futures" in str(e):
-            log.warning(
-                "synth_peerdiv: ThreadPoolExecutor ctor failed (%s); going serial", e,
-            )
-            _serial_metrics()
-        else:
-            raise
+    # Run every (metric, symbol) cell on safe_executor's daemon threads.
+    # ``_worker`` writes into the lock-guarded ``metrics``/``errors``
+    # structures and swallows its own exceptions, so parallel_map's return
+    # value is ignored. parallel_map falls back to a serial loop by itself
+    # when worker threads can't be spawned, and its daemon workers can't
+    # block interpreter exit the way non-daemon TPE workers did.
+    cells = [
+        (metric_name, fn, sym)
+        for metric_name, fn, _desc in _METRIC_REGISTRY
+        for sym in all_syms
+    ]
+    safe_executor.parallel_map(
+        lambda cell: _worker(cell[0], cell[1], cell[2]), cells,
+        max_workers=16, thread_name_prefix="peerdiv",
+    )
 
     return metrics, errors
 

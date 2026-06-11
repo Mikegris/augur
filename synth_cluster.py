@@ -34,9 +34,10 @@ import math
 import statistics
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError as FutTimeoutError
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Dict, List, Optional, Tuple
+
+import safe_executor
 
 log = logging.getLogger("augur.synth_cluster")
 
@@ -564,69 +565,35 @@ def _scan_symbol(symbol: str, direction: str) -> Dict[str, Any]:
     per component. Returns the per-symbol cluster dict (no min_sources
     filtering yet — caller decides whether to include)."""
     symbol = symbol.upper().strip()
-    sources: List[Optional[Dict[str, Any]]] = [None] * len(COMPONENTS)
 
     # Per-symbol pool (small so we don't hammer upstreams). The outer
     # scanner runs ~6 symbols at once, this runs ~6 components per
     # symbol — total ceiling of ~36 in-flight upstream HTTP calls, which
     # is still polite by Yahoo/EDGAR standards because each upstream has
     # its own per-source caching.
-    # Bundle-state can flip `concurrent.futures.thread._shutdown` (atexit
-    # fires while Flask is still serving), after which every submit raises
-    # `RuntimeError: cannot schedule new futures after interpreter shutdown`
-    # and the route 500s. Fall back to a serial loop in that state — slower
-    # but the panel keeps working.
-    try:
-        pool = ThreadPoolExecutor(max_workers=6, thread_name_prefix=f"sc-{symbol}")
-    except RuntimeError as e:
-        if "interpreter shutdown" in str(e) or "cannot schedule new futures" in str(e):
-            for i, (name, fn) in enumerate(COMPONENTS):
-                try:
-                    sources[i] = _eval_component_safe(name, fn, symbol, direction)
-                except Exception as exc:
-                    sources[i] = {"name": name, "fired": False, "value": "error",
-                                  "note": f"{type(exc).__name__}: {exc}"}
-            return _finalize_scan(symbol, sources)
-        raise
-    try:
+    #
+    # safe_executor.parallel_map runs on daemon threads (so stragglers can't
+    # block interpreter exit the way abandoned TPE workers did), enforces
+    # SYMBOL_TIMEOUT_S as the same overall deadline the old
+    # as_completed(timeout=SYMBOL_TIMEOUT_S) loop had, and falls back to a
+    # serial loop by itself when threads can't be spawned.
+    def _eval_slot(i: int) -> Dict[str, Any]:
+        name, fn = COMPONENTS[i]
         try:
-            futures = {
-                pool.submit(_eval_component_safe, name, fn, symbol, direction): i
-                for i, (name, fn) in enumerate(COMPONENTS)
-            }
-        except RuntimeError as e:
-            if "interpreter shutdown" in str(e) or "cannot schedule new futures" in str(e):
-                # Serial fallback if submit raises mid-loop
-                pool.shutdown(wait=False)
-                for i, (name, fn) in enumerate(COMPONENTS):
-                    if sources[i] is None:
-                        try:
-                            sources[i] = _eval_component_safe(name, fn, symbol, direction)
-                        except Exception as exc:
-                            sources[i] = {"name": name, "fired": False, "value": "error",
-                                          "note": f"{type(exc).__name__}: {exc}"}
-                return _finalize_scan(symbol, sources)
-            raise
-        # We iterate `as_completed` with a timeout; if the symbol-level
-        # deadline triggers we catch the TimeoutError and fall through to
-        # mark the still-unfilled component slots as timed-out.
-        try:
-            for fut in as_completed(futures, timeout=SYMBOL_TIMEOUT_S):
-                i = futures[fut]
-                name = COMPONENTS[i][0]
-                try:
-                    sources[i] = fut.result(timeout=SOURCE_TIMEOUT_S)
-                except FutTimeoutError:
-                    sources[i] = {"name": name, "fired": False, "value": "timeout", "note": "exceeded SOURCE_TIMEOUT_S"}
-                except Exception as e:
-                    sources[i] = {"name": name, "fired": False, "value": "error", "note": f"{type(e).__name__}: {e}"}
-        except FutTimeoutError:
-            log.info("synth_cluster: %s hit symbol-level deadline; marking unfinished sources as timeout", symbol)
-    finally:
-        # daemon-style shutdown — pending futures get abandoned but their
-        # daemon threads die with the process. Avoids the inner pool
-        # blocking us when EDGAR/PDF parses go slow.
-        pool.shutdown(wait=False)
+            return _eval_component_safe(name, fn, symbol, direction)
+        except Exception as exc:
+            return {"name": name, "fired": False, "value": "error",
+                    "note": f"{type(exc).__name__}: {exc}"}
+
+    # Slots still None after the deadline are marked as timed-out by
+    # _finalize_scan ("future not completed").
+    sources: List[Optional[Dict[str, Any]]] = safe_executor.parallel_map(
+        _eval_slot,
+        range(len(COMPONENTS)),
+        max_workers=6,
+        timeout_per_item=SYMBOL_TIMEOUT_S,
+        thread_name_prefix=f"sc-{symbol}",
+    )
 
     # Composite score: weighted sum of fired flags / sum of all weights, plus
     # a nonlinear bonus for breadth of agreement. See _finalize_scan.
@@ -716,53 +683,31 @@ def cluster_scan(
         # Outer pool: 6 symbols at a time. Each scans its 10 components
         # internally in a smaller inner pool. The inner pools are short-lived
         # so total live threads stay bounded (~6 * 6 = ~36 worst case).
-        # Same global-shutdown guard as the per-symbol pool above — if the
-        # ThreadPoolExecutor refuses to start, run the symbols sequentially
-        # so the route still returns a usable response.
-        def _outer_serial():
-            for sym in symbols:
-                try:
-                    results.append(_scan_symbol(sym, direction))
-                except Exception as e:
-                    log.warning("synth_cluster: %s outer failed (serial): %s", sym, e)
-                    results.append({
-                        "symbol":           sym,
-                        "n_sources_firing": 0,
-                        "sources":          [{"name": n, "fired": False, "value": "skipped",
-                                              "note": "symbol-level failure"} for n, _ in COMPONENTS],
-                        "composite_score":  0.0,
-                    })
-        try:
-            with ThreadPoolExecutor(max_workers=6, thread_name_prefix="sc-outer") as outer:
-                try:
-                    futures = {outer.submit(_scan_symbol, sym, direction): sym for sym in symbols}
-                except RuntimeError as e:
-                    if "interpreter shutdown" in str(e) or "cannot schedule new futures" in str(e):
-                        log.warning("synth_cluster: outer pool unavailable (%s); going serial", e)
-                        _outer_serial()
-                        futures = {}
-                    else:
-                        raise
-                for fut in as_completed(futures):
-                    sym = futures[fut]
-                    try:
-                        res = fut.result(timeout=SYMBOL_TIMEOUT_S + 5)
-                    except Exception as e:
-                        log.warning("synth_cluster: %s outer failed: %s", sym, e)
-                        res = {
-                            "symbol":           sym,
-                            "n_sources_firing": 0,
-                            "sources":          [{"name": n, "fired": False, "value": "skipped",
-                                                  "note": "symbol-level failure"} for n, _ in COMPONENTS],
-                            "composite_score":  0.0,
-                        }
-                    results.append(res)
-        except RuntimeError as e:
-            if "interpreter shutdown" in str(e) or "cannot schedule new futures" in str(e):
-                log.warning("synth_cluster: outer ThreadPoolExecutor ctor failed (%s); going serial", e)
-                _outer_serial()
-            else:
-                raise
+        # safe_executor.parallel_map handles the can't-spawn-threads fallback
+        # (serial loop) by itself; each symbol is internally bounded by
+        # SYMBOL_TIMEOUT_S inside _scan_symbol, matching the old per-future
+        # result(timeout=SYMBOL_TIMEOUT_S + 5) intent without an extra cap.
+        def _scan_or_placeholder(sym):
+            try:
+                return _scan_symbol(sym, direction)
+            except Exception as e:
+                log.warning("synth_cluster: %s outer failed: %s", sym, e)
+                return None
+
+        raw = safe_executor.parallel_map(
+            _scan_or_placeholder, symbols, max_workers=6,
+            thread_name_prefix="sc-outer",
+        )
+        for sym, res in zip(symbols, raw):
+            if res is None:
+                res = {
+                    "symbol":           sym,
+                    "n_sources_firing": 0,
+                    "sources":          [{"name": n, "fired": False, "value": "skipped",
+                                          "note": "symbol-level failure"} for n, _ in COMPONENTS],
+                    "composite_score":  0.0,
+                }
+            results.append(res)
 
         # Filter by min_sources, then sort by composite_score desc
         clusters = [r for r in results if r.get("n_sources_firing", 0) >= min_sources]

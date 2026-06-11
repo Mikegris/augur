@@ -10,12 +10,12 @@ Python 3.9 compatible (no match/case, no X | Y unions).
 import logging
 import re
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from typing import Dict, List, Optional, Tuple
 
 import sec_edgar as edgar
 import fetcher
+import safe_executor
 
 logger = logging.getLogger(__name__)
 
@@ -799,21 +799,26 @@ def assess_contagion(symbol, event_type="earnings_miss"):
                 "detail": detail,
             }
 
-        # Parallel execution for correlation calculations
-        impacted = []
-        with ThreadPoolExecutor(max_workers=3) as executor:
-            futures = {executor.submit(_analyze_target, node): node for node in nodes}
-            for future in as_completed(futures):
-                try:
-                    result = future.result()
-                    if result is not None:
-                        impacted.append(result)
-                except Exception as e:
-                    node = futures[future]
-                    logger.warning(
-                        "Contagion analysis failed for %s: %s",
-                        node.get("ticker", "?"), e,
-                    )
+        # Parallel execution for correlation calculations on safe_executor's
+        # daemon threads (falls back to serial by itself if threads can't
+        # spawn; workers can't block interpreter exit).
+        def _analyze_target_safe(node):
+            try:
+                return _analyze_target(node)
+            except Exception as e:
+                logger.warning(
+                    "Contagion analysis failed for %s: %s",
+                    node.get("ticker", "?"), e,
+                )
+                return None
+
+        impacted = [
+            r for r in safe_executor.parallel_map(
+                _analyze_target_safe, nodes, max_workers=3,
+                thread_name_prefix="contagion",
+            )
+            if r is not None
+        ]
 
         # Sort by impact score descending
         impacted.sort(key=lambda x: x["impact_score"], reverse=True)

@@ -11,7 +11,6 @@ Alert levels:  DORMANT -> AWAKENING -> CONVERGING -> CRITICAL
 
 import logging
 import time
-from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 from datetime import datetime, timedelta, timezone
 
 import fetcher
@@ -320,78 +319,48 @@ def compute_composite(symbol):
         if cached is not None:
             return cached
 
-        # Score all 6 channels in parallel.
-        # Bundle-state can flip `concurrent.futures.thread._shutdown` (atexit
-        # fires while Flask is still serving), after which every submit raises
-        # `RuntimeError: cannot schedule new futures after interpreter shutdown`
-        # and the route 500s. Fall back to a serial run so the panel keeps
-        # working (slower, but no 500).
-        def _serial_channels():
-            return (
-                _score_options_flow(symbol),
-                _score_volume_anomaly(symbol),
-                _score_insider_cluster(symbol),
-                _score_congress_cluster(symbol),
-                _score_institutional_signal(symbol),
-                _score_technical_regime(symbol),
-            )
-
+        # Score all 6 channels in parallel on safe_executor's daemon threads.
         # Channels run in parallel; the composite is gated by the SLOWEST one.
         # A single rate-limited upstream (SEC 429-retry, congress download) used
         # to drag the whole call to ~30s because we blocked on fut.result() with
-        # no deadline AND `with` exit waited on stragglers. Bound the wall clock:
-        # collect against a shared deadline, fall back to a neutral channel for
-        # any that overrun, and shutdown(wait=False) so we never block on a
-        # straggler (it finishes in the background and dies with the pool).
-        pool = None
-        try:
-            pool = ThreadPoolExecutor(max_workers=6)
+        # no deadline AND `with` exit waited on stragglers. parallel_map keeps
+        # the wall clock bounded: timeout_per_item=_CHANNEL_BUDGET_S is the same
+        # shared overall deadline the old _collect() loop enforced, stragglers
+        # keep running on daemon threads (so they can't block interpreter exit
+        # the way abandoned non-daemon TPE workers did), and the can't-spawn-
+        # threads case falls back to a serial run inside parallel_map itself.
+        import safe_executor
+
+        channel_specs = [
+            (_score_options_flow, 0.20),
+            (_score_volume_anomaly, 0.10),
+            (_score_insider_cluster, 0.25),
+            (_score_congress_cluster, 0.15),
+            (_score_institutional_signal, 0.10),
+            (_score_technical_regime, 0.20),
+        ]
+
+        def _run_channel(spec):
+            fn, weight = spec
             try:
-                fut_options = pool.submit(_score_options_flow, symbol)
-                fut_volume = pool.submit(_score_volume_anomaly, symbol)
-                fut_insider = pool.submit(_score_insider_cluster, symbol)
-                fut_congress = pool.submit(_score_congress_cluster, symbol)
-                fut_inst = pool.submit(_score_institutional_signal, symbol)
-                fut_tech = pool.submit(_score_technical_regime, symbol)
-            except RuntimeError as e:
-                if "interpreter shutdown" in str(e) or "cannot schedule new futures" in str(e):
-                    logger.warning(
-                        "synthetic_insider: submit failed (%s); going serial for %s",
-                        e, symbol,
-                    )
-                    ch_options, ch_volume, ch_insider, ch_congress, ch_inst, ch_tech = _serial_channels()
-                else:
-                    raise
-            else:
-                deadline = time.monotonic() + _CHANNEL_BUDGET_S
+                return fn(symbol)
+            except Exception as e:
+                logger.debug("synthetic_insider channel error %s: %s", symbol, e)
+                return {"score": 50, "detail": "data unavailable", "firing": False, "weight": weight}
 
-                def _collect(fut, weight):
-                    try:
-                        return fut.result(timeout=max(0.1, deadline - time.monotonic()))
-                    except FuturesTimeoutError:
-                        return {"score": 50, "detail": "timed out", "firing": False, "weight": weight}
-                    except Exception as e:
-                        logger.debug("synthetic_insider channel error %s: %s", symbol, e)
-                        return {"score": 50, "detail": "data unavailable", "firing": False, "weight": weight}
-
-                ch_options = _collect(fut_options, 0.20)
-                ch_volume = _collect(fut_volume, 0.10)
-                ch_insider = _collect(fut_insider, 0.25)
-                ch_congress = _collect(fut_congress, 0.15)
-                ch_inst = _collect(fut_inst, 0.10)
-                ch_tech = _collect(fut_tech, 0.20)
-        except RuntimeError as e:
-            if "interpreter shutdown" in str(e) or "cannot schedule new futures" in str(e):
-                logger.warning(
-                    "synthetic_insider: ThreadPoolExecutor ctor failed (%s); going serial for %s",
-                    e, symbol,
-                )
-                ch_options, ch_volume, ch_insider, ch_congress, ch_inst, ch_tech = _serial_channels()
-            else:
-                raise
-        finally:
-            if pool is not None:
-                pool.shutdown(wait=False)
+        raw_channels = safe_executor.parallel_map(
+            _run_channel, channel_specs, max_workers=6,
+            timeout_per_item=_CHANNEL_BUDGET_S,
+            thread_name_prefix="si-channel",
+        )
+        # A None slot means the channel missed the shared deadline — fall
+        # back to the same neutral placeholder the old timeout path used.
+        channels = []
+        for (fn, weight), res in zip(channel_specs, raw_channels):
+            if res is None:
+                res = {"score": 50, "detail": "timed out", "firing": False, "weight": weight}
+            channels.append(res)
+        ch_options, ch_volume, ch_insider, ch_congress, ch_inst, ch_tech = channels
 
         # Weighted composite
         composite = (

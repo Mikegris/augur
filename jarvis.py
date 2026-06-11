@@ -118,6 +118,104 @@ def _fmt_pct(v: Optional[float]) -> str:
     return "{}{:.2f}%".format("+" if v >= 0 else "", v)
 
 
+# ─── optional LLM polish (fail-open; keyless behavior is unchanged) ──────────
+# Everything below is best-effort sugar on top of the rule-based output. No
+# key (or a spent daily cap, or any error) means these paths are skipped and
+# the briefing/ask responses are byte-identical to the pure rule-based ones.
+
+def _llm_available() -> bool:
+    """True only when ai_summarizer reports a usable key AND today's call
+    budget isn't spent. Reuses ai_summarizer's key/cap helpers — the cap
+    logic lives in exactly one place."""
+    try:
+        import ai_summarizer
+        if not ai_summarizer.get_openai_key():
+            return False
+        return not ai_summarizer._cap_exceeded()
+    except Exception:
+        return False
+
+
+def _llm_complete(messages: List[Dict[str, str]], max_tokens: int = 200,
+                  temperature: float = 0.4) -> Optional[str]:
+    """One MODEL_LIGHT plain-text completion with a hard 5s timeout.
+    Returns stripped text or None; raises on transport errors — callers wrap
+    in try/except so every consumer fails open."""
+    import ai_summarizer
+    key = ai_summarizer.get_openai_key()
+    if not key:
+        return None
+    from openai import OpenAI
+    client = OpenAI(api_key=key, timeout=5.0)
+    resp = ai_summarizer._chat_completion(
+        client, ai_summarizer.MODEL_LIGHT, messages,
+        max_tokens=max_tokens, temperature=temperature, json_mode=False)
+    ai_summarizer._record_ai_call()
+    text = (resp.choices[0].message.content or "").strip()
+    return text or None
+
+
+_VOICE_SYSTEM = (
+    "You are JARVIS, a personal investing copilot. Rewrite this brief status "
+    "into 1-2 sentences, confident, dry wit, no advice, keep all numbers exactly."
+)
+
+
+def _llm_voice(headline: str, insight_titles: List[str]) -> Optional[str]:
+    user = "Status: {}".format(headline)
+    if insight_titles:
+        user += "\nTop items: " + "; ".join(insight_titles)
+    return _llm_complete(
+        [{"role": "system", "content": _VOICE_SYSTEM},
+         {"role": "user", "content": user}],
+        max_tokens=120, temperature=0.6)
+
+
+def _llm_context_snapshot() -> str:
+    """Compact data snapshot for grounded LLM answers — portfolio pulse
+    numbers + market regime, built from the existing private helpers."""
+    lines: List[str] = []
+    try:
+        pulse = _portfolio_pulse()
+    except Exception:
+        pulse = None
+    if pulse:
+        lines.append(
+            "Portfolio: value {} across {} positions; total P&L {} ({}); "
+            "day P&L {} ({}).".format(
+                _fmt_usd(pulse["total_value"]), pulse["num_positions"],
+                _fmt_usd(pulse["total_pnl"]), _fmt_pct(pulse["total_pnl_pct"]),
+                _fmt_usd(pulse.get("day_pnl")), _fmt_pct(pulse.get("day_pnl_pct"))))
+        tops = sorted(pulse["holdings"], key=lambda r: -r["market_value"])[:5]
+        lines.append("Top holdings: " + "; ".join(
+            "{} ({}% of book, {} today)".format(
+                r["symbol"], r["weight_pct"], _fmt_pct(r.get("day_change_pct")))
+            for r in tops))
+    try:
+        regime = _market_regime()
+    except Exception:
+        regime = None
+    if regime:
+        lines.append("Market: S&P {}; Nasdaq-100 {}; VIX {} (regime: {}).".format(
+            _fmt_pct(regime.get("spx_pct")), _fmt_pct(regime.get("ndx_pct")),
+            "{:.1f}".format(regime["vix"]) if regime.get("vix") is not None else "—",
+            regime.get("regime") or "—"))
+    return "\n".join(lines) if lines else "(no local data available)"
+
+
+def _llm_ask(query: str) -> Optional[str]:
+    system = (
+        "You are JARVIS, a personal investing copilot. Answer ONLY from the "
+        "provided data, one short paragraph, say so if the data can't answer. "
+        "No investment advice."
+    )
+    user = "DATA:\n{}\n\nQUESTION: {}".format(_llm_context_snapshot(), query)
+    return _llm_complete(
+        [{"role": "system", "content": system},
+         {"role": "user", "content": user}],
+        max_tokens=220, temperature=0.3)
+
+
 # ─── briefing sections (each fully guarded) ──────────────────────────────────
 
 def _portfolio_pulse() -> Optional[Dict[str, Any]]:
@@ -389,7 +487,7 @@ def _run_briefing_uncached() -> Dict[str, Any]:
     cards.sort(key=lambda c: c["priority"])
     n_urgent = sum(1 for c in cards if c["priority"] == 1)
 
-    return {
+    out = {
         "greeting": "{}. Markets are {}.".format(_greeting(), _market_phase(now_et)),
         "headline": _build_headline(pulse, regime, n_urgent),
         "insights": cards[:12],
@@ -398,11 +496,342 @@ def _run_briefing_uncached() -> Dict[str, Any]:
         "generated_at": datetime.now(timezone.utc).isoformat(),
     }
 
+    # Optional LLM polish: rides the same briefing coalesce (240s TTL), so the
+    # cost ceiling is ~1 light call per 4 minutes. `headline` is never touched
+    # — `voice` is an additive field and any failure leaves the briefing
+    # exactly as the rule-based path built it.
+    try:
+        if _llm_available():
+            voice = _llm_voice(out["headline"], [c["title"] for c in cards[:3]])
+            if voice:
+                out["voice"] = voice
+    except Exception as e:
+        log.debug("briefing: llm polish skipped: %s", e)
+
+    return out
+
 
 def get_briefing(force_refresh: bool = False) -> Dict[str, Any]:
     if cache_store is None or force_refresh:
         return _run_briefing_uncached()
     return cache_store.coalesce(("jarvis_briefing",), _BRIEFING_TTL, _run_briefing_uncached)
+
+
+# ─── view context: Jarvis speaks on every view ───────────────────────────────
+# One fast, cached line per view, shown in the #jarvis-strip under the sub-nav.
+# Data-backed where cheap (portfolio pulse, regime, alerts, earnings, idea
+# pool); persona-voiced and static where live data would cost an upstream hit.
+
+_VIEW_LINES = {
+    "scanner":   "Scanner standing by — I rank the whole universe by your own profile weights.",
+    "sectorflow": "Sector flow maps where capital is rotating. I refresh it every 30 minutes.",
+    "liquidity": "Liquidity is the tide every other signal floats on. Watch it turn before the headlines do.",
+    "news":      "I read the wires so you skim them. Click any story's symbol for a full work-up.",
+    "research":  "Pull up any symbol and I'll assemble charts, fundamentals, and signals into one view.",
+    "analytics": "Correlation, risk, and allocation — the unglamorous math that keeps portfolios alive.",
+    "backtest":  "Test the idea against history before you trust it with money. I'll keep score honestly.",
+    "optimizer": "I can rebalance toward max-Sharpe, min-variance, or risk-parity. Constraints respected.",
+    "montecarlo": "Ten thousand futures, one distribution. The cone matters more than the median.",
+    "whatif":    "Stage a trade and I'll show the portfolio impact before you commit a dollar.",
+    "catalysts": "Upcoming catalysts, ranked by blast radius against your actual holdings.",
+    "research-lab": "State a hypothesis, I'll ground it against data and keep the receipts.",
+    "intel":     "SEC filings, decoded. I flag the 8-Ks worth reading and summarize the rest.",
+    "screener":  "Filter the market down to a shortlist. Compound filters stack.",
+    "narrative": "Every move has a story. I track which phase the story is in — and when it exhausts.",
+    "alt-data":  "Wikipedia attention, dev activity, search interest — signal before it reaches the tape.",
+    "signals":   "Composite smart-money score: insiders, institutions, options flow, congress. Convergence is the tell.",
+    "cluster":   "I sweep ~100 names for multi-source signal clusters. Agreement across sources beats any single one.",
+    "divergences": "Price saying one thing, signals saying another — that gap is where edges live.",
+    "options-flow": "Unusual options activity, surfaced. Size and urgency speak louder than direction.",
+    "gex":       "Dealer gamma shapes the tape's gravity. Positive pins, negative amplifies.",
+    "contagion": "Map who catches the cold when your holding sneezes — supplier, customer, competitor edges.",
+    "reflexivity": "Soros's loop, instrumented: when price starts driving fundamentals, trends overshoot.",
+    "synthetic-insider": "No insider access needed — I reconstruct their footprint from public exhaust.",
+    "congress":  "Congressional trades, disclosed late but still informative. I track the repeat winners.",
+    "terminal":  "Direct line. Type commands; I'll execute.",
+    "settings":  "Tune me here. API keys unlock deeper summarization; everything else runs local.",
+    "crypto":    "Crypto runs 24/7 — I keep CoinGecko as the source of truth, Yahoo as backup.",
+    "stress":    "I'll replay 2008, the COVID crash, and rate shocks against your exact book.",
+    "macro":     "Rates, inflation, employment — the weather system every position trades inside.",
+    "dividends": "Income stream, projected forward from your actual holdings.",
+    "transactions": "Every fill, logged. The tape of your own decisions is alpha too.",
+}
+
+_MARKET_VIEWS = {"markets", "macro", "liquidity", "news", "sectorflow", "crypto"}
+_PULSE_VIEWS = {"overview", "portfolio", "transactions", "dividends"}
+
+
+def _pulse_line() -> Optional[Dict[str, Any]]:
+    pulse = _portfolio_pulse()
+    if not pulse:
+        return {"line": "No positions on the book yet. Add holdings and I'll start working.",
+                "tone": "info", "action": {"view": "portfolio"}}
+    day = ""
+    if pulse.get("day_pnl") is not None:
+        day = " {} {} ({}) today".format(
+            "up" if pulse["day_pnl"] >= 0 else "down",
+            _fmt_usd(abs(pulse["day_pnl"])), _fmt_pct(pulse.get("day_pnl_pct")))
+    b, w = pulse.get("best"), pulse.get("worst")
+    detail = ""
+    if b and w and b["symbol"] != w["symbol"]:
+        detail = " {} leads ({}), {} lags ({}).".format(
+            b["symbol"], _fmt_pct(b["day_change_pct"]),
+            w["symbol"], _fmt_pct(w["day_change_pct"]))
+    tone = "pos" if (pulse.get("day_pnl") or 0) >= 0 else "neg"
+    return {"line": "Book at {}{}.{}".format(_fmt_usd(pulse["total_value"]), day, detail),
+            "tone": tone, "action": None}
+
+
+def _regime_line() -> Optional[Dict[str, Any]]:
+    regime = _market_regime()
+    if not regime:
+        return None
+    bits = []
+    if regime.get("spx_pct") is not None:
+        bits.append("S&P {}".format(_fmt_pct(regime["spx_pct"])))
+    if regime.get("vix") is not None:
+        bits.append("VIX {:.1f} ({})".format(regime["vix"], regime.get("regime") or "—"))
+    tone = "warn" if regime.get("regime") in ("ELEVATED", "STRESSED") else "info"
+    note = " {}".format(regime.get("regime_note")) if regime.get("regime_note") else ""
+    return {"line": ", ".join(bits) + ".{}".format(note), "tone": tone, "action": None}
+
+
+def _alerts_line() -> Dict[str, Any]:
+    alerts = db.get_price_alerts(include_triggered=True)
+    trig = [a for a in alerts if a.get("triggered")]
+    active = [a for a in alerts if not a.get("triggered")]
+    if trig:
+        return {"line": "{} alert{} triggered — {} still armed.".format(
+                    len(trig), "s" if len(trig) != 1 else "", len(active)),
+                "tone": "warn", "action": None}
+    if active:
+        return {"line": "{} alert{} armed. I check them every five minutes.".format(
+                    len(active), "s" if len(active) != 1 else ""),
+                "tone": "info", "action": None}
+    return {"line": "No tripwires set. Give me levels to watch and I'll wake you when they break.",
+            "tone": "info", "action": None}
+
+
+def _ideas_line() -> Dict[str, Any]:
+    try:
+        import idea_pool_warmer
+        pool = idea_pool_warmer.list_warmed_symbols()
+    except Exception:
+        pool = []
+    if pool:
+        top = pool[0]
+        return {"line": "{} pre-built theses warm and ready. Top of the stack: {} (score {:.0f}).".format(
+                    len(pool), top["symbol"], top.get("composite_score") or 0),
+                "tone": "pos", "action": None}
+    return {"line": "Idea pool is warming — theses generate in the background every six hours.",
+            "tone": "info", "action": None}
+
+
+def _earnings_line() -> Dict[str, Any]:
+    import earnings
+    held = [h["symbol"] for h in db.get_portfolio() if h.get("asset_type") != "crypto"]
+    cal = earnings.get_earnings_calendar(held[:25]) if held else []
+    soon = [e for e in cal if (e.get("days_until") or 99) <= 14]
+    if soon:
+        e = soon[0]
+        return {"line": "Next on the calendar: {} reports {} ({} days). {} more inside two weeks.".format(
+                    e["symbol"], e["earnings_date"], e["days_until"], max(0, len(soon) - 1)),
+                "tone": "info", "action": None}
+    return {"line": "Calendar's clear — no portfolio earnings inside two weeks.",
+            "tone": "info", "action": None}
+
+
+def _forecast_line() -> Dict[str, Any]:
+    line = "Name a symbol and I'll fuse every forecasting engine into one calibrated call."
+    try:
+        import forecast_accountability
+        rep = forecast_accountability.accountability_report()
+        ens = rep.get("ensemble") or {}
+        hr = (ens.get("track_record") or {}).get("hit_rate")
+        n = (ens.get("calibration") or {}).get("n")
+        if hr is not None and n:
+            line = "My directional hit rate stands at {:.0f}% over {} scored calls. {}".format(
+                hr * 100 if hr <= 1 else hr, n,
+                "Holding my edge." if (hr * 100 if hr <= 1 else hr) >= 55 else "Calibrating.")
+    except Exception:
+        pass
+    return {"line": line, "tone": "info", "action": None}
+
+
+def _symbol_line(symbol: str) -> Dict[str, Any]:
+    q = fetcher.get_quote(symbol)
+    if not q or q.get("error") or q.get("price") is None:
+        return {"line": "Working up {} — quote feed is slow right now.".format(symbol),
+                "tone": "info", "action": None}
+    bits = ["{} at ${:,.2f}".format(symbol, q["price"])]
+    if q.get("change_pct") is not None:
+        bits.append("{} today".format(_fmt_pct(q["change_pct"])))
+    hi, lo = q.get("fifty_two_week_high"), q.get("fifty_two_week_low")
+    if hi and lo and hi > lo:
+        bits.append("{:.0f}% of 52-week range".format((q["price"] - lo) / (hi - lo) * 100))
+    held = None
+    try:
+        for h in db.get_portfolio():
+            if h["symbol"].upper() == symbol.upper():
+                held = h
+                break
+    except Exception:
+        pass
+    tail = ""
+    if held:
+        mv = (q["price"] or 0) * held["shares"]
+        cost = held["avg_cost"] * held["shares"]
+        pnl = mv - cost
+        tail = " You hold {} — {} {} on the position.".format(
+            _fmt_usd(mv), "up" if pnl >= 0 else "down", _fmt_usd(abs(pnl)))
+    tone = "pos" if (q.get("change_pct") or 0) >= 0 else "neg"
+    return {"line": ", ".join(bits) + "." + tail, "tone": tone, "action": None}
+
+
+def _view_context_uncached(view: str, symbol: Optional[str]) -> Dict[str, Any]:
+    try:
+        if symbol:
+            return _symbol_line(symbol)
+        if view in _PULSE_VIEWS:
+            r = _pulse_line()
+            if r:
+                return r
+        if view in _MARKET_VIEWS or view == "stress":
+            r = _regime_line()
+            if r:
+                # stress view gets the regime line with a sharper tail
+                if view == "stress":
+                    r = dict(r)
+                    r["line"] += " Run the scenarios — better to rehearse the drawdown than meet it cold."
+                return r
+        if view == "alerts" or view == "watchlist":
+            return _alerts_line() if view == "alerts" else _watchlist_line()
+        if view in ("ideas", "scanner"):
+            return _ideas_line()
+        if view == "earnings":
+            return _earnings_line()
+        if view == "forecast":
+            return _forecast_line()
+    except Exception as e:
+        log.debug("view_context(%s) data path failed: %s", view, e)
+    line = _VIEW_LINES.get(view)
+    if line:
+        return {"line": line, "tone": "info", "action": None}
+    return {"line": "At your service. ⌘K if you need me.", "tone": "info", "action": None}
+
+
+def _watchlist_line() -> Dict[str, Any]:
+    wl = db.get_watchlist()
+    if not wl:
+        return {"line": "Watchlist is empty. Add names and I'll track them tick by tick.",
+                "tone": "info", "action": None}
+    syms = [w["symbol"] for w in wl][:25]
+    quotes = fetcher.get_quotes_batch(syms)
+    movers = [(s, (quotes.get(s) or {}).get("change_pct")) for s in syms]
+    movers = [m for m in movers if m[1] is not None]
+    if movers:
+        s, pct = max(movers, key=lambda m: abs(m[1]))
+        return {"line": "Watching {} name{}. Today's standout: {} at {}.".format(
+                    len(wl), "s" if len(wl) != 1 else "", s, _fmt_pct(pct)),
+                "tone": "pos" if pct >= 0 else "neg", "action": None}
+    return {"line": "Watching {} name{}.".format(len(wl), "s" if len(wl) != 1 else ""),
+            "tone": "info", "action": None}
+
+
+def view_context(view: str, symbol: Optional[str] = None) -> Dict[str, Any]:
+    view = (view or "").strip().lower()
+    sym = (symbol or "").strip().upper() or None
+    if cache_store is None:
+        return _view_context_uncached(view, sym)
+    ttl = 60 if sym else 120
+    return cache_store.coalesce(("jarvis_ctx", view, sym), ttl,
+                                lambda: _view_context_uncached(view, sym))
+
+
+# ─── activity: what Jarvis is doing behind the scenes ────────────────────────
+# Read-only snapshot of the background machinery (cache warmer cycles, idea
+# pool, cache size) phrased as human activity lines for the neural-activity
+# panel. Everything here is in-memory state — no upstream calls.
+
+_WARMER_LABELS = {
+    "indices":          "Sampling global indices",
+    "sectors":          "Mapping sector performance",
+    "movers":           "Hunting market movers",
+    "macro":            "Reading macro indicators",
+    "quotes":           "Refreshing portfolio quotes",
+    "quotes_crypto":    "Polling crypto quotes",
+    "fundamentals":     "Studying fundamentals",
+    "news":             "Scanning the wires",
+    "benchmark":        "Tracking the benchmark",
+    "chart":            "Pre-rendering charts",
+    "tracker_score":    "Scoring past forecasts",
+    "hypothesis_score": "Grading hypotheses",
+    "tracker_prune":    "Tidying forecast records",
+    "cluster_bull":     "Sweeping for bull clusters",
+    "cluster_bear":     "Sweeping for bear clusters",
+    "divmap":           "Mapping divergences",
+    "sectorflow":       "Tracing sector flows",
+    "prune":            "Pruning stale cache",
+    "vacuum":           "Compacting the database",
+}
+
+
+def _ago(ts: float) -> str:
+    try:
+        import time as _t
+        s = max(0, int(_t.time() - ts))
+    except Exception:
+        return ""
+    if s < 60:
+        return "{}s ago".format(s)
+    if s < 3600:
+        return "{}m ago".format(s // 60)
+    return "{}h ago".format(s // 3600)
+
+
+def activity_snapshot() -> Dict[str, Any]:
+    background: List[Dict[str, Any]] = []
+    summary_bits: List[str] = []
+
+    try:
+        import cache_warmer
+        cycles = (cache_warmer.status() or {}).get("last_cycle") or {}
+        rows = sorted(cycles.items(), key=lambda kv: -kv[1])[:8]
+        for label, ts in rows:
+            background.append({
+                "label": _WARMER_LABELS.get(label, label.replace("_", " ").capitalize()),
+                "when": _ago(ts),
+                "ts": ts,
+            })
+    except Exception as e:
+        log.debug("activity: warmer status failed: %s", e)
+
+    try:
+        import idea_pool_warmer
+        st = idea_pool_warmer.warmer_status() or {}
+        fresh = st.get("warmed_total")
+        if fresh is not None:
+            summary_bits.append("{} theses warm".format(fresh))
+        if st.get("running"):
+            background.insert(0, {"label": "Generating investment theses",
+                                  "when": "now", "ts": None})
+    except Exception as e:
+        log.debug("activity: idea pool status failed: %s", e)
+
+    try:
+        if cache_store is not None:
+            st = cache_store.stats() or {}
+            n = st.get("on_disk") or st.get("in_memory")
+            if n and int(n) > 0:
+                summary_bits.append("{:,} facts cached".format(int(n)))
+    except Exception as e:
+        log.debug("activity: cache stats failed: %s", e)
+
+    return {
+        "background": background,
+        "summary": " · ".join(summary_bits) if summary_bits else "Background systems nominal",
+        "as_of": datetime.now(timezone.utc).isoformat(),
+    }
 
 
 # ─── ask: local natural-language Q&A ─────────────────────────────────────────
@@ -634,5 +1063,15 @@ def ask(query: str) -> Dict[str, Any]:
         log.warning("jarvis.ask failed for %r: %s", q, e)
         return {"intent": "error",
                 "answer": "Something went wrong answering that — the data source may be rate-limited. Try again in a moment."}
+
+    # Unrecognized intent: optionally let the LLM answer from local data only.
+    # Keyless (or cap-exhausted) behavior is identical to before — "help".
+    if _llm_available():
+        try:
+            answer = _llm_ask(q)
+            if answer:
+                return done("llm", {"answer": answer})
+        except Exception as e:
+            log.debug("jarvis.ask llm fallback failed for %r: %s", q, e)
 
     return {"intent": "help", "answer": _HELP_ANSWER}

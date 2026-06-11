@@ -24,13 +24,13 @@ import json
 import logging
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
 import database as db
 import idea_generator
 import opportunity_scanner as scanner
+import safe_executor
 
 logger = logging.getLogger(__name__)
 
@@ -346,17 +346,17 @@ def _warm_one(target: Dict[str, str]) -> bool:
 
 
 def _warm_one_with_cleanup(target: Dict[str, str]) -> bool:
-    """ThreadPoolExecutor wrapper that closes thread-local sqlite connections
-    on the way out. Without this, each pool worker thread opens (lazily, via
-    database.get_conn() / cache_store._conn() inside _build_dossier and
-    _persist_dossier) thread-local sqlite handles. The ThreadPoolExecutor
-    is recreated every warm_pool() call via the `with` block, so its
-    worker threads terminate when the pool exits — but Python's
-    threading.local cleanup runs only when the thread object is GC'd,
-    which can be arbitrarily delayed. In the meantime the sqlite FDs stay
-    open and a long-lived process accumulates them across passes (every
-    6h × N workers per process lifetime). On macOS the default per-process
-    FD soft limit is 256; with two workers we'd hit it after ~120 passes."""
+    """Worker wrapper that closes thread-local sqlite connections on the
+    way out. Without this, each parallel_map worker thread opens (lazily,
+    via database.get_conn() / cache_store._conn() inside _build_dossier and
+    _persist_dossier) thread-local sqlite handles. The daemon worker pool
+    is recreated every warm_pool() call, so its threads terminate when the
+    pass drains — but Python's threading.local cleanup runs only when the
+    thread object is GC'd, which can be arbitrarily delayed. In the
+    meantime the sqlite FDs stay open and a long-lived process accumulates
+    them across passes (every 6h × N workers per process lifetime). On
+    macOS the default per-process FD soft limit is 256; with two workers
+    we'd hit it after ~120 passes."""
     try:
         return _warm_one(target)
     finally:
@@ -394,60 +394,26 @@ def warm_pool(target_count: int = 200) -> Dict[str, Any]:
         logger.info("idea_pool: starting warm pass — %d targets, %d workers",
                     len(targets), _WARM_MAX_WORKERS)
 
-        # Bundle-state can flip `concurrent.futures.thread._shutdown` (atexit
-        # fires while Flask is still serving). After that, every submit
-        # raises `RuntimeError: cannot schedule new futures after interpreter
-        # shutdown`. The warmer is a long-lived background thread itself, so
-        # this would normally kill the warm pass silently. Fall back to a
-        # serial loop in that state — the pass takes longer, but the cache
-        # still gets populated.
-        def _serial_warm():
-            nonlocal warmed, errors
-            for t in targets:
-                try:
-                    ok = _warm_one_with_cleanup(t)
-                except Exception as exc:  # noqa: BLE001
-                    logger.exception("idea_pool: serial worker crashed on %s: %s",
-                                     t.get("symbol"), exc)
-                    ok = False
-                if ok:
-                    warmed += 1
-                else:
-                    errors += 1
-
-        try:
-            with ThreadPoolExecutor(max_workers=_WARM_MAX_WORKERS) as pool:
-                try:
-                    futures = {pool.submit(_warm_one_with_cleanup, t): t for t in targets}
-                except RuntimeError as exc:
-                    if "interpreter shutdown" in str(exc) or "cannot schedule new futures" in str(exc):
-                        logger.warning(
-                            "idea_pool: submit failed (%s); running pass serially", exc,
-                        )
-                        futures = {}
-                        _serial_warm()
-                    else:
-                        raise
-                for fut in as_completed(futures):
-                    try:
-                        ok = fut.result()
-                    except Exception as exc:  # noqa: BLE001
-                        t = futures[fut]
-                        logger.exception("idea_pool: worker crashed on %s: %s",
-                                         t.get("symbol"), exc)
-                        ok = False
-                    if ok:
-                        warmed += 1
-                    else:
-                        errors += 1
-        except RuntimeError as exc:
-            if "interpreter shutdown" in str(exc) or "cannot schedule new futures" in str(exc):
-                logger.warning(
-                    "idea_pool: ThreadPoolExecutor ctor failed (%s); running pass serially", exc,
-                )
-                _serial_warm()
+        # Run on safe_executor's daemon threads. This is the call site that
+        # used to wedge interpreter exit: a 200-item pass mid-flight at
+        # shutdown left non-daemon TPE workers for concurrent.futures'
+        # atexit hook to join. Daemon workers just die with the process.
+        # parallel_map also falls back to a serial loop by itself when
+        # worker threads can't be spawned, replacing the old bundle-state
+        # guards. _warm_one_with_cleanup returns True/False (it logs and
+        # swallows per-target exceptions); a None slot from parallel_map
+        # (work fn raised) counts as an error like the old fut.result()
+        # exception path did.
+        outcomes = safe_executor.parallel_map(
+            _warm_one_with_cleanup, targets,
+            max_workers=_WARM_MAX_WORKERS,
+            thread_name_prefix="idea-warm",
+        )
+        for ok in outcomes:
+            if ok:
+                warmed += 1
             else:
-                raise
+                errors += 1
     finally:
         elapsed = time.time() - start
         finished_iso = _now_iso()

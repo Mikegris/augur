@@ -42,9 +42,9 @@ import logging
 import re
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 
+import safe_executor
 import sec_edgar as edgar
 import ai_summarizer
 import earnings as earnings_module
@@ -987,10 +987,14 @@ def portfolio_dividends():
     equity_syms = [h["symbol"] for h in holdings if h["asset_type"] != "crypto"]
     div_map = {}
     if equity_syms:
-        with ThreadPoolExecutor(max_workers=8) as pool:
-            for sym, dd in zip(equity_syms,
-                               pool.map(fetcher.get_dividend_data, equity_syms)):
-                div_map[sym] = dd or {}
+        # safe_executor.parallel_map preserves input order (like pool.map
+        # did) and fills a slot with None if a fetch raises, which the
+        # `or {}` below absorbs instead of 500-ing the route.
+        for sym, dd in zip(equity_syms,
+                           safe_executor.parallel_map(
+                               fetcher.get_dividend_data, equity_syms,
+                               max_workers=8, thread_name_prefix="div-batch")):
+            div_map[sym] = dd or {}
 
     # Walk holdings in original order so the response ordering is stable.
     results = []
@@ -1304,9 +1308,16 @@ def intel_feed():
                     )
                     return (f, {})
 
-            with ThreadPoolExecutor(max_workers=8) as pool:
-                for f, ai_result in pool.map(_summarize_and_cache, uncached_filings):
-                    result.append({
+            # parallel_map preserves input order like pool.map did;
+            # _summarize_and_cache catches its own exceptions, so a None
+            # slot (work fn raised) just falls back to empty AI fields.
+            summarized = safe_executor.parallel_map(
+                _summarize_and_cache, uncached_filings,
+                max_workers=8, thread_name_prefix="intel-ai",
+            )
+            for f, pair in zip(uncached_filings, summarized):
+                ai_result = pair[1] if pair else {}
+                result.append({
                         "ticker": f["ticker"],
                         "form_type": f["form_type"],
                         "filing_date": f["filing_date"],
@@ -3055,6 +3066,87 @@ def jarvis_briefing_route():
     try:
         force = request.args.get("refresh") == "1"
         return jsonify(jarvis.get_briefing(force_refresh=force))
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/jarvis/activity", methods=["GET"])
+def jarvis_activity_route():
+    """In-memory snapshot of background machinery for the activity panel."""
+    try:
+        import jarvis
+        return jsonify(jarvis.activity_snapshot())
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/jarvis/activity/stream", methods=["GET"])
+def jarvis_activity_stream_route():
+    """Server-Sent Events stream of activity_snapshot(). Emits the FIRST
+    snapshot immediately (so test clients can read one chunk and close),
+    then only on change (stable JSON signature over background+summary).
+    Comment heartbeats (`: hb`) flow every ~15s so dead connections get
+    reaped, and the generator hard-stops after 10 minutes — the browser's
+    EventSource auto-reconnects — so reloads/shutdowns are never blocked
+    by an immortal response thread."""
+    try:
+        import jarvis
+    except Exception as e:
+        return jsonify({"error": "jarvis unavailable: {}".format(e)}), 500
+
+    def generate():
+        import time as _time
+        import json as _json
+        started = _time.time()
+        last_sig = None
+        last_yield = _time.time()
+        sent_any = False
+        while _time.time() - started < 600:  # hard stop after 10 min
+            try:
+                snap = jarvis.activity_snapshot()
+                sig = _json.dumps(
+                    {"background": snap.get("background"),
+                     "summary": snap.get("summary")},
+                    sort_keys=True, default=str)
+                if sig != last_sig:
+                    last_sig = sig
+                    last_yield = _time.time()
+                    sent_any = True
+                    yield "data: {}\n\n".format(_json.dumps(snap, default=str))
+                elif _time.time() - last_yield >= 15:
+                    last_yield = _time.time()
+                    yield ": hb\n\n"
+            except Exception:
+                # One bad snapshot must not kill the stream — heartbeat so
+                # the very first chunk still arrives promptly even on error.
+                # (GeneratorExit is BaseException: client disconnects still
+                # close the generator normally.)
+                if _time.time() - last_yield >= 15 or not sent_any:
+                    last_yield = _time.time()
+                    sent_any = True
+                    yield ": hb\n\n"
+            _time.sleep(2)
+
+    resp = Response(generate(), mimetype="text/event-stream")
+    resp.headers["Cache-Control"] = "no-cache"
+    resp.headers["X-Accel-Buffering"] = "no"
+    return resp
+
+
+@app.route("/api/jarvis/context/<view>", methods=["GET"])
+def jarvis_context_route(view):
+    """One contextual Jarvis line for the active view (?symbol= for research)."""
+    try:
+        import jarvis
+    except Exception as e:
+        return jsonify({"error": "jarvis unavailable: {}".format(e)}), 500
+    if not view or len(view) > 40 or not view.replace("-", "").isalnum():
+        return jsonify({"error": "invalid view"}), 400
+    symbol = request.args.get("symbol")
+    if symbol and not _valid_ticker(symbol):
+        symbol = None
+    try:
+        return jsonify(jarvis.view_context(view, symbol))
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 

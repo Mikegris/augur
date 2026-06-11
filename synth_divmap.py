@@ -41,9 +41,10 @@ from __future__ import annotations
 import hashlib
 import logging
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional, Tuple
+
+import safe_executor
 
 log = logging.getLogger("augur.divmap")
 
@@ -701,50 +702,21 @@ def divergence_map(universe=None, top_n: int = 20) -> dict:
             for pair in PAIR_DEFS:
                 tasks.append((sym, pair))
 
-        # Bundle-state can flip the global concurrent.futures._shutdown flag
-        # (atexit fires while Flask is still serving), after which every
-        # submit raises RuntimeError("cannot schedule new futures after
-        # interpreter shutdown") and the route 500s. Fall back to serial
-        # evaluation in that state so the panel still loads.
-        def _serial():
-            for sym, pair in tasks:
-                try:
-                    row = _evaluate_pair_for_symbol(sym, pair)
-                except Exception as e:
-                    log.debug("serial pair failed %s/%s: %s", sym, pair["name"], e)
-                    continue
-                if row is not None:
-                    all_rows.append(row)
-
-        try:
-            with ThreadPoolExecutor(max_workers=_MAX_WORKERS) as pool:
-                try:
-                    futures = {
-                        pool.submit(_evaluate_pair_for_symbol, sym, pair): (sym, pair)
-                        for sym, pair in tasks
-                    }
-                except RuntimeError as e:
-                    if "interpreter shutdown" in str(e) or "cannot schedule new futures" in str(e):
-                        log.warning("synth_divmap: ThreadPool unavailable (%s); going serial", e)
-                        _serial()
-                        futures = {}
-                    else:
-                        raise
-                for fut in as_completed(futures):
-                    sym, pair = futures[fut]
-                    try:
-                        row = fut.result(timeout=_PER_SYMBOL_TIMEOUT_S)
-                    except Exception as e:
-                        log.debug("future failed %s/%s: %s", sym, pair["name"], e)
-                        continue
-                    if row is not None:
-                        all_rows.append(row)
-        except RuntimeError as e:
-            if "interpreter shutdown" in str(e) or "cannot schedule new futures" in str(e):
-                log.warning("synth_divmap: ThreadPoolExecutor ctor failed (%s); going serial", e)
-                _serial()
-            else:
-                raise
+        # Run on safe_executor's daemon threads. parallel_map fills a slot
+        # with None when the work fn raises (matching the old skip-on-error
+        # behavior) and falls back to serial by itself when threads can't
+        # spawn. The old per-future result(timeout=_PER_SYMBOL_TIMEOUT_S)
+        # becomes an overall batch deadline of _PER_SYMBOL_TIMEOUT_S × 4 —
+        # a hard cap so one slow upstream can't stall the scan forever, but
+        # with headroom for queued tasks behind the _MAX_WORKERS limit.
+        raw_rows = safe_executor.parallel_map(
+            lambda task: _evaluate_pair_for_symbol(task[0], task[1]),
+            tasks,
+            max_workers=_MAX_WORKERS,
+            timeout_per_item=_PER_SYMBOL_TIMEOUT_S * 4,
+            thread_name_prefix="divmap",
+        )
+        all_rows.extend(r for r in raw_rows if r is not None)
 
         # Sort by magnitude desc, then take top_n.
         all_rows.sort(key=lambda r: r.get("magnitude", 0), reverse=True)

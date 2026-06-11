@@ -10,7 +10,6 @@ beat probability.
 import logging
 import math
 import time
-from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from typing import Dict, List, Optional
 
@@ -557,7 +556,7 @@ def nowcast_revenue(symbol):
 def nowcast_bulk(symbols):
     # type: (list) -> list
     """
-    Score multiple symbols in parallel using ThreadPoolExecutor.
+    Score multiple symbols in parallel via safe_executor.parallel_map.
 
     Caps at 15 symbols. Returns list sorted by nowcast_score descending.
     On error returns [{"error": str}].
