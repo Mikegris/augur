@@ -2193,9 +2193,202 @@ body::before {
 .jp-item.sel { background: var(--bg-active); color: var(--text-primary); box-shadow: inset 2px 0 0 var(--green); }
 .jp-icon { color: var(--text-dim); width: 14px; text-align: center; }
 .jp-item.sel .jp-icon { color: var(--green); }
+/* Client-side commands (alert / stress test) read amber — they act, not navigate */
+.jp-item.jp-cmd .jp-icon { color: var(--amber); }
+.jp-item.jp-cmd.sel { box-shadow: inset 2px 0 0 var(--amber); }
+.jp-item.jp-cmd.sel .jp-icon { color: var(--amber); }
 .jp-footer { padding: 6px 14px; border-top: 1px solid var(--border); font-size: 9px; color: var(--text-dim); letter-spacing: .08em; }
 .jp-answer { padding: 12px 14px; border-bottom: 1px solid var(--border); background: var(--bg-secondary); }
 .jp-answer.thinking { display: flex; align-items: center; gap: 8px; color: var(--text-dim); font-size: var(--font-size-sm); }
 .jp-answer.error { color: var(--red); font-size: var(--font-size-sm); }
 .jp-answer-text { font-size: var(--font-size-md); color: var(--text-primary); line-height: 1.6; margin-bottom: 6px; }
 .jp-answer-detail { font-size: var(--font-size-xs); color: var(--text-secondary); margin-bottom: 6px; }
+
+/* ── JARVIS pervasive layer: strip, core pulse, view transitions ── */
+#jarvis-strip {
+  display: flex; align-items: center; gap: 8px;
+  padding: 5px 14px;
+  font-size: var(--font-size-sm);
+  color: var(--text-secondary);
+  background: linear-gradient(90deg, var(--bg-elevated), var(--bg-secondary) 60%);
+  border-bottom: 1px solid var(--border);
+  min-height: 26px;
+}
+#jarvis-strip .js-glyph {
+  color: var(--green);
+  animation: jarvis-pulse 2.4s ease-in-out infinite;
+}
+#jarvis-strip[data-tone="pos"]  #jarvis-strip-text { color: var(--green-dim); }
+#jarvis-strip[data-tone="neg"]  #jarvis-strip-text { color: var(--red); }
+#jarvis-strip[data-tone="warn"] #jarvis-strip-text { color: var(--amber); }
+#jarvis-strip .js-caret {
+  display: none; width: 6px; height: 12px;
+  background: var(--green); opacity: .8;
+}
+#jarvis-strip.typing .js-caret { display: inline-block; animation: jarvis-caret .7s steps(1) infinite; }
+@keyframes jarvis-caret { 50% { opacity: 0; } }
+
+@keyframes jarvis-pulse {
+  0%, 100% { text-shadow: 0 0 4px var(--green-glow); opacity: .85; }
+  50%      { text-shadow: 0 0 12px var(--green), 0 0 24px var(--green-glow); opacity: 1; }
+}
+.jarvis-core { color: var(--green); animation: jarvis-pulse 2.4s ease-in-out infinite; }
+
+/* Views rise in like a HUD pane coming online */
+@keyframes jarvis-view-in {
+  from { opacity: 0; transform: translateY(5px); }
+  to   { opacity: 1; transform: none; }
+}
+.view.active { animation: jarvis-view-in .22s ease-out; }
+
+/* Loaders: dual-ring core glow */
+.spinner {
+  border: 2px solid var(--border);
+  border-top-color: var(--green);
+  border-bottom-color: var(--blue);
+  box-shadow: 0 0 8px var(--green-glow), inset 0 0 4px var(--blue-glow);
+}
+
+/* Status bar: Jarvis presence */
+#status-jarvis .status-val { color: var(--green); }
+#status-jarvis .jarvis-core { font-size: 9px; }
+
+@media (prefers-reduced-motion: reduce) {
+  #jarvis-strip .js-glyph, .jarvis-core { animation: none; }
+  .view.active { animation: none; }
+}
+
+/* ── JARVIS HUD: orb, neural activity panel, futuristic conformance ── */
+#jarvis-orb {
+  position: fixed; right: 16px; bottom: 34px; z-index: 950;
+  width: 46px; height: 46px; border-radius: 50%;
+  background: radial-gradient(circle at 50% 42%, var(--green-glow), rgba(2,11,18,.95) 65%);
+  border: 1px solid var(--border-bright);
+  box-shadow: 0 0 16px var(--green-glow), inset 0 0 10px var(--green-glow);
+  cursor: pointer; padding: 0;
+  display: flex; align-items: center; justify-content: center;
+}
+#jarvis-orb .orb-ring {
+  position: absolute; inset: 3px; border-radius: 50%;
+  background: conic-gradient(from 0deg, transparent 0 70%, var(--green) 85%, transparent 100%);
+  -webkit-mask: radial-gradient(circle, transparent 58%, #000 60%);
+          mask: radial-gradient(circle, transparent 58%, #000 60%);
+  animation: orb-spin 6s linear infinite; opacity: .55;
+}
+#jarvis-orb .orb-core {
+  width: 12px; height: 12px; border-radius: 50%;
+  background: var(--green);
+  box-shadow: 0 0 10px var(--green), 0 0 22px var(--green-glow);
+  animation: jarvis-pulse 2.4s ease-in-out infinite;
+}
+#jarvis-orb.busy .orb-ring {
+  animation-duration: 1.1s; opacity: 1;
+  background: conic-gradient(from 0deg, transparent 0 55%, var(--cyan) 75%, var(--green) 90%, transparent 100%);
+}
+#jarvis-orb.busy { box-shadow: 0 0 26px var(--green-glow), inset 0 0 14px var(--blue-glow); }
+#jarvis-orb .orb-count {
+  position: absolute; top: -4px; right: -4px;
+  min-width: 15px; height: 15px; border-radius: 8px; padding: 0 3px;
+  background: var(--bg-elevated); border: 1px solid var(--blue-dim);
+  color: var(--cyan); font-size: 9px; line-height: 13px; font-family: var(--font-mono);
+}
+#jarvis-orb .orb-count:empty { display: none; }
+/* Live SSE frame landed — ~600ms cyan surge (class added/removed by jarvis.js,
+   which also skips the flash entirely under prefers-reduced-motion). */
+#jarvis-orb { transition: box-shadow .2s ease; }
+#jarvis-orb.sse-flash {
+  box-shadow: 0 0 30px var(--blue-glow), 0 0 14px var(--green-glow), inset 0 0 14px var(--blue-glow);
+}
+#jarvis-orb.sse-flash .orb-core {
+  background: var(--cyan);
+  box-shadow: 0 0 12px var(--cyan), 0 0 24px var(--blue-glow);
+}
+@keyframes orb-spin { to { transform: rotate(360deg); } }
+
+#jarvis-activity-panel {
+  position: fixed; right: 16px; bottom: 88px; z-index: 949;
+  width: min(360px, 92vw); max-height: 60vh;
+  display: none; flex-direction: column;
+  background: linear-gradient(180deg, var(--bg-elevated), var(--bg-panel));
+  border: 1px solid var(--border-bright); border-radius: var(--radius-md);
+  box-shadow: 0 12px 40px rgba(0,0,0,.55), 0 0 18px var(--green-glow);
+  overflow: hidden;
+}
+#jarvis-activity-panel.open { display: flex; }
+.jap-header {
+  display: flex; align-items: center; gap: 6px;
+  padding: 8px 12px; border-bottom: 1px solid var(--border);
+  font-size: 10px; letter-spacing: .15em; color: var(--green); font-weight: 600;
+}
+.jap-close {
+  margin-left: auto; background: none; border: none; color: var(--text-dim);
+  font-size: 14px; cursor: pointer; padding: 0 2px;
+}
+.jap-close:hover { color: var(--red); }
+.jap-bg {
+  padding: 7px 12px; border-bottom: 1px solid var(--border);
+  background: var(--bg-secondary); font-size: 10px; color: var(--text-secondary);
+}
+.jap-bg-sum { color: var(--blue); letter-spacing: .06em; margin-bottom: 3px; }
+.jap-bg-row { display: flex; justify-content: space-between; color: var(--text-dim); padding: 1px 0; }
+.jap-list { overflow-y: auto; padding: 4px 0; flex: 1; }
+.jap-row {
+  display: flex; align-items: center; gap: 8px;
+  padding: 4px 12px; font-size: var(--font-size-xs);
+  color: var(--text-secondary); line-height: 1.4;
+}
+.jap-row.err .jap-desc { color: var(--red); }
+.jap-row.run .jap-desc { color: var(--text-primary); }
+.jap-ic { width: 12px; text-align: center; color: var(--green-dim); flex: none; }
+.jap-row.err .jap-ic { color: var(--red); }
+.jap-run {
+  display: inline-block; width: 8px; height: 8px; border-radius: 50%;
+  border: 1px solid var(--cyan); border-top-color: transparent;
+  animation: spin .6s linear infinite;
+}
+.jap-desc { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.jap-ms { color: var(--text-dim); font-size: 9px; flex: none; }
+.jap-empty { padding: 14px 12px; color: var(--text-dim); font-size: var(--font-size-xs); }
+
+/* HUD corner brackets on every panel */
+.panel::after {
+  content: ''; position: absolute; inset: 0; pointer-events: none; opacity: .45;
+  background:
+    linear-gradient(var(--green-dim), var(--green-dim)) left   0 top    0 / 9px 1px,
+    linear-gradient(var(--green-dim), var(--green-dim)) left   0 top    0 / 1px 9px,
+    linear-gradient(var(--green-dim), var(--green-dim)) right  0 top    0 / 9px 1px,
+    linear-gradient(var(--green-dim), var(--green-dim)) right  0 top    0 / 1px 9px,
+    linear-gradient(var(--green-dim), var(--green-dim)) left   0 bottom 0 / 9px 1px,
+    linear-gradient(var(--green-dim), var(--green-dim)) left   0 bottom 0 / 1px 9px,
+    linear-gradient(var(--green-dim), var(--green-dim)) right  0 bottom 0 / 9px 1px,
+    linear-gradient(var(--green-dim), var(--green-dim)) right  0 bottom 0 / 1px 9px;
+  background-repeat: no-repeat;
+}
+.panel:hover::after { opacity: .9; }
+.panel { transition: box-shadow .2s ease; }
+.panel:hover { box-shadow: 0 0 14px rgba(0, 255, 159, 0.06); }
+
+/* Header scan sweep */
+#header::after {
+  content: ''; position: absolute; top: 0; bottom: 0; width: 90px;
+  background: linear-gradient(90deg, transparent, rgba(0,255,159,.05), rgba(0,200,255,.07), transparent);
+  animation: hud-sweep 9s linear infinite; pointer-events: none;
+}
+@keyframes hud-sweep { from { left: -90px; } to { left: 110%; } }
+
+/* Focus & interaction glow */
+input:focus, select:focus, textarea:focus {
+  box-shadow: 0 0 0 1px var(--green-dim), 0 0 10px var(--green-glow) !important;
+  outline: none;
+}
+.kpi-card { transition: transform .15s ease, box-shadow .15s ease; }
+.kpi-card:hover { transform: translateY(-1px); box-shadow: 0 3px 14px rgba(0,200,255,.08); }
+.btn:hover { box-shadow: 0 0 10px var(--green-glow); }
+
+@media (prefers-reduced-motion: reduce) {
+  #jarvis-orb .orb-ring, #jarvis-orb .orb-core, #header::after { animation: none; }
+  .kpi-card, .panel, #jarvis-orb { transition: none; }
+}
+@media print {
+  #jarvis-orb, #jarvis-activity-panel, #jarvis-strip { display: none !important; }
+}

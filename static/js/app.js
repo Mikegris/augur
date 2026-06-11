@@ -457,6 +457,9 @@ function navigate(view) {
   State.activeView = view;
   State.activeGroup = group;
 
+  // Jarvis context strip — one line about wherever you just landed
+  if (window.Jarvis && Jarvis.onNavigate) Jarvis.onNavigate(view);
+
   // Lazy-load views (unchanged)
   switch (view) {
     case 'overview':     loadOverview(); break;
@@ -1436,6 +1439,10 @@ async function loadResearchFor(symbol) {
   // points below bail when their gen no longer matches the latest.
   const gen = ++_researchGen;
   view.innerHTML = `<div class="loading"><div class="spinner"></div> FETCHING ${symbol}...</div>`;
+
+  // Keep the Jarvis strip in sync when the symbol changes within the view
+  State.researchSymbol = symbol;
+  if (window.Jarvis && Jarvis.onNavigate) Jarvis.onNavigate('research');
 
   try {
     const [quote, fund] = await Promise.all([
@@ -3556,7 +3563,7 @@ async function loadSettings() {
           <div class="panel-body">
             <div class="fund-grid">
               ${[
-                ['SYSTEM', 'AUGUR v1.0'],
+                ['SYSTEM', 'AUGUR v1.1'],
                 ['DATA SOURCE', 'YAHOO FINANCE + COINGECKO'],
                 ['DATABASE', 'SQLITE3 (LOCAL)'],
                 ['BACKEND', 'PYTHON / FLASK'],

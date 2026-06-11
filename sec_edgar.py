@@ -548,7 +548,7 @@ def get_form4_transactions(ticker, limit=30):
             break
 
     # Parse Form 4 XMLs in parallel (4 concurrent to respect EDGAR rate limits)
-    from concurrent.futures import ThreadPoolExecutor, as_completed
+    import safe_executor
 
     def _parse_one_form4(filing):
         """Fetch and parse a single Form 4 filing. Returns list of txn dicts."""
@@ -690,11 +690,15 @@ def get_form4_transactions(ticker, limit=30):
 
         return results
 
+    # Daemon-thread fan-out; _parse_one_form4 catches its own errors and
+    # returns a list, so a None slot (work fn raised) is just skipped.
     transactions = []
-    with ThreadPoolExecutor(max_workers=4) as pool:
-        futures = {pool.submit(_parse_one_form4, f): f for f in form4_filings}
-        for future in as_completed(futures):
-            transactions.extend(future.result())
+    for parsed in safe_executor.parallel_map(
+        _parse_one_form4, form4_filings,
+        max_workers=4, thread_name_prefix="edgar-form4",
+    ):
+        if parsed:
+            transactions.extend(parsed)
 
     transactions.sort(key=lambda x: x.get("date", ""), reverse=True)
     return transactions

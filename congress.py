@@ -365,8 +365,6 @@ def get_recent_trades(days=90, max_pdfs=100, tickers=None):
     all_ptrs = all_ptrs[:max_pdfs]
 
     # Parse PDFs in parallel (5 concurrent downloads)
-    from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError as FutTimeoutError
-
     def _rehydrate_dt(trades):
         """Cache round-trip drops datetime objects to strings (json.dumps
         default=str). Re-derive txn_dt from txn_date so downstream sort
@@ -405,61 +403,53 @@ def get_recent_trades(days=90, max_pdfs=100, tickers=None):
             return []
 
         # Bound the pdfplumber parse so a single malformed PDF can't stall
-        # the whole batch. Run in a single-slot executor so we can hard-cap
-        # with future.result(timeout=…); the worker thread leaks if it
-        # hangs, but it's a daemon and we'll have already returned.
-        #
-        # Bundle-state guard: if Python's `concurrent.futures.thread._shutdown`
-        # flag has been flipped (atexit fired mid-session in the py2app
-        # bundle), ThreadPoolExecutor.submit raises `RuntimeError: cannot
-        # schedule new futures after interpreter shutdown`. Fall back to a
-        # direct in-thread call to _parse_ptr_pdf — we lose the timeout
-        # bound, but a well-formed PDF parses in <1s, and the alternative
-        # (returning []) silently loses that PTR's trades.
-        try:
-            parse_pool = ThreadPoolExecutor(max_workers=1)
-        except RuntimeError as e:
-            if "interpreter shutdown" in str(e) or "cannot schedule new futures" in str(e):
-                log.warning(
-                    "congress: parse_pool ctor failed (%s); parsing %s in-thread", e, doc_id,
-                )
-                try:
-                    trades = _parse_ptr_pdf(resp.content, member, doc_id, year)
-                except Exception as ex:
-                    log.warning("congress: in-thread parse failed for %s: %s", doc_id, ex)
-                    return []
-                if cache_store is not None and trades:
-                    try:
-                        cache_store.cache_set(cache_key, trades, _PTR_CACHE_TTL)
-                    except Exception:
-                        pass
-                return trades
-            raise
+        # the whole batch. A plain DAEMON thread + join(timeout) gives the
+        # same hard cap a ThreadPoolExecutor did, without its fatal flaw:
+        # TPE workers are non-daemon, and concurrent.futures' atexit hook
+        # joins them — one hung pdfplumber thread left by shutdown(wait=False)
+        # made interpreter shutdown block forever, which wedged the Werkzeug
+        # reloader holding the port (and py2app bundles at quit). A daemon
+        # thread that hangs simply dies with the process.
+        import threading
+
+        parse_out = {}
+
+        def _parse_worker():
+            try:
+                parse_out["trades"] = _parse_ptr_pdf(resp.content, member, doc_id, year)
+            except Exception as ex:  # surfaced after join below
+                parse_out["err"] = ex
 
         try:
+            t = threading.Thread(target=_parse_worker, daemon=True,
+                                 name="ptr-parse-{}".format(doc_id))
+            t.start()
+        except RuntimeError as e:
+            # Interpreter already tearing down (atexit fired mid-session) —
+            # parse in-thread; we lose the timeout bound, but a well-formed
+            # PDF parses in <1s and returning [] would silently lose trades.
+            log.warning("congress: parse thread start failed (%s); parsing %s in-thread",
+                        e, doc_id)
             try:
-                fut = parse_pool.submit(_parse_ptr_pdf, resp.content, member, doc_id, year)
-            except RuntimeError as e:
-                if "interpreter shutdown" in str(e) or "cannot schedule new futures" in str(e):
-                    log.warning(
-                        "congress: parse_pool submit failed (%s); parsing %s in-thread",
-                        e, doc_id,
-                    )
-                    try:
-                        trades = _parse_ptr_pdf(resp.content, member, doc_id, year)
-                    except Exception as ex:
-                        log.warning("congress: in-thread parse failed for %s: %s", doc_id, ex)
-                        return []
-                else:
-                    raise
-            else:
+                trades = _parse_ptr_pdf(resp.content, member, doc_id, year)
+            except Exception as ex:
+                log.warning("congress: in-thread parse failed for %s: %s", doc_id, ex)
+                return []
+            if cache_store is not None and trades:
                 try:
-                    trades = fut.result(timeout=_PDF_PARSE_TIMEOUT_S)
-                except FutTimeoutError:
-                    log.warning("PTR parse timeout for %s — abandoning", doc_id)
-                    return []
-        finally:
-            parse_pool.shutdown(wait=False)
+                    cache_store.cache_set(cache_key, trades, _PTR_CACHE_TTL)
+                except Exception:
+                    pass
+            return trades
+
+        t.join(_PDF_PARSE_TIMEOUT_S)
+        if t.is_alive():
+            log.warning("PTR parse timeout for %s — abandoning", doc_id)
+            return []
+        if "err" in parse_out:
+            log.warning("congress: parse failed for %s: %s", doc_id, parse_out["err"])
+            return []
+        trades = parse_out.get("trades", [])
 
         if cache_store is not None and trades:
             try:

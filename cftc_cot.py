@@ -141,7 +141,7 @@ def snapshot() -> dict:
     ~20-30s on cold cache. Bounded concurrency keeps us comfortably under
     Socrata's per-IP throttle.
     """
-    from concurrent.futures import ThreadPoolExecutor
+    import safe_executor
 
     def _one(entry):
         dataset_id, pattern, label, category = entry
@@ -172,9 +172,12 @@ def snapshot() -> dict:
         }
 
     # Preserve WATCHED_CONTRACTS order in the output so the UI grid stays
-    # stable across reloads.
-    with ThreadPoolExecutor(max_workers=6) as pool:
-        results = list(pool.map(_one, WATCHED_CONTRACTS))
+    # stable across reloads — parallel_map returns results in input order
+    # (like pool.map did) and fills a slot with None if a fetch raises,
+    # which the filter below drops instead of 500-ing the macro endpoint.
+    results = safe_executor.parallel_map(
+        _one, WATCHED_CONTRACTS, max_workers=6, thread_name_prefix="cftc-cot",
+    )
     out = [r for r in results if r is not None]
 
     return {

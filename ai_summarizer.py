@@ -1,5 +1,6 @@
 """
-AI Filing Summarizer — uses OpenAI gpt-4o-mini.
+AI Filing Summarizer — uses OpenAI (MODEL_HEAVY for deep analyses,
+MODEL_LIGHT for short summaries; see the model-selection block below).
 Falls back to rule-based extraction if no API key configured.
 
 Caching & daily cap:
@@ -21,6 +22,95 @@ except Exception:  # pragma: no cover
     cache_store = None
 
 log = logging.getLogger(__name__)
+
+# ── Model selection (centralized) ────────────────────────────────────────────
+# Verified against the OpenAI model docs (developers.openai.com/api/docs/models,
+# June 2026): gpt-5.5 (snapshot gpt-5.5-2026-04-23) is the current flagship for
+# professional/analytical work; gpt-5.4-mini (snapshot gpt-5.4-mini-2026-03-17,
+# $0.75/$4.50 per 1M tokens) is the strongest cheap/fast variant — there is no
+# gpt-5.5-mini. Both support Chat Completions and JSON-mode structured outputs.
+# Override either tier via env, no code changes needed:
+#   AUGUR_OPENAI_MODEL_HEAVY — deep analyses (portfolio, earnings briefs)
+#   AUGUR_OPENAI_MODEL_LIGHT — short summaries (filings, insiders, theses)
+_DEFAULT_MODEL_HEAVY = "gpt-5.5"
+_DEFAULT_MODEL_LIGHT = "gpt-5.4-mini"
+MODEL_HEAVY = (os.environ.get("AUGUR_OPENAI_MODEL_HEAVY") or _DEFAULT_MODEL_HEAVY).strip() or _DEFAULT_MODEL_HEAVY
+MODEL_LIGHT = (os.environ.get("AUGUR_OPENAI_MODEL_LIGHT") or _DEFAULT_MODEL_LIGHT).strip() or _DEFAULT_MODEL_LIGHT
+
+# Last-resort retry target when the configured model isn't available on the
+# user's account (e.g. an account without gpt-5.x access yet).
+MODEL_FALLBACK = "gpt-4o"
+
+# Existing API routes / CLI still pass the historic defaults explicitly
+# (app.py sends "gpt-4o", cli.py defaults to "gpt-4o"). Treat those as "use
+# the configured tier" so the upgrade applies app-wide without touching the
+# callers; any other explicit model string is respected as-is.
+_LEGACY_HEAVY = {None, "", "default", "gpt-4o"}
+_LEGACY_LIGHT = {None, "", "default", "gpt-4o-mini"}
+
+
+def _resolve_heavy_model(model):
+    return MODEL_HEAVY if model in _LEGACY_HEAVY else model
+
+
+def _resolve_light_model(model):
+    return MODEL_LIGHT if model in _LEGACY_LIGHT else model
+
+
+def _uses_reasoning_params(model):
+    """gpt-5.x / o-series models reject `temperature` and `max_tokens` on Chat
+    Completions — they take `max_completion_tokens` and only the default
+    temperature. gpt-4o-era models keep the classic parameter names."""
+    m = (model or "").lower()
+    return m.startswith(("gpt-5", "o1", "o3", "o4"))
+
+
+def _is_model_not_found(exc):
+    """True when the API says the requested model doesn't exist / isn't
+    accessible on this account — the only failure we silently retry."""
+    if exc.__class__.__name__ == "NotFoundError":
+        return True
+    if getattr(exc, "code", None) == "model_not_found":
+        return True
+    msg = str(exc).lower()
+    return "model" in msg and (
+        "not found" in msg or "does not exist" in msg or "do not have access" in msg
+    )
+
+
+def _chat_completion(client, model, messages, max_tokens=None, temperature=None,
+                     json_mode=True):
+    """Single seam for every OpenAI chat call in the app.
+
+    - Maps parameters per model family (gpt-5.x/o-series get
+      `max_completion_tokens` and no `temperature`; older models get
+      `max_tokens` + `temperature`).
+    - If the chosen model isn't available on the user's account, retries once
+      with MODEL_FALLBACK so an aggressive default can never break a feature.
+    """
+    def _call(m):
+        kwargs = {"model": m, "messages": messages}
+        if json_mode:
+            kwargs["response_format"] = {"type": "json_object"}
+        if _uses_reasoning_params(m):
+            if max_tokens is not None:
+                kwargs["max_completion_tokens"] = max_tokens
+        else:
+            if max_tokens is not None:
+                kwargs["max_tokens"] = max_tokens
+            if temperature is not None:
+                kwargs["temperature"] = temperature
+        return client.chat.completions.create(**kwargs)
+
+    try:
+        return _call(model)
+    except Exception as e:
+        if model != MODEL_FALLBACK and _is_model_not_found(e):
+            log.warning("model %r unavailable (%s); retrying with %r",
+                        model, e, MODEL_FALLBACK)
+            return _call(MODEL_FALLBACK)
+        raise
+
 
 # Cache TTLs (seconds)
 _FILING_SUMMARY_TTL    = 7 * 24 * 3600    # accession is immutable
@@ -133,15 +223,14 @@ Filing text (excerpt):
 
 Return JSON only."""
 
-            resp = client.chat.completions.create(
-                model="gpt-4o-mini",
-                messages=[
+            resp = _chat_completion(
+                client, MODEL_LIGHT,
+                [
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt},
                 ],
-                response_format={"type": "json_object"},
-                temperature=0.1,
                 max_tokens=500,
+                temperature=0.1,
             )
             _record_ai_call()
             result = json.loads(resp.choices[0].message.content)
@@ -212,11 +301,13 @@ def _rule_based_summarize(text, form_type, ticker, description):
     }
 
 
-def analyze_portfolio(holdings, summary, model="gpt-4o"):
+def analyze_portfolio(holdings, summary, model=None):
     """
-    Deep AI analysis of entire portfolio. Uses gpt-4o by default for higher quality.
+    Deep AI analysis of entire portfolio. Uses MODEL_HEAVY by default for
+    higher quality (legacy "gpt-4o" requests are mapped to MODEL_HEAVY too).
     Returns structured dict with overall assessment, risks, opportunities, and per-position insights.
     """
+    model = _resolve_heavy_model(model)
     key = get_openai_key()
     if not key:
         return _rule_based_portfolio_analysis(holdings, summary)
@@ -246,7 +337,7 @@ def analyze_portfolio(holdings, summary, model="gpt-4o"):
 def _analyze_portfolio_uncached(holdings, summary, model, key):
     try:
         from openai import OpenAI
-        # 60s for the larger gpt-4o portfolio call; still bounded, just
+        # 60s for the larger heavy-model portfolio call; still bounded, just
         # roomier than the small JSON-mode prompts.
         client = OpenAI(api_key=key, timeout=60.0)
 
@@ -298,20 +389,19 @@ Return this exact JSON structure:
   "market_context": "<1-2 sentences on how current macro/market conditions affect this portfolio>"
 }}"""
 
-        resp = client.chat.completions.create(
-            model=model,
-            messages=[
+        resp = _chat_completion(
+            client, model,
+            [
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt},
             ],
-            response_format={"type": "json_object"},
-            temperature=0.2,
             max_tokens=2000,
+            temperature=0.2,
         )
         _record_ai_call()
         result = json.loads(resp.choices[0].message.content)
         result["ai_powered"] = True
-        result["model_used"] = model
+        result["model_used"] = getattr(resp, "model", None) or model
         return result
     except Exception as e:
         fallback = _rule_based_portfolio_analysis(holdings, summary)
@@ -401,11 +491,13 @@ def _rule_based_portfolio_analysis(holdings, summary):
     }
 
 
-def generate_earnings_brief(dossier, model="gpt-4o"):
+def generate_earnings_brief(dossier, model=None):
     """
     Generate a pre-earnings analyst brief from a full dossier dict.
-    Uses gpt-4o for depth. Falls back to rule-based if no key.
+    Uses MODEL_HEAVY for depth (legacy "gpt-4o" requests are mapped to
+    MODEL_HEAVY too). Falls back to rule-based if no key.
     """
+    model = _resolve_heavy_model(model)
     key = get_openai_key()
     if not key:
         return _rule_based_earnings_brief(dossier)
@@ -505,20 +597,19 @@ Return this exact JSON:
   "options_take": "<1 sentence on whether options are cheap/expensive relative to historical moves and what that implies>"
 }}"""
 
-        resp = client.chat.completions.create(
-            model=model,
-            messages=[
+        resp = _chat_completion(
+            client, model,
+            [
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt},
             ],
-            response_format={"type": "json_object"},
-            temperature=0.2,
             max_tokens=800,
+            temperature=0.2,
         )
         _record_ai_call()
         result = json.loads(resp.choices[0].message.content)
         result["ai_powered"] = True
-        result["model_used"] = model
+        result["model_used"] = getattr(resp, "model", None) or model
         return result
     except Exception as e:
         fallback = _rule_based_earnings_brief(dossier)
@@ -574,12 +665,14 @@ def _rule_based_earnings_brief(dossier):
     }
 
 
-def generate_idea_thesis(idea, model="gpt-4o-mini"):
+def generate_idea_thesis(idea, model=None):
     """
     Generate an investment thesis for a randomly-picked idea.
     `idea` is the lightweight context dict assembled by idea_generator.
-    Falls back to rule-based thesis if no OpenAI key.
+    Uses MODEL_LIGHT by default (legacy "gpt-4o-mini" requests are mapped to
+    MODEL_LIGHT too). Falls back to rule-based thesis if no OpenAI key.
     """
+    model = _resolve_light_model(model)
     key = get_openai_key()
     if not key:
         return _rule_based_idea_thesis(idea)
@@ -736,20 +829,19 @@ Return this exact JSON:
   "suggested_action": "<one of: STARTER POSITION | FULL POSITION | WATCH | AVOID> — and a 1-line why"
 }}"""
 
-        resp = client.chat.completions.create(
-            model=model,
-            messages=[
+        resp = _chat_completion(
+            client, model,
+            [
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt},
             ],
-            response_format={"type": "json_object"},
-            temperature=0.4,
             max_tokens=600,
+            temperature=0.4,
         )
         _record_ai_call()
         result = json.loads(resp.choices[0].message.content)
         result["ai_powered"] = True
-        result["model_used"] = model
+        result["model_used"] = getattr(resp, "model", None) or model
         return result
     except Exception as e:
         fallback = _rule_based_idea_thesis(idea)
@@ -902,18 +994,17 @@ def analyze_insider_pattern(transactions, ticker):
         try:
             from openai import OpenAI
             client = OpenAI(api_key=key, timeout=30.0)
-            resp = client.chat.completions.create(
-                model="gpt-4o-mini",
-                messages=[{
+            resp = _chat_completion(
+                client, MODEL_LIGHT,
+                [{
                     "role": "user",
                     "content": f"""Analyze insider transactions for {ticker}. Return JSON only:
 {{"signal": "BULLISH/BEARISH/NEUTRAL", "summary": "2 sentence analysis", "key_insight": "most important observation"}}
 
 Transactions: {txn_summary}""",
                 }],
-                response_format={"type": "json_object"},
-                temperature=0.1,
                 max_tokens=200,
+                temperature=0.1,
             )
             _record_ai_call()
             result = json.loads(resp.choices[0].message.content)

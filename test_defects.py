@@ -270,6 +270,22 @@ def _run_jarvis_checks(jarvis):
     check("ask: biggest loser resolves TSLA", "TSLA" in worst["answer"], worst["answer"])
     check("ask: empty query -> help", jarvis.ask("")["intent"] == "help")
 
+    # view_context — exercised uncached so the mocked seams are visible
+    # (the coalesce cache hydrates from disk and could hold real-data lines).
+    vc = lambda v, s=None: jarvis._view_context_uncached(v, s)
+    check("ctx: portfolio view speaks the pulse", "Book at" in vc("portfolio")["line"],
+          vc("portfolio")["line"])
+    check("ctx: markets view speaks the regime", "VIX" in vc("markets")["line"])
+    check("ctx: stress view appends scenario nudge", "scenario" in vc("stress")["line"])
+    check("ctx: research+symbol includes held position",
+          "You hold" in vc("research", "AAPL")["line"], vc("research", "AAPL")["line"])
+    check("ctx: alerts view counts triggered", "triggered" in vc("alerts")["line"])
+    check("ctx: watchlist empty has CTA", "empty" in vc("watchlist")["line"])
+    check("ctx: persona line for alpha views", len(vc("gex")["line"]) > 20)
+    check("ctx: unknown view falls back gracefully", "⌘K" in vc("unknownview")["line"])
+    tones = {vc(v)["tone"] for v in ("portfolio", "markets", "gex")}
+    check("ctx: tones are valid", tones <= {"pos", "neg", "warn", "info"}, str(tones))
+
     import app
     c = app.app.test_client()
     r = c.post("/api/jarvis/ask", json={"query": "how are markets"})
@@ -278,6 +294,47 @@ def _run_jarvis_checks(jarvis):
     check("route: overlong query -> 400", r2.status_code == 400)
     r3 = c.get("/api/jarvis/briefing?refresh=1")
     check("route: GET /api/jarvis/briefing -> 200 JSON", r3.status_code == 200 and r3.is_json)
+    r4 = c.get("/api/jarvis/context/portfolio")
+    check("route: GET /api/jarvis/context/<view> -> 200 JSON",
+          r4.status_code == 200 and r4.is_json)
+    r5 = c.get("/api/jarvis/context/bad!view")
+    check("route: invalid view -> 400", r5.status_code == 400)
+
+    # activity snapshot — pure in-memory state, must never raise
+    a = jarvis.activity_snapshot()
+    check("activity: snapshot has background list", isinstance(a.get("background"), list))
+    check("activity: snapshot has summary string",
+          isinstance(a.get("summary"), str) and len(a["summary"]) > 0)
+    r6 = c.get("/api/jarvis/activity")
+    check("route: GET /api/jarvis/activity -> 200 JSON",
+          r6.status_code == 200 and r6.is_json)
+
+    # SSE stream — Werkzeug 3 test client defaults to buffered=False, so the
+    # infinite generator is NOT consumed for status/headers. The generator
+    # emits its FIRST snapshot before any sleep, so reading exactly one chunk
+    # returns promptly; then close() GeneratorExits the stream.
+    r7 = c.get("/api/jarvis/activity/stream", buffered=False)
+    try:
+        check("route: SSE stream -> 200 text/event-stream",
+              r7.status_code == 200 and r7.mimetype == "text/event-stream",
+              "status=%s mimetype=%s" % (r7.status_code, r7.mimetype))
+        check("route: SSE stream sets Cache-Control: no-cache",
+              r7.headers.get("Cache-Control") == "no-cache")
+        check("route: SSE stream sets X-Accel-Buffering: no",
+              r7.headers.get("X-Accel-Buffering") == "no")
+        chunk = next(iter(r7.response))
+        if isinstance(chunk, bytes):
+            chunk = chunk.decode("utf-8", "replace")
+        check("route: SSE first chunk is an immediate data frame",
+              chunk.startswith("data: ") and chunk.endswith("\n\n"),
+              chunk[:80])
+        import json as _json
+        payload = _json.loads(chunk[len("data: "):])
+        check("route: SSE frame carries background+summary",
+              isinstance(payload.get("background"), list)
+              and isinstance(payload.get("summary"), str))
+    finally:
+        r7.close()  # GeneratorExit at the current yield — never blocks
 
 
 # ── 12. database add_position: offsetting to zero shares must not crash ──────
@@ -321,9 +378,11 @@ def test_perf_fixes_present():
     import synthetic_insider, synth_sectorflow, inspect
     si = inspect.getsource(synthetic_insider)
     check("synthetic_insider has a per-channel wall-clock budget",
-          "_CHANNEL_BUDGET_S" in si and ".result(timeout=" in si)
-    check("synthetic_insider doesn't block on stragglers (shutdown wait=False)",
-          "shutdown(wait=False)" in si)
+          "_CHANNEL_BUDGET_S" in si and "timeout_per_item=_CHANNEL_BUDGET_S" in si)
+    check("synthetic_insider scores channels via safe_executor.parallel_map",
+          "parallel_map(" in si)
+    check("synthetic_insider has no abandoned-worker shutdown(wait=False)",
+          "shutdown(wait=False)" not in si)
     sf = inspect.getsource(synth_sectorflow)
     check("sectorflow builds sectors in parallel (not a serial loop)",
           "_build_sector_row" in sf and "parallel_map(" in sf)
@@ -331,6 +390,35 @@ def test_perf_fixes_present():
     fb = inspect.getsource(fetcher.get_quotes_batch)
     check("get_quotes_batch resolves symbols in parallel (Markets/movers/alerts)",
           "parallel_map(" in fb)
+
+
+# ── 21b. No direct ThreadPoolExecutor abandonment anywhere in the codebase ───
+def test_no_abandoned_tpe_workers():
+    """Python 3.9 TPE workers are non-daemon and concurrent.futures registers
+    an atexit join over them, so `shutdown(wait=False)` leaks workers that
+    block interpreter exit (wedged Werkzeug reloader, hung py2app quit).
+    The sanctioned pattern is safe_executor.parallel_map on daemon threads.
+    Grep every project *.py (excluding safe_executor itself, which documents
+    the failure mode, and tests) and assert zero non-comment hits."""
+    base = os.path.dirname(os.path.abspath(__file__))
+    offenders = []
+    for fname in sorted(os.listdir(base)):
+        if not fname.endswith(".py"):
+            continue
+        if fname == "safe_executor.py" or fname.startswith("test_"):
+            continue
+        path = os.path.join(base, fname)
+        try:
+            with open(path, encoding="utf-8") as fh:
+                src = fh.read()
+        except OSError:
+            continue
+        for lineno, line in enumerate(src.splitlines(), 1):
+            code = line.split("#", 1)[0]  # ignore comments
+            if "shutdown(wait=False" in code:
+                offenders.append("%s:%d" % (fname, lineno))
+    check("no shutdown(wait=False) outside comments in any project module",
+          not offenders, "found: %s" % ", ".join(offenders))
 
 
 # ── 19. Research/Alpha tab fixes: window globals, API errors, reflexivity ────
@@ -402,21 +490,38 @@ def test_alt_social_pulse():
 
 # ── 17. safe_executor falls back to serial on thread exhaustion ──────────────
 def test_safe_executor_thread_exhaustion():
-    import concurrent.futures as cf
+    import threading
     import safe_executor as se
     check("recognizes 'can't start new thread'",
           se._looks_like_global_shutdown(RuntimeError("can't start new thread")))
-    orig = se.ThreadPoolExecutor
-    class _BoomPool:
-        def __init__(self, *a, **k):
-            raise RuntimeError("can't start new thread")
-    se.ThreadPoolExecutor = _BoomPool
+    check("recognizes interpreter-shutdown spawn refusal",
+          se._looks_like_global_shutdown(
+              RuntimeError("can't create new thread at interpreter shutdown")))
+    orig = se._spawn
+    def _boom(target, name):
+        raise RuntimeError("can't start new thread")
+    se._spawn = _boom
     try:
         out = se.parallel_map(lambda x: x * 2, [1, 2, 3, 4])
     finally:
-        se.ThreadPoolExecutor = orig
+        se._spawn = orig
     check("parallel_map serial-fallback on thread exhaustion", out == [2, 4, 6, 8],
           "out=%r" % out)
+    # Daemon guarantee — the whole point of the rewrite: workers must never
+    # be able to block interpreter exit (the atexit-join reloader wedge).
+    seen = {}
+    def _spy(target, name):
+        t = threading.Thread(target=target, daemon=True, name=name)
+        seen["daemon"] = t.daemon
+        t.start()
+        return t
+    se._spawn = _spy
+    try:
+        out2 = se.parallel_map(lambda x: x + 1, [1, 2, 3])
+    finally:
+        se._spawn = orig
+    check("parallel_map workers are daemon threads", seen.get("daemon") is True)
+    check("parallel_map ordered results", out2 == [2, 3, 4], "out=%r" % out2)
 
 
 # ── 16. Yahoo chart UA isn't the rate-limited Chrome string ──────────────────
@@ -467,6 +572,7 @@ def main():
         ("research/alpha tab fixes", test_research_alpha_fixes),
         ("options-flow rate-limit msg", test_options_flow_ratelimit_message),
         ("perf fixes present", test_perf_fixes_present),
+        ("no abandoned TPE workers", test_no_abandoned_tpe_workers),
     ]
     for title, fn in tests:
         print("── %s" % title)
