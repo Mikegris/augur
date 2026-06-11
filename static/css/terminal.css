@@ -2427,3 +2427,15 @@ input:focus, select:focus, textarea:focus {
 }
 .jp-proposal span { flex: 1; }
 .jp-dismiss { color: var(--text-dim); border-color: var(--border); }
+
+/* ── v1.4 statefulness: thread resume + new-thread control ──────── */
+.jp-resume { padding: 10px 14px; border-bottom: 1px solid var(--border); background: var(--bg-secondary); }
+.jp-resume-turn { font-size: var(--font-size-xs); color: var(--text-dim); margin-bottom: 6px; line-height: 1.5; }
+.jp-resume-q { color: var(--text-secondary); }
+.jp-resume-hint { font-size: 9px; color: var(--text-muted); letter-spacing: .08em; text-align: center; margin-top: 2px; }
+#jp-new-thread {
+  float: right; background: none; border: 1px solid var(--border); border-radius: var(--radius);
+  color: var(--text-dim); font-family: var(--font-mono); font-size: 9px; letter-spacing: .06em;
+  padding: 1px 6px; cursor: pointer;
+}
+#jp-new-thread:hover { color: var(--amber); border-color: var(--amber-dim); }

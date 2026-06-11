@@ -204,6 +204,33 @@ def _llm_context_snapshot() -> str:
     return "\n".join(lines) if lines else "(no local data available)"
 
 
+def _memory_block() -> str:
+    """Durable user facts, formatted for prompt injection. Empty when none."""
+    try:
+        facts = db.jarvis_list_memories()[:12]
+    except Exception:
+        return ""
+    if not facts:
+        return ""
+    return ("\n\nDurable facts about the user (apply when relevant):\n"
+            + "\n".join("- " + f["fact"] for f in facts))
+
+
+def _turns_from_messages(msgs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Pair a stored user/assistant message stream into ask()-shaped turns."""
+    turns: List[Dict[str, Any]] = []
+    pending_q: Optional[Dict[str, Any]] = None
+    for m in msgs:
+        if m.get("role") == "user":
+            pending_q = m
+        elif m.get("role") == "assistant" and pending_q is not None:
+            turns.append({"q": pending_q.get("content") or "",
+                          "a": m.get("content") or "",
+                          "symbol": m.get("symbol") or pending_q.get("symbol")})
+            pending_q = None
+    return turns
+
+
 _AGENT_SYSTEM = (
     "You are JARVIS, the user's personal investing copilot inside their "
     "AUGUR terminal. You have tools that read the user's REAL portfolio and "
@@ -231,7 +258,8 @@ def _agent_ask(query: str, history: Optional[List[Dict[str, Any]]] = None) -> Op
     from openai import OpenAI
     client = OpenAI(api_key=key, timeout=25.0)
 
-    messages: List[Dict[str, Any]] = [{"role": "system", "content": _AGENT_SYSTEM}]
+    messages: List[Dict[str, Any]] = [
+        {"role": "system", "content": _AGENT_SYSTEM + _memory_block()}]
     for turn in (history or [])[-4:]:
         if turn.get("q"):
             messages.append({"role": "user", "content": turn["q"]})
@@ -299,7 +327,7 @@ def _llm_ask(query: str, history: Optional[List[Dict[str, Any]]] = None) -> Opti
         "You are JARVIS, a personal investing copilot. Answer ONLY from the "
         "provided data, one short paragraph, say so if the data can't answer. "
         "No investment advice. The conversation may reference earlier turns."
-    )
+    ) + _memory_block()
     messages: List[Dict[str, str]] = [{"role": "system", "content": system}]
     # Replay the last few exchanges so follow-ups ("and what about its
     # downside?") resolve. History is already sanitized by ask().
@@ -1155,15 +1183,74 @@ _ACTIONISH_RE = re.compile(
     re.IGNORECASE)
 
 
-def ask(query: str, history: Any = None) -> Dict[str, Any]:
+_REMEMBER_RE = re.compile(r"^(?:remember|remember that|note that)[:,]?\s+(.+)$", re.IGNORECASE)
+_FORGET_RE = re.compile(r"^forget\s+(?:#|memory\s*)?(\d+)$", re.IGNORECASE)
+_LIST_MEMORY_RE = re.compile(
+    r"^(what do you (remember|know about me)|list (your )?memor(y|ies)|your memory)\??$",
+    re.IGNORECASE)
+
+
+def _answer_memory(q: str) -> Optional[Dict[str, Any]]:
+    """Rule-based memory management — free, instant, no LLM required."""
+    m = _REMEMBER_RE.match(q)
+    if m:
+        fact = m.group(1).strip().rstrip(".")
+        mid = db.jarvis_add_memory(fact, source="user")
+        return {"answer": "Noted (#{}) — I'll keep that in mind: “{}”.".format(mid, fact)}
+    m = _FORGET_RE.match(q)
+    if m:
+        ok = db.jarvis_delete_memory(int(m.group(1)))
+        return {"answer": "Forgotten." if ok else "I have no memory #{}.".format(m.group(1))}
+    if _LIST_MEMORY_RE.match(q.strip()):
+        facts = db.jarvis_list_memories()
+        if not facts:
+            return {"answer": "Nothing yet. Tell me “remember: …” and it sticks across sessions."}
+        listing = " ".join("#{} {}.".format(f["id"], f["fact"]) for f in facts[:12])
+        return {"answer": "Here's what I'm holding onto: {} Say “forget <number>” to drop one.".format(listing)}
+    return None
+
+
+def ask(query: str, history: Any = None, conversation_id: Any = None,
+        persist: bool = True) -> Dict[str, Any]:
     """Route a natural-language question to the right engine. Local-only,
-    with optional conversation history for follow-up resolution."""
+    with server-persisted conversation state for follow-up resolution."""
     q = (query or "").strip()
     if not q:
         return {"intent": "help", "answer": _HELP_ANSWER}
     ql = q.lower()
     symbol = _extract_symbol(q)
     turns = _sanitize_history(history)
+
+    # Server-side conversation: resolve the thread and, when the client sent
+    # no explicit history, rebuild turns from what's persisted there.
+    conv_id: Optional[int] = None
+    if persist:
+        try:
+            conv_id = int(conversation_id) if conversation_id else db.jarvis_active_conversation()
+            if not turns:
+                turns = _sanitize_history(
+                    _turns_from_messages(db.jarvis_get_messages(conv_id, limit=16)))
+        except Exception as e:
+            log.debug("ask: conversation load failed: %s", e)
+            conv_id = None
+
+    def _persisted(payload: Dict[str, Any]) -> Dict[str, Any]:
+        if conv_id is not None:
+            payload["conversation_id"] = conv_id
+            try:
+                db.jarvis_add_message(conv_id, "user", q, payload.get("symbol"))
+                db.jarvis_add_message(conv_id, "assistant", payload.get("answer", ""),
+                                      payload.get("symbol"))
+            except Exception as e:
+                log.debug("ask: persist failed: %s", e)
+        return payload
+
+    # Durable memory management — checked first, never needs a key.
+    mem = _answer_memory(q)
+    if mem is not None:
+        mem["intent"] = "memory"
+        mem.setdefault("symbol", None)
+        return _persisted(mem)
 
     # Follow-up resolution: "will it keep falling?" after a question about
     # NVDA should mean NVDA. Inherit the most recent symbol from history,
@@ -1181,7 +1268,7 @@ def ask(query: str, history: Any = None) -> Dict[str, Any]:
     def done(intent: str, payload: Dict[str, Any]) -> Dict[str, Any]:
         payload["intent"] = intent
         payload.setdefault("symbol", symbol)
-        return payload
+        return _persisted(payload)
 
     try:
         if any(w in ql for w in ("forecast", "predict", "outlook", "go up", "go down", "prob")) and symbol:
@@ -1229,4 +1316,4 @@ def ask(query: str, history: Any = None) -> Dict[str, Any]:
         except Exception as e:
             log.debug("jarvis.ask llm fallback failed for %r: %s", q, e)
 
-    return {"intent": "help", "answer": _HELP_ANSWER, "symbol": symbol}
+    return _persisted({"intent": "help", "answer": _HELP_ANSWER, "symbol": symbol})

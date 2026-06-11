@@ -272,7 +272,22 @@ TOOLS: Dict[str, Dict[str, Any]] = {
         "description": "Replay historical crash scenarios (2008, COVID, rate shocks) against the user's actual portfolio. Optional custom_drop_pct (e.g. -30).",
         "parameters": _p({"custom_drop_pct": {"type": "number", "description": "Optional custom market drop in percent, negative"}}),
     },
+    "list_memories": {
+        "fn": lambda args: __import__("database").jarvis_list_memories(),
+        "mutating": False,
+        "description": "Durable facts Jarvis remembers about the user across sessions.",
+        "parameters": _p({}),
+    },
     # ── mutating: proposal-only from the agent loop ──────────────────────────
+    "remember_fact": {
+        "fn": lambda args: {"status": "remembered",
+                            "id": __import__("database").jarvis_add_memory(
+                                str(args.get("fact") or ""), source="agent"),
+                            "label": "Remember: {}".format(str(args.get("fact") or "")[:120])},
+        "mutating": True,
+        "description": "Store a durable fact about the user (preferences, constraints). The user must confirm before this is saved.",
+        "parameters": _p({"fact": {"type": "string", "description": "One concise fact, e.g. 'User is risk-averse'"}}, ["fact"]),
+    },
     "add_price_alert": {
         "fn": _t_add_alert, "mutating": True,
         "description": "Create a price alert. The user must confirm before this executes.",
@@ -303,6 +318,8 @@ def is_mutating(name: str) -> bool:
 
 
 def proposal_label(name: str, args: Dict[str, Any]) -> str:
+    if name == "remember_fact":
+        return "Remember: {}".format(str(args.get("fact", ""))[:120])
     if name == "add_price_alert":
         return "Set alert: {} {} ${}".format(
             str(args.get("symbol", "")).upper(), args.get("alert_type"), args.get("price"))

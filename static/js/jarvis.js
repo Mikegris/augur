@@ -235,7 +235,8 @@
   const Palette = {
     el: null, input: null, list: null, answer: null,
     _items: [], _sel: 0, _asking: false, _recent: [], _prevFocus: null,
-    _history: [],  // conversation turns {q, a, symbol} — session-scoped
+    _history: [],   // fallback turns {q, a, symbol} if the server thread is unavailable
+    _convId: null,  // server-persisted conversation id (v1.4 statefulness)
 
     SUGGESTIONS: [
       "how's my portfolio",
@@ -261,7 +262,9 @@
           </div>
           <div id="jp-answer"></div>
           <div id="jp-list" role="listbox"></div>
-          <div class="jp-footer">↑↓ NAVIGATE &nbsp;·&nbsp; ENTER RUN &nbsp;·&nbsp; ESC CLOSE</div>
+          <div class="jp-footer">↑↓ NAVIGATE &nbsp;·&nbsp; ENTER RUN &nbsp;·&nbsp; ESC CLOSE
+            <button id="jp-new-thread" type="button" title="Start a fresh conversation">⌫ NEW THREAD</button>
+          </div>
         </div>`;
       document.body.appendChild(wrap);
       this.el = wrap;
@@ -287,6 +290,16 @@
         this._syncVoiceBtn();
         Toast.info(Voice.enabled ? '◉ JARVIS: voice replies on.' : '◉ JARVIS: voice replies off.');
       });
+      document.getElementById('jp-new-thread').addEventListener('click', async () => {
+        try {
+          const r = await API.post('/api/jarvis/conversation/new', {});
+          this._convId = r.conversation_id;
+          this._history = [];
+          this.answer.innerHTML = '';
+          Toast.info('◉ JARVIS: fresh thread.');
+          this.input.focus();
+        } catch (e) { Toast.error(e.message); }
+      });
       document.addEventListener('keydown', (e) => {
         if ((e.metaKey || e.ctrlKey) && (e.key === 'k' || e.key === 'K')) {
           e.preventDefault();
@@ -305,6 +318,30 @@
       this.answer.innerHTML = '';
       this._refresh();
       this.input.focus();
+      this._resumeConversation();
+    },
+
+    // v1.4 statefulness: pick up the server-persisted thread so the palette
+    // reopens mid-conversation, even across page reloads and app restarts.
+    async _resumeConversation() {
+      try {
+        const c = await API.get('/api/jarvis/conversation');
+        this._convId = c.conversation_id;
+        const msgs = c.messages || [];
+        // Rebuild fallback turns and show the tail of the thread, dimmed.
+        const turns = [];
+        for (let i = 0; i < msgs.length - 1; i++) {
+          if (msgs[i].role === 'user' && msgs[i + 1].role === 'assistant') {
+            turns.push({ q: msgs[i].content, a: msgs[i + 1].content, symbol: msgs[i + 1].symbol || null });
+          }
+        }
+        this._history = turns.slice(-6);
+        if (turns.length && this.isOpen() && !this.answer.innerHTML) {
+          const tail = turns.slice(-2).map(t =>
+            `<div class="jp-resume-turn"><span class="jp-resume-q">⟩ ${esc(t.q)}</span><br>${esc(t.a.slice(0, 180))}${t.a.length > 180 ? '…' : ''}</div>`).join('');
+          this.answer.innerHTML = `<div class="jp-resume">${tail}<div class="jp-resume-hint">— continuing this thread; ⌫ NEW THREAD to reset —</div></div>`;
+        }
+      } catch (e) { this._convId = null; /* stateless fallback */ }
     },
     close() {
       this.el.classList.remove('open');
@@ -467,9 +504,14 @@
       this._recent = [query].concat(this._recent.filter(s => s !== query)).slice(0, 4);
       this.answer.innerHTML = '<div class="jp-answer thinking"><div class="spinner"></div> Working on it...</div>';
       try {
-        // Conversation memory: the backend resolves follow-ups ("will it go
-        // up?") against these turns, and the LLM path replays them.
-        const r = await API.post('/api/jarvis/ask', { query, history: this._history.slice(-6) });
+        // Conversation memory: prefer the server-persisted thread (the
+        // backend loads its own history); send explicit turns only as the
+        // stateless fallback when no conversation id resolved.
+        const body = this._convId
+          ? { query, conversation_id: this._convId }
+          : { query, history: this._history.slice(-6) };
+        const r = await API.post('/api/jarvis/ask', body);
+        if (r.conversation_id) this._convId = r.conversation_id;
         this._history.push({ q: query, a: r.answer, symbol: r.symbol || null });
         if (this._history.length > 8) this._history.shift();
         const action = r.action
