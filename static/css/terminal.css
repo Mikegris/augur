@@ -2133,3 +2133,69 @@ body::before {
   #main { overflow: visible; }
   body { background: white; color: black; }
 }
+
+/* ── JARVIS: briefing panel + command palette ───────────────────── */
+.jarvis-panel {
+  margin-bottom: 8px;
+  border-color: var(--border-bright);
+  background: linear-gradient(180deg, var(--bg-elevated), var(--bg-panel));
+}
+.jarvis-title { color: var(--green); text-shadow: 0 0 8px var(--green-glow); }
+.jarvis-hint { margin-left: auto; margin-right: 8px; font-size: 9px; color: var(--text-dim); letter-spacing: .08em; }
+.jarvis-greeting { font-size: var(--font-size-sm); color: var(--text-secondary); margin-bottom: 4px; }
+.jarvis-headline { font-size: var(--font-size-lg); color: var(--text-primary); font-weight: 600; margin-bottom: 10px; line-height: 1.5; }
+.jarvis-cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(290px, 1fr)); gap: 8px; }
+.jarvis-card {
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--blue);
+  border-radius: var(--radius);
+  padding: 8px 10px;
+}
+.jarvis-card-head { display: flex; align-items: center; gap: 6px; margin-bottom: 4px; }
+.jarvis-card-title { font-size: var(--font-size-sm); font-weight: 600; color: var(--text-primary); flex: 1; }
+.jarvis-card-detail { font-size: var(--font-size-xs); color: var(--text-secondary); line-height: 1.5; }
+.jarvis-pri { font-size: 9px; font-weight: 700; padding: 1px 5px; border-radius: var(--radius); letter-spacing: .06em; }
+.jarvis-pri.p1 { background: var(--red-glow); color: var(--red); border: 1px solid var(--red-dim); }
+.jarvis-pri.p2 { background: var(--amber-glow); color: var(--amber); border: 1px solid var(--amber-dim); }
+.jarvis-go {
+  background: none; border: 1px solid var(--border-bright); color: var(--blue);
+  font-family: var(--font-mono); font-size: 9px; padding: 2px 7px; cursor: pointer;
+  border-radius: var(--radius); letter-spacing: .06em; white-space: nowrap;
+}
+.jarvis-go:hover { border-color: var(--blue); background: var(--blue-glow); }
+.jarvis-allclear { font-size: var(--font-size-sm); color: var(--green-dim); }
+
+#jarvis-palette-overlay {
+  display: none; position: fixed; inset: 0; z-index: 1000;
+  background: rgba(2, 11, 18, 0.75); backdrop-filter: blur(2px);
+  align-items: flex-start; justify-content: center; padding-top: 12vh;
+}
+#jarvis-palette-overlay.open { display: flex; }
+#jarvis-palette {
+  width: min(640px, 92vw);
+  background: var(--bg-panel); border: 1px solid var(--border-bright);
+  border-radius: var(--radius-md); box-shadow: 0 12px 48px rgba(0,0,0,.6), 0 0 24px var(--green-glow);
+  overflow: hidden;
+}
+.jp-input-row { display: flex; align-items: center; gap: 10px; padding: 12px 14px; border-bottom: 1px solid var(--border); }
+.jp-glyph { color: var(--green); font-size: 14px; text-shadow: 0 0 8px var(--green-glow); }
+#jp-input {
+  flex: 1; background: none; border: none; outline: none;
+  color: var(--text-primary); font-family: var(--font-mono); font-size: var(--font-size-md);
+}
+#jp-input::placeholder { color: var(--text-dim); }
+#jp-list { max-height: 320px; overflow-y: auto; }
+.jp-item {
+  display: flex; align-items: center; gap: 10px;
+  padding: 8px 14px; font-size: var(--font-size-sm); color: var(--text-secondary); cursor: pointer;
+}
+.jp-item.sel { background: var(--bg-active); color: var(--text-primary); box-shadow: inset 2px 0 0 var(--green); }
+.jp-icon { color: var(--text-dim); width: 14px; text-align: center; }
+.jp-item.sel .jp-icon { color: var(--green); }
+.jp-footer { padding: 6px 14px; border-top: 1px solid var(--border); font-size: 9px; color: var(--text-dim); letter-spacing: .08em; }
+.jp-answer { padding: 12px 14px; border-bottom: 1px solid var(--border); background: var(--bg-secondary); }
+.jp-answer.thinking { display: flex; align-items: center; gap: 8px; color: var(--text-dim); font-size: var(--font-size-sm); }
+.jp-answer.error { color: var(--red); font-size: var(--font-size-sm); }
+.jp-answer-text { font-size: var(--font-size-md); color: var(--text-primary); line-height: 1.6; margin-bottom: 6px; }
+.jp-answer-detail { font-size: var(--font-size-xs); color: var(--text-secondary); margin-bottom: 6px; }

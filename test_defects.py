@@ -180,6 +180,106 @@ def test_routes():
     check("GET /api/synth/whatif -> 200 JSON", r4.status_code == 200 and r4.is_json)
 
 
+# ── 11b. Jarvis assistant layer: briefing synthesis + ask intent routing ─────
+def test_jarvis():
+    import jarvis
+
+    holdings = [
+        {"symbol": "AAPL", "shares": 10, "avg_cost": 100.0, "asset_type": "stock"},
+        {"symbol": "TSLA", "shares": 1, "avg_cost": 500.0, "asset_type": "stock"},
+    ]
+    quotes = {
+        "AAPL": {"price": 200.0, "change": 10.0, "change_pct": 5.26},
+        "TSLA": {"price": 400.0, "change": -20.0, "change_pct": -4.76},
+    }
+    alerts = [
+        {"symbol": "AAPL", "alert_type": "above", "price": 150.0, "triggered": 1},
+        {"symbol": "TSLA", "alert_type": "below", "price": 395.0, "triggered": 0},
+    ]
+    indices = [
+        {"symbol": "^GSPC", "price": 5000.0, "change_pct": -1.0},
+        {"symbol": "^NDX", "price": 18000.0, "change_pct": -1.5},
+        {"symbol": "^VIX", "price": 30.0, "change_pct": 5.0},
+    ]
+
+    # Monkeypatch every data seam jarvis touches — fully offline. jarvis.db /
+    # jarvis.fetcher ARE the shared modules, so save originals and restore in
+    # the finally below or later tests (database zero-shares, perf source
+    # inspection of get_quotes_batch) see the fakes.
+    import earnings
+    import idea_pool_warmer
+    saved = [
+        (jarvis.db, "get_portfolio"), (jarvis.db, "get_watchlist"),
+        (jarvis.db, "get_price_alerts"),
+        (jarvis.fetcher, "get_quotes_batch"), (jarvis.fetcher, "get_market_indices"),
+        (jarvis.fetcher, "get_quote"),
+        (earnings, "get_earnings_calendar"),
+        (idea_pool_warmer, "list_warmed_symbols"),
+    ]
+    originals = [(mod, name, getattr(mod, name)) for mod, name in saved]
+    jarvis.db.get_portfolio = lambda **k: [dict(h) for h in holdings]
+    jarvis.db.get_watchlist = lambda: []
+    jarvis.db.get_price_alerts = lambda include_triggered=False: [dict(a) for a in alerts]
+    jarvis.fetcher.get_quotes_batch = lambda syms: {s: dict(quotes[s]) for s in syms if s in quotes}
+    jarvis.fetcher.get_market_indices = lambda: [dict(i) for i in indices]
+    jarvis.fetcher.get_quote = lambda s: {"symbol": s, "price": 123.45, "change_pct": 1.5,
+                                          "fifty_two_week_high": 150.0, "fifty_two_week_low": 100.0}
+    earnings.get_earnings_calendar = lambda syms: [
+        {"symbol": "AAPL", "earnings_date": "2026-06-13", "days_until": 2,
+         "beat_rate": 80, "avg_surprise_pct": 5.0}]
+    idea_pool_warmer.list_warmed_symbols = lambda asset_class=None: []
+    try:
+        _run_jarvis_checks(jarvis)
+    finally:
+        for mod, name, fn in originals:
+            setattr(mod, name, fn)
+
+
+def _run_jarvis_checks(jarvis):
+    b = jarvis.get_briefing(force_refresh=True)
+    kinds = [c["kind"] for c in b["insights"]]
+    check("briefing: triggered alert -> P1 card", "alert" in kinds)
+    check("briefing: near-alert detected (TSLA within 2% of level)", "alert_near" in kinds)
+    check("briefing: big movers carded", kinds.count("mover") == 2)
+    check("briefing: concentration flagged (AAPL ~83%)", "concentration" in kinds)
+    check("briefing: VIX 30 -> STRESSED regime card", "regime" in kinds)
+    check("briefing: earnings-in-2-days carded", "earnings" in kinds)
+    check("briefing: P1 cards sort first", b["insights"][0]["priority"] == 1)
+    mover_titles = [c["title"] for c in b["insights"] if c["kind"] == "mover"]
+    check("briefing: mover title has no double negative ('down -4%')",
+          all("down -" not in t for t in mover_titles), str(mover_titles))
+    check("briefing: headline mentions portfolio day move",
+          "Portfolio" in b["headline"], b["headline"])
+
+    cases = [
+        ("how is my portfolio", "portfolio"),
+        ("biggest loser today", "portfolio"),
+        ("price of NVDA", "quote"),
+        ("when does AAPL report", "earnings"),
+        ("how are markets", "market"),
+        ("my exposure", "exposure"),
+        ("any ideas", "ideas"),
+        ("my alerts", "alerts"),
+        ("completely unrelated gibberish", "help"),
+    ]
+    for q, want in cases:
+        got = jarvis.ask(q)
+        check("ask: %r -> %s" % (q, want), got["intent"] == want,
+              "got %s" % got["intent"])
+    worst = jarvis.ask("biggest loser today")
+    check("ask: biggest loser resolves TSLA", "TSLA" in worst["answer"], worst["answer"])
+    check("ask: empty query -> help", jarvis.ask("")["intent"] == "help")
+
+    import app
+    c = app.app.test_client()
+    r = c.post("/api/jarvis/ask", json={"query": "how are markets"})
+    check("route: POST /api/jarvis/ask -> 200 JSON", r.status_code == 200 and r.is_json)
+    r2 = c.post("/api/jarvis/ask", json={"query": "x" * 600})
+    check("route: overlong query -> 400", r2.status_code == 400)
+    r3 = c.get("/api/jarvis/briefing?refresh=1")
+    check("route: GET /api/jarvis/briefing -> 200 JSON", r3.status_code == 200 and r3.is_json)
+
+
 # ── 12. database add_position: offsetting to zero shares must not crash ──────
 def test_database_zero_shares():
     import database
@@ -356,6 +456,7 @@ def main():
         ("finviz stocks parse", test_finviz_stocks_parse),
         ("forecast edge cases", test_forecast_edge_cases),
         ("route handlers", test_routes),
+        ("jarvis briefing + ask", test_jarvis),
         ("database zero-shares guard", test_database_zero_shares),
         ("cli quote None fields", test_cli_quote_none_fields),
         ("xss escaping intact", test_xss_escaping_intact),

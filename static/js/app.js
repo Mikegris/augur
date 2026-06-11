@@ -593,6 +593,7 @@ async function loadOverview() {
 
   // Render skeleton immediately so the page isn't stuck on "INITIALIZING..."
   view.innerHTML = `
+    <div id="ov-jarvis"></div>
     <div class="kpi-grid" style="grid-template-columns:repeat(auto-fill,minmax(160px,1fr))">
       <div class="kpi-card" id="ov-kpi-value"><div class="kpi-label">PORTFOLIO VALUE</div><div class="kpi-value text-dim">—</div></div>
       <div class="kpi-card" id="ov-kpi-pnl"><div class="kpi-label">UNREALIZED P&L</div><div class="kpi-value text-dim">—</div></div>
@@ -631,6 +632,8 @@ async function loadOverview() {
     <div id="ov-allocation-section"></div>
   `;
   Progress.show(20);
+  // Jarvis briefing — fires in parallel with everything below
+  if (window.Jarvis) Jarvis.renderBriefing('ov-jarvis');
   // Upcoming events overlay (earnings/IPOs/dividends/splits)
   DataPanels.appendCalendarOverlay(document.getElementById('ov-calendar-section'));
 
