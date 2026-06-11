@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>AUGUR // WEALTH INTELLIGENCE SYSTEM</title>
-  <link rel="stylesheet" href="/static/css/terminal.css">
+  <link rel="stylesheet" href="/static/css/terminal.css?v=2">
   <!-- Chart.js -->
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
   <!-- Date adapter for Chart.js time scales (the catalysts scatter plots events
@@ -45,6 +45,7 @@
     </div>
 
     <div class="header-controls">
+      <button id="jarvis-btn" type="button" class="btn btn-ghost btn-sm" onclick="Jarvis.openPalette()" title="Ask Jarvis (⌘K)">◉ JARVIS <kbd style="font-size:9px;opacity:.6">⌘K</kbd></button>
       <div id="clock">00:00:00</div>
       <div class="market-status">
         <div class="status-dot closed"></div>
@@ -640,6 +641,7 @@
     </div>
     <dl>
       <div class="sh-section">GLOBAL</div>
+      <dt><kbd>⌘</kbd>+<kbd>K</kbd></dt><dd>Jarvis — ask anything, jump anywhere</dd>
       <dt><kbd>?</kbd></dt><dd>Open this shortcuts panel</dd>
       <dt><kbd>/</kbd></dt><dd>Focus the command bar / search</dd>
       <dt><kbd>Esc</kbd></dt><dd>Close modal, dropdown, or this panel</dd>
@@ -664,7 +666,8 @@
 
 <!-- Scripts -->
 <script src="/static/js/charts.js?v=2"></script>
-<script src="/static/js/app.js?v=9"></script>
+<script src="/static/js/app.js?v=10"></script>
+<script src="/static/js/jarvis.js?v=1"></script>
 
 <!-- v0.2.0 research modules — each registers window.render* globals. Loaded
      after app.js so they can read State / API / fmt helpers if needed. -->

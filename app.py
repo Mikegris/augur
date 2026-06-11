@@ -3043,6 +3043,41 @@ def forecast_accountability_route():
         return jsonify({"error": str(e)}), 500
 
 
+# ── Jarvis: unified assistant layer ────────────────────────────────
+@app.route("/api/jarvis/briefing", methods=["GET"])
+def jarvis_briefing_route():
+    """Prioritized daily briefing: portfolio pulse, alerts, earnings,
+    market regime, notable moves, concentration, fresh ideas."""
+    try:
+        import jarvis
+    except Exception as e:
+        return jsonify({"error": "jarvis unavailable: {}".format(e)}), 500
+    try:
+        force = request.args.get("refresh") == "1"
+        return jsonify(jarvis.get_briefing(force_refresh=force))
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/jarvis/ask", methods=["POST"])
+def jarvis_ask_route():
+    """Natural-language Q&A routed to local engines (no API key needed)."""
+    try:
+        import jarvis
+    except Exception as e:
+        return jsonify({"error": "jarvis unavailable: {}".format(e)}), 500
+    data = request.get_json(silent=True) or {}
+    query = data.get("query") if isinstance(data, dict) else None
+    if not query or not isinstance(query, str):
+        return jsonify({"error": "expected JSON body with a 'query' string"}), 400
+    if len(query) > 500:
+        return jsonify({"error": "query too long (max 500 chars)"}), 400
+    try:
+        return jsonify(jarvis.ask(query))
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
 # ── 10. Signal Tracker ─────────────────────────────────────────────
 @app.route("/api/research/track/<signal_name>")
 def research_track_record(signal_name):
