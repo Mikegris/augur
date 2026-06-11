@@ -3563,7 +3563,7 @@ async function loadSettings() {
           <div class="panel-body">
             <div class="fund-grid">
               ${[
-                ['SYSTEM', 'AUGUR v1.1'],
+                ['SYSTEM', 'AUGUR v1.1.1'],
                 ['DATA SOURCE', 'YAHOO FINANCE + COINGECKO'],
                 ['DATABASE', 'SQLITE3 (LOCAL)'],
                 ['BACKEND', 'PYTHON / FLASK'],

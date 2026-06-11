@@ -2392,3 +2392,7 @@ input:focus, select:focus, textarea:focus {
 @media print {
   #jarvis-orb, #jarvis-activity-panel, #jarvis-strip { display: none !important; }
 }
+
+/* LLM-polished briefing voice — subtly distinct from the rule-based headline */
+.jarvis-voice { color: var(--green-dim); font-style: italic; font-weight: 500; }
+.jarvis-voice::before { content: '◉ '; font-style: normal; color: var(--green); }
