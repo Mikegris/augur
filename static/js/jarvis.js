@@ -70,6 +70,7 @@
           <div class="panel-header">
             <span class="panel-title jarvis-title">◉ JARVIS</span>
             <span class="jarvis-hint">⌘K to ask anything</span>
+            <button class="btn btn-ghost btn-sm" id="jarvis-speak" title="Read the briefing aloud" aria-label="Read the briefing aloud">🔊</button>
             <button class="btn btn-ghost btn-sm" id="jarvis-refresh">↻</button>
           </div>
           <div class="panel-body" id="jarvis-body">
@@ -78,6 +79,14 @@
         </div>`;
       const refreshBtn = document.getElementById('jarvis-refresh');
       if (refreshBtn) refreshBtn.addEventListener('click', () => this.render(containerId, true));
+      const speakBtn = document.getElementById('jarvis-speak');
+      if (speakBtn) {
+        if (!Voice.ttsAvailable()) speakBtn.style.display = 'none';
+        speakBtn.addEventListener('click', () => {
+          const b = this._last;
+          if (b) Voice.speak((b.greeting ? b.greeting + ' ' : '') + (b.voice || b.headline || ''), null, true);
+        });
+      }
       try {
         const b = await API.get('/api/jarvis/briefing' + (force ? '?refresh=1' : ''));
         this._last = b;
@@ -127,9 +136,106 @@
   const ALERT_CMD = /^alert\s+([A-Za-z.\-]{1,10})\s+(above|below|at|>|<)?\s*\$?(\d+(?:\.\d+)?)$/i;
   const STRESS_CMD = /^stress\s*test$/i;
 
+  // ── Voice — speech out (TTS) and speech in (STT), browser-native ────────────
+  // speechSynthesis works everywhere; SpeechRecognition is webkit-prefixed
+  // (Chrome/Edge/Safari). Both degrade silently: no STT → no mic button,
+  // no TTS → speak() is a no-op that still fires its callback so the
+  // conversation loop never stalls.
+  const Voice = {
+    SR: window.SpeechRecognition || window.webkitSpeechRecognition || null,
+    enabled: false,
+    _recog: null, _voice: null, _warned: false,
+
+    init() {
+      try { this.enabled = localStorage.getItem('jarvis-voice-out') === '1'; } catch (e) {}
+      // Voice list loads async in some browsers
+      if ('speechSynthesis' in window && speechSynthesis.onvoiceschanged === null) {
+        speechSynthesis.onvoiceschanged = () => { this._voice = null; };
+      }
+    },
+
+    ttsAvailable() { return 'speechSynthesis' in window; },
+    sttAvailable() { return !!this.SR; },
+
+    setEnabled(on) {
+      this.enabled = !!on;
+      try { localStorage.setItem('jarvis-voice-out', on ? '1' : '0'); } catch (e) {}
+      if (!on && this.ttsAvailable()) speechSynthesis.cancel();
+    },
+
+    _pickVoice() {
+      if (this._voice) return this._voice;
+      const voices = speechSynthesis.getVoices() || [];
+      const prefer = ['Daniel', 'Google UK English Male', 'Samantha', 'Alex'];
+      for (const name of prefer) {
+        const v = voices.find(v => v.name === name);
+        if (v) { this._voice = v; return v; }
+      }
+      this._voice = voices.find(v => (v.lang || '').startsWith('en')) || voices[0] || null;
+      return this._voice;
+    },
+
+    // Speak text aloud. `force` bypasses the enabled toggle (explicit 🔊
+    // clicks). onend always fires exactly once — TTS missing, disabled,
+    // cancelled or errored included — so callers can chain safely.
+    speak(text, onend, force) {
+      const done = (() => { let fired = false;
+        return () => { if (!fired) { fired = true; if (onend) onend(); } }; })();
+      if (!text || !this.ttsAvailable() || (!this.enabled && !force)) { done(); return; }
+      try {
+        speechSynthesis.cancel();
+        const u = new SpeechSynthesisUtterance(text);
+        const v = this._pickVoice();
+        if (v) u.voice = v;
+        u.rate = 1.05;
+        u.onend = done;
+        u.onerror = done;
+        speechSynthesis.speak(u);
+      } catch (e) { done(); }
+    },
+
+    // One push-to-talk capture. onResult(transcript) on success;
+    // onNoSpeech() when nothing usable was heard (timeout, denial, silence).
+    listen(onResult, onNoSpeech) {
+      if (!this.SR) { Toast.info('Speech input isn’t supported in this browser.'); if (onNoSpeech) onNoSpeech(); return; }
+      this.stopListening();
+      const r = new this.SR();
+      this._recog = r;
+      r.lang = navigator.language || 'en-US';
+      r.interimResults = false;
+      r.maxAlternatives = 1;
+      let got = false;
+      r.onresult = (ev) => {
+        got = true;
+        const t = ev.results[0] && ev.results[0][0] ? ev.results[0][0].transcript.trim() : '';
+        if (t) onResult(t); else if (onNoSpeech) onNoSpeech();
+      };
+      r.onerror = (ev) => {
+        if (ev.error === 'not-allowed' && !this._warned) {
+          this._warned = true;
+          Toast.warn('Microphone access denied — allow it in your browser to talk to Jarvis.');
+        }
+        if (!got && onNoSpeech) onNoSpeech();
+        got = true;
+      };
+      r.onend = () => { this._recog = null; if (!got && onNoSpeech) onNoSpeech(); got = true; };
+      try { r.start(); } catch (e) { this._recog = null; if (onNoSpeech) onNoSpeech(); }
+    },
+
+    stopListening() {
+      if (this._recog) { try { this._recog.abort(); } catch (e) {} this._recog = null; }
+    },
+
+    stopAll() {
+      this.stopListening();
+      if (this.ttsAvailable()) try { speechSynthesis.cancel(); } catch (e) {}
+    },
+  };
+
   const Palette = {
     el: null, input: null, list: null, answer: null,
     _items: [], _sel: 0, _asking: false, _recent: [], _prevFocus: null,
+    _history: [],  // conversation turns {q, a, symbol} — session-scoped
 
     SUGGESTIONS: [
       "how's my portfolio",
@@ -150,6 +256,8 @@
             <span class="jp-glyph">◉</span>
             <input id="jp-input" type="text" placeholder="Ask Jarvis or jump anywhere... (e.g. 'forecast NVDA', 'biggest loser today')"
                    autocomplete="off" spellcheck="false">
+            <button id="jp-mic" type="button" title="Talk to Jarvis" aria-label="Talk to Jarvis (push to talk)">🎙</button>
+            <button id="jp-voice" type="button" title="Jarvis speaks replies aloud" aria-label="Toggle spoken replies" aria-pressed="false">🔊</button>
           </div>
           <div id="jp-answer"></div>
           <div id="jp-list" role="listbox"></div>
@@ -165,6 +273,20 @@
       wrap.addEventListener('keydown', (e) => this._trapTab(e));
       this.input.addEventListener('input', () => this._refresh());
       this.input.addEventListener('keydown', (e) => this._onKey(e));
+
+      // Voice controls — mic hidden when the browser has no SpeechRecognition
+      Voice.init();
+      const mic = document.getElementById('jp-mic');
+      const spk = document.getElementById('jp-voice');
+      if (!Voice.sttAvailable()) mic.style.display = 'none';
+      if (!Voice.ttsAvailable()) spk.style.display = 'none';
+      this._syncVoiceBtn();
+      mic.addEventListener('click', () => this._listenTurn());
+      spk.addEventListener('click', () => {
+        Voice.setEnabled(!Voice.enabled);
+        this._syncVoiceBtn();
+        Toast.info(Voice.enabled ? '◉ JARVIS: voice replies on.' : '◉ JARVIS: voice replies off.');
+      });
       document.addEventListener('keydown', (e) => {
         if ((e.metaKey || e.ctrlKey) && (e.key === 'k' || e.key === 'K')) {
           e.preventDefault();
@@ -186,9 +308,43 @@
     },
     close() {
       this.el.classList.remove('open');
+      Voice.stopAll();
+      this._setListening(false);
       const prev = this._prevFocus;
       this._prevFocus = null;
       if (prev && typeof prev.focus === 'function' && document.contains(prev)) prev.focus();
+    },
+
+    _syncVoiceBtn() {
+      const spk = document.getElementById('jp-voice');
+      if (!spk) return;
+      spk.classList.toggle('on', Voice.enabled);
+      spk.setAttribute('aria-pressed', String(Voice.enabled));
+    },
+
+    _setListening(on) {
+      const row = this.el && this.el.querySelector('.jp-input-row');
+      if (row) row.classList.toggle('listening', !!on);
+      if (this.input) this.input.placeholder = on
+        ? 'Listening…'
+        : "Ask Jarvis or jump anywhere... (e.g. 'forecast NVDA', 'biggest loser today')";
+    },
+
+    // One conversational turn: listen → transcribe into the input → ask.
+    // After a spoken answer, _ask() re-opens the mic so the exchange keeps
+    // flowing until silence, Esc, or close.
+    _listenTurn() {
+      if (!this.isOpen()) return;
+      this._setListening(true);
+      Voice.listen(
+        (transcript) => {
+          this._setListening(false);
+          this.input.value = transcript;
+          this._refresh();
+          this._ask(transcript, { spoken: true });
+        },
+        () => { this._setListening(false); }  // silence/denied → drop back to typing
+      );
     },
 
     // Focus trap: while the palette is open, Tab / Shift+Tab cycle within it.
@@ -305,13 +461,17 @@
       }
     },
 
-    async _ask(query) {
+    async _ask(query, opts) {
       if (this._asking) return;
       this._asking = true;
       this._recent = [query].concat(this._recent.filter(s => s !== query)).slice(0, 4);
       this.answer.innerHTML = '<div class="jp-answer thinking"><div class="spinner"></div> Working on it...</div>';
       try {
-        const r = await API.post('/api/jarvis/ask', { query });
+        // Conversation memory: the backend resolves follow-ups ("will it go
+        // up?") against these turns, and the LLM path replays them.
+        const r = await API.post('/api/jarvis/ask', { query, history: this._history.slice(-6) });
+        this._history.push({ q: query, a: r.answer, symbol: r.symbol || null });
+        if (this._history.length > 8) this._history.shift();
         const action = r.action
           ? `<button class="jarvis-go" id="jp-answer-go">OPEN →</button>` : '';
         this.answer.innerHTML = `
@@ -322,6 +482,12 @@
           </div>`;
         const go = document.getElementById('jp-answer-go');
         if (go) go.addEventListener('click', () => { this.close(); runAction(r.action); });
+        // Speak the reply; after a spoken question, hand the mic back for
+        // the follow-up — that's the back-and-forth loop.
+        const spoken = opts && opts.spoken;
+        Voice.speak(r.answer, () => {
+          if (spoken && Voice.enabled && this.isOpen()) this._listenTurn();
+        }, spoken);
       } catch (e) {
         this.answer.innerHTML = `<div class="jp-answer error">${esc(e.message)}</div>`;
       } finally {

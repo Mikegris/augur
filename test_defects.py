@@ -270,6 +270,20 @@ def _run_jarvis_checks(jarvis):
     check("ask: biggest loser resolves TSLA", "TSLA" in worst["answer"], worst["answer"])
     check("ask: empty query -> help", jarvis.ask("")["intent"] == "help")
 
+    # Conversation memory (v1.2): follow-ups inherit the last symbol; fresh
+    # unrelated questions must NOT silently become quotes of the old ticker.
+    hist = [{"q": "price of NVDA", "a": "NVDA is trading at...", "symbol": "NVDA"}]
+    fu = jarvis.ask("how about a quote on it", history=hist)
+    check("history: follow-up inherits last symbol", fu.get("symbol") == "NVDA"
+          and fu["intent"] == "quote", "got %s/%s" % (fu.get("symbol"), fu["intent"]))
+    fresh = jarvis.ask("completely unrelated gibberish", history=hist)
+    check("history: unrelated query does not inherit", fresh["intent"] == "help")
+    bad = jarvis._sanitize_history([{"q": "x" * 9999, "a": None, "symbol": "NOT A TICKER!!"},
+                                    "junk", 42])
+    check("history: sanitizer clamps shape", len(bad) == 1 and len(bad[0]["q"]) == 500
+          and bad[0]["symbol"] is None, repr(bad)[:80])
+    check("history: non-list -> empty", jarvis._sanitize_history("zzz") == [])
+
     # view_context — exercised uncached so the mocked seams are visible
     # (the coalesce cache hydrates from disk and could hold real-data lines).
     vc = lambda v, s=None: jarvis._view_context_uncached(v, s)
@@ -294,6 +308,12 @@ def _run_jarvis_checks(jarvis):
     check("route: overlong query -> 400", r2.status_code == 400)
     r3 = c.get("/api/jarvis/briefing?refresh=1")
     check("route: GET /api/jarvis/briefing -> 200 JSON", r3.status_code == 200 and r3.is_json)
+    rh = c.post("/api/jarvis/ask",
+                json={"query": "quote on it",
+                      "history": [{"q": "price of NVDA", "a": "...", "symbol": "NVDA"}]})
+    check("route: ask accepts conversation history -> 200 JSON",
+          rh.status_code == 200 and rh.is_json and rh.get_json().get("symbol") == "NVDA",
+          "got %s" % rh.get_json())
     r4 = c.get("/api/jarvis/context/portfolio")
     check("route: GET /api/jarvis/context/<view> -> 200 JSON",
           r4.status_code == 200 and r4.is_json)
