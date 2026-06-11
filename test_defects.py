@@ -357,6 +357,101 @@ def _run_jarvis_checks(jarvis):
         r7.close()  # GeneratorExit at the current yield — never blocks
 
 
+# ── 11c. v1.3: key console + tool-calling agent ──────────────────────────────
+def test_keys_and_agent():
+    import types
+    import api_keys, jarvis, jarvis_tools, ai_summarizer
+    import database as db_
+
+    # Key registry: masking + precedence + masked-echo guard
+    check("keys: mask keeps last 4", api_keys.mask("sk-secretXY12") == "••••XY12")
+    check("keys: is_masked detects placeholder", api_keys.is_masked("••••XY12")
+          and not api_keys.is_masked("sk-real"))
+    db_.set_setting("openai_api_key", "sk-test-database-key-000ABCD")
+    os.environ.pop("OPENAI_API_KEY", None)
+    check("keys: db key resolves", api_keys.get_api_key("openai").endswith("ABCD"))
+    os.environ["OPENAI_API_KEY"] = "sk-test-env-key-000WXYZ"
+    check("keys: env beats db", api_keys.get_api_key("openai").endswith("WXYZ"))
+    os.environ.pop("OPENAI_API_KEY", None)
+    bad = api_keys.save_key("openai", "••••XY12")
+    check("keys: masked echo rejected on save", bool(bad.get("error")))
+    check("keys: unknown provider rejected",
+          bool(api_keys.save_key("nope", "sk-x").get("error")))
+
+    import app
+    c = app.app.test_client()
+    s = c.get("/api/settings").get_json()
+    check("route: /api/settings masks the key",
+          api_keys.is_masked(s.get("openai_api_key", "")), repr(s.get("openai_api_key")))
+    c.post("/api/settings", json={"openai_api_key": s.get("openai_api_key")})
+    check("route: masked echo doesn't clobber stored key",
+          db_.get_settings().get("openai_api_key", "").endswith("ABCD"))
+    k = c.get("/api/keys").get_json()
+    check("route: /api/keys lists providers without key material",
+          k["providers"][0]["provider"] == "openai"
+          and "sk-" not in str(k["providers"][0].get("masked", "")))
+
+    # Agent loop with a stubbed LLM — read path, proposal path, act whitelist
+    class _Fn:
+        def __init__(s2, n, a): s2.name, s2.arguments = n, a
+    class _TC:
+        def __init__(s2, i, n, a): s2.id, s2.function = i, _Fn(n, a)
+    class _Msg:
+        def __init__(s2, content=None, tool_calls=None):
+            s2.content, s2.tool_calls = content, tool_calls
+    class _Resp:
+        def __init__(s2, m): s2.choices = [types.SimpleNamespace(message=m)]
+
+    import fetcher as f_
+    orig = (ai_summarizer._chat_completion, ai_summarizer._record_ai_call,
+            ai_summarizer.get_openai_key, f_.get_quote)
+    f_.get_quote = lambda sym: {"symbol": sym, "price": 100.0, "change_pct": 2.0}
+    ai_summarizer.get_openai_key = lambda: "sk-fake"
+    ai_summarizer._record_ai_call = lambda: None
+    state = {"n": 0}
+    def fake_chat(client, model, messages, **kw):
+        state["n"] += 1
+        if state["n"] == 1:
+            return _Resp(_Msg(tool_calls=[_TC("t1", "get_quote", '{"symbol":"NVDA"}')]))
+        assert any(m.get("role") == "tool" for m in messages)
+        return _Resp(_Msg(content="NVDA is at $100."))
+    ai_summarizer._chat_completion = fake_chat
+    try:
+        r = jarvis._agent_ask("how is NVDA?")
+        check("agent: read tool executes and answer returns",
+              r["answer"].startswith("NVDA") and r["used"] == ["get_quote"], repr(r))
+        ai_summarizer._chat_completion = lambda *a, **kw: _Resp(_Msg(
+            tool_calls=[_TC("t2", "add_price_alert",
+                            '{"symbol":"NVDA","alert_type":"above","price":190}')]))
+        r2 = jarvis._agent_ask("alert me at 190 on nvda")
+        check("agent: mutating tool returns proposal (not executed)",
+              r2.get("proposal", {}).get("tool") == "add_price_alert", repr(r2))
+    finally:
+        (ai_summarizer._chat_completion, ai_summarizer._record_ai_call,
+         ai_summarizer.get_openai_key, f_.get_quote) = orig
+        db_.set_setting("openai_api_key", "")
+
+    check("act: read tool rejected",
+          jarvis_tools.execute_mutating("get_quote", {}).get("error") is not None)
+    check("act: unknown tool rejected",
+          jarvis_tools.execute_mutating("rm_rf", {}).get("error") is not None)
+    check("act: bad args rejected",
+          jarvis_tools.execute_mutating(
+              "add_price_alert",
+              {"symbol": "NVDA", "alert_type": "sideways", "price": 1}
+          ).get("error") is not None)
+    ra = c.post("/api/jarvis/act", json={"tool": "get_quote", "args": {}})
+    check("route: /api/jarvis/act rejects non-mutating", ra.status_code == 400)
+    rb = c.post("/api/jarvis/act",
+                json={"tool": "add_to_watchlist", "args": {"symbol": "ZZTEST"}})
+    check("route: /api/jarvis/act executes confirmed whitelist action",
+          rb.status_code == 200 and rb.get_json().get("status") == "added",
+          repr(rb.get_json()))
+    check("agent: every tool schema has valid shape",
+          all(t["function"]["name"] and t["function"]["parameters"]["type"] == "object"
+              for t in jarvis_tools.openai_schemas()))
+
+
 # ── 12. database add_position: offsetting to zero shares must not crash ──────
 def test_database_zero_shares():
     import database
@@ -582,6 +677,7 @@ def main():
         ("forecast edge cases", test_forecast_edge_cases),
         ("route handlers", test_routes),
         ("jarvis briefing + ask", test_jarvis),
+        ("key console + tool agent", test_keys_and_agent),
         ("database zero-shares guard", test_database_zero_shares),
         ("cli quote None fields", test_cli_quote_none_fields),
         ("xss escaping intact", test_xss_escaping_intact),

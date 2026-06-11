@@ -25,6 +25,7 @@ Python 3.9 compatible (no PEP 604 unions).
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 from datetime import datetime, timezone, timedelta
@@ -201,6 +202,96 @@ def _llm_context_snapshot() -> str:
             "{:.1f}".format(regime["vix"]) if regime.get("vix") is not None else "—",
             regime.get("regime") or "—"))
     return "\n".join(lines) if lines else "(no local data available)"
+
+
+_AGENT_SYSTEM = (
+    "You are JARVIS, the user's personal investing copilot inside their "
+    "AUGUR terminal. You have tools that read the user's REAL portfolio and "
+    "the app's analysis engines — use them rather than guessing, and ground "
+    "every number in tool output. Be concise (a short paragraph), confident, "
+    "dry wit welcome. No investment advice — present evidence and framing, "
+    "not instructions to buy or sell. If the user asks for an action (an "
+    "alert, a watchlist add), call the matching tool; the app will ask the "
+    "user to confirm it. If the tools can't answer, say so plainly."
+)
+
+_AGENT_MAX_ROUNDS = 4
+
+
+def _agent_ask(query: str, history: Optional[List[Dict[str, Any]]] = None) -> Optional[Dict[str, Any]]:
+    """Tool-calling agent over the full engine registry. Returns
+    {"answer", "used": [tool names]} or {"answer", "proposal": {...}} for a
+    mutating request awaiting user confirmation. Raises on transport errors;
+    the caller fails open to the plain-context path."""
+    import ai_summarizer
+    import jarvis_tools
+    key = ai_summarizer.get_openai_key()
+    if not key:
+        return None
+    from openai import OpenAI
+    client = OpenAI(api_key=key, timeout=25.0)
+
+    messages: List[Dict[str, Any]] = [{"role": "system", "content": _AGENT_SYSTEM}]
+    for turn in (history or [])[-4:]:
+        if turn.get("q"):
+            messages.append({"role": "user", "content": turn["q"]})
+        if turn.get("a"):
+            messages.append({"role": "assistant", "content": turn["a"]})
+    messages.append({"role": "user", "content": query})
+
+    schemas = jarvis_tools.openai_schemas()
+    used: List[str] = []
+
+    for _ in range(_AGENT_MAX_ROUNDS):
+        resp = ai_summarizer._chat_completion(
+            client, ai_summarizer.MODEL_LIGHT, messages,
+            max_tokens=400, temperature=0.3, json_mode=False, tools=schemas)
+        ai_summarizer._record_ai_call()
+        msg = resp.choices[0].message
+
+        if not getattr(msg, "tool_calls", None):
+            answer = (msg.content or "").strip()
+            if not answer:
+                return None
+            return {"answer": answer, "used": used}
+
+        # Mutating request → stop and hand the proposal to the UI.
+        for tc in msg.tool_calls:
+            name = tc.function.name
+            if jarvis_tools.is_mutating(name):
+                try:
+                    args = json.loads(tc.function.arguments or "{}")
+                except Exception:
+                    args = {}
+                label = jarvis_tools.proposal_label(name, args)
+                return {"answer": "I can do that: {}. Confirm and I'll execute.".format(label),
+                        "proposal": {"tool": name, "args": args, "label": label},
+                        "used": used}
+
+        # Read tools: execute and feed results back.
+        messages.append({"role": "assistant", "content": msg.content or "",
+                         "tool_calls": [
+                             {"id": tc.id, "type": "function",
+                              "function": {"name": tc.function.name,
+                                           "arguments": tc.function.arguments}}
+                             for tc in msg.tool_calls]})
+        for tc in msg.tool_calls:
+            try:
+                args = json.loads(tc.function.arguments or "{}")
+            except Exception:
+                args = {}
+            used.append(tc.function.name)
+            messages.append({"role": "tool", "tool_call_id": tc.id,
+                             "content": jarvis_tools.execute_read(tc.function.name, args)})
+
+    # Round budget exhausted — ask for a final synthesis without tools.
+    resp = ai_summarizer._chat_completion(
+        client, ai_summarizer.MODEL_LIGHT, messages
+        + [{"role": "user", "content": "Answer now from what you have, briefly."}],
+        max_tokens=300, temperature=0.3, json_mode=False)
+    ai_summarizer._record_ai_call()
+    answer = (resp.choices[0].message.content or "").strip()
+    return {"answer": answer, "used": used} if answer else None
 
 
 def _llm_ask(query: str, history: Optional[List[Dict[str, Any]]] = None) -> Optional[str]:
@@ -1057,6 +1148,12 @@ def _sanitize_history(history: Any) -> List[Dict[str, Any]]:
 
 _FOLLOW_UP_RE = re.compile(r"\b(it|its|that|this|same|again)\b", re.IGNORECASE)
 
+# Action-phrased queries ("keep an eye on PLTR", "add X", "track Y") must
+# reach the tool agent, not short-circuit into the bare-ticker quote path.
+_ACTIONISH_RE = re.compile(
+    r"\b(watch|track|add|remove|set|remind|keep an eye|monitor|follow)\b",
+    re.IGNORECASE)
+
 
 def ask(query: str, history: Any = None) -> Dict[str, Any]:
     """Route a natural-language question to the right engine. Local-only,
@@ -1103,7 +1200,7 @@ def ask(query: str, history: Any = None) -> Dict[str, Any]:
             return done("portfolio", _answer_portfolio(ql))
         if any(w in ql for w in ("market", "vix", "s&p", "spx", "nasdaq", "fear", "regime", "volatil")):
             return done("market", _answer_market())
-        if symbol:
+        if symbol and not (_ACTIONISH_RE.search(ql) and _llm_available()):
             return done("quote", _answer_quote(symbol))
     except Exception as e:
         log.warning("jarvis.ask failed for %r: %s", q, e)
@@ -1113,6 +1210,18 @@ def ask(query: str, history: Any = None) -> Dict[str, Any]:
     # Unrecognized intent: optionally let the LLM answer from local data only.
     # Keyless (or cap-exhausted) behavior is identical to before — "help".
     if _llm_available():
+        # Tool-calling agent first — it can reach every engine. Fall back to
+        # the plain context-snapshot answer if the agent path errors out.
+        try:
+            r = _agent_ask(q, turns)
+            if r and r.get("answer"):
+                payload = {"answer": r["answer"], "used": r.get("used") or []}
+                if r.get("proposal"):
+                    payload["proposal"] = r["proposal"]
+                    return done("action", payload)
+                return done("llm", payload)
+        except Exception as e:
+            log.debug("jarvis.ask agent failed for %r: %s", q, e)
         try:
             answer = _llm_ask(q, turns)
             if answer:

@@ -894,17 +894,54 @@ def portfolio_analytics():
 
 @app.route("/api/settings", methods=["GET"])
 def get_settings():
-    return jsonify(db.get_settings())
+    # Key material never leaves the server — sensitive values are masked
+    # to •••• + last 4. (This route previously leaked the full OpenAI key.)
+    import api_keys
+    return jsonify(api_keys.mask_settings(db.get_settings()))
 
 
 @app.route("/api/settings", methods=["POST"])
 def update_settings():
+    import api_keys
     data = request.get_json(silent=True) or {}
     if not isinstance(data, dict):
         return jsonify({"error": "expected JSON object"}), 400
     for k, v in data.items():
+        # The UI echoes masked placeholders back on save — writing one
+        # through would clobber the real key with "••••XaQA".
+        if k in api_keys.SENSITIVE_SETTINGS and api_keys.is_masked(v):
+            continue
         db.set_setting(k, v)
     return jsonify({"status": "saved"})
+
+
+# ─── API key console ──────────────────────────────────────────────────────────
+
+@app.route("/api/keys", methods=["GET"])
+def list_api_keys():
+    import api_keys
+    return jsonify({"providers": api_keys.list_providers()})
+
+
+@app.route("/api/keys/<provider>", methods=["POST"])
+def save_api_key(provider):
+    import api_keys
+    data = request.get_json(silent=True) or {}
+    r = api_keys.save_key(provider, data.get("key", ""))
+    return (jsonify(r), 400) if r.get("error") else jsonify(r)
+
+
+@app.route("/api/keys/<provider>", methods=["DELETE"])
+def delete_api_key(provider):
+    import api_keys
+    r = api_keys.delete_key(provider)
+    return (jsonify(r), 400) if r.get("error") else jsonify(r)
+
+
+@app.route("/api/keys/<provider>/test", methods=["POST"])
+def test_api_key(provider):
+    import api_keys
+    return jsonify(api_keys.test_provider(provider))
 
 
 # ─── Price Alerts ─────────────────────────────────────────────────────────────
@@ -3055,6 +3092,24 @@ def forecast_accountability_route():
 
 
 # ── Jarvis: unified assistant layer ────────────────────────────────
+@app.route("/api/jarvis/act", methods=["POST"])
+def jarvis_act_route():
+    """Execute a user-CONFIRMED mutating action proposed by the Jarvis agent.
+    Whitelisted against jarvis_tools' registry — read tools and unknown names
+    are rejected, so this can only ever do what the registry defines."""
+    try:
+        import jarvis_tools
+    except Exception as e:
+        return jsonify({"error": "jarvis_tools unavailable: {}".format(e)}), 500
+    data = request.get_json(silent=True) or {}
+    tool = data.get("tool")
+    args = data.get("args")
+    if not isinstance(tool, str) or not isinstance(args, dict):
+        return jsonify({"error": "expected {tool: str, args: object}"}), 400
+    r = jarvis_tools.execute_mutating(tool, args)
+    return (jsonify(r), 400) if r.get("error") else jsonify(r)
+
+
 @app.route("/api/jarvis/briefing", methods=["GET"])
 def jarvis_briefing_route():
     """Prioritized daily briefing: portfolio pulse, alerts, earnings,

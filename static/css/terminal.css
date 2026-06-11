@@ -2414,3 +2414,16 @@ input:focus, select:focus, textarea:focus {
 @media (prefers-reduced-motion: reduce) {
   .jp-input-row.listening .jp-glyph, .jp-input-row.listening #jp-mic { animation: none; }
 }
+
+/* ── v1.3 API key console rows ──────────────────────────────────── */
+.key-row { padding: 10px 0; border-bottom: 1px solid var(--border); }
+.key-row:last-child { border-bottom: none; }
+.key-row-head { display: flex; align-items: center; gap: 10px; }
+.key-label { font-size: var(--font-size-sm); font-weight: 600; color: var(--text-primary); letter-spacing: .08em; }
+.jp-proposal {
+  display: flex; align-items: center; gap: 8px; margin-top: 8px;
+  padding: 7px 10px; border: 1px solid var(--amber-dim); border-radius: var(--radius);
+  background: var(--amber-glow); font-size: var(--font-size-sm); color: var(--amber);
+}
+.jp-proposal span { flex: 1; }
+.jp-dismiss { color: var(--text-dim); border-color: var(--border); }
