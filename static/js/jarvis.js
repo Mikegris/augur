@@ -102,9 +102,14 @@
           <div class="jarvis-card-detail">${esc(c.detail)}</div>
         </div>`;
       }).join('');
+      // Prefer the LLM-polished voice when present (it carries the same
+      // numbers); the rule-based headline is the keyless/capped fallback.
+      const headline = b.voice
+        ? `<div class="jarvis-headline jarvis-voice">${esc(b.voice)}</div>`
+        : `<div class="jarvis-headline">${esc(b.headline || '')}</div>`;
       body.innerHTML = `
         <div class="jarvis-greeting">${esc(b.greeting || '')}</div>
-        <div class="jarvis-headline">${esc(b.headline || '')}</div>
+        ${headline}
         ${cards ? `<div class="jarvis-cards">${cards}</div>`
                 : '<div class="jarvis-allclear">All clear — nothing needs your attention right now.</div>'}`;
       body.querySelectorAll('.jarvis-go').forEach(btn => {
