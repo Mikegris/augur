@@ -2396,3 +2396,21 @@ input:focus, select:focus, textarea:focus {
 /* LLM-polished briefing voice — subtly distinct from the rule-based headline */
 .jarvis-voice { color: var(--green-dim); font-style: italic; font-weight: 500; }
 .jarvis-voice::before { content: '◉ '; font-style: normal; color: var(--green); }
+
+/* ── v1.2 Voice: mic / speaker controls + listening state ───────── */
+#jp-mic, #jp-voice {
+  background: none; border: 1px solid var(--border); border-radius: var(--radius);
+  color: var(--text-dim); font-size: 13px; line-height: 1;
+  padding: 4px 7px; cursor: pointer; flex: none;
+}
+#jp-mic:hover, #jp-voice:hover { border-color: var(--border-bright); color: var(--text-primary); }
+#jp-voice.on { color: var(--green); border-color: var(--green-dim); box-shadow: 0 0 8px var(--green-glow); }
+.jp-input-row.listening .jp-glyph { color: var(--cyan); animation: jarvis-pulse .9s ease-in-out infinite; }
+.jp-input-row.listening #jp-mic {
+  color: var(--cyan); border-color: var(--blue-dim);
+  box-shadow: 0 0 10px var(--blue-glow);
+  animation: jarvis-pulse 1.2s ease-in-out infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  .jp-input-row.listening .jp-glyph, .jp-input-row.listening #jp-mic { animation: none; }
+}

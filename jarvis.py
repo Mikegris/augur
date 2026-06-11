@@ -203,17 +203,25 @@ def _llm_context_snapshot() -> str:
     return "\n".join(lines) if lines else "(no local data available)"
 
 
-def _llm_ask(query: str) -> Optional[str]:
+def _llm_ask(query: str, history: Optional[List[Dict[str, Any]]] = None) -> Optional[str]:
     system = (
         "You are JARVIS, a personal investing copilot. Answer ONLY from the "
         "provided data, one short paragraph, say so if the data can't answer. "
-        "No investment advice."
+        "No investment advice. The conversation may reference earlier turns."
     )
-    user = "DATA:\n{}\n\nQUESTION: {}".format(_llm_context_snapshot(), query)
-    return _llm_complete(
-        [{"role": "system", "content": system},
-         {"role": "user", "content": user}],
-        max_tokens=220, temperature=0.3)
+    messages: List[Dict[str, str]] = [{"role": "system", "content": system}]
+    # Replay the last few exchanges so follow-ups ("and what about its
+    # downside?") resolve. History is already sanitized by ask().
+    for turn in (history or [])[-4:]:
+        if turn.get("q"):
+            messages.append({"role": "user", "content": turn["q"]})
+        if turn.get("a"):
+            messages.append({"role": "assistant", "content": turn["a"]})
+    messages.append({
+        "role": "user",
+        "content": "DATA:\n{}\n\nQUESTION: {}".format(_llm_context_snapshot(), query),
+    })
+    return _llm_complete(messages, max_tokens=220, temperature=0.3)
 
 
 # ─── briefing sections (each fully guarded) ──────────────────────────────────
@@ -1027,13 +1035,51 @@ _HELP_ANSWER = (
 )
 
 
-def ask(query: str) -> Dict[str, Any]:
-    """Route a natural-language question to the right engine. Local-only."""
+def _sanitize_history(history: Any) -> List[Dict[str, Any]]:
+    """Clamp a client-supplied conversation history to a safe shape:
+    ≤8 turns of {"q": str≤500, "a": str≤800, "symbol": ticker|None}."""
+    out: List[Dict[str, Any]] = []
+    if not isinstance(history, list):
+        return out
+    for turn in history[-8:]:
+        if not isinstance(turn, dict):
+            continue
+        sym = turn.get("symbol")
+        if not (isinstance(sym, str) and re.fullmatch(r"[A-Za-z][A-Za-z.\-]{0,9}", sym)):
+            sym = None
+        out.append({
+            "q": str(turn.get("q") or "")[:500],
+            "a": str(turn.get("a") or "")[:800],
+            "symbol": sym.upper() if sym else None,
+        })
+    return out
+
+
+_FOLLOW_UP_RE = re.compile(r"\b(it|its|that|this|same|again)\b", re.IGNORECASE)
+
+
+def ask(query: str, history: Any = None) -> Dict[str, Any]:
+    """Route a natural-language question to the right engine. Local-only,
+    with optional conversation history for follow-up resolution."""
     q = (query or "").strip()
     if not q:
         return {"intent": "help", "answer": _HELP_ANSWER}
     ql = q.lower()
     symbol = _extract_symbol(q)
+    turns = _sanitize_history(history)
+
+    # Follow-up resolution: "will it keep falling?" after a question about
+    # NVDA should mean NVDA. Inherit the most recent symbol from history,
+    # but ONLY when the phrasing actually refers back — a fresh unrelated
+    # question must not silently become a quote of the previous ticker.
+    inherited = None
+    for turn in reversed(turns):
+        if turn.get("symbol"):
+            inherited = turn["symbol"]
+            break
+    is_follow_up = bool(_FOLLOW_UP_RE.search(ql)) or ql.startswith(("what about", "how about", "and "))
+    if not symbol and inherited and is_follow_up:
+        symbol = inherited
 
     def done(intent: str, payload: Dict[str, Any]) -> Dict[str, Any]:
         payload["intent"] = intent
@@ -1068,10 +1114,10 @@ def ask(query: str) -> Dict[str, Any]:
     # Keyless (or cap-exhausted) behavior is identical to before — "help".
     if _llm_available():
         try:
-            answer = _llm_ask(q)
+            answer = _llm_ask(q, turns)
             if answer:
                 return done("llm", {"answer": answer})
         except Exception as e:
             log.debug("jarvis.ask llm fallback failed for %r: %s", q, e)
 
-    return {"intent": "help", "answer": _HELP_ANSWER}
+    return {"intent": "help", "answer": _HELP_ANSWER, "symbol": symbol}

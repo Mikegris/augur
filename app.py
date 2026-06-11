@@ -3164,8 +3164,9 @@ def jarvis_ask_route():
         return jsonify({"error": "expected JSON body with a 'query' string"}), 400
     if len(query) > 500:
         return jsonify({"error": "query too long (max 500 chars)"}), 400
+    history = data.get("history")  # optional conversation turns; jarvis clamps shape
     try:
-        return jsonify(jarvis.ask(query))
+        return jsonify(jarvis.ask(query, history=history))
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
