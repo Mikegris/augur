@@ -38,6 +38,19 @@ logger = logging.getLogger(__name__)
 
 WARMED_TTL_SECONDS = 24 * 3600  # 24h freshness window
 
+# Skip-fresh threshold (2026-06 audit). Every 6h pass used to rebuild ALL
+# ~180 dossiers (full fan-out: yfinance / EDGAR / CoinGecko / ML forecast)
+# even though rows are served for 24h — i.e. each dossier was regenerated
+# 4× per day while its consumers tolerate 24h-old data by design. A pass now
+# skips any (symbol, asset_class, strategy) row younger than this threshold.
+# Why TTL/2 (12h) and not higher: a row rebuilt at age 12h gets TWO further
+# passes (18h, 24h) as retry headroom before it would expire, so a transient
+# per-symbol failure can't leave a hole in the pool. Failed targets are never
+# persisted, so they stay missing-from-fresh and retry on the very next pass.
+# Net effect: ~720 dossier builds/day -> ~360/day (alternating full/no-op
+# passes in steady state), with identical worst-case staleness (24h TTL).
+REFRESH_AGE_SECONDS = WARMED_TTL_SECONDS // 2
+
 # Internal cap on parallelism — the underlying _build_dossier already fans out
 # to ~10 workers per symbol, so keep this modest to avoid thrashing the
 # external rate limits (yfinance / SEC / CoinGecko) AND to minimize SQLite
@@ -61,6 +74,7 @@ _last_run_started: Optional[str] = None
 _last_run_finished: Optional[str] = None
 _last_run_count = 0
 _last_run_errors = 0
+_last_run_skipped = 0
 _last_run_epoch: Optional[float] = None
 _warm_target = 200
 _warm_interval = 6 * 3600
@@ -200,6 +214,26 @@ def _count_fresh() -> int:
         return 0
 
 
+def _recently_warmed_keys(max_age_seconds: int) -> set:
+    """Set of (symbol, asset_class, strategy) tuples warmed within the last
+    `max_age_seconds`. Used by warm_pool to skip rebuilding dossiers whose
+    cached row is still young. Best-effort: on any error return an empty set,
+    which degrades to the old rebuild-everything behavior (safe, just slower)."""
+    try:
+        cutoff = (
+            datetime.now(timezone.utc) - timedelta(seconds=max_age_seconds)
+        ).isoformat()
+        conn = db.get_conn()
+        rows = conn.execute(
+            "SELECT symbol, asset_class, strategy FROM idea_pool WHERE warmed_at >= ?",
+            (cutoff,),
+        ).fetchall()
+        return {(r["symbol"], r["asset_class"], r["strategy"]) for r in rows}
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("idea_pool: fresh-key lookup failed (will warm all): %s", exc)
+        return set()
+
+
 def warmer_status() -> Dict[str, Any]:
     """Snapshot of the warmer state for the UI."""
     with _state_lock:
@@ -208,6 +242,7 @@ def warmer_status() -> Dict[str, Any]:
         last_finished = _last_run_finished
         last_count = _last_run_count
         last_errors = _last_run_errors
+        last_skipped = _last_run_skipped
         last_epoch = _last_run_epoch
         target = _warm_target
         interval = _warm_interval
@@ -219,15 +254,27 @@ def warmer_status() -> Dict[str, Any]:
         remaining = int(interval - elapsed)
         next_in = max(remaining, 0)
 
+    # The configured target (default 200) exceeds what one pass can actually
+    # produce: the universe is ~160 equities + ~20 crypto and each symbol is
+    # warmed under exactly one strategy per pass (PRIMARY KEY symbol/class/
+    # strategy), so distinct fresh rows top out around 180. Surface the real
+    # ceiling so the UI widget doesn't imply 200 is reachable.
+    try:
+        ceiling = len(idea_generator.CRYPTO_UNIVERSE) + len(idea_generator.EQUITY_UNIVERSE)
+    except Exception:  # noqa: BLE001
+        ceiling = None
+
     return {
         "running": running,
         "last_run_started": last_started,
         "last_run_finished": last_finished,
         "last_run_count": last_count,
         "last_run_errors": last_errors,
+        "last_run_skipped": last_skipped,
         "warmed_total": _count_fresh(),
         "next_run_in_seconds": next_in,
         "warm_target": target,
+        "warm_target_ceiling": ceiling,
     }
 
 
@@ -258,6 +305,14 @@ def _select_targets(target_count: int) -> List[Dict[str, str]]:
     Equity universe is sliced with a wrap-around rotation offset so that
     successive passes cover different equities and the full ~160-symbol
     universe gets touched over a few days.
+
+    NOTE (2026-06 audit): with the default target (200) >= universe size
+    (~180), take == n, so the offset advances by (offset + n) % n == offset —
+    i.e. rotation is a no-op and every pass selects the full universe with
+    the SAME symbol->strategy assignment. That's harmless (full coverage per
+    pass) and the stable strategy assignment is what lets warm_pool's
+    skip-fresh filter match rows across passes. Rotation only kicks in if
+    the target is lowered below the universe size.
 
     Strategies are assigned round-robin so each pass mixes growth/value/etc.
     """
@@ -376,7 +431,8 @@ def _warm_one_with_cleanup(target: Dict[str, str]) -> bool:
 def warm_pool(target_count: int = 200) -> Dict[str, Any]:
     """Run a single warming pass. Returns counts + elapsed seconds."""
     global _running, _last_run_started, _last_run_finished
-    global _last_run_count, _last_run_errors, _last_run_epoch, _warm_target
+    global _last_run_count, _last_run_errors, _last_run_skipped
+    global _last_run_epoch, _warm_target
 
     with _state_lock:
         if _running:
@@ -389,10 +445,25 @@ def warm_pool(target_count: int = 200) -> Dict[str, Any]:
     start = time.time()
     warmed = 0
     errors = 0
+    skipped_fresh = 0
     try:
         targets = _select_targets(target_count)
-        logger.info("idea_pool: starting warm pass — %d targets, %d workers",
-                    len(targets), _WARM_MAX_WORKERS)
+
+        # Drop targets whose cached dossier is still young (< REFRESH_AGE).
+        # Inputs (price, signals) feeding a dossier are themselves cached
+        # upstream for minutes-to-hours, so rebuilding a 6h-old dossier
+        # mostly re-serializes the same inputs — pure churn. See the
+        # REFRESH_AGE_SECONDS comment for the staleness/retry reasoning.
+        fresh = _recently_warmed_keys(REFRESH_AGE_SECONDS)
+        if fresh:
+            kept = [t for t in targets
+                    if (t["symbol"], t["asset_class"], t["strategy"]) not in fresh]
+            skipped_fresh = len(targets) - len(kept)
+            targets = kept
+
+        logger.info(
+            "idea_pool: starting warm pass — %d targets (%d skipped still-fresh), %d workers",
+            len(targets), skipped_fresh, _WARM_MAX_WORKERS)
 
         # Run on safe_executor's daemon threads. This is the call site that
         # used to wedge interpreter exit: a 200-item pass mid-flight at
@@ -422,6 +493,7 @@ def warm_pool(target_count: int = 200) -> Dict[str, Any]:
             _last_run_finished = finished_iso
             _last_run_count = warmed
             _last_run_errors = errors
+            _last_run_skipped = skipped_fresh
             _last_run_epoch = time.time()
         # Persist for visibility across restarts.
         try:
@@ -429,11 +501,12 @@ def warm_pool(target_count: int = 200) -> Dict[str, Any]:
             _state_set("last_run_finished", finished_iso)
             _state_set("last_run_count", str(warmed))
             _state_set("last_run_errors", str(errors))
+            _state_set("last_run_skipped", str(skipped_fresh))
         except Exception as exc:  # noqa: BLE001
             logger.warning("idea_pool: failed to persist run state: %s", exc)
         logger.info(
-            "idea_pool: warm pass complete — warmed=%d errors=%d elapsed=%.1fs",
-            warmed, errors, elapsed,
+            "idea_pool: warm pass complete — warmed=%d skipped=%d errors=%d elapsed=%.1fs",
+            warmed, skipped_fresh, errors, elapsed,
         )
         # Force a WAL checkpoint so the WAL file doesn't grow unbounded across
         # passes and so subsequent reader connections don't spend time over
@@ -445,7 +518,12 @@ def warm_pool(target_count: int = 200) -> Dict[str, Any]:
         except Exception as exc:  # noqa: BLE001
             logger.warning("idea_pool: WAL checkpoint failed: %s", exc)
 
-    return {"warmed": warmed, "errors": errors, "elapsed_seconds": elapsed}
+    return {
+        "warmed": warmed,
+        "errors": errors,
+        "skipped_fresh": skipped_fresh,
+        "elapsed_seconds": elapsed,
+    }
 
 
 # ── Background thread ────────────────────────────────────────────────────────

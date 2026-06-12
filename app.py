@@ -82,6 +82,33 @@ def _valid_ticker(symbol):
 def _utc_now():
     return datetime.now(timezone.utc)
 
+def _portfolio_live_prices(holdings):
+    """Live quotes for a holdings list in ONE batched fetch.
+
+    Stocks and crypto used to be fetched as two sequential
+    fetcher.get_quotes_batch calls per request (two full network waves —
+    the second blocked on the first). Combining them into a single batch
+    lets fetcher's internal thread pool resolve everything in one wave.
+
+    Returns the same dict the old per-route code built: UPPER-cased stock
+    symbols from get_quotes_batch, plus each crypto holding's original
+    symbol mapped from its -USD Yahoo pair when a quote came back.
+    """
+    stock_syms = [h["symbol"] for h in holdings if h.get("asset_type") != "crypto"]
+    crypto_syms = [h["symbol"] for h in holdings if h.get("asset_type") == "crypto"]
+    query = stock_syms + [s + "-USD" for s in crypto_syms]
+    if not query:
+        return {}
+    batch = fetcher.get_quotes_batch(query)
+    prices = dict(batch)
+    for sym in crypto_syms:
+        # get_quotes_batch returns UPPER-cased keys; match accordingly so a
+        # lowercase-stored crypto symbol doesn't silently miss its live price.
+        key = (sym + "-USD").upper()
+        if key in batch:
+            prices[sym] = batch[key]
+    return prices
+
 # When bundled by py2app, app.py lives inside a .zip and Flask's default
 # template/static lookup (relative to __file__) breaks. py2app exports
 # RESOURCEPATH pointing at Contents/Resources/ where data_files land, so
@@ -142,18 +169,7 @@ def _snapshot_worker():
         try:
             holdings = db.get_portfolio()
             if holdings:
-                stock_syms = [h["symbol"] for h in holdings if h["asset_type"] != "crypto"]
-                crypto_syms = [h["symbol"] for h in holdings if h["asset_type"] == "crypto"]
-                prices = {}
-                if stock_syms:
-                    prices.update(fetcher.get_quotes_batch(stock_syms))
-                if crypto_syms:
-                    crypto_yf = [s + "-USD" for s in crypto_syms]
-                    crypto_prices = fetcher.get_quotes_batch(crypto_yf)
-                    for sym in crypto_syms:
-                        key = (sym + "-USD").upper()
-                        if key in crypto_prices:
-                            prices[sym] = crypto_prices[key]
+                prices = _portfolio_live_prices(holdings)
 
                 total_value = 0
                 total_cost = 0
@@ -371,22 +387,8 @@ def get_portfolio():
     if not holdings:
         return jsonify({"holdings": [], "summary": {}})
 
-    # Enrich with live prices
-    stock_syms = [h["symbol"] for h in holdings if h["asset_type"] != "crypto"]
-    crypto_syms = [h["symbol"] for h in holdings if h["asset_type"] == "crypto"]
-
-    prices = {}
-    if stock_syms:
-        prices.update(fetcher.get_quotes_batch(stock_syms))
-
-    # For crypto, use yfinance with -USD suffix fallback
-    if crypto_syms:
-        crypto_yf = [s + "-USD" for s in crypto_syms]
-        crypto_prices = fetcher.get_quotes_batch(crypto_yf)
-        for sym in crypto_syms:
-            key = (sym + "-USD").upper()
-            if key in crypto_prices:
-                prices[sym] = crypto_prices[key]
+    # Enrich with live prices (stocks + crypto -USD pairs in one wave)
+    prices = _portfolio_live_prices(holdings)
 
     enriched = []
     total_value = 0
@@ -850,18 +852,7 @@ def portfolio_analytics():
 
     # Live prices for market-value-weighted allocation (cost basis is the
     # fallback when a quote is missing).
-    stock_syms = [h["symbol"] for h in holdings if h["asset_type"] != "crypto"]
-    crypto_syms = [h["symbol"] for h in holdings if h["asset_type"] == "crypto"]
-    prices = {}
-    if stock_syms:
-        prices.update(fetcher.get_quotes_batch(stock_syms))
-    if crypto_syms:
-        crypto_yf = [s + "-USD" for s in crypto_syms]
-        crypto_prices = fetcher.get_quotes_batch(crypto_yf)
-        for sym in crypto_syms:
-            key = (sym + "-USD").upper()
-            if key in crypto_prices:
-                prices[sym] = crypto_prices[key]
+    prices = _portfolio_live_prices(holdings)
 
     alloc_type = {}
     alloc_sector = {}
@@ -1014,23 +1005,29 @@ def portfolio_dividends():
     if not holdings:
         return jsonify({"positions": [], "summary": {}})
 
-    # Get live prices for yield-on-cost
-    syms = [h["symbol"] for h in holdings if h["asset_type"] != "crypto"]
-    prices = fetcher.get_quotes_batch(syms) if syms else {}
-
-    # Parallelize per-symbol yfinance dividend roundtrips. Without this,
+    # Live prices (for yield-on-cost) + per-symbol yfinance dividend
+    # roundtrips, all in ONE parallel wave. The quotes batch is independent
+    # of the dividend fetches, so it rides the same pool (slot 0) instead of
+    # running as its own serial phase before them. Without parallelism,
     # 30 positions = 30 sequential network calls. yfinance 1.2.x is
     # thread-safe with fast_info.
     equity_syms = [h["symbol"] for h in holdings if h["asset_type"] != "crypto"]
+    prices = {}
     div_map = {}
     if equity_syms:
+        def _div_task(item):
+            if item is None:  # sentinel slot: the live-quotes batch
+                return fetcher.get_quotes_batch(equity_syms)
+            return fetcher.get_dividend_data(item)
+
         # safe_executor.parallel_map preserves input order (like pool.map
         # did) and fills a slot with None if a fetch raises, which the
         # `or {}` below absorbs instead of 500-ing the route.
-        for sym, dd in zip(equity_syms,
-                           safe_executor.parallel_map(
-                               fetcher.get_dividend_data, equity_syms,
-                               max_workers=8, thread_name_prefix="div-batch")):
+        wave = safe_executor.parallel_map(
+            _div_task, [None] + equity_syms,
+            max_workers=9, thread_name_prefix="div-batch")
+        prices = wave[0] or {}
+        for sym, dd in zip(equity_syms, wave[1:]):
             div_map[sym] = dd or {}
 
     # Walk holdings in original order so the response ordering is stable.
@@ -1107,20 +1104,8 @@ def stress_test():
     if not holdings:
         return jsonify({"error": "No positions in portfolio"}), 400
 
-    # Enrich with live market values
-    syms = [h["symbol"] for h in holdings if h["asset_type"] != "crypto"]
-    crypto_syms = [h["symbol"] for h in holdings if h["asset_type"] == "crypto"]
-    prices = {}
-    if syms:
-        prices.update(fetcher.get_quotes_batch(syms))
-    if crypto_syms:
-        cp = fetcher.get_quotes_batch([s + "-USD" for s in crypto_syms])
-        for s in crypto_syms:
-            # get_quotes_batch returns UPPER-cased keys; match accordingly so a
-            # lowercase-stored crypto symbol doesn't silently miss its live price.
-            k = (s + "-USD").upper()
-            if k in cp:
-                prices[s] = cp[k]
+    # Enrich with live market values (stocks + crypto in one batched wave)
+    prices = _portfolio_live_prices(holdings)
 
     enriched = []
     for h in holdings:
@@ -1204,19 +1189,8 @@ def portfolio_ai_analysis():
     if not holdings:
         return jsonify({"error": "No positions in portfolio"}), 400
 
-    # Enrich with live prices (same logic as get_portfolio)
-    stock_syms = [h["symbol"] for h in holdings if h["asset_type"] != "crypto"]
-    crypto_syms = [h["symbol"] for h in holdings if h["asset_type"] == "crypto"]
-    prices = {}
-    if stock_syms:
-        prices.update(fetcher.get_quotes_batch(stock_syms))
-    if crypto_syms:
-        crypto_yf = [s + "-USD" for s in crypto_syms]
-        cp = fetcher.get_quotes_batch(crypto_yf)
-        for sym in crypto_syms:
-            key = (sym + "-USD").upper()
-            if key in cp:
-                prices[sym] = cp[key]
+    # Enrich with live prices (same logic as get_portfolio — one batched wave)
+    prices = _portfolio_live_prices(holdings)
 
     total_value = 0
     total_cost = 0
@@ -1297,14 +1271,24 @@ def intel_feed():
     result = []
     uncached_filings = []  # list of (filing_dict,) entries needing AI
 
-    for symbol in symbols[:15]:  # cap at 15 symbols to avoid long waits
-        try:
-            filings = edgar.get_recent_filings(
-                symbol, forms=["8-K", "10-K", "10-Q", "S-1"], limit=5
-            )
-        except Exception:
-            continue
-        for f in filings:
+    # Fetch each symbol's recent filings in parallel instead of serially —
+    # 15 cold symbols used to mean 15 back-to-back EDGAR roundtrips.
+    # sec_edgar bounds its own concurrency (module-level semaphore of 8),
+    # so 8 workers here can't exceed SEC's 10 req/s budget. parallel_map
+    # preserves input order and returns None where a fetch raised, which
+    # `or ()` skips — exactly what the old per-symbol `continue` did.
+    def _recent_filings(sym):
+        return edgar.get_recent_filings(
+            sym, forms=["8-K", "10-K", "10-Q", "S-1"], limit=5
+        )
+
+    filing_lists = safe_executor.parallel_map(
+        _recent_filings, symbols[:15],  # cap at 15 symbols to avoid long waits
+        max_workers=8, thread_name_prefix="intel-filings",
+    )
+
+    for filings in filing_lists:
+        for f in filings or ():
             acc = f["accession"]
             cached = db.get_cached_filing(acc) if not refresh else None
             if cached:
@@ -2869,23 +2853,10 @@ def _mc_holdings_from_portfolio(account_id=None):
         rows = db.get_portfolio() or []
     if not rows:
         return []
-    stock_syms = [h["symbol"] for h in rows if h.get("asset_type") != "crypto"]
-    crypto_syms = [h["symbol"] for h in rows if h.get("asset_type") == "crypto"]
-    prices = {}
-    if stock_syms:
-        try:
-            prices.update(fetcher.get_quotes_batch(stock_syms))
-        except Exception:
-            pass
-    if crypto_syms:
-        try:
-            cp = fetcher.get_quotes_batch([s + "-USD" for s in crypto_syms])
-            for s in crypto_syms:
-                v = cp.get((s + "-USD").upper())
-                if v:
-                    prices[s] = v
-        except Exception:
-            pass
+    try:
+        prices = _portfolio_live_prices(rows)
+    except Exception:
+        prices = {}
     out = []
     for h in rows:
         q = prices.get(h["symbol"]) or {}

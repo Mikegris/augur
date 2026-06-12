@@ -40,6 +40,38 @@ _PDF_PARSE_TIMEOUT_S = 20
 # 2 parses run at once; the rest queue inside their daemon workers.
 _PDF_PARSE_GATE = threading.BoundedSemaphore(2)
 
+# Circuit breaker state. Two trip conditions, because genuine hangs hold
+# gate permits forever and therefore CAP at the gate's capacity (2) — a
+# higher hung-threshold could never be reached:
+#   • hung >= gate capacity  → both permits leaked, the gate is starved
+#   • a streak of gate-busy acquire timeouts → starvation detected even if
+#     the hung accounting missed it. Streak resets on any successful parse.
+_MAX_HUNG_PARSES = 2   # == BoundedSemaphore capacity above
+_BUSY_TRIP = 5
+_hung_lock = threading.Lock()
+_breaker = {"hung": 0, "busy_streak": 0}
+
+
+def _note_hung_parse():
+    with _hung_lock:
+        _breaker["hung"] += 1
+
+
+def _note_gate_busy():
+    with _hung_lock:
+        _breaker["busy_streak"] += 1
+
+
+def _note_parse_ok():
+    with _hung_lock:
+        _breaker["busy_streak"] = 0
+
+
+def _parse_circuit_open():
+    with _hung_lock:
+        return (_breaker["hung"] >= _MAX_HUNG_PARSES
+                or _breaker["busy_streak"] >= _BUSY_TRIP)
+
 # Negative-result TTL: timeouts, parse failures, 404s and legitimately
 # trade-less PTRs were never cached, so every sweep re-downloaded and
 # re-ground the same documents (observed: one doc_id parsed 3× in 2s by
@@ -435,14 +467,41 @@ def get_recent_trades(days=90, max_pdfs=100, tickers=None):
         # thread that hangs simply dies with the process.
         import threading
 
+        # Circuit breaker: every parse whose join() times out leaves one
+        # permanently-hung daemon thread behind. A handful is survivable;
+        # dozens exhaust the process's OS thread budget and Werkzeug can no
+        # longer spawn request handlers ("can't start new thread" → dead
+        # server, observed live). Past the limit, stop attempting parses
+        # entirely — neg-cache and move on; the breaker resets on restart.
+        if _parse_circuit_open():
+            log.warning("congress: parse circuit open (hung=%d busy_streak=%d); skipping %s",
+                        _breaker["hung"], _breaker["busy_streak"], doc_id)
+            _neg_cache()
+            return []
+
         parse_out = {}
 
         def _parse_worker():
+            # Acquire the gate WITH a timeout. A blocking `with _PDF_PARSE_GATE:`
+            # made every queued worker wait forever behind a hung parse — the
+            # thread-pileup that caused the exhaustion above.
+            acquired = False
             try:
-                with _PDF_PARSE_GATE:  # cap concurrent CPU-bound parses
-                    parse_out["trades"] = _parse_ptr_pdf(resp.content, member, doc_id, year)
+                acquired = _PDF_PARSE_GATE.acquire(timeout=_PDF_PARSE_TIMEOUT_S)
+                if not acquired:
+                    parse_out["gate_busy"] = True
+                    parse_out["err"] = TimeoutError("parse gate busy")
+                    return
+                parse_out["trades"] = _parse_ptr_pdf(resp.content, member, doc_id, year)
+                _note_parse_ok()
             except Exception as ex:  # surfaced after join below
                 parse_out["err"] = ex
+            finally:
+                if acquired:
+                    try:
+                        _PDF_PARSE_GATE.release()
+                    except ValueError:
+                        pass
 
         try:
             t = threading.Thread(target=_parse_worker, daemon=True,
@@ -466,13 +525,18 @@ def get_recent_trades(days=90, max_pdfs=100, tickers=None):
                     pass
             return trades
 
-        t.join(_PDF_PARSE_TIMEOUT_S)
+        # Worst case inside the worker: gate wait (≤timeout) + parse. Give the
+        # join both phases before declaring the thread hung.
+        t.join(_PDF_PARSE_TIMEOUT_S * 2)
         if t.is_alive():
             log.warning("PTR parse timeout for %s — abandoning", doc_id)
+            _note_hung_parse()
             _neg_cache()
             return []
         if "err" in parse_out:
             log.warning("congress: parse failed for %s: %s", doc_id, parse_out["err"])
+            if parse_out.get("gate_busy"):
+                _note_gate_busy()  # starvation evidence — feeds the breaker
             _neg_cache()
             return []
         trades = parse_out.get("trades", [])

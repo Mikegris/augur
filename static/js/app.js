@@ -192,7 +192,8 @@ const MacroBar = {
     // macro data), with a 300s floor for legacy behaviour.
     const sec = parseInt((State.settings && State.settings.refresh_interval) || 60, 10);
     const ms = Math.max(sec * 5 * 1000, 60000);
-    this._timer = setInterval(() => this.refresh(), ms);
+    // Skip while the tab is hidden — a backgrounded tab does zero network.
+    this._timer = setInterval(() => { if (!document.hidden) this.refresh(); }, ms);
   },
   restart() { this._startTimer(); },
   _latestPerSecurity(rates) {
@@ -508,28 +509,41 @@ function navigate(view) {
 
 // ── Clock & Market Status ─────────────────────────────────────────────────────
 function startClock() {
+  // Cache the DOM refs once — this ticks every second, and the market
+  // status only flips a handful of times a day, so skip the className /
+  // textContent writes (each one invalidates style) unless it changed.
+  const clockEl = document.getElementById('clock');
+  const dot = document.querySelector('.status-dot');
+  const label = document.querySelector('.status-label');
+  let lastStatus = null;
   function tick() {
+    // Hidden tab: skip the Intl formatting + DOM writes entirely. The
+    // next visible tick (≤1s after refocus) repaints the clock.
+    if (document.hidden) return;
     const now = new Date();
-    document.getElementById('clock').textContent =
+    if (clockEl) clockEl.textContent =
       now.toLocaleTimeString('en-US', { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' });
 
     // Market status (simplified EST)
     const est = new Date(now.toLocaleString('en-US', { timeZone: 'America/New_York' }));
     const h = est.getHours(), m = est.getMinutes(), day = est.getDay();
     const mins = h * 60 + m;
-    const dot = document.querySelector('.status-dot');
-    const label = document.querySelector('.status-label');
     if (dot && label) {
+      let cls, text;
       if (day === 0 || day === 6) {
-        dot.className = 'status-dot closed'; label.textContent = 'CLOSED';
+        cls = 'status-dot closed'; text = 'CLOSED';
       } else if (mins >= 570 && mins < 960) { // 9:30 - 16:00
-        dot.className = 'status-dot open'; label.textContent = 'MARKET OPEN';
+        cls = 'status-dot open'; text = 'MARKET OPEN';
       } else if (mins >= 240 && mins < 570) { // 4:00 - 9:30
-        dot.className = 'status-dot pre'; label.textContent = 'PRE-MARKET';
+        cls = 'status-dot pre'; text = 'PRE-MARKET';
       } else if (mins >= 960 && mins < 1200) { // 16:00 - 20:00
-        dot.className = 'status-dot pre'; label.textContent = 'AFTER-HRS';
+        cls = 'status-dot pre'; text = 'AFTER-HRS';
       } else {
-        dot.className = 'status-dot closed'; label.textContent = 'CLOSED';
+        cls = 'status-dot closed'; text = 'CLOSED';
+      }
+      if (text !== lastStatus) {
+        dot.className = cls; label.textContent = text;
+        lastStatus = text;
       }
     }
   }
@@ -1432,13 +1446,21 @@ async function loadResearchDefault() {
 
 let _researchGen = 0;
 async function loadResearchFor(symbol) {
+  // Whitelist-sanitize at the entry: `symbol` flows into dozens of innerHTML
+  // positions, element ids and single-quoted onclick handlers below. Sources
+  // include the command bar's raw text and LLM-derived Jarvis action symbols,
+  // so strip anything that isn't a real ticker character (^ for indices,
+  // = for futures, . - for share classes). One choke point beats escaping
+  // every interpolation individually — and keeps ids/lookups consistent.
+  symbol = String(symbol || '').replace(/[^A-Za-z0-9.\-^=]/g, '').toUpperCase().slice(0, 12);
+  if (!symbol) { Toast.warn('Invalid symbol'); return; }
   const view = document.getElementById('view-research');
   // Generation token: if the user clicks a second symbol before the first
   // request lands, the older (slower) response must NOT overwrite the newer
   // view. Each call gets a monotonically-increasing gen; the await-then-write
   // points below bail when their gen no longer matches the latest.
   const gen = ++_researchGen;
-  view.innerHTML = `<div class="loading"><div class="spinner"></div> FETCHING ${symbol}...</div>`;
+  view.innerHTML = `<div class="loading"><div class="spinner"></div> FETCHING ${_esc(symbol)}...</div>`;
 
   // Keep the Jarvis strip in sync when the symbol changes within the view
   State.researchSymbol = symbol;
@@ -1974,9 +1996,12 @@ async function loadCrypto() {
 }
 
 async function openCryptoResearch(coinId, symbol) {
+  // Same entry sanitization as loadResearchFor — symbol reaches innerHTML.
+  symbol = String(symbol || '').replace(/[^A-Za-z0-9.\-]/g, '').toUpperCase().slice(0, 12);
+  coinId = String(coinId || '').replace(/[^a-z0-9\-]/g, '');
   navigate('research');
   const view = document.getElementById('view-research');
-  view.innerHTML = `<div class="loading"><div class="spinner"></div> FETCHING ${symbol}...</div>`;
+  view.innerHTML = `<div class="loading"><div class="spinner"></div> FETCHING ${_esc(symbol)}...</div>`;
 
   try {
     const [coin, chartData] = await Promise.all([
@@ -2739,11 +2764,22 @@ function _startAlertPollTimer() {
   if (_alertPollTimer) clearInterval(_alertPollTimer);
   const sec = parseInt((State.settings && State.settings.refresh_interval) || 60, 10);
   const ms = Math.max(sec * 1000, 15000); // never poll faster than 15s
-  _alertPollTimer = setInterval(_pollTriggeredAlerts, ms);
+  // Skip while the tab is hidden; the visibilitychange handler below
+  // catches up the moment the user comes back.
+  _alertPollTimer = setInterval(() => { if (!document.hidden) _pollTriggeredAlerts(); }, ms);
 }
 _startAlertPollTimer();
 // Run once on load so the user sees pending alerts immediately
 setTimeout(_pollTriggeredAlerts, 2000);
+
+// Page Visibility catch-up: the hidden-tab guards above skip refreshes,
+// so when the tab becomes visible again refresh ticker + alert badge
+// immediately instead of leaving them stale until the next interval.
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) return;
+  try { loadTicker(); } catch(e) {}
+  try { _pollTriggeredAlerts(); } catch(e) {}
+});
 
 // Restart all user-configurable timers so a settings change takes
 // effect immediately (no page reload needed).
@@ -3561,7 +3597,7 @@ async function loadSettings() {
           <div class="panel-body">
             <div class="fund-grid">
               ${[
-                ['SYSTEM', 'AUGUR v1.4.0'],
+                ['SYSTEM', 'AUGUR v1.5.0'],
                 ['DATA SOURCE', 'YAHOO FINANCE + COINGECKO'],
                 ['DATABASE', 'SQLITE3 (LOCAL)'],
                 ['BACKEND', 'PYTHON / FLASK'],
@@ -3817,6 +3853,10 @@ function startAutoRefresh() {
   const nodeEl = document.getElementById('status-node-live');
   if (nodeEl) nodeEl.title = 'Auto-refresh every ' + intervalSec + 's';
   State.refreshInterval = setInterval(() => {
+    // Page Visibility: a backgrounded tab does zero network. The
+    // visibilitychange handler refreshes the ticker on return, and the
+    // next visible tick picks the active view back up.
+    if (document.hidden) return;
     try { loadTicker(); } catch(e) {}
     try { loadSidebarWatchlist(); } catch(e) {}
     const loader = VIEW_LOADERS[State.activeView];
@@ -4557,6 +4597,15 @@ async function renderEquityChart(equityData, history) {
     height: 320,
   });
 
+  // Register with ChartEngine immediately (before any await) so the
+  // destroyChart() above actually finds the previous instance next time.
+  // Previously this chart was stored in a dead local object, so every
+  // analytics reload leaked a live chart + its ResizeObserver.
+  const ro = new ResizeObserver(() => chart.applyOptions({ width: container.clientWidth }));
+  ro.observe(container);
+  chart._resizeObserver = ro; // destroyChart() disconnects this
+  ChartEngine.registerChart('equity-chart-container', chart);
+
   const portfolioSeries = chart.addAreaSeries({
     lineColor: '#00ff9f',
     topColor: '#00ff9f33',
@@ -4601,13 +4650,6 @@ async function renderEquityChart(equityData, history) {
       benchSeries.setData(normalizedBench);
     }
   } catch(e) {}
-
-  const ro = new ResizeObserver(() => chart.applyOptions({ width: container.clientWidth }));
-  ro.observe(container);
-
-  // Store chart instance for cleanup
-  const instances = {};
-  instances['equity-chart-container'] = chart;
 }
 
 function round4(v) { return Math.round(v * 10000) / 10000; }

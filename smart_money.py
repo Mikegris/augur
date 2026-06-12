@@ -14,13 +14,16 @@ Components:
   Total                  0-100
 """
 
+import copy
 import logging
+import threading
 import time
 from datetime import datetime, timedelta, timezone
 
 import yfinance as yf
 
 import fetcher
+import safe_executor
 
 try:
     from zoneinfo import ZoneInfo
@@ -41,6 +44,35 @@ def _today_et() -> datetime:
     return datetime.today()
 
 log = logging.getLogger(__name__)
+
+
+# ── compute_score result memo ─────────────────────────────────────────────────
+# synth_cluster, synth_divmap (which evaluates TWO smart-money pairs per
+# symbol), opportunity_scanner, synthetic_insider and jarvis_tools all call
+# compute_score for overlapping symbols inside the same warmer cycle.  Every
+# input the score is built from is already cached upstream for >= 30 minutes
+# (ml_forecast 1h, EDGAR via cache_store, chart data 12h, narrative 30min), so
+# a short memo here collapses pure duplicate work without changing freshness.
+# In-flight coalescing means concurrent scans share ONE computation per symbol
+# instead of hammering Yahoo with identical .info/.option_chain calls.
+_SCORE_TTL_S = 600.0       # positive results
+_SCORE_ERR_TTL_S = 120.0   # "No price data" results — retry sooner
+_score_cache = {}          # symbol -> (timestamp, result dict)
+_score_lock = threading.Lock()
+_score_inflight = {}       # symbol -> threading.Event
+
+
+def _score_cache_get(symbol):
+    """Return a defensive copy of a fresh cached result, else None."""
+    with _score_lock:
+        hit = _score_cache.get(symbol)
+        if hit is None:
+            return None
+        ts, res = hit
+        ttl = _SCORE_TTL_S if res.get("score") is not None else _SCORE_ERR_TTL_S
+        if (time.time() - ts) >= ttl:
+            return None
+        return copy.deepcopy(res)
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
@@ -488,8 +520,51 @@ def compute_score(symbol):
     """
     Compute the Smart Money Convergence Score for a symbol.
     Returns a dict with total score and component breakdown.
+
+    Memoized for _SCORE_TTL_S with in-flight coalescing: concurrent callers
+    (cluster scan, divergence map, opportunity scanner, synthetic insider)
+    asking for the same symbol share one computation instead of each paying
+    the full upstream fan-out. Returns are deep copies so a caller mutating
+    its result can't pollute the cache.
     """
     symbol = symbol.upper()
+
+    cached = _score_cache_get(symbol)
+    if cached is not None:
+        return cached
+
+    # Coalesce concurrent computations of the same symbol.
+    with _score_lock:
+        ev = _score_inflight.get(symbol)
+        owner = ev is None
+        if owner:
+            ev = threading.Event()
+            _score_inflight[symbol] = ev
+
+    if not owner:
+        # Another thread is computing this symbol right now — wait for it
+        # (bounded so a hung upstream can't wedge us), then re-check the
+        # cache. On a miss we fall through and compute directly.
+        ev.wait(timeout=45.0)
+        cached = _score_cache_get(symbol)
+        if cached is not None:
+            return cached
+
+    try:
+        result = _compute_score_uncached(symbol)
+    finally:
+        if owner:
+            with _score_lock:
+                _score_inflight.pop(symbol, None)
+            ev.set()
+
+    with _score_lock:
+        _score_cache[symbol] = (time.time(), copy.deepcopy(result))
+    return result
+
+
+def _compute_score_uncached(symbol):
+    """Do the actual upstream fan-out + scoring for compute_score()."""
     start = time.time()
 
     # Route price + history through `fetcher` so we benefit from the v0.1.6
@@ -500,24 +575,41 @@ def compute_score(symbol):
     # ticker.option_chain() — options data has its own separate fallback story
     # handled inside `_score_options`.
     ticker = yf.Ticker(symbol)
-    try:
-        info = ticker.info or {}
-    except Exception:
-        info = {}
 
     import pandas as pd
-    hist = pd.DataFrame()
-    current_price = None
 
+    def _fetch_info():
+        try:
+            return ticker.info or {}
+        except Exception:
+            return {}
+
+    def _fetch_hist():
+        try:
+            bars = fetcher.get_chart_data(symbol, "1y", "1d")
+        except Exception:
+            return pd.DataFrame()
+        if not bars:
+            return pd.DataFrame()
+        h = pd.DataFrame(bars)
+        h.index = pd.to_datetime([b["time"] for b in bars], unit="s")
+        return h.rename(columns={
+            "open": "Open", "high": "High", "low": "Low",
+            "close": "Close", "volume": "Volume",
+        })
+
+    # `.info` is an uncached Yahoo HTTP round-trip every call; fetch it and
+    # the price history concurrently instead of back-to-back.
+    fetched = safe_executor.parallel_map(
+        lambda fn: fn(), [_fetch_info, _fetch_hist], max_workers=2,
+        thread_name_prefix="sm-fetch",
+    )
+    info = fetched[0] if fetched[0] is not None else {}
+    hist = fetched[1] if fetched[1] is not None else pd.DataFrame()
+
+    current_price = None
     try:
-        bars = fetcher.get_chart_data(symbol, "1y", "1d")
-        if bars:
-            hist = pd.DataFrame(bars)
-            hist.index = pd.to_datetime([b["time"] for b in bars], unit="s")
-            hist = hist.rename(columns={
-                "open": "Open", "high": "High", "low": "Low",
-                "close": "Close", "volume": "Volume",
-            })
+        if not hist.empty:
             current_price = float(hist["Close"].iloc[-1])
     except Exception:
         pass
@@ -546,14 +638,32 @@ def compute_score(symbol):
             "score": None,
         }
 
-    # Compute each component — pass shared ticker/info/hist where possible
-    insider_score, insider_txns = _score_insiders(symbol)
+    # Compute each component — pass shared ticker/info/hist where possible.
+    # The four network-bound scorers (EDGAR Form 4, options chain, SEC filing
+    # sentiment, ML forecast) are independent of each other; run them on
+    # safe_executor's daemon threads so the wall clock is the slowest one,
+    # not their sum. A None slot (work fn raised) falls back to the same
+    # neutral default the scorer itself returns on failure.
+    component_fns = [
+        lambda: _score_insiders(symbol),
+        lambda: _score_options(ticker, current_price, hist),
+        lambda: _score_sec_sentiment(symbol),
+        lambda: _score_ml_forecast(symbol),
+    ]
+    part = safe_executor.parallel_map(
+        lambda fn: fn(), component_fns, max_workers=4,
+        thread_name_prefix="sm-parts",
+    )
+    insider_score, insider_txns = part[0] if part[0] is not None else (12, [])
+    options_score = part[1] if part[1] is not None else 8
+    sec_score = part[2] if part[2] is not None else 5
+    ml_score, ml_detail = part[3] if part[3] is not None else (
+        10, {"signal": "N/A", "detail": "ML unavailable"})
+
+    # CPU-only scorers over already-fetched data — no benefit from threads.
     institutional_score = _score_institutional(info)
     earnings_score = _score_earnings_quality(info, symbol)
-    options_score = _score_options(ticker, current_price, hist)
     momentum_score = _score_momentum(hist)
-    sec_score = _score_sec_sentiment(symbol)
-    ml_score, ml_detail = _score_ml_forecast(symbol)
 
     # Scale legacy components to new maxes (20+15+15+10+10+10+20=100)
     insider_scaled = round(insider_score * 20 / 25)

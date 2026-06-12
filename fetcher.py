@@ -519,13 +519,34 @@ def get_quote(symbol: str) -> dict:
 
 def get_quotes_batch(symbols: list) -> dict:
     results = {}
+    # Cross-route reuse: /api/portfolio, the Jarvis briefing and analytics
+    # all batch-resolve overlapping symbol sets within seconds of each other,
+    # and the old code refetched every symbol every time (the batch path
+    # neither read nor wrote the per-symbol quote cache for equities). Serve
+    # anything with a fresh per-symbol entry — written by get_quote (full
+    # shape, a superset of the batch shape) or by a previous batch under
+    # ("quote_batch", …) — and only hit the network for the misses.
+    # get_quote() itself deliberately does NOT read "quote_batch" entries:
+    # they lack volume/currency/exchange/52w fields that /api/quote callers
+    # rely on, so the slim shape never leaks into the full-quote path.
+    to_fetch = []
+    for sym in symbols:
+        su = sym.upper()
+        cached = _cached(("quote", su), ttl=30)
+        if cached is None:
+            cached = _cached(("quote_batch", su), ttl=30)
+        if cached is not None and cached.get("price") is not None:
+            results[su] = cached
+        else:
+            to_fetch.append(sym)
+
     # yfinance's fast_info is lazy and per-ticker — iterating it serially fires
     # one network round-trip per symbol (≈16s for the 36-name movers list, ≈8s
     # for indices), which stalled the Markets/movers/alerts/watchlist panels.
     # Resolve symbols concurrently. This one function feeds movers, indices,
     # portfolio, alerts and watchlist, so the speedup is broad.
     try:
-        tickers = yf.Tickers(" ".join(symbols))
+        tickers = yf.Tickers(" ".join(to_fetch)) if to_fetch else None
 
         def _resolve(sym):
             try:
@@ -563,16 +584,23 @@ def get_quotes_batch(symbols: list) -> dict:
 
         import safe_executor
         resolved = safe_executor.parallel_map(
-            _resolve, symbols,
-            max_workers=min(12, max(1, len(symbols))),
+            _resolve, to_fetch,
+            max_workers=min(12, max(1, len(to_fetch))),
             thread_name_prefix="quotes-batch",
-        )
-        for sym, q in zip(symbols, resolved):
-            results[sym.upper()] = q if q is not None else {
-                "symbol": sym.upper(), "error": "fetch failed"}
+        ) if to_fetch else []
+        for sym, q in zip(to_fetch, resolved):
+            if q is None:
+                q = {"symbol": sym.upper(), "error": "fetch failed"}
+            results[sym.upper()] = q
+            # Make this batch's work reusable by the next overlapping batch
+            # (30s, matching get_quote's equity TTL; memory-only — below
+            # cache_store's persistence threshold). Stored under a separate
+            # key so it can never shadow a full get_quote() entry.
+            if "error" not in q and q.get("price") is not None:
+                _set_cache(("quote_batch", sym.upper()), q, ttl=30)
     except Exception as e:
-        # Fallback: individual fetches
-        for sym in symbols:
+        # Fallback: individual fetches (cache misses only)
+        for sym in to_fetch:
             results[sym.upper()] = get_quote(sym)
 
     # CoinGecko sweep — collect every crypto in the batch (failed OR
@@ -981,7 +1009,16 @@ def get_top_movers() -> dict:
     NOTE: This is NOT a market-wide screen. We fetch quotes for a fixed list
     of liquid large-cap names and re-sort by intraday change_pct within that
     set. Anything outside the curated universe will never appear here.
+
+    Coalesce-cached 90s to match the warmer's movers cadence: the warmer
+    refreshes the entry right as it expires, so route hits in between are
+    pure cache reads instead of a 36-symbol re-batch (~1.4s observed).
+    An all-empty result is failure-shaped and never cached.
     """
+    return cache_store.coalesce(("top_movers",), 90, _top_movers_uncached)
+
+
+def _top_movers_uncached() -> dict:
     large_caps = [
         "AAPL", "MSFT", "NVDA", "AMZN", "GOOGL", "META", "TSLA", "BRK-B",
         "JPM", "V", "MA", "UNH", "XOM", "JNJ", "PG", "HD", "LLY", "AVGO",
@@ -1274,25 +1311,52 @@ def get_crypto_extras(coin_id: str) -> dict:
 
 # ─── Options Chain ────────────────────────────────────────────────────────────
 
+# Options-data TTLs. Expiry *dates* only change when an expiry rolls off the
+# calendar (weekly at most), chains move intraday but every consumer of these
+# (iv_density, cluster, divmap, sectorflow, peerdiv, the options view) is
+# doing structural analysis, not execution — 10 minutes of staleness is fine
+# and collapses the N-modules × same-symbol fan-out into one upstream call.
+_OPTIONS_DATES_TTL = 6 * 3600
+_OPTION_CHAIN_TTL = 600
+
+
 def get_options_dates(symbol: str) -> list:
     """Return list of expiry date strings for a symbol."""
-    try:
-        t = yf.Ticker(symbol)
-        return list(t.options)
-    except Exception:
-        return []
+    ck = ("options_dates", symbol.upper())
+
+    def _fetch():
+        try:
+            t = yf.Ticker(symbol)
+            return list(t.options)
+        except Exception:
+            return []
+
+    # coalesce: in-flight dedup for the synth modules that fan out over the
+    # same symbols in parallel. Empty lists are failure-shaped and never
+    # cached, so a transient outage doesn't pin "no options" for 6 hours.
+    return cache_store.coalesce(ck, _OPTIONS_DATES_TTL, _fetch)
 
 
 def get_option_chain(symbol: str, date: str = None) -> dict:
     """Return calls and puts as list of dicts. Handles missing greeks gracefully."""
+    if not date:
+        # Resolve "nearest expiry" through the cached dates list so the
+        # implicit-date and explicit-date callers (divmap vs cluster) share
+        # one cache entry — and so we don't burn a `t.options` HTTP call per
+        # chain fetch (the old code read t.options twice on this path).
+        dates = get_options_dates(symbol)
+        if not dates:
+            return {"calls": [], "puts": [], "error": "No options available"}
+        date = dates[0]
+    ck = ("option_chain", symbol.upper(), date)
+    return cache_store.coalesce(
+        ck, _OPTION_CHAIN_TTL, lambda: _option_chain_uncached(symbol, date))
+
+
+def _option_chain_uncached(symbol: str, date: str) -> dict:
     try:
         t = yf.Ticker(symbol)
-        if date:
-            chain = t.option_chain(date)
-        else:
-            if not t.options:
-                return {"calls": [], "puts": [], "error": "No options available"}
-            chain = t.option_chain(t.options[0])
+        chain = t.option_chain(date)
 
         def _df_to_list(df):
             # yfinance occasionally returns None for one side of the chain
@@ -1681,7 +1745,25 @@ def get_dividend_data(symbol: str) -> dict:
     """
     Returns dividend yield, rate, ex-date, payment history (last 8 quarters),
     and projected annual income per share.
+
+    Cached 12h: rates/ex-dates/history change at most quarterly, and this
+    function costs up to 6 upstream calls (info, fast_info, calendar ×2,
+    dividends ×2) — it's hit by the dividends view, idea_generator,
+    event-study, synth_catalyst and the scanner for overlapping symbols.
+    Error envelopes are returned but never cached (the 4+-key error shape
+    here isn't failure-shaped to cache_store, so we guard explicitly).
     """
+    ck = ("dividends", symbol.upper())
+    hit = _cached(ck, ttl=43200)
+    if hit is not None:
+        return hit
+    result = _dividend_data_uncached(symbol)
+    if isinstance(result, dict) and "error" not in result:
+        _set_cache(ck, result, ttl=43200)
+    return result
+
+
+def _dividend_data_uncached(symbol: str) -> dict:
     try:
         t = yf.Ticker(symbol)
         info = t.info or {}
@@ -2119,7 +2201,21 @@ def get_unusual_options_flow(symbol):
     - volume > open_interest * 2  AND  volume > 200
     - Flags large bullish/bearish bets
     - Returns top unusual contracts sorted by volume/OI ratio
+
+    Cached 15 min with in-flight coalescing: each scan costs up to 7 HTTP
+    calls (expirations + fast_info + 6 chains) and the same symbols get hit
+    by the opportunity scanner (×50/scan), smart-money, cluster, divmap and
+    synthetic-insider within the same warmer cycle. Error envelopes are
+    failure-shaped, so cache_store refuses to cache them — a rate-limited
+    response never freezes in place.
     """
+    sym = str(symbol).upper()
+    ck = ("options_flow", sym)
+    return cache_store.coalesce(
+        ck, 900, lambda: _unusual_options_flow_uncached(sym))
+
+
+def _unusual_options_flow_uncached(symbol):
     import math
     symbol = symbol.upper()
     ticker = yf.Ticker(symbol)

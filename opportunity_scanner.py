@@ -725,10 +725,14 @@ def scan_opportunities(profile=None, force_refresh=False):
     # workers can't block interpreter exit the way non-daemon TPE workers did.
     # _score_eq/_score_cr already swallow exceptions and return None, which
     # the composite filter below drops, matching parallel_map's None-on-raise.
+    # max_workers=6: each candidate's signals are fetched sequentially inside
+    # _score_equity, so in-flight upstream HTTP ≈ the worker count — 6 stays
+    # well under yfinance's tolerance while halving the ~50-symbol scan's
+    # wall clock vs the old 3.
     tasks = [(_score_eq, c) for c in equity_candidates] + \
             [(_score_cr, c) for c in crypto_candidates]
     scored = safe_executor.parallel_map(
-        lambda task: task[0](task[1]), tasks, max_workers=3,
+        lambda task: task[0](task[1]), tasks, max_workers=6,
         thread_name_prefix="opp-scan",
     )
     for result in scored:

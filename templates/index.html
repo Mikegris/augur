@@ -5,14 +5,18 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>AUGUR // WEALTH INTELLIGENCE SYSTEM</title>
   <link rel="stylesheet" href="/static/css/terminal.css?v=9">
+  <!-- All scripts use `defer`: it unblocks HTML parsing/first paint (these
+       three CDN scripts used to block the parser in <head>) while keeping
+       document execution order — vendor libs, then charts.js, app.js,
+       jarvis.js, then the feature modules — exactly as before. -->
   <!-- Chart.js -->
-  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+  <script defer src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
   <!-- Date adapter for Chart.js time scales (the catalysts scatter plots events
        on a time axis; without an adapter Chart.js throws "complete date adapter
        required" and the chart fails to render). -->
-  <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns@3.0.0/dist/chartjs-adapter-date-fns.bundle.min.js"></script>
+  <script defer src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns@3.0.0/dist/chartjs-adapter-date-fns.bundle.min.js"></script>
   <!-- TradingView Lightweight Charts -->
-  <script src="https://unpkg.com/lightweight-charts@4.1.3/dist/lightweight-charts.standalone.production.js"></script>
+  <script defer src="https://unpkg.com/lightweight-charts@4.1.3/dist/lightweight-charts.standalone.production.js"></script>
 </head>
 <body>
 
@@ -327,7 +331,7 @@
   <footer id="statusbar">
     <div class="status-item">
       <span class="status-key">SYS:</span>
-      <span class="status-val green">AUGUR v1.4.0</span>
+      <span class="status-val green">AUGUR v1.5.0</span>
     </div>
     <div class="status-item">
       <span class="status-key">DATA:</span>
@@ -668,35 +672,35 @@
 </div>
 
 <!-- Scripts -->
-<script src="/static/js/charts.js?v=2"></script>
-<script src="/static/js/app.js?v=12"></script>
-<script src="/static/js/jarvis.js?v=9"></script>
+<script defer src="/static/js/charts.js?v=3"></script>
+<script defer src="/static/js/app.js?v=14"></script>
+<script defer src="/static/js/jarvis.js?v=10"></script>
 
 <!-- v0.2.0 research modules — each registers window.render* globals. Loaded
      after app.js so they can read State / API / fmt helpers if needed. -->
-<script src="/static/js/research_backtest.js?v=1"></script>
-<script src="/static/js/research_eventstudy.js?v=1"></script>
-<script src="/static/js/research_factors.js?v=1"></script>
-<script src="/static/js/research_hypothesis.js?v=1"></script>
-<script src="/static/js/research_iv_density.js?v=1"></script>
-<script src="/static/js/research_montecarlo.js?v=1"></script>
-<script src="/static/js/research_multihorizon.js?v=1"></script>
-<script src="/static/js/research_optimizer.js?v=1"></script>
-<script src="/static/js/research_probforecast.js?v=1"></script>
-<script src="/static/js/research_tracker.js?v=1"></script>
+<script defer src="/static/js/research_backtest.js?v=1"></script>
+<script defer src="/static/js/research_eventstudy.js?v=1"></script>
+<script defer src="/static/js/research_factors.js?v=1"></script>
+<script defer src="/static/js/research_hypothesis.js?v=1"></script>
+<script defer src="/static/js/research_iv_density.js?v=1"></script>
+<script defer src="/static/js/research_montecarlo.js?v=1"></script>
+<script defer src="/static/js/research_multihorizon.js?v=1"></script>
+<script defer src="/static/js/research_optimizer.js?v=1"></script>
+<script defer src="/static/js/research_probforecast.js?v=1"></script>
+<script defer src="/static/js/research_tracker.js?v=1"></script>
 
 <!-- v0.3.0 synthesis modules — cross-source fusion / what-if / cluster scan.
      Each registers window.render*  (or loadSectorFlow) globals. -->
-<script src="/static/js/synth_bayessmart.js?v=1"></script>
-<script src="/static/js/synth_catalyst.js?v=1"></script>
-<script src="/static/js/synth_cluster.js?v=1"></script>
-<script src="/static/js/synth_consensus.js?v=1"></script>
-<script src="/static/js/synth_divmap.js?v=1"></script>
-<script src="/static/js/synth_groundhyp.js?v=1"></script>
-<script src="/static/js/synth_macrotranslate.js?v=1"></script>
-<script src="/static/js/synth_peerdiv.js?v=1"></script>
-<script src="/static/js/synth_sectorflow.js?v=1"></script>
-<script src="/static/js/synth_whatif.js?v=1"></script>
+<script defer src="/static/js/synth_bayessmart.js?v=1"></script>
+<script defer src="/static/js/synth_catalyst.js?v=1"></script>
+<script defer src="/static/js/synth_cluster.js?v=1"></script>
+<script defer src="/static/js/synth_consensus.js?v=1"></script>
+<script defer src="/static/js/synth_divmap.js?v=1"></script>
+<script defer src="/static/js/synth_groundhyp.js?v=1"></script>
+<script defer src="/static/js/synth_macrotranslate.js?v=1"></script>
+<script defer src="/static/js/synth_peerdiv.js?v=1"></script>
+<script defer src="/static/js/synth_sectorflow.js?v=1"></script>
+<script defer src="/static/js/synth_whatif.js?v=1"></script>
 
 <!-- Inline: pre-populate research quick buttons -->
 <script>

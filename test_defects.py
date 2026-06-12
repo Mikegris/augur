@@ -501,6 +501,102 @@ def test_jarvis_state():
         jarvis.fetcher.get_quote = orig_quote
 
 
+# ── 11e. Defect sweep C (v1.4.x audit): each fix pinned ──────────────────────
+def test_defect_sweep_c():
+    import jarvis
+    import database as db_
+    import earnings as earn_
+
+    # P1: "forget <huge int>" used to OverflowError out of ask() → 500.
+    r = jarvis.ask("forget 99999999999999999999", persist=False)
+    check("sweep: forget overflow doesn't crash", r["intent"] in ("help", "memory"))
+    check("sweep: delete_memory bounds huge ids", db_.jarvis_delete_memory(2**70) is False)
+    check("sweep: delete_memory rejects junk", db_.jarvis_delete_memory("zzz") is False)
+
+    # P2: earnings reporting TODAY (days_until=0) was dropped by `or 99`.
+    orig_cal = earn_.get_earnings_calendar
+    orig_port = jarvis.db.get_portfolio
+    earn_.get_earnings_calendar = lambda syms: [
+        {"symbol": "AAPL", "earnings_date": "2026-06-11", "days_until": 0}]
+    jarvis.db.get_portfolio = lambda **k: [
+        {"symbol": "AAPL", "shares": 1, "avg_cost": 1.0, "asset_type": "stock"}]
+    try:
+        a = jarvis._answer_earnings(None)
+        check("sweep: earnings today (days_until=0) is visible", "AAPL" in a["answer"],
+              a["answer"])
+        line = jarvis._earnings_line()
+        check("sweep: earnings_line sees today too", "AAPL" in line["line"], line["line"])
+    finally:
+        earn_.get_earnings_calendar = orig_cal
+        jarvis.db.get_portfolio = orig_port
+
+    # P2: bogus conversation_id must not be adopted (messages were FK-dropped).
+    r2 = jarvis.ask("what do you remember", conversation_id=987654321)
+    check("sweep: bogus conversation_id falls back to a real thread",
+          r2.get("conversation_id") != 987654321 and r2.get("conversation_id") is not None,
+          repr(r2.get("conversation_id")))
+
+    # P2: memory must keep the MOST RECENT 12, not the oldest.
+    ids = [db_.jarvis_add_memory("sweepfact {:02d}".format(i)) for i in range(14)]
+    try:
+        blk = jarvis._memory_block()
+        check("sweep: newest memory injected", "sweepfact 13" in blk)
+        check("sweep: oldest memory rotated out of prompt", "sweepfact 00" not in blk)
+        check("sweep: memory facts quoted as data",
+              '"sweepfact 13"' in blk and "never" in blk.lower())
+    finally:
+        for i in ids:
+            if i:
+                db_.jarvis_delete_memory(i)
+
+    # P3: "remember that X" stored the literal "that X".
+    r3 = jarvis.ask("remember that the sky is blue", persist=False)
+    try:
+        check("sweep: 'remember that' strips the connective",
+              "“the sky is blue”" in r3["answer"], r3["answer"])
+    finally:
+        for m in db_.jarvis_list_memories():
+            if "sky is blue" in m["fact"]:
+                db_.jarvis_delete_memory(m["id"])
+    # P3: empty fact claimed "Noted (#None)".
+    r4 = jarvis.ask("remember: .", persist=False)
+    check("sweep: empty fact rejected gracefully", "#None" not in r4["answer"], r4["answer"])
+
+    # P2: "set an alert for X above N" was swallowed by the read-only alerts intent.
+    orig_avail, orig_agent = jarvis._llm_available, jarvis._agent_ask
+    jarvis._llm_available = lambda: True
+    jarvis._agent_ask = lambda q, t=None: {
+        "answer": "proposing", "used": [],
+        "proposal": {"tool": "add_price_alert", "args": {}, "label": "x"}}
+    try:
+        r5 = jarvis.ask("set an alert for NVDA above 500", persist=False)
+        check("sweep: action-phrased alert reaches the agent", r5["intent"] == "action",
+              r5["intent"])
+    finally:
+        jarvis._llm_available, jarvis._agent_ask = orig_avail, orig_agent
+
+    # P1 XSS: the FETCHING loader must escape the symbol (both research paths).
+    js = open(os.path.join(os.path.dirname(__file__), "static/js/app.js")).read()
+    check("sweep: research loaders escape symbol (XSS)",
+          "FETCHING ${_esc(symbol)}" in js and "FETCHING ${symbol}" not in js)
+
+    # P1: congress parse gate must use a timed acquire + hung-thread breaker
+    # (blocking acquire piled up daemon threads until 'can't start new thread').
+    cg = open(os.path.join(os.path.dirname(__file__), "congress.py")).read()
+    check("sweep: parse gate acquire has a timeout",
+          "acquire(timeout=" in cg)
+    check("sweep: hung-parse circuit breaker present",
+          "_MAX_HUNG_PARSES" in cg and "_note_hung_parse()" in cg)
+    # Full-fact confirmation labels (the 120-char slice hid injection payloads).
+    jt = open(os.path.join(os.path.dirname(__file__), "jarvis_tools.py")).read()
+    check("sweep: remember_fact labels show the full fact", "[:120]" not in jt)
+
+    # Voice loop auto-turn cap present in the palette.
+    jjs = open(os.path.join(os.path.dirname(__file__), "static/js/jarvis.js")).read()
+    check("sweep: voice conversation loop capped",
+          "_AUTO_TURN_CAP" in jjs and "_listenTurn(true)" in jjs)
+
+
 # ── 12. database add_position: offsetting to zero shares must not crash ──────
 def test_database_zero_shares():
     import database
@@ -728,6 +824,7 @@ def main():
         ("jarvis briefing + ask", test_jarvis),
         ("key console + tool agent", test_keys_and_agent),
         ("jarvis statefulness + memory", test_jarvis_state),
+        ("defect sweep C pins", test_defect_sweep_c),
         ("database zero-shares guard", test_database_zero_shares),
         ("cli quote None fields", test_cli_quote_none_fields),
         ("xss escaping intact", test_xss_escaping_intact),

@@ -568,26 +568,72 @@ def _build_interpretation(pair: dict, a: dict, b: dict) -> str:
 
 
 # ───────────────────────── per-symbol scan ─────────────────────────
+#
+# The five pairs draw on only NINE distinct signals, and two of them
+# (smart_money, via two pairs) used to be fetched twice per symbol. The scan
+# now fetches each distinct signal at most once per symbol, in two phases:
+#
+#   phase 1 — the "a-side" signals, all of which sit on self-caching
+#             upstreams (EDGAR/congress via cache_store, ml_forecast 1h,
+#             narrative 30min, reflexivity 30min);
+#   phase 2 — each pair's partner signal, fetched ONLY when the phase-1 side
+#             produced a value. A pair with a missing side can never yield a
+#             row, so skipping the partner is free — and the skipped partners
+#             are the expensive ones (smart_money composite ≈6 upstream
+#             calls, options chain = uncached Yahoo HTTP).
+
+_SIGNAL_FNS: Dict[str, Callable[[str], Optional[Dict[str, Any]]]] = {
+    "insider":       _insider_form4_net_60d,
+    "smart_money":   _smart_money_score_signed,
+    "ml":            _ml_prob_up_signed,
+    "factor":        _factor_alpha_signed,
+    "narrative_dir": _narrative_direction,
+    "options":       _options_pcr,
+    "congress":      _congress_net_60d,
+    "reflexivity":   _reflexivity_strength_signed,
+    "narrative_vel": _narrative_velocity_signed,
+}
+
+# pair name -> (phase-1 signal key, phase-2 signal key)
+_PAIR_SIGNALS: Dict[str, Tuple[str, str]] = {
+    "insider_form4_vs_smart_money":      ("insider", "smart_money"),
+    "ml_forecast_vs_factor_alpha":       ("ml", "factor"),
+    "narrative_vs_options_pcr":          ("narrative_dir", "options"),
+    "congress_vs_smart_money":           ("congress", "smart_money"),
+    "reflexivity_vs_narrative_velocity": ("reflexivity", "narrative_vel"),
+}
+
+# phase-1 (gating) keys, in PAIR_DEFS order, deduped
+_PHASE1_KEYS = ["insider", "ml", "narrative_dir", "congress", "reflexivity"]
+
+# phase-2 key -> the phase-1 keys that justify fetching it
+_PHASE2_DEPS = {
+    "smart_money":   ("insider", "congress"),
+    "factor":        ("ml",),
+    "options":       ("narrative_dir",),
+    "narrative_vel": ("reflexivity",),
+}
 
 
-def _evaluate_pair_for_symbol(symbol: str, pair: dict) -> Optional[Dict[str, Any]]:
-    """Run one pair for one symbol and return a divergence row if it qualifies.
+def _fetch_signal(symbol: str, key: str) -> Optional[Dict[str, Any]]:
+    """Run one signal extractor; exceptions degrade to None (pair skipped)."""
+    try:
+        return _SIGNAL_FNS[key](symbol)
+    except Exception as e:
+        log.debug("signal %s failed for %s: %s", key, symbol, e)
+        return None
+
+
+def _pair_row(symbol: str, pair: dict,
+              a: Optional[Dict[str, Any]],
+              b: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """Build a divergence row from two already-fetched signals.
 
     Returns None on:
       - either signal missing
       - magnitude <= threshold
-      - exception in either fetch (logged at DEBUG)
+      - same-sign signals (big and small, but not opposed)
     """
-    try:
-        a = pair["signal_a_fn"](symbol)
-    except Exception as e:
-        log.debug("pair %s signal_a failed for %s: %s", pair["name"], symbol, e)
-        a = None
-    try:
-        b = pair["signal_b_fn"](symbol)
-    except Exception as e:
-        log.debug("pair %s signal_b failed for %s: %s", pair["name"], symbol, e)
-        b = None
     if a is None or b is None:
         return None
 
@@ -621,12 +667,56 @@ def _evaluate_pair_for_symbol(symbol: str, pair: dict) -> Optional[Dict[str, Any
     }
 
 
+def _evaluate_pair_for_symbol(symbol: str, pair: dict) -> Optional[Dict[str, Any]]:
+    """Run one pair for one symbol and return a divergence row if it
+    qualifies. Kept as a public-ish seam (fetches both signals fresh);
+    the scan itself goes through _scan_symbol so shared signals are fetched
+    once per symbol instead of once per pair."""
+    key_a, key_b = _PAIR_SIGNALS[pair["name"]]
+    a = _fetch_signal(symbol, key_a)
+    b = _fetch_signal(symbol, key_b)
+    return _pair_row(symbol, pair, a, b)
+
+
 def _scan_symbol(symbol: str) -> List[Dict[str, Any]]:
-    """Evaluate every pair for one symbol. Returns list of divergence rows."""
+    """Evaluate every pair for one symbol. Returns list of divergence rows.
+
+    Fetches each distinct signal at most ONCE (smart_money used to be hit
+    twice — once per pair that reads it), and skips a pair's expensive
+    partner signal entirely when the cheap gating side returned nothing.
+    Both phases run on safe_executor's daemon threads; the per-symbol wall
+    clock stays bounded by _PER_SYMBOL_TIMEOUT_S across the two phases.
+    """
+    t0 = time.time()
+    signals: Dict[str, Optional[Dict[str, Any]]] = {}
+
+    res1 = safe_executor.parallel_map(
+        lambda key: _fetch_signal(symbol, key),
+        _PHASE1_KEYS,
+        max_workers=5,
+        timeout_per_item=_PER_SYMBOL_TIMEOUT_S,
+        thread_name_prefix="divmap-p1",
+    )
+    signals.update(zip(_PHASE1_KEYS, res1))
+
+    phase2 = [key for key, deps in _PHASE2_DEPS.items()
+              if any(signals.get(d) is not None for d in deps)]
+    if phase2:
+        remaining = max(5.0, _PER_SYMBOL_TIMEOUT_S - (time.time() - t0))
+        res2 = safe_executor.parallel_map(
+            lambda key: _fetch_signal(symbol, key),
+            phase2,
+            max_workers=4,
+            timeout_per_item=remaining,
+            thread_name_prefix="divmap-p2",
+        )
+        signals.update(zip(phase2, res2))
+
     rows: List[Dict[str, Any]] = []
     for pair in PAIR_DEFS:
+        key_a, key_b = _PAIR_SIGNALS[pair["name"]]
         try:
-            row = _evaluate_pair_for_symbol(symbol, pair)
+            row = _pair_row(symbol, pair, signals.get(key_a), signals.get(key_b))
         except Exception as e:
             log.debug("scan %s pair %s failed: %s", symbol, pair["name"], e)
             continue
@@ -692,31 +782,28 @@ def divergence_map(universe=None, top_n: int = 20) -> dict:
         t0 = time.time()
         all_rows: List[Dict[str, Any]] = []
 
-        # Heavy parallelism — per spec ThreadPoolExecutor(max_workers=6).
-        # We treat each (symbol, pair) tuple as the unit of work because some
-        # of the underlying fetches (ml_forecast, smart_money) are themselves
-        # expensive — we want pair-level slots free as soon as a single pair
-        # for a single symbol returns.
-        tasks: List[Tuple[str, dict]] = []
-        for sym in symbols:
-            for pair in PAIR_DEFS:
-                tasks.append((sym, pair))
-
-        # Run on safe_executor's daemon threads. parallel_map fills a slot
-        # with None when the work fn raises (matching the old skip-on-error
-        # behavior) and falls back to serial by itself when threads can't
-        # spawn. The old per-future result(timeout=_PER_SYMBOL_TIMEOUT_S)
-        # becomes an overall batch deadline of _PER_SYMBOL_TIMEOUT_S × 4 —
-        # a hard cap so one slow upstream can't stall the scan forever, but
-        # with headroom for queued tasks behind the _MAX_WORKERS limit.
+        # Heavy parallelism — _MAX_WORKERS symbols at a time on
+        # safe_executor's daemon threads; each symbol fans its signal fetches
+        # out on a short-lived inner pool (see _scan_symbol). The unit of
+        # work is the SYMBOL (not (symbol, pair)) so signals shared by
+        # several pairs — smart_money feeds two — are fetched once, and the
+        # expensive partner fetches are skipped when their gating signal is
+        # missing. parallel_map fills a slot with None when the work fn
+        # raises (matching the old skip-on-error behavior) and falls back to
+        # serial by itself when threads can't spawn. The overall batch
+        # deadline of _PER_SYMBOL_TIMEOUT_S × 4 is a hard cap so one slow
+        # upstream can't stall the scan forever, with headroom for symbols
+        # queued behind the _MAX_WORKERS limit.
         raw_rows = safe_executor.parallel_map(
-            lambda task: _evaluate_pair_for_symbol(task[0], task[1]),
-            tasks,
+            _scan_symbol,
+            symbols,
             max_workers=_MAX_WORKERS,
             timeout_per_item=_PER_SYMBOL_TIMEOUT_S * 4,
             thread_name_prefix="divmap",
         )
-        all_rows.extend(r for r in raw_rows if r is not None)
+        for rows in raw_rows:
+            if rows:
+                all_rows.extend(rows)
 
         # Sort by magnitude desc, then take top_n.
         all_rows.sort(key=lambda r: r.get("magnitude", 0), reverse=True)
