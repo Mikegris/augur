@@ -2153,6 +2153,24 @@ body::before {
   padding: 6px 10px; margin: 2px 0 8px; line-height: 1.5;
 }
 .jarvis-digest-h { color: var(--cyan); font-weight: 600; letter-spacing: .08em; margin-right: 6px; font-size: 10px; }
+.jarvis-digest .btn { padding: 0 6px; font-size: 10px; vertical-align: baseline; }
+#jarvis-digest-items { margin-top: 6px; }
+#jarvis-digest-items .jv-obs { padding: 2px 0; font-size: var(--font-size-sm); }
+.jv-trail { color: var(--text-dim); font-size: var(--font-size-sm); opacity: .55; line-height: 1.6; }
+#jv-send.jv-stop { color: var(--red, #ff5370); border-color: var(--red, #ff5370); }
+.jap-health {
+  display: flex; flex-wrap: wrap; gap: 6px; align-items: center;
+  padding: 5px 10px; font-size: 10px; color: var(--text-secondary);
+  border-bottom: 1px solid var(--border);
+}
+.jap-health .jap-dot { color: var(--text-dim); }
+.jap-meter { display: inline-flex; align-items: center; gap: 5px; }
+.jap-meter-bar {
+  display: inline-block; width: 52px; height: 5px; border-radius: 3px;
+  background: var(--bg-secondary); border: 1px solid var(--border); overflow: hidden;
+}
+.jap-meter-bar > span { display: block; height: 100%; background: var(--cyan); }
+.jap-meter-bar > span.hot { background: var(--red, #ff5370); }
 .jarvis-cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(290px, 1fr)); gap: 8px; }
 .jarvis-card {
   background: var(--bg-secondary);

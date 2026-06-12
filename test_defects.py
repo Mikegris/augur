@@ -1164,8 +1164,155 @@ def test_jarvis_v2_live():
           src.count("API.post('/api/jarvis/ask'") >= 2)
     check("frontend: digest fetched once per page load", "_digestFetched" in src)
     html = open("templates/index.html").read()
-    check("assets: jarvis.js cache-busted to v17", "jarvis.js?v=17" in html)
-    check("assets: terminal.css cache-busted to v14", "terminal.css?v=14" in html)
+    check("assets: jarvis.js cache-busted", "jarvis.js?v=" in html)
+    check("assets: terminal.css cache-busted", "terminal.css?v=" in html)
+
+
+def test_jarvis_30x():
+    """v2.0 wave 2: the 30-enhancement sweep — intents, briefing cards,
+    tools, routes, frontend wiring."""
+    import jarvis
+    import jarvis_tools
+    import database as db_
+    import app
+
+    fakeq = {"AAPL": {"symbol": "AAPL", "price": 99.0, "change_pct": 1.0,
+                      "fifty_two_week_high": 100.0, "fifty_two_week_low": 50.0,
+                      "market_cap": 3.1e12, "volume": 52e6},
+             "NVDA": {"symbol": "NVDA", "price": 80.0, "change_pct": -2.0,
+                      "fifty_two_week_high": 100.0, "fifty_two_week_low": 60.0,
+                      "market_cap": 2.0e12, "volume": 30e6}}
+    orig_quote = jarvis.fetcher.get_quote
+    jarvis.fetcher.get_quote = lambda s: fakeq.get(
+        s.upper(), {"symbol": s, "price": None})
+    try:
+        # Intent routing — every new rule answers without an LLM.
+        for q, want in (("whats on my watchlist", "watchlist"),
+                        ("is AAPL near its high", "range"),
+                        ("what did i miss", "recap"),
+                        ("summarize my day", "summary"),
+                        ("how risky is my portfolio", "risk"),
+                        ("how much crypto do i have", "crypto_share"),
+                        ("what did i buy recently", "transactions"),
+                        ("am i beating the market", "benchmark"),
+                        ("NVDA vs AAPL", "compare")):
+            r = jarvis.ask(q, persist=False)
+            check("intent: %r -> %s" % (q, want), r.get("intent") == want,
+                  "%s: %s" % (r.get("intent"), str(r.get("answer"))[:60]))
+
+        # Company-name resolution + enriched quote.
+        check("symbol: 'apple' resolves to AAPL",
+              jarvis._extract_symbol("how is apple doing") == "AAPL")
+        check("symbol: $SYM still beats names",
+              jarvis._extract_symbol("$TSLA or apple") == "TSLA")
+        rq = jarvis._answer_quote("AAPL")
+        check("quote: enriched with cap + volume",
+              "$3.10T" in rq["answer"] and "52.0M shares" in rq["answer"],
+              rq["answer"])
+
+        # 52-week range answer phrasing.
+        rr = jarvis._answer_range("AAPL")
+        check("range: position + distance phrased",
+              "98% of its 52-week range" in rr["answer"]
+              and "1.0% below the high" in rr["answer"], rr["answer"])
+
+        # Compare answer names the better day.
+        rc = jarvis._answer_compare_quotes("AAPL", "NVDA")
+        check("compare: side-by-side with verdict",
+              "versus" in rc["answer"] and "AAPL has the better day" in rc["answer"],
+              rc["answer"])
+    finally:
+        jarvis.fetcher.get_quote = orig_quote
+
+    # Crypto share + benchmark + risk on a fake pulse.
+    orig_pulse, orig_regime = jarvis._portfolio_pulse, jarvis._market_regime
+    jarvis._portfolio_pulse = lambda: {
+        "total_value": 10000.0, "total_pnl": 500.0, "total_pnl_pct": 5.0,
+        "day_pnl": 100.0, "day_pnl_pct": 1.0, "num_positions": 2,
+        "holdings": [
+            {"symbol": "BTC", "asset_type": "crypto", "market_value": 4000.0,
+             "weight_pct": 40.0, "day_pnl": 60.0, "day_change_pct": 1.5,
+             "unrealized_pnl": 0, "unrealized_pct": 0},
+            {"symbol": "AAPL", "asset_type": "stock", "market_value": 6000.0,
+             "weight_pct": 60.0, "day_pnl": 40.0, "day_change_pct": 0.7,
+             "unrealized_pnl": 0, "unrealized_pct": 0}],
+        "best": None, "worst": None}
+    jarvis._market_regime = lambda: {"spx_pct": 0.4, "vix": 14.0, "regime": "CALM"}
+    try:
+        cs = jarvis._answer_crypto_share()
+        check("crypto share: 40% surfaced", "40.0%" in cs["answer"], cs["answer"])
+        bm = jarvis._answer_benchmark()
+        check("benchmark: ahead of the tape",
+              "ahead of" in bm["answer"] and "+1.00%" in bm["answer"], bm["answer"])
+        rk = jarvis._answer_risk()
+        check("risk: crypto flag at 40%", "crypto is 40%" in rk["answer"], rk["answer"])
+    finally:
+        jarvis._portfolio_pulse, jarvis._market_regime = orig_pulse, orig_regime
+
+    # Briefing cards: streak, watchlist mover, earnings-today P1.
+    orig_snaps = db_.get_snapshots
+    db_.get_snapshots = lambda: [
+        {"date": "d%d" % i, "total_value": v}
+        for i, v in enumerate([100, 99, 100, 102, 104])]
+    try:
+        sc = jarvis._streak_card()
+        check("streak: 3 rising sessions carded",
+              bool(sc) and "up 3 sessions" in sc[0]["title"], repr(sc)[:100])
+    finally:
+        db_.get_snapshots = orig_snaps
+
+    orig_wl, orig_batch = db_.get_watchlist, jarvis.fetcher.get_quotes_batch
+    db_.get_watchlist = lambda: [{"symbol": "PLTR"}, {"symbol": "SOFI"}]
+    jarvis.fetcher.get_quotes_batch = lambda syms: {
+        "PLTR": {"change_pct": 7.5}, "SOFI": {"change_pct": 0.5}}
+    try:
+        wc = jarvis._watchlist_mover_cards()
+        check("watch mover: 7.5% move carded, 0.5% not",
+              len(wc) == 1 and "PLTR" in wc[0]["title"], repr(wc)[:100])
+    finally:
+        db_.get_watchlist, jarvis.fetcher.get_quotes_batch = orig_wl, orig_batch
+
+    import earnings as earn_
+    orig_cal = earn_.get_earnings_calendar
+    earn_.get_earnings_calendar = lambda syms: [
+        {"symbol": "AAPL", "days_until": 0, "earnings_date": "2026-06-12"}]
+    try:
+        ec = jarvis._earnings_insights(["AAPL"])
+        check("earnings: TODAY escalates to P1", bool(ec) and ec[0]["priority"] == 1,
+              repr(ec)[:100])
+    finally:
+        earn_.get_earnings_calendar = orig_cal
+
+    # New tools registered + read-only + executable.
+    for tool in ("get_away_digest", "recent_transactions"):
+        check("tool: %s read-only" % tool,
+              tool in jarvis_tools.TOOLS and not jarvis_tools.is_mutating(tool))
+    out = jarvis_tools.execute_read("get_away_digest", {})
+    check("tool: get_away_digest executes", '"count"' in out, out[:80])
+
+    # Health + export routes.
+    c = app.app.test_client()
+    h = c.get("/api/jarvis/health")
+    hj = h.get_json()
+    check("health: route 200 with ai/warmer/cache sections",
+          h.status_code == 200 and "ai" in hj and "warmer" in hj and "cache" in hj)
+    e = c.get("/api/jarvis/conversation/export")
+    check("export: markdown attachment",
+          e.status_code == 200 and "markdown" in e.mimetype
+          and "attachment" in (e.headers.get("Content-Disposition") or ""))
+
+    # Frontend wiring greps.
+    src = open("static/js/jarvis.js").read()
+    check("frontend: recap + export palette commands",
+          "RECAP_CMD" in src and "EXPORT_CMD" in src)
+    check("frontend: stop button aborts the stream",
+          "jv-stop" in src and "abort.signal" in src)
+    check("frontend: status trail kept", "jv-trail" in src)
+    check("frontend: health meter in orb panel",
+          "jap-health" in src and "_refreshHealth" in src)
+    html = open("templates/index.html").read()
+    check("assets: jarvis.js v18 + css v15",
+          "jarvis.js?v=18" in html and "terminal.css?v=15" in html)
 
 
 def test_database_zero_shares():
@@ -1405,6 +1552,7 @@ def main():
         ("defect sweep E pins", test_defect_sweep_e),
         ("jarvis open-world research", test_jarvis_research),
         ("jarvis v2.0 live features", test_jarvis_v2_live),
+        ("jarvis 30-enhancement sweep", test_jarvis_30x),
         ("jarvis lens + premium TTS", test_jarvis_lens),
         ("database zero-shares guard", test_database_zero_shares),
         ("cli quote None fields", test_cli_quote_none_fields),

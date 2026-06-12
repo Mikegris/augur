@@ -3197,6 +3197,37 @@ def jarvis_digest_route():
         return jsonify({"error": str(e)}), 500
 
 
+@app.route("/api/jarvis/health", methods=["GET"])
+def jarvis_health_route():
+    """Jarvis self-diagnostics: LLM key/budget, warmer liveness, cache size."""
+    try:
+        import jarvis
+        return jsonify(jarvis.health_snapshot())
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/jarvis/conversation/export", methods=["GET"])
+def jarvis_conversation_export_route():
+    """Download the active conversation as a Markdown transcript."""
+    try:
+        conv_id = db.jarvis_active_conversation()
+        msgs = db.jarvis_get_messages(conv_id, limit=200)
+        lines = ["# JARVIS conversation #{}".format(conv_id), ""]
+        for m in msgs:
+            who = "**You**" if m.get("role") == "user" else "**JARVIS**"
+            ts = (m.get("created_at") or "")[:16]
+            lines.append("{} ({}):".format(who, ts))
+            lines.append((m.get("content") or "").strip())
+            lines.append("")
+        resp = Response("\n".join(lines), mimetype="text/markdown")
+        resp.headers["Content-Disposition"] = \
+            "attachment; filename=jarvis-conversation-{}.md".format(conv_id)
+        return resp
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
 @app.route("/api/jarvis/activity", methods=["GET"])
 def jarvis_activity_route():
     """In-memory snapshot of background machinery for the activity panel."""

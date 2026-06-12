@@ -95,6 +95,29 @@ def _t_portfolio_attribution(args):
         "note": "no priced positions with day-change data right now"}
 
 
+def _t_away_digest(args):
+    import jarvis
+    d = jarvis.away_digest(mark_seen=False)
+    return {"since": d.get("since"), "away_minutes": d.get("away_minutes"),
+            "count": d.get("count"),
+            "insights": [{"title": r.get("title"), "kind": r.get("kind"),
+                          "detail": (r.get("detail") or "")[:150]}
+                         for r in (d.get("insights") or [])[:8]]}
+
+
+def _t_recent_transactions(args):
+    import database as db
+    n = _num_arg(args.get("limit"))
+    n = int(max(1, min(n, 25))) if n else 10
+    txns = db.get_transactions(limit=n)
+    if not txns:
+        return {"note": "no transactions on record"}
+    return {"transactions": [
+        {"date": t.get("date"), "symbol": t.get("symbol"),
+         "action": t.get("action"), "shares": t.get("shares"),
+         "price": t.get("price"), "total": t.get("total")} for t in txns]}
+
+
 def _t_market_regime(args):
     import jarvis
     return jarvis._market_regime() or {"note": "market data unavailable"}
@@ -592,6 +615,16 @@ TOOLS: Dict[str, Dict[str, Any]] = {
         "fn": _t_get_portfolio, "mutating": False,
         "description": "Use FIRST for any question about what the user owns, P&L, or weights: total value, day move, top 10 positions with weight and day change.",
         "parameters": _p({}),
+    },
+    "get_away_digest": {
+        "fn": _t_away_digest, "mutating": False,
+        "description": "Use for 'what did I miss' / 'what happened while I was away': the insight history since the user's last visit — triggered alerts, big holding moves, regime changes, 52-week extremes.",
+        "parameters": _p({}),
+    },
+    "recent_transactions": {
+        "fn": _t_recent_transactions, "mutating": False,
+        "description": "Use for 'what did I buy/sell recently' or any question about the user's own trading behavior: most recent fills with date, action, shares, and price.",
+        "parameters": _p({"limit": {"type": "integer", "description": "How many fills (default 10, max 25)"}}),
     },
     "get_market_regime": {
         "fn": _t_market_regime, "mutating": False,

@@ -140,6 +140,20 @@ def _fmt_pct(v: Optional[float]) -> str:
     return "{}{:.2f}%".format("+" if v >= 0 else "", v)
 
 
+def _fmt_cap(v: Optional[float]) -> Optional[str]:
+    """$1.23T / $456B / $789M — None when unknown/zero."""
+    v = _finite(v)
+    if not v or v <= 0:
+        return None
+    if v >= 1e12:
+        return "${:.2f}T".format(v / 1e12)
+    if v >= 1e9:
+        return "${:.0f}B".format(v / 1e9)
+    if v >= 1e6:
+        return "${:.0f}M".format(v / 1e6)
+    return "${:,.0f}".format(v)
+
+
 # ─── optional LLM polish (fail-open; keyless behavior is unchanged) ──────────
 # Everything below is best-effort sugar on top of the rule-based output. No
 # key (or a spent daily cap, or any error) means these paths are skipped and
@@ -512,6 +526,7 @@ def _portfolio_pulse() -> Optional[Dict[str, Any]]:
             day_pnl_known = True
         rows.append({
             "symbol": h["symbol"],
+            "asset_type": h.get("asset_type") or "stock",
             "market_value": round(mv, 2),
             "unrealized_pnl": round(mv - cost, 2),
             "unrealized_pct": round((mv - cost) / cost * 100, 2) if cost > 0 else 0,
@@ -630,12 +645,125 @@ def _earnings_insights(symbols: List[str]) -> List[Dict[str, Any]]:
         extra = ""
         if e.get("beat_rate") is not None:
             extra = " Historical beat rate: {}%.".format(e["beat_rate"])
+        # Earnings TODAY is a P1 — it's the one day the position can gap
+        # double digits and the user should not learn that after the close.
+        pri = 1 if days == 0 else (2 if days <= 2 else 3)
         cards.append(_card(
-            2 if days <= 2 else 3, "earnings", "info",
+            pri, "earnings", "info",
             "{} reports earnings {}".format(e["symbol"], when),
             "Next earnings date {}.{}".format(e.get("earnings_date", "—"), extra),
             view="earnings", symbol=e["symbol"]))
     return cards
+
+
+_WATCHLIST_MOVE_PCT = 5.0  # watchlist names earn a card on bigger moves than holdings
+_RANGE_EPS_PCT = 0.5       # within 0.5% of a 52-week boundary counts as "at" it
+
+
+def _watchlist_mover_cards() -> List[Dict[str, Any]]:
+    """Watchlist names moving hard today — stuff you watch but don't own."""
+    cards: List[Dict[str, Any]] = []
+    wl = db.get_watchlist()
+    if not wl:
+        return cards
+    held = set()
+    try:
+        held = {h["symbol"].upper() for h in db.get_portfolio()}
+    except Exception:
+        pass
+    syms = [w["symbol"] for w in wl if w["symbol"].upper() not in held][:15]
+    if not syms:
+        return cards
+    quotes = fetcher.get_quotes_batch(syms)
+    movers = [(s, (quotes.get(s) or {}).get("change_pct")) for s in syms]
+    movers = [(s, cp) for s, cp in movers
+              if cp is not None and abs(cp) >= _WATCHLIST_MOVE_PCT]
+    movers.sort(key=lambda m: -abs(m[1]))
+    for s, cp in movers[:2]:
+        cards.append(_card(
+            3, "watch_mover", "pos" if cp > 0 else "neg",
+            "{} (watchlist) {} {:.1f}% today".format(s, "up" if cp > 0 else "down", abs(cp)),
+            "A name you watch is moving hard — worth a look while it's in motion.",
+            view="research", symbol=s))
+    return cards
+
+
+def _streak_card() -> List[Dict[str, Any]]:
+    """3+ consecutive up/down sessions from the daily snapshot history."""
+    snaps = db.get_snapshots()[-12:]
+    vals = [_finite(s.get("total_value")) for s in snaps]
+    vals = [v for v in vals if v]
+    if len(vals) < 4:
+        return []
+    diffs = [vals[i] - vals[i - 1] for i in range(1, len(vals))]
+    streak = 0
+    for d in reversed(diffs):
+        if d > 0 and streak >= 0:
+            streak += 1
+        elif d < 0 and streak <= 0:
+            streak -= 1
+        else:
+            break
+    n = abs(streak)
+    if n < 3:
+        return []
+    up = streak > 0
+    cum = vals[-1] - vals[-1 - n]
+    return [_card(
+        3, "streak", "pos" if up else "warn",
+        "Portfolio {} {} sessions in a row".format("up" if up else "down", n),
+        "{} {} over the run. {}".format(
+            "Gained" if up else "Gave back", _fmt_usd(abs(cum)),
+            "Momentum is nice — discipline is nicer." if up
+            else "Drawdowns are where temperament gets tested."),
+        view="portfolio")]
+
+
+def _range_extreme_cards(pulse: Optional[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Holdings sitting AT their 52-week high/low today (top 8 by value).
+    Per-symbol quotes are 30s-cached and warmed, so this is usually free."""
+    if not pulse:
+        return []
+    # Equities only — a bare crypto symbol 404s on the stock quote endpoint
+    # (crypto prices live at SYM-USD), and a 52-week range matters less for
+    # an asset that trades 24/7 anyway.
+    rows = sorted((r for r in pulse["holdings"] if r.get("asset_type") != "crypto"),
+                  key=lambda r: -r["market_value"])[:8]
+
+    def _one(r: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        q = fetcher.get_quote(r["symbol"])
+        if not q or q.get("error"):
+            return None
+        p = _finite(q.get("price"))
+        hi = _finite(q.get("fifty_two_week_high"))
+        lo = _finite(q.get("fifty_two_week_low"))
+        if p is None or not hi or not lo or hi <= lo:
+            return None
+        if p >= hi * (1 - _RANGE_EPS_PCT / 100):
+            return _card(3, "range_high", "pos",
+                         "{} is at a 52-week high".format(r["symbol"]),
+                         "${:,.2f} — the top of its one-year range. Strength, "
+                         "but also where chasing starts.".format(p),
+                         view="research", symbol=r["symbol"])
+        if p <= lo * (1 + _RANGE_EPS_PCT / 100):
+            return _card(2, "range_low", "warn",
+                         "{} is at a 52-week low".format(r["symbol"]),
+                         "${:,.2f} — the bottom of its one-year range. "
+                         "Position-review territory.".format(p),
+                         view="research", symbol=r["symbol"])
+        return None
+
+    if safe_executor is not None:
+        results = safe_executor.parallel_map(_one, rows, max_workers=4,
+                                             thread_name_prefix="jarvis-range")
+    else:
+        results = []
+        for r in rows:
+            try:
+                results.append(_one(r))
+            except Exception:
+                results.append(None)
+    return [c for c in results if c][:2]
 
 
 def _idea_insights() -> List[Dict[str, Any]]:
@@ -701,6 +829,8 @@ def _run_briefing_uncached() -> Dict[str, Any]:
         _alert_insights,
         _idea_insights,
         lambda: _earnings_insights(held),
+        _watchlist_mover_cards,
+        _streak_card,
     ]
     if safe_executor is not None:
         results = safe_executor.parallel_map(
@@ -715,7 +845,8 @@ def _run_briefing_uncached() -> Dict[str, Any]:
             except Exception as e:
                 log.warning("briefing: section failed: %s", e)
                 results.append(None)
-    pulse, regime, alert_cards, idea_cards, earnings_cards = results
+    (pulse, regime, alert_cards, idea_cards, earnings_cards,
+     watch_cards, streak_cards) = results
 
     cards.extend(alert_cards or [])
 
@@ -778,6 +909,14 @@ def _run_briefing_uncached() -> Dict[str, Any]:
             view="macro"))
 
     cards.extend(idea_cards or [])
+    cards.extend(watch_cards or [])
+    cards.extend(streak_cards or [])
+    # 52-week extremes need the priced holdings, so they run after the
+    # parallel wave — guarded like every other section.
+    try:
+        cards.extend(_range_extreme_cards(pulse) or [])
+    except Exception as e:
+        log.debug("briefing: range extremes failed: %s", e)
 
     cards.sort(key=lambda c: c["priority"])
     n_urgent = sum(1 for c in cards if c["priority"] == 1)
@@ -1169,6 +1308,54 @@ def _ago(ts: float) -> str:
     return "{}h ago".format(s // 3600)
 
 
+def health_snapshot() -> Dict[str, Any]:
+    """Self-diagnostics: LLM key + AI budget, warmer liveness, cache size,
+    memory/insight counts. Every section guarded — health reporting must
+    never itself be a source of failure."""
+    out: Dict[str, Any] = {"as_of": datetime.now(timezone.utc).isoformat()}
+    try:
+        import ai_summarizer
+        cap = ai_summarizer._daily_cap()
+        used = 0
+        try:
+            used = db.get_ai_call_count()
+        except Exception:
+            pass
+        out["ai"] = {"key": bool(ai_summarizer.get_openai_key()),
+                     "calls_today": used, "daily_cap": cap,
+                     "remaining": max(0, cap - used)}
+    except Exception:
+        out["ai"] = {"key": False, "calls_today": None, "daily_cap": None,
+                     "remaining": None}
+    try:
+        import cache_warmer
+        import time as _t
+        cycles = (cache_warmer.status() or {}).get("last_cycle") or {}
+        if cycles:
+            age = int(_t.time() - max(cycles.values()))
+            out["warmer"] = {"alive": age < 900, "last_cycle_age_s": age}
+        else:
+            out["warmer"] = {"alive": False, "last_cycle_age_s": None}
+    except Exception:
+        out["warmer"] = {"alive": False, "last_cycle_age_s": None}
+    try:
+        st = (cache_store.stats() if cache_store is not None else {}) or {}
+        out["cache"] = {"on_disk": st.get("on_disk"), "in_memory": st.get("in_memory")}
+    except Exception:
+        out["cache"] = {}
+    try:
+        out["memory_facts"] = len(db.jarvis_list_memories())
+    except Exception:
+        out["memory_facts"] = None
+    try:
+        row = db.get_conn().execute(
+            "SELECT COUNT(*) AS n FROM jarvis_insights").fetchone()
+        out["insights_14d"] = row["n"] if row else 0
+    except Exception:
+        out["insights_14d"] = None
+    return out
+
+
 def activity_snapshot() -> Dict[str, Any]:
     background: List[Dict[str, Any]] = []
     summary_bits: List[str] = []
@@ -1241,8 +1428,26 @@ def _known_symbols() -> set:
     return syms
 
 
+# Well-known company names → tickers, so "how is apple doing" works without
+# the user knowing to type AAPL. Equities only — crypto names resolve through
+# the held-symbol path, and a wrong stock quote is worse than no match.
+_COMPANY_NAMES = {
+    "apple": "AAPL", "microsoft": "MSFT", "google": "GOOGL", "alphabet": "GOOGL",
+    "amazon": "AMZN", "nvidia": "NVDA", "meta": "META", "facebook": "META",
+    "tesla": "TSLA", "netflix": "NFLX", "amd": "AMD", "intel": "INTC",
+    "berkshire": "BRK-B", "disney": "DIS", "boeing": "BA", "walmart": "WMT",
+    "costco": "COST", "starbucks": "SBUX", "nike": "NKE", "paypal": "PYPL",
+    "palantir": "PLTR", "coinbase": "COIN", "robinhood": "HOOD", "uber": "UBER",
+    "airbnb": "ABNB", "salesforce": "CRM", "oracle": "ORCL", "broadcom": "AVGO",
+    "qualcomm": "QCOM", "spotify": "SPOT", "shopify": "SHOP", "snowflake": "SNOW",
+    "micron": "MU", "ford": "F", "gm": "GM", "exxon": "XOM", "chevron": "CVX",
+    "jpmorgan": "JPM", "goldman": "GS", "visa": "V", "mastercard": "MA",
+}
+
+
 def _extract_symbol(query: str) -> Optional[str]:
-    """$SYM beats known portfolio/watchlist symbols beats bare ALL-CAPS token."""
+    """$SYM beats known portfolio/watchlist symbols beats company names
+    beats bare ALL-CAPS token."""
     m = re.search(r"\$([A-Za-z][A-Za-z.\-]{0,9})", query)
     if m:
         return m.group(1).upper()
@@ -1255,6 +1460,12 @@ def _extract_symbol(query: str) -> Optional[str]:
     for t in tokens:
         if t.upper() in known and (t.isupper() or t.upper() not in _STOPWORDS):
             return t.upper()
+    # Company names: "apple", "nvidia", "berkshire" — lowercase words a ticker
+    # match could never catch.
+    for t in tokens:
+        sym = _COMPANY_NAMES.get(t.lower())
+        if sym:
+            return sym
     # bare all-caps token the user typed in caps (intentional ticker)
     for t in tokens:
         if t.isupper() and 1 <= len(t) <= 5 and t not in _STOPWORDS:
@@ -1273,6 +1484,12 @@ def _answer_quote(symbol: str) -> Dict[str, Any]:
     if hi and lo and hi > lo:  # hi > lo, not just truthy — guards inverted data
         pos = (q["price"] - lo) / (hi - lo) * 100
         parts.append("sitting at {:.0f}% of its 52-week range".format(pos))
+    cap = _fmt_cap(q.get("market_cap"))
+    if cap:
+        parts.append("{} market cap".format(cap))
+    vol = _finite(q.get("volume"))
+    if vol and vol >= 1e6:
+        parts.append("{:.1f}M shares traded".format(vol / 1e6))
     return {"answer": ", ".join(parts) + ".",
             "action": {"view": "research", "symbol": symbol}}
 
@@ -1287,6 +1504,11 @@ def _answer_forecast(symbol: str) -> Dict[str, Any]:
     answer = "{}: ensemble of {} signals puts P(up) at {:.0f}% over {} trading days — {} conviction {}.".format(
         symbol, f.get("n_signals", 0), (prob or 0.5) * 100, f.get("horizon_days", 20),
         (ens.get("conviction") or "").lower(), ens.get("direction") or "")
+    cone = ens.get("return_cone") or {}
+    p05, p95 = _finite(cone.get("p05")), _finite(cone.get("p95"))
+    if p05 is not None and p95 is not None:
+        answer += " Return cone: {} to {} (5th–95th percentile).".format(
+            _fmt_pct(p05), _fmt_pct(p95))
     notes = f.get("notes") or []
     return {"answer": answer,
             "detail": notes[0] if notes else None,
@@ -1433,8 +1655,11 @@ def _answer_earnings(symbol: Optional[str]) -> Dict[str, Any]:
         cal = earnings.get_earnings_calendar([symbol])
         if cal:
             e = cal[0]
-            return {"answer": "{} reports earnings on {} ({} days away).".format(
-                        e["symbol"], e["earnings_date"], e["days_until"]),
+            beat = ""
+            if e.get("beat_rate") is not None:
+                beat = " Historical beat rate: {}%.".format(e["beat_rate"])
+            return {"answer": "{} reports earnings on {} ({} days away).{}".format(
+                        e["symbol"], e["earnings_date"], e["days_until"], beat),
                     "action": {"view": "earnings", "symbol": symbol}}
         return {"answer": "No upcoming earnings date found for {}.".format(symbol)}
     held = []
@@ -1511,10 +1736,243 @@ def _answer_ideas() -> Dict[str, Any]:
             "action": {"view": "ideas"}}
 
 
+def _answer_watchlist() -> Dict[str, Any]:
+    wl = db.get_watchlist()
+    if not wl:
+        return {"answer": "Your watchlist is empty. Add names and I'll track them tick by tick.",
+                "action": {"view": "watchlist"}}
+    syms = [w["symbol"] for w in wl][:15]
+    quotes = fetcher.get_quotes_batch(syms)
+    movers = [(s, (quotes.get(s) or {}).get("change_pct")) for s in syms]
+    movers = [m for m in movers if m[1] is not None]
+    movers.sort(key=lambda m: -abs(m[1]))
+    tail = ""
+    if movers:
+        tail = " Today: " + "; ".join(
+            "{} {}".format(s, _fmt_pct(p)) for s, p in movers[:4]) + "."
+    return {"answer": "Watching {} name{}.{}".format(
+                len(wl), "s" if len(wl) != 1 else "", tail),
+            "action": {"view": "watchlist"}}
+
+
+def _answer_range(symbol: str) -> Dict[str, Any]:
+    """52-week range position — 'is NVDA near its high?'"""
+    q = fetcher.get_quote(symbol)
+    if not q or q.get("error") or q.get("price") is None:
+        return {"answer": "I couldn't get a quote for {} right now.".format(symbol)}
+    hi, lo = _finite(q.get("fifty_two_week_high")), _finite(q.get("fifty_two_week_low"))
+    if not hi or not lo or hi <= lo:
+        return {"answer": "{} is at ${:,.2f}, but I don't have a clean 52-week range for it.".format(
+                    symbol, q["price"]),
+                "action": {"view": "research", "symbol": symbol}}
+    price = q["price"]
+    pos = (price - lo) / (hi - lo) * 100
+    off_hi = (hi - price) / hi * 100
+    above_lo = (price - lo) / lo * 100
+    if pos >= 90:
+        verdict = "that's knocking on the high — momentum territory"
+    elif pos >= 60:
+        verdict = "upper end of the range"
+    elif pos >= 40:
+        verdict = "mid-range, no extreme either way"
+    else:
+        verdict = "closer to the low than the high"
+    return {"answer": "{} at ${:,.2f} sits at {:.0f}% of its 52-week range "
+                      "(${:,.2f}–${:,.2f}) — {:.1f}% below the high, {:.0f}% above "
+                      "the low. In short: {}.".format(
+                          symbol, price, pos, lo, hi, off_hi, above_lo, verdict),
+            "action": {"view": "research", "symbol": symbol}}
+
+
+def _answer_recap() -> Dict[str, Any]:
+    """'What did I miss' — replay the away digest without moving the watermark."""
+    d = away_digest(mark_seen=False)
+    if not d.get("count"):
+        return {"answer": "Nothing new since your last look — no alerts tripped, "
+                          "no notable moves logged. I'll keep watch."}
+    extra = ""
+    if d["count"] > 3:
+        titles = [r["title"] for r in d["insights"][3:6]]
+        if titles:
+            extra = " Also: {}.".format("; ".join(titles))
+    return {"answer": (d.get("line") or "") + extra, "data": {"count": d["count"]},
+            "action": {"view": "overview"}}
+
+
+def _answer_day_summary() -> Dict[str, Any]:
+    """One composed paragraph: book, driver, market, alerts."""
+    bits: List[str] = []
+    try:
+        pulse = _portfolio_pulse()
+    except Exception:
+        pulse = None
+    if pulse:
+        if pulse.get("day_pnl") is not None:
+            bits.append("Book {} {} ({}) today at {}.".format(
+                "up" if pulse["day_pnl"] >= 0 else "down",
+                _fmt_usd(abs(pulse["day_pnl"])), _fmt_pct(pulse.get("day_pnl_pct")),
+                _fmt_usd(pulse["total_value"])))
+        try:
+            a = portfolio_attribution()
+            main = (a or {}).get("detractors" if (pulse.get("day_pnl") or 0) < 0
+                                 else "contributors") or []
+            if main:
+                bits.append("Main driver: {} ({}).".format(
+                    main[0]["symbol"], _fmt_usd(main[0]["day_pnl"])))
+        except Exception:
+            pass
+    try:
+        regime = _market_regime()
+    except Exception:
+        regime = None
+    if regime and regime.get("spx_pct") is not None:
+        vix_bit = ""
+        if regime.get("vix") is not None:
+            vix_bit = ", VIX {:.1f} ({})".format(regime["vix"], regime.get("regime") or "—")
+        bits.append("Market: S&P {}{}.".format(_fmt_pct(regime["spx_pct"]), vix_bit))
+    try:
+        trig = [x for x in db.get_price_alerts(include_triggered=True) if x.get("triggered")]
+        if trig:
+            bits.append("{} alert{} triggered.".format(len(trig), "s" if len(trig) != 1 else ""))
+    except Exception:
+        pass
+    if not bits:
+        return {"answer": "Quiet day — I have no portfolio or market data to summarize right now."}
+    return {"answer": " ".join(bits), "action": {"view": "overview"}}
+
+
+def _answer_risk() -> Dict[str, Any]:
+    """Rule-based risk read: concentration, crypto share, market regime."""
+    pulse = _portfolio_pulse()
+    if not pulse:
+        return {"answer": "No positions, no risk. Add holdings and I'll keep score.",
+                "action": {"view": "portfolio"}}
+    rows = sorted(pulse["holdings"], key=lambda r: -r.get("weight_pct", 0))
+    top = rows[0]
+    top3 = sum(r.get("weight_pct") or 0 for r in rows[:3])
+    crypto_pct = sum(r.get("weight_pct") or 0 for r in rows
+                     if r.get("asset_type") == "crypto")
+    flags: List[str] = []
+    if (top.get("weight_pct") or 0) >= _CONCENTRATION_PCT:
+        flags.append("{} alone is {:.0f}% of the book".format(top["symbol"], top["weight_pct"]))
+    if top3 >= 70:
+        flags.append("top 3 positions are {:.0f}% combined".format(top3))
+    if crypto_pct >= 30:
+        flags.append("crypto is {:.0f}% of the book".format(crypto_pct))
+    regime_bit = ""
+    try:
+        regime = _market_regime()
+        if regime and regime.get("regime") in ("ELEVATED", "STRESSED"):
+            regime_bit = " And the volatility regime is {} right now — sizing matters more than usual.".format(
+                regime["regime"])
+    except Exception:
+        pass
+    head = "Across {} positions: {} is your largest at {:.0f}%, top 3 hold {:.0f}%, crypto {:.0f}%.".format(
+        pulse["num_positions"], top["symbol"], top.get("weight_pct") or 0, top3, crypto_pct)
+    if flags:
+        verdict = " Concentration flags: {}.".format("; ".join(flags))
+    else:
+        verdict = " No concentration flags at my thresholds — reasonably spread."
+    return {"answer": head + verdict + regime_bit + " The stress test shows what this book survives.",
+            "action": {"view": "stress"}}
+
+
+def _answer_crypto_share() -> Dict[str, Any]:
+    pulse = _portfolio_pulse()
+    if not pulse:
+        return {"answer": "No positions yet — crypto share of nothing is nothing.",
+                "action": {"view": "portfolio"}}
+    crypto = [r for r in pulse["holdings"] if r.get("asset_type") == "crypto"]
+    if not crypto:
+        return {"answer": "You hold no crypto right now — the book is all equities.",
+                "action": {"view": "portfolio"}}
+    mv = sum(r["market_value"] for r in crypto)
+    pct = sum(r.get("weight_pct") or 0 for r in crypto)
+    names = ", ".join("{} ({:.1f}%)".format(r["symbol"], r.get("weight_pct") or 0)
+                      for r in sorted(crypto, key=lambda r: -r["market_value"])[:4])
+    return {"answer": "Crypto is {} of the book — {:.1f}% across {} position{}: {}.".format(
+                _fmt_usd(mv), pct, len(crypto), "s" if len(crypto) != 1 else "", names),
+            "action": {"view": "crypto"}}
+
+
+def _answer_transactions() -> Dict[str, Any]:
+    txns = db.get_transactions(limit=5)
+    if not txns:
+        return {"answer": "No transactions on record yet.",
+                "action": {"view": "transactions"}}
+    bits = []
+    for t in txns:
+        bits.append("{} {:g} {} @ ${:,.2f} on {}".format(
+            (t.get("action") or "?").upper(), t.get("shares") or 0,
+            t.get("symbol") or "?", t.get("price") or 0, t.get("date") or "—"))
+    return {"answer": "Last fills: {}.".format("; ".join(bits)),
+            "action": {"view": "transactions"}}
+
+
+def _answer_benchmark() -> Dict[str, Any]:
+    """'Am I beating the market?' — honest day-scope comparison."""
+    pulse = _portfolio_pulse()
+    if not pulse or pulse.get("day_pnl_pct") is None:
+        return {"answer": "I don't have a clean day move for your book right now to compare against the index."}
+    regime = None
+    try:
+        regime = _market_regime()
+    except Exception:
+        pass
+    spx = _finite((regime or {}).get("spx_pct"))
+    mine = _finite(pulse.get("day_pnl_pct"))
+    if spx is None or mine is None:
+        return {"answer": "Index data is unavailable right now, so I can't make the comparison."}
+    diff = mine - spx
+    verdict = ("ahead of" if diff > 0.05 else ("behind" if diff < -0.05 else "tracking"))
+    alltime = " All-time, the book is {} ({}).".format(
+        "up" if pulse["total_pnl"] >= 0 else "down", _fmt_pct(pulse.get("total_pnl_pct")))
+    return {"answer": "Today: you {} vs S&P {} — {} the tape by {:.2f}pt. "
+                      "One day proves nothing, but that's the score.{}".format(
+                          _fmt_pct(mine), _fmt_pct(spx), verdict, abs(diff), alltime),
+            "action": {"view": "analytics"}}
+
+
+_VS_RE = re.compile(
+    r"\b([A-Za-z][A-Za-z.\-]{0,9})\s+(?:vs\.?|versus)\s+([A-Za-z][A-Za-z.\-]{0,9})\b",
+    re.IGNORECASE)
+
+
+def _answer_compare_quotes(s1: str, s2: str) -> Dict[str, Any]:
+    """Instant keyless side-by-side — 'NVDA vs AMD'."""
+    q1, q2 = fetcher.get_quote(s1), fetcher.get_quote(s2)
+
+    def _line(sym: str, q: Optional[Dict[str, Any]]) -> Optional[str]:
+        if not q or q.get("error") or q.get("price") is None:
+            return None
+        parts = ["{} ${:,.2f} ({})".format(sym, q["price"], _fmt_pct(q.get("change_pct")))]
+        hi, lo = _finite(q.get("fifty_two_week_high")), _finite(q.get("fifty_two_week_low"))
+        if hi and lo and hi > lo:
+            parts.append("{:.0f}% of 52-wk range".format((q["price"] - lo) / (hi - lo) * 100))
+        cap = _fmt_cap(q.get("market_cap"))
+        if cap:
+            parts.append(cap)
+        return ", ".join(parts)
+
+    l1, l2 = _line(s1, q1), _line(s2, q2)
+    if not l1 or not l2:
+        missing = s1 if not l1 else s2
+        return {"answer": "I couldn't price {} right now — try again in a moment.".format(missing)}
+    tail = ""
+    c1, c2 = _finite((q1 or {}).get("change_pct")), _finite((q2 or {}).get("change_pct"))
+    if c1 is not None and c2 is not None and abs(c1 - c2) >= 0.05:
+        tail = " {} has the better day.".format(s1 if c1 > c2 else s2)
+    return {"answer": "{} — versus — {}.{}".format(l1, l2, tail),
+            "action": {"view": "research", "symbol": s1}}
+
+
 _HELP_ANSWER = (
-    "I can answer things like: “how's my portfolio”, “biggest loser today”, "
-    "“price of NVDA”, “forecast TSLA”, “when does AAPL report”, "
-    "“how are markets”, “my exposure”, “any ideas”, or “my alerts”."
+    "Try me on: “why am I down today”, “how's my portfolio”, “how risky is my "
+    "book”, “what did I miss”, “summarize my day”, “price of NVDA”, “NVDA vs "
+    "AMD”, “is AAPL near its high”, “forecast TSLA”, “when does AAPL report”, "
+    "“what did I buy recently”, “am I beating the market”, “how much crypto do "
+    "I have”, “my watchlist”, “any ideas” — or just tell me something to "
+    "remember and I'll keep it."
 )
 
 
@@ -1767,17 +2225,60 @@ def ask(query: str, history: Any = None, conversation_id: Any = None,
         # broader portfolio intent below would swallow into a value line.
         if _ATTRIB_RE.search(ql) and not symbol:
             return done("attribution", _answer_why())
+        if any(p in ql for p in ("what did i miss", "while i was away",
+                                 "while i was gone", "catch me up",
+                                 "anything new since", "what happened while")):
+            return done("recap", _answer_recap())
+        if ("summar" in ql or "wrap up" in ql) and ("day" in ql or "today" in ql):
+            return done("summary", _answer_day_summary())
+        # "NVDA vs AMD" — instant keyless side-by-side for short, two-name
+        # queries; longer comparison questions still reach the agent's
+        # compare_positions lens.
+        m_vs = _VS_RE.search(q)
+        if m_vs and len(ql.split()) <= 4:
+            def _vs_resolve(tok: str) -> Optional[str]:
+                low = tok.lower()
+                if low in _COMPANY_NAMES:
+                    return _COMPANY_NAMES[low]
+                up = tok.upper()
+                if up in _known_symbols():
+                    return up
+                if len(up) <= 5 and up not in _STOPWORDS:
+                    return up
+                return None
+            s1, s2 = _vs_resolve(m_vs.group(1)), _vs_resolve(m_vs.group(2))
+            if s1 and s2 and s1 != s2:
+                return done("compare", _answer_compare_quotes(s1, s2))
         # "prob" matched "problem"/"probably" — require a forecasting verb or
         # a whole "prob"/"probability" word, plus a symbol.
         if symbol and (any(w in ql for w in ("forecast", "predict", "outlook", "go up", "go down"))
                        or re.search(r"\bprob(ability)?\b", ql)):
             return done("forecast", _answer_forecast(symbol))
+        # 52-week range position — "is NVDA near its high?"
+        if symbol and (re.search(r"\b52\b|52-week|fifty[- ]two", ql)
+                       or (("high" in ql or "low" in ql)
+                           and any(w in ql for w in ("near", "close to", "off the", "from its")))):
+            return done("range", _answer_range(symbol))
         if any(w in ql for w in ("earnings", "report", "reports", "reporting")):
             return done("earnings", _answer_earnings(symbol))
+        # Crypto share before exposure — "crypto exposure" contains "exposure".
+        if "crypto" in ql and any(w in ql for w in ("how much", "share", "allocation",
+                                                    "exposure", "weight", "percent", " %")):
+            return done("crypto_share", _answer_crypto_share())
+        if any(p in ql for p in ("how risky", "risk level", "portfolio risk",
+                                 "my risk", "too risky", "risk profile")):
+            return done("risk", _answer_risk())
         if any(w in ql for w in ("exposure", "allocation", "concentrat", "diversif", "weight")):
             return done("exposure", _answer_exposure())
         if "alert" in ql and not (_ACTIONISH_RE.search(ql) and _llm_available()):
             return done("alerts", _answer_alerts())
+        if ("watchlist" in ql or "what am i watching" in ql) \
+                and not (_ACTIONISH_RE.search(ql) and _llm_available()):
+            return done("watchlist", _answer_watchlist())
+        if any(p in ql for p in ("what did i buy", "what did i sell", "recent trade",
+                                 "recent transaction", "last trade", "my trades",
+                                 "my fills", "recent fills")):
+            return done("transactions", _answer_transactions())
         if any(w in ql for w in ("idea", "opportunit", "what should i buy", "what to buy")):
             return done("ideas", _answer_ideas())
         if (any(w in ql for w in ("portfolio", "am i up", "am i down", "my position",
@@ -1785,6 +2286,11 @@ def ask(query: str, history: Any = None, conversation_id: Any = None,
                                   "best position", "worst position", "how am i doing"))
                 and not _analytical):
             return done("portfolio", _answer_portfolio(ql))
+        # Benchmark before market — "beating the market" contains "market".
+        if any(p in ql for p in ("beat the market", "beating the market", "outperform",
+                                 "underperform", "vs the market", "versus the market",
+                                 "against the market")):
+            return done("benchmark", _answer_benchmark())
         if (any(w in ql for w in ("market", "vix", "s&p", "spx", "nasdaq", "fear", "regime", "volatil"))
                 and not _analytical):
             return done("market", _answer_market())
