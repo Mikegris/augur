@@ -263,22 +263,26 @@ def _turns_from_messages(msgs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 
 _AGENT_SYSTEM = (
     "You are JARVIS, the user's personal investing copilot inside their "
-    "AUGUR terminal. Your tools read the user's REAL portfolio and the "
-    "app's analysis engines. Plan a short tool sequence before answering: "
-    "for any question about the user's money or holdings, consult "
-    "get_portfolio first; when conviction matters (should-I-worry, "
-    "how-strong-is-this, conflicting evidence), cross-reference at least "
-    "two independent engines (e.g. forecast + smart money, signals + "
-    "fundamentals) and say where they agree or disagree. Prefer calling a "
-    "specific tool over guessing, and cite numbers exactly as tool output "
-    "gives them. Be concise (a short paragraph), confident, dry wit "
-    "welcome. No investment advice — present evidence and framing, not "
-    "instructions to buy or sell. If the user asks for an action (an "
-    "alert, a watchlist add), call the matching tool; the app will ask the "
-    "user to confirm it. If the tools can't answer, say so plainly."
+    "AUGUR terminal. You have TWO kinds of tools. (1) LOCAL engines that read "
+    "the user's REAL portfolio and the app's analysis (get_portfolio, "
+    "forecast, smart_money_score, position_review, …). (2) OPEN-WORLD "
+    "research that reaches OUTSIDE the app: web_research, search_news, "
+    "search_sec_filings, search_hacker_news, news_sentiment. "
+    "Plan a short tool sequence first. For the user's own money or holdings, "
+    "consult get_portfolio first; when conviction matters, cross-reference at "
+    "least two independent local engines and say where they agree or disagree. "
+    "CRUCIALLY: for ANY question your local tools can't answer — a private "
+    "company (SpaceX, Stripe), an upcoming IPO, a Fed decision, breaking news, "
+    "a regulation, a theme, 'what's happening with X' — DO NOT say you can't "
+    "help. Use web_research (or search_news / search_sec_filings) and answer "
+    "from what you find, citing sources. Researching beats refusing. "
+    "Cite numbers exactly as tools give them. Be concise (a short paragraph), "
+    "confident, dry wit welcome. No investment advice — evidence and framing, "
+    "not buy/sell instructions. For an action (alert, watchlist add) call the "
+    "matching tool; the app asks the user to confirm."
 )
 
-_AGENT_MAX_ROUNDS = 4
+_AGENT_MAX_ROUNDS = 5  # +1 round headroom for a research call + synthesis
 
 
 def _agent_ask(query: str, history: Optional[List[Dict[str, Any]]] = None) -> Optional[Dict[str, Any]]:
@@ -306,6 +310,7 @@ def _agent_ask(query: str, history: Optional[List[Dict[str, Any]]] = None) -> Op
     schemas = jarvis_tools.openai_schemas()
     used: List[str] = []           # distinct tool names consulted (for the UI trace)
     tool_cache: Dict[str, str] = {}  # (name+args) -> result, dedup across rounds
+    citations: List[Dict[str, Any]] = []  # web_research sources, for the UI
 
     for _ in range(_AGENT_MAX_ROUNDS):
         # The daily cap is a hard money ceiling — re-check it EACH round, not
@@ -327,7 +332,10 @@ def _agent_ask(query: str, history: Optional[List[Dict[str, Any]]] = None) -> Op
             answer = (msg.content or "").strip()
             if not answer:
                 return None
-            return {"answer": answer, "used": used}
+            out = {"answer": answer, "used": used}
+            if citations:
+                out["citations"] = citations[:6]
+            return out
 
         # Mutating request → stop and hand the proposal to the UI. Check this
         # FIRST so a mutating call batched with reads still proposes, but the
@@ -370,6 +378,15 @@ def _agent_ask(query: str, history: Optional[List[Dict[str, Any]]] = None) -> Op
             if result is None:
                 result = jarvis_tools.execute_read(tc.function.name, args)
                 tool_cache[mkey] = result
+            # Harvest web_research source citations to surface in the UI.
+            if tc.function.name == "web_research":
+                try:
+                    cites = (json.loads(result) or {}).get("citations") or []
+                    for c in cites:
+                        if c.get("url") and c not in citations:
+                            citations.append(c)
+                except Exception:
+                    pass
             messages.append({"role": "tool", "tool_call_id": tc.id, "content": result})
 
     if ai_summarizer._cap_exceeded():
@@ -383,7 +400,12 @@ def _agent_ask(query: str, history: Optional[List[Dict[str, Any]]] = None) -> Op
         max_tokens=300, temperature=0.3, json_mode=False)
     ai_summarizer._record_ai_call()
     answer = (resp.choices[0].message.content or "").strip()
-    return {"answer": answer, "used": used} if answer else None
+    if not answer:
+        return None
+    out = {"answer": answer, "used": used}
+    if citations:
+        out["citations"] = citations[:6]
+    return out
 
 
 def _llm_ask(query: str, history: Optional[List[Dict[str, Any]]] = None) -> Optional[str]:
@@ -1495,6 +1517,8 @@ def ask(query: str, history: Any = None, conversation_id: Any = None,
             r = _agent_ask(q, turns)
             if r and r.get("answer"):
                 payload = {"answer": r["answer"], "used": r.get("used") or []}
+                if r.get("citations"):
+                    payload["citations"] = r["citations"]
                 if r.get("proposal"):
                     payload["proposal"] = r["proposal"]
                     return done("action", payload)

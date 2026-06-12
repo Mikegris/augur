@@ -2490,3 +2490,14 @@ input:focus, select:focus, textarea:focus {
 }
 .jv-starter:hover { border-color: var(--blue); background: var(--blue-glow); color: var(--text-primary); }
 #jv-voice.on { color: var(--green); border-color: var(--green-dim); }
+
+/* ── v1.9 Jarvis open-world research: source citations ──────────── */
+.jv-cites { margin-top: 8px; display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.jv-cites-h { font-size: 9px; letter-spacing: .1em; text-transform: uppercase; color: var(--text-dim); }
+.jv-cite {
+  font-size: var(--font-size-xs); color: var(--blue); text-decoration: none;
+  border: 1px solid var(--border); border-radius: var(--radius);
+  padding: 2px 7px; max-width: 240px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.jv-cite:hover { border-color: var(--blue); background: var(--blue-glow); }
+.jv-cite::before { content: "↗ "; opacity: .6; }

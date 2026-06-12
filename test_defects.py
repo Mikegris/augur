@@ -911,6 +911,61 @@ def test_defect_sweep_e():
           "sttAvailable()" in jjs and "jvMic.style.display = 'none'" in jjs)
 
 
+# ── 11i. v1.9: open-world research tools (the SpaceX-IPO gap) ─────────────────
+def test_jarvis_research():
+    import jarvis_research as jr
+    import jarvis_tools
+
+    # The five research tools are registered as read-only agent tools.
+    for name in ("web_research", "search_news", "news_sentiment",
+                 "search_sec_filings", "search_hacker_news"):
+        check("research: tool '%s' registered (read-only)" % name,
+              name in jarvis_tools.TOOLS and not jarvis_tools.TOOLS[name]["mutating"])
+
+    # web_research is keyless-safe: returns a note, never raises.
+    import ai_summarizer
+    orig_key = ai_summarizer.get_openai_key
+    ai_summarizer.get_openai_key = lambda: ""
+    try:
+        w = jr.web_research("anything")
+        check("research: web_research keyless → note not crash",
+              isinstance(w, dict) and "note" in w)
+    finally:
+        ai_summarizer.get_openai_key = orig_key
+
+    # search_news / sec / hn degrade to a note when the upstream is stubbed dead.
+    import data_sources
+    orig_g = data_sources.gdelt_articles
+    data_sources.gdelt_articles = lambda *a, **k: []
+    try:
+        n = jr.search_news("SpaceX IPO")
+        check("research: search_news empty → graceful", "articles" in n or "note" in n)
+    finally:
+        data_sources.gdelt_articles = orig_g
+
+    s = jr.search_sec_filings("zzznoSuchCompanyQ7")
+    check("research: search_sec_filings shape", isinstance(s, dict)
+          and ("filings" in s or "note" in s))
+
+    # Citations are harvested + surfaced when web_research runs (stub the agent).
+    import jarvis
+    fake = {"answer": "...", "used": ["web_research"],
+            "citations": [{"title": "T", "url": "http://x"}]}
+    orig_avail, orig_agent = jarvis._llm_available, jarvis._agent_ask
+    jarvis._llm_available = lambda: True
+    jarvis._agent_ask = lambda q, t=None: fake
+    try:
+        r = jarvis.ask("what's the latest on the spacex ipo", persist=False)
+        check("research: ask surfaces citations from web_research",
+              r.get("citations") == fake["citations"], repr(r.get("citations")))
+    finally:
+        jarvis._llm_available, jarvis._agent_ask = orig_avail, orig_agent
+
+    # Frontend renders citations as clickable links.
+    jjs = open(os.path.join(os.path.dirname(__file__), "static/js/jarvis.js")).read()
+    check("research: UI renders citation links", "jv-cite" in jjs and 'rel="noopener' in jjs)
+
+
 # ── 12. database add_position: offsetting to zero shares must not crash ──────
 def test_database_zero_shares():
     import database
@@ -1147,6 +1202,7 @@ def main():
         ("defect sweep C pins", test_defect_sweep_c),
         ("defect sweep D pins", test_defect_sweep_d),
         ("defect sweep E pins", test_defect_sweep_e),
+        ("jarvis open-world research", test_jarvis_research),
         ("jarvis lens + premium TTS", test_jarvis_lens),
         ("database zero-shares guard", test_database_zero_shares),
         ("cli quote None fields", test_cli_quote_none_fields),
