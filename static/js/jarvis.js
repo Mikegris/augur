@@ -623,10 +623,14 @@
              </div>` : '';
         const usedLine = (r.used && r.used.length)
           ? `<div class="jp-answer-detail">◉ consulted: ${esc([...new Set(r.used)].join(', ').replace(/_/g, ' '))}</div>` : '';
+        const citesLine = (r.citations && r.citations.length)
+          ? `<div class="jv-cites"><span class="jv-cites-h">sources</span>${r.citations.slice(0,6).map(c =>
+                `<a class="jv-cite" href="${esc(c.url)}" target="_blank" rel="noopener noreferrer">${esc(c.title || c.url)}</a>`).join('')}</div>` : '';
         this.answer.innerHTML = `
           <div class="jp-answer">
             <div class="jp-answer-text">${esc(r.answer)}</div>
             ${r.detail ? `<div class="jp-answer-detail">${esc(r.detail)}</div>` : ''}
+            ${citesLine}
             ${usedLine}
             ${proposal}
             ${action}
@@ -1216,6 +1220,12 @@
         const r = await API.post('/api/jarvis/ask', { query: q, conversation_id: this._convId });
         if (r.conversation_id) this._convId = r.conversation_id;
         let html = esc(r.answer);
+        if (r.citations && r.citations.length) {
+          html += '<div class="jv-cites"><span class="jv-cites-h">sources</span>'
+            + r.citations.slice(0, 6).map(c =>
+                `<a class="jv-cite" href="${esc(c.url)}" target="_blank" rel="noopener noreferrer">${esc(c.title || c.url)}</a>`).join('')
+            + '</div>';
+        }
         if (r.used && r.used.length) {
           html += `<div class="jv-used">◉ consulted: ${esc([...new Set(r.used)].join(', ').replace(/_/g, ' '))}</div>`;
         }

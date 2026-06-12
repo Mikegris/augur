@@ -537,6 +537,41 @@ def _p(props: Dict[str, Any], required: Optional[List[str]] = None) -> Dict[str,
 _SYM_PROP = {"symbol": {"type": "string", "description": "Ticker symbol, e.g. NVDA"}}
 
 TOOLS: Dict[str, Dict[str, Any]] = {
+    # ── OPEN-WORLD research (no ticker / portfolio needed) ──────────────────
+    "web_research": {
+        "fn": lambda args: __import__("jarvis_research").web_research(str(args.get("query") or "")),
+        "mutating": False,
+        "description": "Use for ANY question your other tools can't answer from local data: private companies (SpaceX, Stripe, OpenAI), upcoming IPOs, Fed/macro events, breaking news, regulations, themes, 'what's happening with X', or anything requiring CURRENT outside information. Returns a researched answer with source citations. This is your catch-all — reach for it instead of saying you can't help.",
+        "parameters": _p({"query": {"type": "string", "description": "The research question, in plain English"}}, ["query"]),
+    },
+    "search_news": {
+        "fn": lambda args: __import__("jarvis_research").search_news(
+            str(args.get("query") or ""), int(args.get("days") or 14)),
+        "mutating": False,
+        "description": "Use for recent NEWS on any topic, company (public OR private), person, or theme — no ticker required. Returns headlines with sources and dates.",
+        "parameters": _p({"query": {"type": "string"},
+                          "days": {"type": "integer", "description": "Lookback days (default 14)"}}, ["query"]),
+    },
+    "news_sentiment": {
+        "fn": lambda args: __import__("jarvis_research").news_sentiment(str(args.get("query") or "")),
+        "mutating": False,
+        "description": "Use for 'how is sentiment / coverage trending on X': average news tone and improving/deteriorating trend for any topic.",
+        "parameters": _p({"query": {"type": "string"}}, ["query"]),
+    },
+    "search_sec_filings": {
+        "fn": lambda args: __import__("jarvis_research").search_sec_filings(
+            str(args.get("query") or ""), args.get("forms")),
+        "mutating": False,
+        "description": "Use to find SEC filings for ANY company by NAME (not ticker) — S-1/IPO prospectuses, 10-Ks, 8-Ks. Works for newly-filing or pre-IPO companies. Optional forms filter (e.g. 'S-1').",
+        "parameters": _p({"query": {"type": "string", "description": "Company name or phrase"},
+                          "forms": {"type": "string", "description": "Optional form type, e.g. S-1"}}, ["query"]),
+    },
+    "search_hacker_news": {
+        "fn": lambda args: __import__("jarvis_research").search_hacker_news(str(args.get("query") or "")),
+        "mutating": False,
+        "description": "Use for tech/startup/crypto buzz and retail chatter on a topic — Hacker News discussion with points and comment counts.",
+        "parameters": _p({"query": {"type": "string"}}, ["query"]),
+    },
     "get_quote": {
         "fn": _t_get_quote, "mutating": False,
         "description": "Use for 'price of X' / 'how is X doing today': live quote with price, day change, volume, 52-week range.",
