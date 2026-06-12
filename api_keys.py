@@ -84,7 +84,9 @@ def get_api_key(provider: str) -> str:
 def mask(key: Optional[str]) -> str:
     if not key:
         return ""
-    return _MASK_PREFIX + key[-4:] if len(key) > 4 else _MASK_PREFIX
+    # Only reveal a tail when the key is long enough that 4 chars are a small
+    # fraction of it — never expose most of a short token.
+    return _MASK_PREFIX + key[-4:] if len(key) >= 12 else _MASK_PREFIX
 
 
 def is_masked(value: Any) -> bool:

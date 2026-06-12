@@ -1753,7 +1753,7 @@ function renderFundamentals(fund) {
   return items.map(([k, v]) => `
     <div class="fund-item">
       <span class="fund-key">${k}</span>
-      <span class="fund-val">${v === 'null' || v === 'NaN' ? '—' : v}</span>
+      <span class="fund-val">${v === 'null' || v === 'NaN' ? '—' : _esc(v)}</span>
     </div>`).join('');
 }
 
@@ -2058,7 +2058,7 @@ async function openCryptoResearch(coinId, symbol) {
               ['ATH Change', fmt.pct(coin.ath_change_pct)],
               ['ATL', '$' + fmt.price(coin.atl)],
               ['CMC Rank', '#' + coin.market_cap_rank],
-            ].map(([k,v]) => `<div class="fund-item"><span class="fund-key">${k}</span><span class="fund-val">${v}</span></div>`).join('')}
+            ].map(([k,v]) => `<div class="fund-item"><span class="fund-key">${k}</span><span class="fund-val">${_esc(v)}</span></div>`).join('')}
           </div>
         </div>
         <div class="panel">
@@ -2448,7 +2448,7 @@ async function loadScreenerFacets() {
     setSel('su-industry', f.industries || []);
     setSel('su-exchange', f.exchanges  || []);
   } catch(e) {
-    Toast.warn(`Facets failed: ${_esc(e.message)}`);
+    Toast.warn(`Facets failed: ${e.message}`);
   }
 }
 
@@ -3590,6 +3590,11 @@ async function loadSettings() {
                 Jarvis answers, voice lines and summaries per day. The
                 AUGUR_AI_DAILY_CAP environment variable overrides this.
               </div>
+              <label class="form-label" style="margin-top:8px">JARVIS VOICE (PREMIUM TTS)</label>
+              <select class="form-select" id="set-tts-voice">
+                ${['onyx','alloy','echo','fable','nova','shimmer'].map(v =>
+                  `<option value="${v}" ${(settings.jarvis_tts_voice || 'onyx') === v ? 'selected' : ''}>${v.toUpperCase()}</option>`).join('')}
+              </select>
             </div>
             <button class="btn btn-green btn-lg" onclick="saveSettings()" style="margin-top:8px">SAVE SETTINGS</button>
           </div>
@@ -3599,7 +3604,7 @@ async function loadSettings() {
           <div class="panel-body">
             <div class="fund-grid">
               ${[
-                ['SYSTEM', 'AUGUR v1.6.0'],
+                ['SYSTEM', 'AUGUR v1.7.0'],
                 ['DATA SOURCE', 'YAHOO FINANCE + COINGECKO'],
                 ['DATABASE', 'SQLITE3 (LOCAL)'],
                 ['BACKEND', 'PYTHON / FLASK'],
@@ -3703,13 +3708,20 @@ async function removeProviderKey(provider) {
 
 async function saveSettings() {
   try {
-    const payload = {
-      refresh_interval: document.getElementById('set-refresh').value,
-      benchmark: document.getElementById('set-benchmark').value,
-      currency: document.getElementById('set-currency').value,
-    };
+    // Null-guard every field: the Settings fallback-render path emits ONLY
+    // the key input, so reading set-refresh/.value blindly threw and made
+    // SAVE a no-op exactly when the user needed to set their key.
+    const payload = {};
+    const refresh = document.getElementById('set-refresh');
+    const benchmark = document.getElementById('set-benchmark');
+    const currency = document.getElementById('set-currency');
+    if (refresh) payload.refresh_interval = refresh.value;
+    if (benchmark) payload.benchmark = benchmark.value;
+    if (currency) payload.currency = currency.value;
     const capField = document.getElementById('set-ai-cap');
     if (capField && capField.value) payload.ai_daily_cap = capField.value;
+    const voiceField = document.getElementById('set-tts-voice');
+    if (voiceField && voiceField.value) payload.jarvis_tts_voice = voiceField.value;
     const keyField = document.getElementById('set-openai-key');  // fallback-render path only
     if (keyField && keyField.value.trim()) {
       payload.openai_api_key = keyField.value.trim();
@@ -4775,7 +4787,7 @@ function handleCsvDrop(event) {
   const file = event.dataTransfer.files[0];
   if (file) {
     _csvFile = file;
-    document.getElementById('csv-import-status').innerHTML = '<span class="text-green">File ready: ' + file.name + ' (' + Math.round(file.size/1024) + ' KB)</span>';
+    document.getElementById('csv-import-status').innerHTML = '<span class="text-green">File ready: ' + _esc(file.name) + ' (' + Math.round(file.size/1024) + ' KB)</span>';
   }
 }
 
@@ -4783,7 +4795,7 @@ function handleCsvFileSelect(event) {
   const file = event.target.files[0];
   if (file) {
     _csvFile = file;
-    document.getElementById('csv-import-status').innerHTML = '<span class="text-green">File ready: ' + file.name + ' (' + Math.round(file.size/1024) + ' KB)</span>';
+    document.getElementById('csv-import-status').innerHTML = '<span class="text-green">File ready: ' + _esc(file.name) + ' (' + Math.round(file.size/1024) + ' KB)</span>';
   }
 }
 
@@ -4797,12 +4809,12 @@ async function submitCsvImport() {
     const resp = await fetch('/api/portfolio/import', { method: 'POST', body: formData });
     const result = await resp.json();
     if (result.error) {
-      statusEl.innerHTML = '<span class="text-red">Error: ' + result.error + '</span>';
+      statusEl.innerHTML = '<span class="text-red">Error: ' + _esc(result.error) + '</span>';
       return;
     }
     statusEl.innerHTML = '<span class="text-green">Imported: ' + result.imported + ' positions &nbsp;|&nbsp; Skipped: ' + result.skipped + '</span>';
     if (result.errors && result.errors.length) {
-      statusEl.innerHTML += '<br><span class="text-amber" style="font-size:10px">' + result.errors.slice(0,3).join('<br>') + '</span>';
+      statusEl.innerHTML += '<br><span class="text-amber" style="font-size:10px">' + result.errors.slice(0,3).map(_esc).join('<br>') + '</span>';
     }
     Toast.success('Imported ' + result.imported + ' positions');
     _csvFile = null;

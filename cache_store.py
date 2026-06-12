@@ -428,10 +428,17 @@ def cache_get(key, ttl: Optional[float] = None):
         value, expiry, last_access = hit
     now = time.time()
     if now >= expiry:
-        with _mem_lock:
-            _mem.pop(k, None)
+        # Expired — but leave the entry in _mem so cache_get_stale can still
+        # serve it for graceful degradation. It's evicted by the LRU sweep
+        # in cache_set, not here. (Popping it on read is what made
+        # cache_get_stale dead in its documented "call after cache_get
+        # returns None" pattern.)
         return None
-    if _looks_like_failure(value):
+    # Read-time defense against legacy null-shaped values, but NOT against
+    # empty collections — those may be a legitimate negative cache written
+    # with allow_empty=True (cache_set already gated the write). Only drop
+    # genuine error-envelope dicts here.
+    if isinstance(value, dict) and value.get("error") and len(value) <= 3:
         with _mem_lock:
             _mem.pop(k, None)
         return None
@@ -458,6 +465,9 @@ def cache_get_stale(key, max_age_seconds: float = 24 * 3600) -> Any:
     k = _serialize_key(key)
     hit = _mem.get(k)
     if hit is None:
+        # Fall back to disk so stale degradation survives a restart.
+        hit = _load_from_disk(k)
+    if hit is None:
         return None
     if len(hit) == 2:
         value, expiry = hit
@@ -475,15 +485,20 @@ def cache_get_stale(key, max_age_seconds: float = 24 * 3600) -> Any:
     return value
 
 
-def cache_set(key, value, ttl: float) -> None:
+def cache_set(key, value, ttl: float, allow_empty: bool = False) -> None:
     """Store in memory + (if ttl >= _PERSIST_MIN_TTL) write through to disk.
 
     Refuses to cache values that look like upstream failures — neither in
     memory nor on disk. A previous version stored failures in memory and
     only blocked the disk write, which caused a transient rate-limit on the
     first request after boot to freeze blank panels for the full TTL window.
+
+    `allow_empty=True` opts a caller out of the failure heuristic when an
+    empty/falsy value is a LEGITIMATE answer to cache (e.g. a NEGATIVE cache:
+    "this PTR genuinely has no trades / 404'd" — caching that for a short TTL
+    is the whole point, and the heuristic would otherwise silently drop it).
     """
-    if _looks_like_failure(value):
+    if not allow_empty and _looks_like_failure(value):
         return
     k = _serialize_key(key)
     now = time.time()
@@ -556,7 +571,13 @@ def coalesce(key, ttl: float, fetch_fn: Callable[[], Any]) -> Any:
 
     # Opportunistic sweep of orphaned events so callers don't pay the
     # full wait timeout on a key whose previous fetch_fn never returned.
-    _sweep_inflight()
+    # Throttled: the orphan reaper's useful work happens at most once per
+    # _INFLIGHT_MAX_AGE_SEC, so scanning _inflight under the global lock on
+    # EVERY miss serialized a miss storm for nothing.
+    now_ts = time.time()
+    if now_ts - _last_sweep_ts[0] >= _SWEEP_MIN_INTERVAL_SEC:
+        _last_sweep_ts[0] = now_ts
+        _sweep_inflight()
 
     # Claim the in-flight slot or wait for the existing fetch.
     with _inflight_lock:
@@ -570,9 +591,19 @@ def coalesce(key, ttl: float, fetch_fn: Callable[[], Any]) -> Any:
             owner = True
 
     if not owner:
-        # Wait for the in-flight fetch to finish; fall back to whatever it
-        # wrote to cache. If it failed/timed out we just refetch ourselves.
-        ev.wait(timeout=15.0)
+        # Wait for the in-flight fetch to finish, in slices, re-checking that
+        # the owner is still alive. A flat 15s gave up while the expensive
+        # fetches this exists to protect (cluster/divmap/SEC, 30-90s) were
+        # still running, so the waiter duplicated the work serially. We wait
+        # up to _INFLIGHT_MAX_AGE_SEC as long as the owner's slot persists.
+        deadline = time.time() + _INFLIGHT_MAX_AGE_SEC
+        while time.time() < deadline:
+            if ev.wait(timeout=5.0):
+                break
+            with _inflight_lock:
+                cur = _inflight.get(k)
+            if cur is None or cur[0] is not ev:
+                break  # owner finished (or was reaped) — stop waiting
         cached = cache_get(key)
         if cached is not None:
             return cached

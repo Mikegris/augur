@@ -45,12 +45,24 @@ def _calendar_for_one(symbol):
     /api/earnings/calendar request, which routinely tripped Yahoo's rate
     limit on portfolios with >20 tickers.
     """
+    _NO_EARN = {"_no_earnings": True}
+
+    def _neg_cache():
+        # Cache "no upcoming earnings" so ETFs / no-earnings names aren't
+        # re-hit on every calendar request (the briefing's 3.8s floor was
+        # largely this). Sentinel is a non-empty dict so cache_set keeps it.
+        if cache_store is not None and ck is not None:
+            try:
+                cache_store.cache_set(ck, _NO_EARN, ttl=6 * 3600)
+            except Exception:
+                pass
+
     try:
         import cache_store
         ck = ("earnings_cal_one", symbol.upper())
         hit = cache_store.cache_get(ck, ttl=6 * 3600)
         if hit is not None:
-            return hit
+            return None if (isinstance(hit, dict) and hit.get("_no_earnings")) else hit
     except Exception:
         cache_store = None
         ck = None
@@ -60,10 +72,12 @@ def _calendar_for_one(symbol):
         t = yf.Ticker(symbol)
         cal = t.calendar
         if not cal:
+            _neg_cache()
             return None
 
         dates_list = cal.get("Earnings Date", [])
         if not dates_list:
+            _neg_cache()
             return None
 
         next_earnings = None
@@ -74,6 +88,7 @@ def _calendar_for_one(symbol):
                 break
 
         if next_earnings is None:
+            _neg_cache()
             return None
 
         days_until = (next_earnings - today).days

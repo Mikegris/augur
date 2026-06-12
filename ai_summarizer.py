@@ -171,9 +171,12 @@ def _cap_error_envelope(context: str) -> dict:
 
 
 # In-process audio cache: the briefing voice line is spoken repeatedly and
-# costs real money per synthesis. Tiny LRU keyed on (model, voice, text).
+# costs real money per synthesis. Tiny LRU keyed on (model, voice, text),
+# guarded by a lock (written from concurrent request threads).
+import threading as _threading
 _TTS_CACHE_MAX = 24
 _tts_cache = {}  # key -> bytes (insertion-ordered; py3.7+ dicts)
+_tts_lock = _threading.Lock()
 
 
 def tts_speech(text, voice="onyx"):
@@ -188,9 +191,14 @@ def tts_speech(text, voice="onyx"):
     if not key or _cap_exceeded():
         return None
     ck = (MODEL_TTS, voice, text)
-    hit = _tts_cache.get(ck)
-    if hit is not None:
-        return hit
+    with _tts_lock:
+        hit = _tts_cache.get(ck)
+        if hit is not None:
+            # Refresh recency (true LRU) so a hot briefing line isn't evicted
+            # as readily as a one-off — each eviction costs a paid re-synth.
+            _tts_cache.pop(ck, None)
+            _tts_cache[ck] = hit
+            return hit
     try:
         from openai import OpenAI
         client = OpenAI(api_key=key, timeout=20)
@@ -199,9 +207,10 @@ def tts_speech(text, voice="onyx"):
         if not audio:
             return None
         _record_ai_call()
-        _tts_cache[ck] = audio
-        while len(_tts_cache) > _TTS_CACHE_MAX:
-            _tts_cache.pop(next(iter(_tts_cache)))
+        with _tts_lock:
+            _tts_cache[ck] = audio
+            while len(_tts_cache) > _TTS_CACHE_MAX:
+                _tts_cache.pop(next(iter(_tts_cache)))
         return audio
     except Exception as e:
         log.debug("tts_speech failed: %s", e)
@@ -1074,6 +1083,12 @@ Transactions: {txn_summary}""",
         except Exception:
             return {"signal": "NEUTRAL", "summary": "Analysis unavailable.", "ai_powered": False}
 
+    # Check the cap OUTSIDE the cache: the augmented cap envelope carries
+    # non-error keys (buy/sell values) so it isn't failure-shaped, and was
+    # being cached for 6h — outliving the midnight cap reset and returning
+    # "cap reached" for hours after the budget refreshed.
+    if _cap_exceeded():
+        return _do_call()
     if cache_store is not None:
         return cache_store.coalesce(cache_key, _INSIDER_PATTERN_TTL, _do_call)
     return _do_call()

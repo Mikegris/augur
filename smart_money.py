@@ -269,7 +269,18 @@ def _score_options(ticker, current_price, hist):
 
         if not target:
             if exps:
-                target = [(0, exps[0])]
+                # No expiry in the preferred 20-50d window — fall back to the
+                # nearest expiry but compute its REAL calendar DTE. Using a
+                # placeholder 0 (→ trading_dte 1) scaled HV to a single day
+                # while the straddle's implied move spanned the real (often
+                # multi-week) expiry, inflating the IV/HV ratio severalfold
+                # and pinning thin-options names to a max-bearish score.
+                try:
+                    _exp_d = datetime.strptime(exps[0], "%Y-%m-%d").date()
+                    _dte = max(1, (_exp_d - _today_et().date()).days)
+                except Exception:
+                    _dte = 21  # neutral-ish default rather than 1
+                target = [(_dte, exps[0])]
             else:
                 return 8
 

@@ -174,7 +174,13 @@ def _t_stress_test(args):
     import fetcher
     drop = args.get("custom_drop_pct")
     if drop is not None:
-        drop = max(-95.0, min(0.0, float(drop)))
+        drop = float(drop)
+        # The model often sends 30 for "a 30% drop" — a positive magnitude.
+        # Treat any positive value as the loss size rather than clamping it
+        # to a no-op 0%.
+        if drop > 0:
+            drop = -drop
+        drop = max(-95.0, min(-0.1, drop))
     holdings = db.get_portfolio()
     if not holdings:
         return {"note": "no positions"}
@@ -384,7 +390,87 @@ def _t_benchmark_compare(args):
     return out
 
 
+def _t_what_if(args):
+    import synth_whatif
+    import database as db
+    import fetcher
+    sym = _sym(args)
+    action = str(args.get("action") or "").lower()
+    if action not in ("add", "remove", "resize_to"):
+        raise ValueError("action must be add, remove or resize_to")
+    mv = 0.0
+    if action != "remove":
+        mv = float(args.get("market_value") or 0)
+        if not (0 < mv < 100_000_000):
+            raise ValueError("market_value required for add/resize_to")
+    holdings = db.get_portfolio()
+    if not holdings:
+        return {"note": "no positions to simulate against"}
+    prices = fetcher.get_quotes_batch([h["symbol"] for h in holdings])
+    cur = []
+    for h in holdings:
+        p = (prices.get(h["symbol"]) or {}).get("price")
+        cur.append({"symbol": h["symbol"],
+                    "market_value": round((p if p else h["avg_cost"]) * h["shares"], 2),
+                    "shares": h["shares"], "avg_cost": h["avg_cost"],
+                    "asset_type": h.get("asset_type")})
+    r = synth_whatif.whatif(cur, {"symbol": sym, "action": action, "market_value": mv})
+    # Condense to the actual whatif shape: delta (risk/return shifts) +
+    # optimizer verdict. The old code copied keys that don't exist, so the
+    # tool returned nothing but an echo of its inputs.
+    out = {"symbol": sym, "action": action, "market_value": mv}
+    delta = r.get("delta")
+    if isinstance(delta, dict):
+        out["delta"] = {k: delta.get(k) for k in (
+            "expected_return_pct", "expected_vol_pct", "sharpe_ratio_delta",
+            "concentration_hhi", "ml_forecast_weighted_return_delta_pct", "nav_delta")
+            if delta.get(k) is not None}
+        shifts = delta.get("scenario_loss_shifts")
+        if isinstance(shifts, (dict, list)) and len(str(shifts)) < 400:
+            out["delta"]["scenario_loss_shifts"] = shifts
+    opt = r.get("optimizer_says")
+    if isinstance(opt, dict):
+        out["optimizer"] = {k: opt.get(k) for k in (
+            "verdict", "current_optimal_size_pct", "your_proposed_size_pct",
+            "optimizer_sharpe") if opt.get(k) is not None}
+    mc = r.get("monte_carlo_delta")
+    if isinstance(mc, dict) and len(str(mc)) < 400:
+        out["monte_carlo_delta"] = mc
+    if r.get("errors"):
+        out["partial"] = True
+    return out
+
+
+def _t_compare(args):
+    import jarvis_lens
+    a = _sym({"symbol": args.get("symbol_a")})
+    b = _sym({"symbol": args.get("symbol_b")})
+
+    def slim(r):
+        return {"symbol": r.get("symbol"),
+                "name": (r.get("business") or {}).get("name"),
+                "sector": (r.get("business") or {}).get("sector"),
+                "quality": r.get("quality"),
+                "valuation": {k: (r.get("valuation") or {}).get(k) for k in ("tone", "pe", "peg")},
+                "ownership": {k: (r.get("ownership") or {}).get(k)
+                              for k in ("held", "unrealized_pct", "holding_days")},
+                "take": r.get("take")}
+    return {"a": slim(jarvis_lens.position_review(a)),
+            "b": slim(jarvis_lens.position_review(b))}
+
+
 # ─── mutating-tool implementations (only via execute_mutating) ───────────────
+
+def _t_remember(args):
+    import database as db
+    fact = str(args.get("fact") or "").strip()
+    if not fact:
+        return {"error": "no fact to remember"}
+    mid = db.jarvis_add_memory(fact, source="agent")
+    if mid is None:
+        return {"error": "could not store that"}
+    return {"status": "remembered", "id": mid, "label": "Remember: {}".format(fact[:500])}
+
 
 def _t_add_alert(args):
     import database as db
@@ -485,6 +571,24 @@ TOOLS: Dict[str, Dict[str, Any]] = {
         "description": "Use when asked for new investment ideas: instant, pre-scored symbols from the warmed idea pool.",
         "parameters": _p({}),
     },
+    "what_if": {
+        "fn": lambda args: _t_what_if(args),
+        "mutating": False,
+        "description": "Use for 'what if I add/trim/sell X' BEFORE any trade: simulates the portfolio impact (risk, concentration, factor tilts, stress) of adding, removing, or resizing a position. Purely hypothetical — changes nothing.",
+        "parameters": _p(dict(_SYM_PROP,
+                              action={"type": "string", "enum": ["add", "remove", "resize_to"],
+                                      "description": "add = buy more, remove = sell all, resize_to = set position to market_value"},
+                              market_value={"type": "number",
+                                            "description": "Dollar amount for add/resize_to (ignored for remove)"}),
+                         ["symbol", "action"]),
+    },
+    "compare_positions": {
+        "fn": lambda args: _t_compare(args),
+        "mutating": False,
+        "description": "Use for 'compare X vs Y / which is the better business': side-by-side Buffett-lens reviews — quality scores, valuation tones, and the user's ownership of each.",
+        "parameters": _p({"symbol_a": {"type": "string"}, "symbol_b": {"type": "string"}},
+                         ["symbol_a", "symbol_b"]),
+    },
     "position_review": {
         "fn": lambda args: __import__("jarvis_lens").position_review(_sym(args)),
         "mutating": False,
@@ -562,10 +666,7 @@ TOOLS: Dict[str, Dict[str, Any]] = {
     },
     # ── mutating: proposal-only from the agent loop ──────────────────────────
     "remember_fact": {
-        "fn": lambda args: {"status": "remembered",
-                            "id": __import__("database").jarvis_add_memory(
-                                str(args.get("fact") or ""), source="agent"),
-                            "label": "Remember: {}".format(str(args.get("fact") or "")[:500])},
+        "fn": lambda args: _t_remember(args),
         "mutating": True,
         "description": "Store a durable fact about the user (preferences, constraints). The user must confirm before this is saved.",
         "parameters": _p({"fact": {"type": "string", "description": "One concise fact, e.g. 'User is risk-averse'"}}, ["fact"]),
@@ -599,6 +700,28 @@ def is_mutating(name: str) -> bool:
     return bool(spec and spec["mutating"])
 
 
+def valid_proposal_args(name: str, args: Dict[str, Any]) -> bool:
+    """Whether a mutating proposal's args are well-formed enough to offer the
+    user a CONFIRM. Malformed model args ('Set alert:  None $None') should be
+    rejected before they ever reach the confirmation UI."""
+    if not isinstance(args, dict):
+        return False
+    if name == "remember_fact":
+        return bool(str(args.get("fact") or "").strip())
+    if name == "add_price_alert":
+        if str(args.get("alert_type") or "").lower() not in ("above", "below"):
+            return False
+        if not str(args.get("symbol") or "").strip():
+            return False
+        try:
+            return float(args.get("price")) > 0
+        except (TypeError, ValueError):
+            return False
+    if name == "add_to_watchlist":
+        return bool(str(args.get("symbol") or "").strip())
+    return True
+
+
 def proposal_label(name: str, args: Dict[str, Any]) -> str:
     if name == "remember_fact":
         return "Remember: {}".format(str(args.get("fact", ""))[:500])
@@ -624,7 +747,26 @@ def execute_read(name: str, args: Dict[str, Any]) -> str:
         return json.dumps({"error": str(e)[:200]})
     s = json.dumps(result, default=str)
     if len(s) > _RESULT_CHAR_BUDGET:
-        s = s[:_RESULT_CHAR_BUDGET] + '..."(truncated)"}'
+        # Truncating raw JSON yields a syntactically broken string the model
+        # can't parse. Drop list items / dict keys until it fits, keeping
+        # VALID JSON, and flag the truncation explicitly.
+        try:
+            if isinstance(result, list):
+                trimmed = list(result)
+                while trimmed and len(json.dumps(trimmed, default=str)) > _RESULT_CHAR_BUDGET - 60:
+                    trimmed.pop()
+                return json.dumps({"items": trimmed, "truncated": True,
+                                   "total": len(result)}, default=str)
+            if isinstance(result, dict):
+                trimmed = dict(result)
+                keys = list(trimmed.keys())
+                while keys and len(json.dumps(trimmed, default=str)) > _RESULT_CHAR_BUDGET - 40:
+                    trimmed.pop(keys.pop(), None)
+                trimmed["truncated"] = True
+                return json.dumps(trimmed, default=str)
+        except Exception:
+            pass
+        return json.dumps({"truncated": True, "note": "result too large to inline"})
     return s
 
 

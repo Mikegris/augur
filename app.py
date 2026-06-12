@@ -166,6 +166,10 @@ else:
 def _snapshot_worker():
     """Takes a portfolio snapshot every 5 minutes but only writes once per day."""
     while True:
+        # Bind prices unconditionally — the alert block below reads it, and a
+        # watchlist-only user (no holdings) would otherwise hit NameError every
+        # cycle and never get an alert evaluated.
+        prices = {}
         try:
             holdings = db.get_portfolio()
             if holdings:
@@ -201,7 +205,6 @@ def _snapshot_worker():
                 )
         except Exception:
             log.exception("snapshot worker: portfolio snapshot failed")
-            prices = prices if 'prices' in locals() else {}
 
         # ── Check price alerts (reuse already-fetched prices) ──────────────
         try:
@@ -902,6 +905,20 @@ def update_settings():
         # through would clobber the real key with "••••XaQA".
         if k in api_keys.SENSITIVE_SETTINGS and api_keys.is_masked(v):
             continue
+        # Sensitive keys must pass the provider's format gate, so a typo
+        # ("garbage") can't flip _llm_available() true and fail at call time.
+        if k in api_keys.SENSITIVE_SETTINGS and v:
+            provider = next((p for p, s in api_keys.PROVIDERS.items()
+                             if s["setting"] == k), None)
+            if provider:
+                res = api_keys.save_key(provider, v if isinstance(v, str) else str(v))
+                if res.get("error"):
+                    return jsonify({"error": res["error"]}), 400
+                continue
+        # Non-string values for non-sensitive keys: coerce primitives, reject
+        # nested structures (str(dict) used to store "{'x': 1}").
+        if v is not None and not isinstance(v, (str, int, float, bool)):
+            return jsonify({"error": "invalid value for '{}'".format(k)}), 400
         db.set_setting(k, v)
     return jsonify({"status": "saved"})
 
@@ -1054,6 +1071,12 @@ def portfolio_dividends():
 
         results.append({
             **div_data,
+            # Guarantee the keys the UI attributes rows by, even when the
+            # per-symbol dividend fetch failed (div_data == {}).
+            "symbol": h["symbol"],
+            "name": div_data.get("name") or h.get("name") or h["symbol"],
+            "div_rate": div_data.get("div_rate"),
+            "div_yield": div_data.get("div_yield"),
             "shares": h["shares"],
             "avg_cost": h["avg_cost"],
             "market_value": round(market_value, 2),
@@ -3104,7 +3127,13 @@ def jarvis_tts_route():
         return jsonify({"error": "expected JSON body with a 'text' string"}), 400
     try:
         import ai_summarizer
-        voice = str(data.get("voice") or "onyx")[:20]
+        _OK_VOICES = {"alloy", "echo", "fable", "onyx", "nova", "shimmer"}
+        voice = data.get("voice") or db.get_settings().get("jarvis_tts_voice") or "onyx"
+        voice = str(voice).lower()[:20]
+        if voice not in _OK_VOICES:
+            # A bad voice is a 400 (distinct from the keyless 404 the frontend
+            # treats as "no premium voice, fall back to browser").
+            return jsonify({"error": "unknown voice '{}'".format(voice)}), 400
         audio = ai_summarizer.tts_speech(text, voice=voice)
         if not audio:
             return jsonify({"error": "tts unavailable"}), 404

@@ -366,16 +366,20 @@ def _congress_net_60d(symbol: str) -> Optional[Dict[str, Any]]:
     n_buys = 0
     n_sells = 0
     for t in trades:
-        amt = t.get("amount_max") or t.get("amount_min") or t.get("amount") or 0
+        # congress.py emits amount_val (number) and txn_type / txn_type_raw
+        # (label + raw P/S code). The old field names (amount_max/type) never
+        # existed, so this congressional signal was silently dead for every
+        # symbol — n_buys+n_sells was always 0 and the function returned None.
+        amt = t.get("amount_val") or 0
         try:
             amt = float(amt)
         except (ValueError, TypeError):
             continue
-        ttype = (t.get("type") or t.get("transaction") or "").lower()
-        if "purchase" in ttype or "buy" in ttype:
+        ttype = "{} {}".format(t.get("txn_type") or "", t.get("txn_type_raw") or "").lower().strip()
+        if "purchase" in ttype or "buy" in ttype or ttype.startswith("p"):
             net += amt
             n_buys += 1
-        elif "sale" in ttype or "sell" in ttype:
+        elif "sale" in ttype or "sell" in ttype or ttype.startswith("s"):
             net -= amt
             n_sells += 1
     if n_buys + n_sells == 0:

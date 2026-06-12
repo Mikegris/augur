@@ -47,13 +47,45 @@ _CHASE_PCT = 20.0          # buying >20% above your own prior avg cost
 _FLIPS_FLAG = 2            # quick flips in 90d that earn a card
 
 
-def _safe_pct(v: Any) -> Optional[float]:
+def _num(v: Any) -> Optional[float]:
     try:
-        f = float(v)
+        return float(v)
     except (TypeError, ValueError):
         return None
-    # yfinance mixes 0.18 and 18.0 conventions; normalize ratios to percent
-    return f * 100 if -1.5 < f < 1.5 else f
+
+
+def _pct_ratio(v: Any) -> Optional[float]:
+    """ROE / margins / growth → percent. yfinance gives a ratio (0.30, and
+    for buyback-heavy names ROE can be 1.41 = 141%); Finviz gives percent
+    (30). Multiply only when the magnitude is ratio-scaled (<2), so 1.6
+    becomes 160% instead of being read as a weak 1.6%."""
+    f = _num(v)
+    if f is None:
+        return None
+    return f * 100 if -2.0 < f < 2.0 else f
+
+
+def _pct_yield(v: Any) -> Optional[float]:
+    """Dividend yield is already percent-form from both sources in the
+    versions we run (yfinance 1.2.0: 0.37 == 0.37%; Finviz 'Dividend %':
+    2.5). Never multiply — that was the '37% dividend' bug."""
+    return _num(v)
+
+
+def _debt_ratio(v: Any) -> Optional[float]:
+    """Normalize debt/equity to a true ratio. yfinance reports percent-form
+    (79.5 == 0.795, and 8.0 == 0.08 nearly debt-free); Finviz reports the
+    ratio directly (0.79). Divide by 100 only for clearly percent-scaled
+    values (>3) so a near-debt-free yfinance 8.0 isn't read as heavy
+    leverage."""
+    f = _num(v)
+    if f is None:
+        return None
+    return f / 100 if f > 3 else f
+
+
+# Back-compat alias: a couple of call sites still read margins generically.
+_safe_pct = _pct_ratio
 
 
 # ─── 1. Position review (Buffett lens) ───────────────────────────────────────
@@ -64,7 +96,7 @@ def _quality_score(f: Dict[str, Any]) -> Dict[str, Any]:
     score = 50.0
     reasons: List[str] = []
 
-    roe = _safe_pct(f.get("return_on_equity"))
+    roe = _pct_ratio(f.get("return_on_equity"))
     if roe is not None:
         if roe >= 20:
             score += 15; reasons.append("ROE {:.0f}% — excellent returns on owners' capital".format(roe))
@@ -73,22 +105,17 @@ def _quality_score(f: Dict[str, Any]) -> Dict[str, Any]:
         elif roe < 6:
             score -= 12; reasons.append("ROE {:.0f}% — weak returns on equity".format(roe))
 
-    om = _safe_pct(f.get("operating_margin"))
+    om = _pct_ratio(f.get("operating_margin"))
     if om is not None:
         if om >= 25:
             score += 10; reasons.append("operating margin {:.0f}% suggests pricing power".format(om))
         elif om < 8:
             score -= 8; reasons.append("thin operating margin ({:.0f}%)".format(om))
 
-    de = f.get("debt_equity")
-    try:
-        de = float(de) if de is not None else None
-    except (TypeError, ValueError):
-        de = None
-    if de is not None:
-        de_ratio = de / 100 if de > 10 else de  # yfinance reports 154.5 meaning 1.545
+    de_ratio = _debt_ratio(f.get("debt_equity"))
+    if de_ratio is not None:
         if de_ratio <= 0.5:
-            score += 8; reasons.append("conservative balance sheet (D/E {:.1f})".format(de_ratio))
+            score += 8; reasons.append("conservative balance sheet (D/E {:.2f})".format(de_ratio))
         elif de_ratio > 2.0:
             score -= 10; reasons.append("heavy leverage (D/E {:.1f})".format(de_ratio))
 
@@ -99,7 +126,7 @@ def _quality_score(f: Dict[str, Any]) -> Dict[str, Any]:
         else:
             score -= 10; reasons.append("burns cash (negative FCF)")
 
-    rg = _safe_pct(f.get("revenue_growth"))
+    rg = _pct_ratio(f.get("revenue_growth"))
     if rg is not None:
         if rg >= 10:
             score += 6; reasons.append("revenue growing {:.0f}%".format(rg))
@@ -117,12 +144,11 @@ def _valuation_flags(f: Dict[str, Any]) -> Dict[str, Any]:
     pb = f.get("pb_ratio")
     flags: List[str] = []
     tone = "unclear"
-    try:
-        pe = float(pe) if pe else None
-        peg = float(peg) if peg else None
-        pb = float(pb) if pb else None
-    except (TypeError, ValueError):
-        pe = peg = pb = None
+    # Parse each independently — one unparsable field ("N/A") must not blank
+    # the other two.
+    pe = _num(pe)
+    peg = _num(peg)
+    pb = _num(pb)
     if pe is not None:
         if pe < 0:
             tone = "speculative"; flags.append("negative earnings — you're paying for a story")
@@ -133,23 +159,32 @@ def _valuation_flags(f: Dict[str, Any]) -> Dict[str, Any]:
                 pe, ", PEG {:.1f}".format(peg) if peg else ""))
         else:
             tone = "fair"; flags.append("P/E {:.0f} — neither bargain nor bubble".format(pe))
-    dy = _safe_pct(f.get("dividend_yield"))
+    dy = _pct_yield(f.get("dividend_yield"))
     if dy:
-        flags.append("pays {:.1f}% dividend".format(dy))
+        flags.append("pays {:.2f}% dividend".format(dy))
     return {"pe": pe, "peg": peg, "pb": pb, "tone": tone, "flags": flags}
 
 
-def _ownership(symbol: str, price: Optional[float]) -> Dict[str, Any]:
-    out: Dict[str, Any] = {"held": False}
+def _held_record(symbol: str) -> Optional[Dict[str, Any]]:
     try:
         for h in db.get_portfolio():
             if h["symbol"].upper() == symbol:
-                out.update({
-                    "held": True, "shares": h["shares"], "avg_cost": h["avg_cost"],
-                    "unrealized_pct": round((price - h["avg_cost"]) / h["avg_cost"] * 100, 1)
-                    if (price and h["avg_cost"]) else None,
-                })
-                break
+                return h
+    except Exception:
+        pass
+    return None
+
+
+def _ownership(symbol: str, price: Optional[float], held: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    out: Dict[str, Any] = {"held": False}
+    try:
+        h = held if held is not None else _held_record(symbol)
+        if h is not None:
+            out.update({
+                "held": True, "shares": h["shares"], "avg_cost": h["avg_cost"],
+                "unrealized_pct": round((price - h["avg_cost"]) / h["avg_cost"] * 100, 1)
+                if (price and h["avg_cost"]) else None,
+            })
         txns = db.get_transactions(symbol=symbol, limit=100)
         buys = [t for t in txns if (t.get("action") or "").upper() == "BUY"]
         if buys:
@@ -201,23 +236,65 @@ def _buffett_take(quality: Dict[str, Any], valuation: Dict[str, Any],
 
 
 def _position_review_uncached(symbol: str) -> Dict[str, Any]:
+    held = _held_record(symbol)
+    is_crypto = bool(held and held.get("asset_type") == "crypto")
+    # Crypto holdings must be priced off SYM-USD, not the same-ticker equity
+    # (an ETF or unrelated stock) — otherwise BTC reviews as a trust at -100%.
+    quote_sym = symbol + "-USD" if is_crypto else symbol
+
     f = {}
-    try:
-        f = fetcher.get_fundamentals(symbol) or {}
-    except Exception as e:
-        log.debug("fundamentals(%s) failed: %s", symbol, e)
+    if not is_crypto:
+        try:
+            f = fetcher.get_fundamentals(symbol) or {}
+        except Exception as e:
+            log.debug("fundamentals(%s) failed: %s", symbol, e)
     q = {}
     try:
-        q = fetcher.get_quote(symbol) or {}
+        q = fetcher.get_quote(quote_sym) or {}
     except Exception:
         pass
     price = q.get("price")
+    own = _ownership(symbol, price, held=held)
+
+    # A crypto asset isn't a "business" — give it an honest, non-equity take.
+    if is_crypto:
+        return {
+            "symbol": symbol, "is_crypto": True,
+            "business": {"name": q.get("name") or symbol, "sector": "Crypto",
+                         "industry": None,
+                         "summary": "{} is a crypto asset — no business fundamentals to "
+                                    "review. Judge it on adoption, liquidity and your own "
+                                    "risk tolerance, not earnings.".format(symbol)},
+            "quality": {"score": None, "verdict": "N/A", "reasons": []},
+            "valuation": {"tone": "n/a", "flags": []},
+            "ownership": own, "price": price,
+            "take": "{} is a crypto position, not a business — the Buffett lens doesn't "
+                    "apply. Size it like the volatile asset it is.".format(symbol),
+            "as_of": datetime.now(timezone.utc).isoformat(),
+        }
+
+    # No fundamentals at all (bad ticker, dead feed): don't fabricate a verdict.
+    metric_keys = ("pe_ratio", "return_on_equity", "operating_margin", "market_cap",
+                   "revenue", "free_cashflow")
+    has_data = bool(price) or any(f.get(k) is not None for k in metric_keys)
+    if not has_data:
+        return {
+            "symbol": symbol, "no_data": True,
+            "business": {"name": f.get("name") or symbol, "sector": None,
+                         "industry": None,
+                         "summary": "No data available for {} — it may be an invalid "
+                                    "ticker or the data feed is down.".format(symbol)},
+            "quality": {"score": None, "verdict": "NO DATA", "reasons": []},
+            "valuation": {"tone": "unclear", "flags": []},
+            "ownership": own, "price": price,
+            "take": "I couldn't pull anything on {} — can't review what I can't see.".format(symbol),
+            "as_of": datetime.now(timezone.utc).isoformat(),
+        }
+
     desc = (f.get("description") or "").strip()
     summary = desc.split(". ")[0][:280] + "." if desc else "No business description available."
-
     quality = _quality_score(f)
     valuation = _valuation_flags(f)
-    own = _ownership(symbol, price)
     name = f.get("name") or symbol
 
     return {
@@ -253,6 +330,19 @@ def _parse_day(t: Dict[str, Any]) -> Optional[datetime]:
         return None
 
 
+def _parse_ts(t: Dict[str, Any]) -> Optional[datetime]:
+    """Full timestamp for ordering. created_at carries time-of-day, which is
+    what disambiguates same-DAY round trips (day-trades) — sorting by day
+    alone left SELL before BUY and the flip pairing never matched."""
+    raw = (t.get("created_at") or t.get("date") or "")
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d"):
+        try:
+            return datetime.strptime(raw[:19], fmt)
+        except Exception:
+            continue
+    return None
+
+
 def _temperament_uncached() -> Dict[str, Any]:
     try:
         txns = db.get_transactions(limit=500) or []
@@ -264,15 +354,18 @@ def _temperament_uncached() -> Dict[str, Any]:
                 "as_of": datetime.now(timezone.utc).isoformat()}
 
     now = datetime.now()
-    dated = [(t, _parse_day(t)) for t in txns]
-    dated = [(t, d) for t, d in dated if d is not None]
-    recent = [(t, d) for t, d in dated if (now - d).days <= 90]
+    # Order by full timestamp so same-day BUY→SELL pairs resolve correctly.
+    dated = [(t, _parse_day(t), _parse_ts(t)) for t in txns]
+    dated = [(t, d, ts) for t, d, ts in dated if d is not None]
+    dated.sort(key=lambda x: x[2] or x[1])
+    recent_count = sum(1 for t, d, ts in dated if (now - d).days <= 90)
 
     observations: List[Dict[str, str]] = []
 
-    # Quick flips: BUY then SELL of the same symbol within N days.
+    # Quick flips: BUY then SELL of the same symbol within N days. Counted
+    # over the last 90 days only — the card says "recently", so it must be.
     by_sym: Dict[str, List] = {}
-    for t, d in sorted(dated, key=lambda td: td[1]):
+    for t, d, ts in dated:
         by_sym.setdefault(t["symbol"].upper(), []).append((t, d))
     flips = []
     for sym, rows in by_sym.items():
@@ -283,7 +376,7 @@ def _temperament_uncached() -> Dict[str, Any]:
                 last_buy = d
             elif act == "SELL" and last_buy is not None:
                 held = (d - last_buy).days
-                if held <= _QUICK_FLIP_DAYS:
+                if held <= _QUICK_FLIP_DAYS and (now - d).days <= 90:
                     flips.append((sym, held))
                 last_buy = None
     if len(flips) >= _FLIPS_FLAG:
@@ -321,7 +414,7 @@ def _temperament_uncached() -> Dict[str, Any]:
                         len(chases), "s" if len(chases) != 1 else "", sym, p, avg)})
 
     # Churn trend: activity accelerating?
-    n_recent = len(recent)
+    n_recent = recent_count
     monthly = n_recent / 3.0
     if monthly >= 8:
         observations.append({
@@ -329,10 +422,13 @@ def _temperament_uncached() -> Dict[str, Any]:
             "text": "{:.0f} trades/month over the last quarter. Buffett: 'lethargy bordering "
                     "on sloth remains the cornerstone of our investment style.'".format(monthly)})
     elif monthly <= 2 and n_recent > 0:
+        # Round first, then pluralize on the rounded display value so the
+        # grammar matches what's shown ("~1 trade", not "~1 trades").
+        shown = round(monthly)
         observations.append({
             "kind": "patience", "tone": "pos",
-            "text": "~{:.0f} trade{}/month — patient pace. The portfolio is doing the work.".format(
-                monthly, "s" if monthly != 1 else "")})
+            "text": "~{} trade{}/month — patient pace. The portfolio is doing the work.".format(
+                shown, "s" if shown != 1 else "")})
 
     if not observations:
         observations.append({"kind": "clean", "tone": "pos",
@@ -374,10 +470,14 @@ def _macro_brief_uncached() -> Dict[str, Any]:
         sectors = fetcher.get_sector_performance() or []
         ranked = sorted([s for s in sectors if s.get("change_pct") is not None],
                         key=lambda s: -s["change_pct"])
+        # Disjoint top/bottom slices — with <6 sectors reporting, ranked[:3]
+        # and ranked[-3:] would overlap and produce "X over X".
+        half = len(ranked) // 2
+        top_n = min(3, half) if len(ranked) >= 2 else 0
         sectors_top = [{"sector": s.get("sector") or s.get("name"),
-                        "change_pct": s["change_pct"]} for s in ranked[:3]]
+                        "change_pct": s["change_pct"]} for s in ranked[:top_n]]
         sectors_bottom = [{"sector": s.get("sector") or s.get("name"),
-                           "change_pct": s["change_pct"]} for s in ranked[-3:]]
+                           "change_pct": s["change_pct"]} for s in ranked[len(ranked) - top_n:]]
     except Exception:
         pass
 
@@ -400,11 +500,14 @@ def _macro_brief_uncached() -> Dict[str, Any]:
 
     # Rule-based strategist paragraph — every clause guarded.
     bits: List[str] = []
-    if regime:
+    if regime and regime.get("vix") is not None and regime.get("regime"):
         bits.append("Equities are in a {} vol regime (VIX {:.1f}), S&P {} on the day".format(
-            (regime.get("regime") or "—").lower(), regime.get("vix") or 0,
+            regime["regime"].lower(), regime["vix"],
             jarvis._fmt_pct(regime.get("spx_pct"))))
-    if sectors_top and sectors_bottom:
+    elif regime and regime.get("spx_pct") is not None:
+        bits.append("S&P {} on the day".format(jarvis._fmt_pct(regime["spx_pct"])))
+    if (sectors_top and sectors_bottom
+            and sectors_top[0]["sector"] != sectors_bottom[-1]["sector"]):
         bits.append("rotation favors {} over {}".format(
             sectors_top[0]["sector"], sectors_bottom[-1]["sector"]))
     if liquidity and liquidity.get("regime"):
