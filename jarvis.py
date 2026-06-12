@@ -289,19 +289,93 @@ _AGENT_SYSTEM = (
     "forecast, smart_money_score, position_review, …). (2) OPEN-WORLD "
     "research that reaches OUTSIDE the app: web_research, search_news, "
     "search_sec_filings, search_hacker_news, news_sentiment. "
-    "Plan a short tool sequence first. For the user's own money or holdings, "
-    "consult get_portfolio first; when conviction matters, cross-reference at "
-    "least two independent local engines and say where they agree or disagree. "
+    "REASON before you act: privately work out what the question really asks, "
+    "what evidence would settle it, and which tools supply that evidence — "
+    "then execute the shortest sequence that gets there. When a plan is "
+    "suggested below, follow it, adapting as results come in. "
+    "ASK WHEN AMBIGUOUS: if a critical fact is missing (which symbol, what "
+    "amount, what timeframe) and any answer would be a guess, reply with ONE "
+    "focused clarifying question ending in '?' as your ENTIRE message — the "
+    "thread continues and you'll get the answer next turn. Prefer answering "
+    "over asking; clarify only when truly required. "
+    "For the user's own money or holdings, consult get_portfolio first; when "
+    "conviction matters, cross-reference at least two independent local "
+    "engines and say where they agree or disagree. "
     "CRUCIALLY: for ANY question your local tools can't answer — a private "
     "company (SpaceX, Stripe), an upcoming IPO, a Fed decision, breaking news, "
     "a regulation, a theme, 'what's happening with X' — DO NOT say you can't "
     "help. Use web_research (or search_news / search_sec_filings) and answer "
     "from what you find, citing sources. Researching beats refusing. "
+    "DEMONSTRATE DEPTH: name the mechanism, not just the fact (dealers hedge "
+    "gamma, multiples compress when rates rise); surface one non-obvious "
+    "second-order effect when it's real; state what evidence would change "
+    "your mind. Never pad — depth is precision, not length. "
     "Cite numbers exactly as tools give them. Be concise (a short paragraph), "
     "confident, dry wit welcome. No investment advice — evidence and framing, "
     "not buy/sell instructions. For an action (alert, watchlist add) call the "
     "matching tool; the app asks the user to confirm."
 )
+
+# ─── planner: think before acting ────────────────────────────────────────────
+# One cheap MODEL_LIGHT call that decides, BEFORE the tool loop spends real
+# money: (a) is the question answerable at all without a clarification, and
+# (b) what's the shortest tool sequence + the non-obvious angle worth
+# checking. Entirely fail-open — a dead/slow/junk planner means the agent
+# runs exactly as it did before planning existed.
+
+_PLANNER_SYSTEM = (
+    "You are the planning faculty of JARVIS, an investing copilot with tools. "
+    "Decide BEFORE acting. If a critical fact is missing (which symbol, what "
+    "amount, what timeframe) such that ANY answer would be a guess, set "
+    "\"clarify\" to one focused question. Otherwise clarify=null and plan the "
+    "shortest tool sequence (≤4 steps). Also name the one non-obvious angle "
+    "worth checking. Reply ONLY JSON: "
+    '{"clarify": null, "steps": [{"tool": "name", "why": "≤8 words"}], '
+    '"angle": "≤12 words"}. Prefer answering over clarifying.'
+)
+
+
+def _plan_approach(query: str, history: Optional[List[Dict[str, Any]]] = None) -> Optional[Dict[str, Any]]:
+    """Returns {"clarify": str|None, "steps": [{tool, why}], "angle": str|None}
+    or None when planning is unavailable/unparseable. Steps naming unknown
+    tools are dropped; a clarify that isn't a question is ignored."""
+    try:
+        import jarvis_tools
+        tool_names = sorted(jarvis_tools.TOOLS.keys())
+        ctx = ""
+        last = [t for t in (history or []) if t.get("q")][-2:]
+        if last:
+            ctx = "Recent turns: " + " | ".join(
+                "Q: {}".format((t.get("q") or "")[:120]) for t in last) + "\n"
+        text = _llm_complete(
+            [{"role": "system", "content": _PLANNER_SYSTEM},
+             {"role": "user", "content": "{}Tools: {}\n\nQuestion: {}".format(
+                 ctx, ", ".join(tool_names), query[:400])}],
+            max_tokens=160, temperature=0.0)
+        if not text:
+            return None
+        m = re.search(r"\{.*\}", text, re.DOTALL)
+        if not m:
+            return None
+        data = json.loads(m.group(0))
+        out: Dict[str, Any] = {"clarify": None, "steps": [], "angle": None}
+        c = data.get("clarify")
+        if isinstance(c, str) and c.strip().endswith("?") and len(c.strip()) >= 8:
+            out["clarify"] = c.strip()[:200]
+        known = set(tool_names)
+        for s in (data.get("steps") or [])[:4]:
+            if isinstance(s, dict) and s.get("tool") in known:
+                out["steps"].append({"tool": s["tool"],
+                                     "why": str(s.get("why") or "")[:60]})
+        a = data.get("angle")
+        if isinstance(a, str) and a.strip():
+            out["angle"] = a.strip()[:100]
+        if not out["clarify"] and not out["steps"]:
+            return None
+        return out
+    except Exception as e:
+        log.debug("planner skipped: %s", e)
+        return None
 
 _AGENT_MAX_ROUNDS = 5  # +1 round headroom for a research call + synthesis
 
@@ -332,6 +406,24 @@ def _progress_label(tool_name: str) -> str:
         tool_name, "Consulting {}…".format(tool_name.replace("_", " ")))
 
 
+def _result_note(result_json: str) -> str:
+    """One dim line for the reasoning trace — what a tool came back with,
+    without dumping its payload into the UI."""
+    try:
+        parsed = json.loads(result_json)
+    except Exception:
+        return "returned data"
+    if isinstance(parsed, dict):
+        if parsed.get("note"):
+            return str(parsed["note"])[:90]
+        if parsed.get("error"):
+            return "error: " + str(parsed["error"])[:70]
+        return "returned " + ", ".join(list(parsed.keys())[:6])
+    if isinstance(parsed, list):
+        return "returned {} rows".format(len(parsed))
+    return "returned data"
+
+
 def _agent_ask(query: str, history: Optional[List[Dict[str, Any]]] = None,
                progress: Any = None) -> Optional[Dict[str, Any]]:
     """Tool-calling agent over the full engine registry. Returns
@@ -353,6 +445,31 @@ def _agent_ask(query: str, history: Optional[List[Dict[str, Any]]] = None,
             progress(text)
         except Exception:
             pass
+
+    # ── plan first ──
+    # Cheap, fail-open. A clarify verdict short-circuits the whole loop —
+    # one question back to the user costs less than four rounds of guessing.
+    notify("Planning the approach…")
+    plan = _plan_approach(query, history)
+    reasoning: Dict[str, Any] = {"plan": [], "angle": None, "consulted": []}
+    plan_hint = ""
+    if plan:
+        if plan.get("clarify"):
+            return {"answer": plan["clarify"], "clarify": True, "used": [],
+                    "reasoning": {"plan": [], "angle": plan.get("angle"),
+                                  "consulted": [],
+                                  "note": "asked instead of guessing"}}
+        if plan.get("steps"):
+            reasoning["plan"] = plan["steps"]
+            reasoning["angle"] = plan.get("angle")
+            notify("Plan: " + " → ".join(s["tool"].replace("_", " ")
+                                         for s in plan["steps"]))
+            plan_hint = "\n\nSuggested plan (adapt as results come in): " + \
+                "; ".join("{} ({})".format(s["tool"], s["why"]) if s.get("why")
+                          else s["tool"] for s in plan["steps"])
+            if plan.get("angle"):
+                plan_hint += ". Angle worth checking: {}.".format(plan["angle"])
+
     from openai import OpenAI
     # gpt-5.x reasoning models with tool schemas can take 20-40s per round;
     # a 25s timeout cut them off under load and dropped the whole agent path
@@ -370,7 +487,8 @@ def _agent_ask(query: str, history: Optional[List[Dict[str, Any]]] = None,
     except Exception:
         grounding = ""
     messages: List[Dict[str, Any]] = [
-        {"role": "system", "content": grounding + _AGENT_SYSTEM + _memory_block()}]
+        {"role": "system",
+         "content": grounding + _AGENT_SYSTEM + _memory_block() + plan_hint}]
     for turn in (history or [])[-6:]:
         if turn.get("q"):
             messages.append({"role": "user", "content": turn["q"]})
@@ -405,6 +523,13 @@ def _agent_ask(query: str, history: Optional[List[Dict[str, Any]]] = None,
             if not answer:
                 return None
             out = {"answer": answer, "used": used}
+            # The doctrine tells the model a pure clarifying question is a
+            # complete reply — surface that to the UI so it can render the
+            # question style + keep the thread primed.
+            if answer.endswith("?") and len(answer) <= 200 and not used:
+                out["clarify"] = True
+            if reasoning["plan"] or reasoning["consulted"]:
+                out["reasoning"] = reasoning
             if citations:
                 out["citations"] = citations[:6]
             return out
@@ -451,6 +576,9 @@ def _agent_ask(query: str, history: Optional[List[Dict[str, Any]]] = None,
                 notify(_progress_label(tc.function.name))
                 result = jarvis_tools.execute_read(tc.function.name, args)
                 tool_cache[mkey] = result
+                if len(reasoning["consulted"]) < 8:
+                    reasoning["consulted"].append(
+                        {"tool": tc.function.name, "note": _result_note(result)})
             # Harvest web_research source citations to surface in the UI.
             if tc.function.name == "web_research":
                 try:
@@ -477,6 +605,8 @@ def _agent_ask(query: str, history: Optional[List[Dict[str, Any]]] = None,
     if not answer:
         return None
     out = {"answer": answer, "used": used}
+    if reasoning["plan"] or reasoning["consulted"]:
+        out["reasoning"] = reasoning
     if citations:
         out["citations"] = citations[:6]
     return out
@@ -2222,6 +2352,214 @@ def _answer_compare_quotes(s1: str, s2: str) -> Dict[str, Any]:
             "action": {"view": "research", "symbol": s1}}
 
 
+# ─── deep knowledge: instant, keyless concept explanations ──────────────────
+# Curated, expert-grade. Each entry: 2-3 sentences naming the MECHANISM (not
+# a dictionary definition), an optional AUGUR view where the concept is live,
+# and aliases. Terms outside the glossary fall through to the agent, which
+# now has web_research — so this is the fast path, not the ceiling.
+
+_GLOSSARY: Dict[str, Dict[str, Any]] = {
+    "p/e ratio": {"aliases": ["p/e", "pe ratio", "pe", "price to earnings", "price-to-earnings"],
+        "text": "Price divided by earnings per share — the price of one dollar of profit. "
+                "It's really a compressed forecast: a high P/E says the market expects earnings to grow into the price, "
+                "a low one says it doesn't believe the E will last. Compare within a sector, never across them.",
+        "view": "screener"},
+    "market cap": {"aliases": ["market capitalization", "mcap"],
+        "text": "Share price × shares outstanding — what the market says the whole company is worth. "
+                "Price moves don't create or destroy cash, they reprice every share simultaneously; "
+                "that's why a 3% move on a $3T name 'moves' $90B without a dollar changing hands."},
+    "dividend yield": {"aliases": ["yield"],
+        "text": "Annual dividend ÷ share price. A rising yield is double-edged: either the payout grew or the price fell. "
+                "Yields far above peers usually mean the market is pricing a cut — the yield is high because trust is low.",
+        "view": "dividends"},
+    "beta": {"aliases": [],
+        "text": "How much a stock historically moves per 1% move in the market. Beta 1.5 amplifies both directions — "
+                "it's leverage you didn't borrow. Low-beta names mute the tape; they don't defy it."},
+    "vix": {"aliases": ["fear index", "volatility index"],
+        "text": "The market's 30-day implied volatility for the S&P 500, extracted from option prices — "
+                "literally what hedging costs right now. Under ~15 is complacent, over ~28 is stress. "
+                "It spikes when everyone wants insurance at once.",
+        "view": "macro"},
+    "gamma exposure": {"aliases": ["gex", "gamma", "dealer gamma"],
+        "text": "Options dealers hedge what they sell. When dealers are long gamma they sell rallies and buy dips — "
+                "pinning price; when short gamma they must chase moves, amplifying them. "
+                "The flip level between those regimes is where the tape's character changes.",
+        "view": "gex"},
+    "short interest": {"aliases": ["short squeeze", "shorts"],
+        "text": "Shares sold short as a fraction of float. High short interest is stored buying pressure: "
+                "every short must eventually buy to close. A squeeze is that buying forced all at once — "
+                "fuel, not a verdict on the business."},
+    "rsi": {"aliases": ["relative strength index"],
+        "text": "A 0-100 oscillator of recent gains vs losses. Above ~70 reads overbought, below ~30 oversold — "
+                "but strong trends stay 'overbought' for months. It measures stretch, not direction.",
+        "view": "research"},
+    "moving average": {"aliases": ["50dma", "200dma", "sma", "ema", "moving averages"],
+        "text": "The average price over a trailing window — a smoothed memory of what holders recently paid. "
+                "The 50/200-day crossovers matter mostly because enough money believes they do; "
+                "they're coordination points, not physics.",
+        "view": "research"},
+    "sharpe ratio": {"aliases": ["sharpe"],
+        "text": "Excess return per unit of volatility — how much you're paid per unit of sleep lost. "
+                "Two portfolios with equal returns aren't equal if one took twice the swings; Sharpe is the tiebreaker.",
+        "view": "analytics"},
+    "drawdown": {"aliases": ["max drawdown"],
+        "text": "Peak-to-trough decline. The brutal math: a 50% drawdown needs +100% to recover. "
+                "It's the number that tests temperament — returns decide how rich you get, drawdowns decide whether you stay invested.",
+        "view": "stress"},
+    "stop loss": {"aliases": ["stop-loss", "stop order"],
+        "text": "An order that sells once price crosses a level. It caps downside but converts volatility into realized loss — "
+                "in a gap or flash dip you sell the low. Position sizing is the stop loss that can't be gapped through."},
+    "limit order": {"aliases": ["market order"],
+        "text": "A limit order names your price and waits; a market order takes whatever's offered now. "
+                "In thin names the spread IS a cost — market orders pay it, limit orders earn it."},
+    "etf": {"aliases": ["index fund", "etfs"],
+        "text": "A fund that trades like a stock, usually tracking an index. The quiet revolution: it made "
+                "diversification nearly free. The catch: you own the index's concentration too — "
+                "the S&P 500 is a tech-weighted bet wearing a diversified costume."},
+    "dollar cost averaging": {"aliases": ["dca", "dollar-cost averaging"],
+        "text": "Investing a fixed amount on a schedule regardless of price. It's behavioral armor, not magic: "
+                "lump-sum wins on average because markets drift up, but DCA removes the regret that makes people freeze at highs and panic at lows."},
+    "diversification": {"aliases": ["diversify"],
+        "text": "Owning risks that don't fail together. The free lunch is correlation, not count — "
+                "twenty tech names is one bet worn twenty ways. The test is what happens to everything you own on the same bad day.",
+        "view": "analytics"},
+    "concentration risk": {"aliases": ["concentration"],
+        "text": "When one position is big enough to set your whole outcome. Concentration builds wealth; "
+                "diversification keeps it. The danger isn't being wrong — it's being wrong in size.",
+        "view": "stress"},
+    "sector rotation": {"aliases": ["rotation"],
+        "text": "Capital migrating between sectors as the cycle turns — banks like rising rates, tech likes falling ones, "
+                "staples catch the bid when fear rises. Watching flows tells you what the market believes about the NEXT six months.",
+        "view": "sectorflow"},
+    "yield curve": {"aliases": ["inverted yield curve", "yield curve inversion", "curve inversion"],
+        "text": "Treasury yields plotted short to long. Inversion — short rates above long — means the market "
+                "expects the Fed to be forced into cuts, historically the cleanest recession signal. "
+                "The slope is the bond market's macro forecast in one line.",
+        "view": "macro"},
+    "fed funds rate": {"aliases": ["fed rate", "interest rates", "rate hike", "rate cut"],
+        "text": "The overnight rate the Fed sets — the price of money everything else is priced off. "
+                "Raising it makes future cash flows worth less today, which is why long-duration assets (growth stocks) feel it hardest.",
+        "view": "macro"},
+    "quantitative easing": {"aliases": ["qe", "qt", "quantitative tightening"],
+        "text": "QE: the Fed buys bonds, pushing money into riskier assets — the tide that lifts everything. "
+                "QT is the drain. Liquidity is the variable most investors ignore until it's the only one that matters.",
+        "view": "liquidity"},
+    "cpi": {"aliases": ["inflation"],
+        "text": "The consumer price index — inflation's headline number. Markets trade the SURPRISE, not the level: "
+                "a hot print repriced rate expectations within seconds. Core (ex food/energy) is what the Fed actually watches.",
+        "view": "macro"},
+    "recession": {"aliases": [],
+        "text": "A broad contraction in activity. Markets bottom BEFORE recessions end — prices turn on the second "
+                "derivative, when things get worse more slowly. Waiting for the all-clear means buying the recovery at full price."},
+    "bull market": {"aliases": ["bear market", "correction"],
+        "text": "Bull: +20% off a low; bear: −20% off a high; correction: −10%. Arbitrary thresholds, real psychology — "
+                "bears compress years of fear into months, bulls climb a wall of disbelief for years. Time in beats timing, statistically."},
+    "options": {"aliases": ["call option", "put option", "calls", "puts"],
+        "text": "Calls are the right to buy at a strike, puts the right to sell. You pay premium for asymmetry: "
+                "defined loss, leveraged gain. Most expire worthless — the seller's edge is time; the buyer's edge is being right about WHEN, not just what.",
+        "view": "options-flow"},
+    "implied volatility": {"aliases": ["iv", "implied vol"],
+        "text": "The volatility baked into an option's price — the market's bet on future movement. "
+                "Buying options when IV is high means overpaying for drama already expected; the edge is when realized exceeds implied.",
+        "view": "options-flow"},
+    "theta": {"aliases": ["time decay"],
+        "text": "Option value lost per day to time. It accelerates near expiry — long options bleed fastest exactly when "
+                "they're most exciting. Theta is why being early and being wrong feel identical to an option buyer."},
+    "covered call": {"aliases": ["covered calls", "the wheel"],
+        "text": "Owning shares and selling calls against them — renting out upside for income. "
+                "It outperforms sideways and underperforms in melt-ups; you've sold the right tail, which is where equity's long-run return lives."},
+    "margin": {"aliases": ["leverage"],
+        "text": "Borrowed money amplifying both directions. The asymmetry kills: leverage forces selling at lows "
+                "(margin calls arrive at maximum pain), so it converts temporary drawdowns into permanent losses."},
+    "liquidity": {"aliases": [],
+        "text": "How much you can trade without moving the price. It evaporates exactly when needed most — "
+                "in a panic, bids vanish and 'the market price' becomes theoretical. Position size should respect exit size.",
+        "view": "liquidity"},
+    "momentum": {"aliases": [],
+        "text": "Winners keep winning — the most stubborn anomaly in finance, likely powered by underreaction and herding. "
+                "It works until it crashes: momentum's worst days cluster at regime turns.",
+        "view": "research"},
+    "mean reversion": {"aliases": ["reversion to the mean"],
+        "text": "Stretched prices snapping back toward average. The catch is the timeframe: days-to-weeks for oscillators, "
+                "years for valuations. 'Cheap' is a mean-reversion bet that can stay wrong longer than you stay solvent.",
+        "view": "forecast"},
+    "smart money": {"aliases": ["institutional money", "13f"],
+        "text": "Insiders, institutions, and funds whose trades are disclosed (Form 4s, 13Fs, congressional filings). "
+                "The signal is CONVERGENCE — one buyer is noise, insiders plus funds plus options flow agreeing is a tell.",
+        "view": "signals"},
+    "dark pool": {"aliases": ["dark pools"],
+        "text": "Private venues where large blocks trade without showing on the public book — "
+                "institutions hiding their footprints so the market can't front-run them. Prints surface after the fact, "
+                "which is why unusual volume often precedes visible news."},
+    "insider trading": {"aliases": ["form 4", "insider buying", "insider selling"],
+        "text": "Executives trading their own stock, legally, disclosed on Form 4s within two days. "
+                "Insider BUYING is the cleaner signal — there's one reason to buy but a dozen innocent reasons to sell.",
+        "view": "intel"},
+    "moat": {"aliases": ["economic moat", "competitive advantage"],
+        "text": "A structural reason competitors can't take the profits — network effects, switching costs, scale, brand. "
+                "Returns on capital above the cost of capital ATTRACT attack; the moat is whatever makes the attack fail. "
+                "No moat means today's margins are tomorrow's commodity.",
+        "view": "jarvis"},
+    "margin of safety": {"aliases": ["intrinsic value"],
+        "text": "Buying well below your estimate of value so being somewhat wrong still works out. "
+                "It's epistemic humility priced in: the discount isn't extra profit, it's insurance against your own analysis.",
+        "view": "jarvis"},
+    "compounding": {"aliases": ["compound interest"],
+        "text": "Returns earning returns. The curve is deceptively flat early and vertical late — "
+                "the first double takes years, the last double of a lifetime is bigger than all the others combined. "
+                "Interrupting it (selling winners, big drawdowns, fees) is the most expensive mistake in investing."},
+}
+
+# alias → canonical term, built once at import
+_GLOSSARY_INDEX: Dict[str, str] = {}
+for _term, _spec in _GLOSSARY.items():
+    _GLOSSARY_INDEX[_term] = _term
+    for _a in _spec.get("aliases", []):
+        _GLOSSARY_INDEX[_a] = _term
+
+_EXPLAIN_RE = re.compile(
+    r"^(?:what(?:'s|s)?(?:\s+(?:is|are|does))?|explain|define|tell me about|how do(?:es)?)\s+"
+    r"(?:a |an |the |my )?(.+?)(?:\s+(?:mean|work|works))?[\s?.!]*$",
+    re.IGNORECASE)
+
+
+def _answer_explain(ql: str) -> Optional[Dict[str, Any]]:
+    """Instant concept explanations — the deep-knowledge fast path. Returns
+    None when the phrase isn't glossary-shaped (so the chain continues)."""
+    m = _EXPLAIN_RE.match(ql)
+    if not m:
+        return None
+    term = " ".join(m.group(1).lower().split())
+    canon = _GLOSSARY_INDEX.get(term)
+    if not canon:
+        return None
+    spec = _GLOSSARY[canon]
+    out: Dict[str, Any] = {"answer": spec["text"]}
+    if spec.get("view"):
+        out["action"] = {"view": spec["view"]}
+    # Live flavor where it's nearly free: the VIX entry quotes the tape.
+    if canon == "vix":
+        try:
+            regime = _market_regime()
+            if regime and regime.get("vix") is not None:
+                out["answer"] += " Right now it's at {:.1f} ({}).".format(
+                    regime["vix"], regime.get("regime") or "—")
+        except Exception:
+            pass
+    # Concentration gets the user's own number — knowledge lands harder
+    # when it's about their book.
+    if canon == "concentration risk":
+        try:
+            pulse = _portfolio_pulse()
+            if pulse and pulse.get("holdings"):
+                top = max(pulse["holdings"], key=lambda r: r.get("weight_pct") or 0)
+                out["answer"] += " Yours right now: {} at {:.0f}% of the book.".format(
+                    top["symbol"], top.get("weight_pct") or 0)
+        except Exception:
+            pass
+    return out
+
+
 _HELP_ANSWER = (
     "Try me on: “why am I down today”, “how's my portfolio”, “how risky is my "
     "book”, “what did I miss”, “summarize my day”, “price of NVDA”, “NVDA vs "
@@ -2461,6 +2799,30 @@ def _answer_memory(q: str) -> Optional[Dict[str, Any]]:
     return None
 
 
+# Pending clarifying questions keyed by conversation id, so "give me a
+# forecast" → "Which symbol?" → "NVDA" completes the ORIGINAL intent.
+# In-memory and short-lived by design: a clarify older than the TTL is a
+# conversation that moved on.
+_PENDING_CLARIFY: Dict[int, Dict[str, Any]] = {}
+_CLARIFY_TTL = 300  # seconds
+
+
+def _set_pending_clarify(conv_id: Optional[int], intent: str) -> None:
+    if conv_id is None:
+        return
+    try:
+        import time as _t
+        # Opportunistic GC so the dict can't grow unboundedly.
+        if len(_PENDING_CLARIFY) > 64:
+            cutoff = _t.time() - _CLARIFY_TTL
+            for k in [k for k, v in _PENDING_CLARIFY.items()
+                      if v.get("ts", 0) < cutoff]:
+                _PENDING_CLARIFY.pop(k, None)
+        _PENDING_CLARIFY[conv_id] = {"intent": intent, "ts": _t.time()}
+    except Exception:
+        pass
+
+
 def ask(query: str, history: Any = None, conversation_id: Any = None,
         persist: bool = True, progress: Any = None) -> Dict[str, Any]:
     """Route a natural-language question to the right engine. Local-only,
@@ -2560,6 +2922,21 @@ def ask(query: str, history: Any = None, conversation_id: Any = None,
         payload.setdefault("symbol", symbol)
         return _persisted(payload)
 
+    # Clarify resume: if the last turn was Jarvis asking which symbol, and
+    # the reply is essentially just a symbol, re-dispatch the ORIGINAL
+    # intent instead of treating "NVDA" as a bare quote request.
+    if conv_id is not None and symbol and len(ql.split()) <= 3:
+        pend = _PENDING_CLARIFY.get(conv_id)
+        if pend is not None:
+            import time as _t
+            _PENDING_CLARIFY.pop(conv_id, None)
+            if _t.time() - pend.get("ts", 0) < _CLARIFY_TTL:
+                try:
+                    if pend.get("intent") == "forecast":
+                        return done("forecast", _answer_forecast(symbol, ql))
+                except Exception as e:
+                    log.debug("clarify resume failed: %s", e)
+
     # When the LLM agent is available, hand it any genuinely analytical
     # question — judgment words ("good business", "overvalued", "should i
     # sell", "worth holding", "vs", "compare") deserve the lens tools, not a
@@ -2582,6 +2959,14 @@ def ask(query: str, history: Any = None, conversation_id: Any = None,
                                   "how do i use you"))
                 or ql.strip(" ?!.") in ("help", "help me")):
             return done("help", {"answer": _HELP_ANSWER})
+        # Deep knowledge: "what is gamma exposure" / "explain p/e". Before
+        # the market/quote intents ("what is the vix" should TEACH, not just
+        # quote a level) but only when no symbol is in play — "what is
+        # NVDA's P/E" stays an agent question about NVDA.
+        if not symbol:
+            exp = _answer_explain(ql)
+            if exp is not None:
+                return done("explain", exp)
         # Market hours before EVERYTHING market-flavored — see _HOURS_RE.
         if _HOURS_RE.search(ql):
             return done("hours", _answer_hours())
@@ -2618,6 +3003,22 @@ def ask(query: str, history: Any = None, conversation_id: Any = None,
         if symbol and (any(w in ql for w in ("forecast", "predict", "outlook", "go up", "go down"))
                        or re.search(r"\bprob(ability)?\b", ql)):
             return done("forecast", _answer_forecast(symbol, ql))
+        # Forecast asked with NO symbol → one clarifying question beats a
+        # guess. Held names become quick-reply chips; the pending-intent
+        # marker lets the bare-symbol reply complete the forecast.
+        if not symbol and any(w in ql for w in ("forecast", "predict", "outlook")) \
+                and "market" not in ql:
+            choices: List[str] = []
+            try:
+                choices = [h["symbol"] for h in sorted(
+                    db.get_portfolio(), key=lambda h: -(h.get("shares") or 0) * (h.get("avg_cost") or 0))
+                    if h.get("asset_type") != "crypto"][:4]
+            except Exception:
+                pass
+            _set_pending_clarify(conv_id, "forecast")
+            return done("clarify", {
+                "answer": "Happy to run the ensemble — which symbol should I forecast?",
+                "choices": choices})
         # 52-week range position — "is NVDA near its high?"
         if symbol and (re.search(r"\b52\b|52-week|fifty[- ]two", ql)
                        or (("high" in ql or "low" in ql)
@@ -2697,6 +3098,11 @@ def ask(query: str, history: Any = None, conversation_id: Any = None,
             r = _agent_ask(q, turns, progress=progress)
             if r and r.get("answer"):
                 payload = {"answer": r["answer"], "used": r.get("used") or []}
+                if r.get("reasoning"):
+                    payload["reasoning"] = r["reasoning"]
+                if r.get("clarify"):
+                    # The agent (or planner) chose to ask rather than guess.
+                    return done("clarify", payload)
                 if r.get("citations"):
                     payload["citations"] = r["citations"]
                 if r.get("proposal"):

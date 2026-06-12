@@ -24,6 +24,50 @@
       .replace(/\*([^*\n]+)\*/g, '<i>$1</i>');
   }
 
+  // ── reasoning trace + clarify chips (shared by palette + command center) ──
+  // The backend attaches {reasoning: {plan, consulted, angle}} when the agent
+  // planned/consulted, and intent "clarify" (+ choices) when Jarvis asked a
+  // question instead of guessing. These render the collapsible "how I got
+  // here" block and the quick-reply chips.
+  function reasoningHtml(r) {
+    const rs = r && r.reasoning;
+    if (!rs) return '';
+    const plan = rs.plan || [], consulted = rs.consulted || [];
+    if (!plan.length && !consulted.length) return '';
+    const steps = plan.map(s =>
+      `<div class="jv-reason-row">▹ ${esc(String(s.tool || '').replace(/_/g, ' '))}${s.why ? ` <span>— ${esc(s.why)}</span>` : ''}</div>`).join('');
+    const used = consulted.map(c =>
+      `<div class="jv-reason-row">✓ ${esc(String(c.tool || '').replace(/_/g, ' '))}${c.note ? ` <span>— ${esc(c.note)}</span>` : ''}</div>`).join('');
+    const angle = rs.angle ? `<div class="jv-reason-row">◆ <span>${esc(rs.angle)}</span></div>` : '';
+    return `<div class="jv-reason">
+      <button class="jv-reason-toggle" type="button" aria-expanded="false">◉ how I got here ▾</button>
+      <div class="jv-reason-body" hidden>
+        ${steps ? `<div class="jv-reason-h">planned</div>${steps}` : ''}
+        ${used ? `<div class="jv-reason-h">consulted</div>${used}` : ''}
+        ${angle}
+      </div></div>`;
+  }
+
+  function wireReasoning(rootEl) {
+    if (!rootEl) return;
+    rootEl.querySelectorAll('.jv-reason-toggle').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const body = btn.parentElement && btn.parentElement.querySelector('.jv-reason-body');
+        if (!body) return;
+        const opening = body.hidden;
+        body.hidden = !opening;
+        btn.setAttribute('aria-expanded', String(opening));
+        btn.textContent = opening ? '◉ how I got here ▴' : '◉ how I got here ▾';
+      });
+    });
+  }
+
+  function clarifyChipsHtml(r) {
+    if (!r || r.intent !== 'clarify' || !(r.choices || []).length) return '';
+    return `<div class="jv-starters jv-clarify-chips">${r.choices.slice(0, 6).map(c =>
+      `<button class="jv-starter jv-chip-reply" type="button" data-q="${esc(c)}">${esc(c)}</button>`).join('')}</div>`;
+  }
+
   // True when the keystroke belongs to a text field — global shortcuts must
   // never hijack typing.
   function isTypingTarget(t) {
@@ -851,14 +895,19 @@
           ? `<div class="jv-cites"><span class="jv-cites-h">sources</span>${r.citations.slice(0,6).map(c =>
                 `<a class="jv-cite" href="${esc(c.url)}" target="_blank" rel="noopener noreferrer">${esc(c.title || c.url)}</a>`).join('')}</div>` : '';
         this.answer.innerHTML = `
-          <div class="jp-answer">
+          <div class="jp-answer${r.intent === 'clarify' ? ' jv-clarify' : ''}">
             <div class="jp-answer-text">${mdLite(esc(r.answer))}</div>
+            ${clarifyChipsHtml(r)}
             ${r.detail ? `<div class="jp-answer-detail">${esc(r.detail)}</div>` : ''}
             ${citesLine}
+            ${reasoningHtml(r)}
             ${usedLine}
             ${proposal}
             ${action}
           </div>`;
+        wireReasoning(this.answer);
+        this.answer.querySelectorAll('.jv-chip-reply').forEach(b =>
+          b.addEventListener('click', () => this._ask(b.dataset.q)));
         const go = document.getElementById('jp-answer-go');
         if (go) go.addEventListener('click', () => { this.close(); runAction(r.action); });
         const confirmBtn = document.getElementById('jp-confirm');
@@ -1620,16 +1669,27 @@
         }
         if (r.conversation_id) this._convId = r.conversation_id;
         let html = mdLite(esc(r.answer));
+        html += clarifyChipsHtml(r);
         if (r.citations && r.citations.length) {
           html += '<div class="jv-cites"><span class="jv-cites-h">sources</span>'
             + r.citations.slice(0, 6).map(c =>
                 `<a class="jv-cite" href="${esc(c.url)}" target="_blank" rel="noopener noreferrer">${esc(c.title || c.url)}</a>`).join('')
             + '</div>';
         }
+        html += reasoningHtml(r);
         if (r.used && r.used.length) {
           html += `<div class="jv-used">◉ consulted: ${esc([...new Set(r.used)].join(', ').replace(/_/g, ' '))}</div>`;
         }
-        if (thinking) thinking.innerHTML = html;
+        if (thinking) {
+          thinking.innerHTML = html;
+          if (r.intent === 'clarify') thinking.classList.add('jv-clarify');
+          wireReasoning(thinking);
+          thinking.querySelectorAll('.jv-chip-reply').forEach(b =>
+            b.addEventListener('click', () => {
+              const inp = document.getElementById('jv-input');
+              if (inp) { inp.value = b.dataset.q; this._send(); }
+            }));
+        }
         if (r.proposal) {
           const prop = this._append('assistant',
             `<div class="jp-proposal"><span>⚡ ${esc(r.proposal.label)}</span>

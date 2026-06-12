@@ -410,6 +410,10 @@ def test_keys_and_agent():
     ai_summarizer._record_ai_call = lambda: None
     state = {"n": 0}
     def fake_chat(client, model, messages, **kw):
+        if not kw.get("tools"):
+            # v2.2 planner runs a plain (tool-less) completion before the
+            # agent loop — answer it with an empty plan so it's a no-op.
+            return _Resp(_Msg(content='{"clarify": null, "steps": []}'))
         state["n"] += 1
         if state["n"] == 1:
             return _Resp(_Msg(tool_calls=[_TC("t1", "get_quote", '{"symbol":"NVDA"}')]))
@@ -1315,6 +1319,118 @@ def test_jarvis_30x():
           "jarvis.js?v=" in html and "terminal.css?v=" in html)
 
 
+def test_jarvis_reasoning():
+    """v2.2: planner, clarifying questions, reasoning trace, glossary."""
+    import jarvis
+    import database as db_
+    import ai_summarizer
+
+    # ── glossary: instant expert answers, no key needed ──
+    orig_regime, orig_pulse = jarvis._market_regime, jarvis._portfolio_pulse
+    jarvis._market_regime = lambda: None
+    jarvis._portfolio_pulse = lambda: None
+    try:
+        for q in ("what is gamma exposure", "explain p/e", "whats a covered call",
+                  "define moat", "what is dca", "tell me about the yield curve"):
+            r = jarvis.ask(q, persist=False)
+            check("explain: %r" % q, r["intent"] == "explain",
+                  "%s: %s" % (r["intent"], str(r.get("answer"))[:60]))
+        gex = jarvis.ask("what is gamma exposure", persist=False)
+        check("explain: names the mechanism (dealers hedge)",
+              "dealers" in gex["answer"].lower() and "hedge" in gex["answer"].lower())
+        check("explain: action deep-links the live view",
+              (gex.get("action") or {}).get("view") == "gex")
+        r2 = jarvis.ask("what is driving my portfolio today", persist=False)
+        check("explain: doesn't swallow attribution", r2["intent"] == "attribution")
+    finally:
+        jarvis._market_regime, jarvis._portfolio_pulse = orig_regime, orig_pulse
+
+    # ── rule-based clarify + pending-intent resume ──
+    orig_avail = jarvis._llm_available
+    jarvis._llm_available = lambda: False
+    cid = db_.jarvis_new_conversation()
+    try:
+        r = jarvis.ask("give me a forecast", conversation_id=cid)
+        check("clarify: forecast w/o symbol asks", r["intent"] == "clarify"
+              and r["answer"].endswith("?"), repr(r)[:100])
+        check("clarify: choices list shape", isinstance(r.get("choices"), list))
+        check("clarify: pending intent recorded", cid in jarvis._PENDING_CLARIFY)
+        orig_fc = jarvis._answer_forecast
+        jarvis._answer_forecast = lambda s, ql=None: {"answer": "F:" + s}
+        try:
+            r2 = jarvis.ask("AAPL", conversation_id=cid)
+            check("clarify: bare-symbol reply resumes the forecast",
+                  r2["intent"] == "forecast" and r2["answer"] == "F:AAPL", repr(r2)[:80])
+        finally:
+            jarvis._answer_forecast = orig_fc
+        check("clarify: pending consumed", cid not in jarvis._PENDING_CLARIFY)
+    finally:
+        jarvis._llm_available = orig_avail
+
+    # ── planner: parse, validate, fail-open ──
+    orig_complete = jarvis._llm_complete
+    jarvis._llm_complete = lambda m, **kw: "not json at all"
+    try:
+        check("planner: junk → None", jarvis._plan_approach("q") is None)
+    finally:
+        jarvis._llm_complete = orig_complete
+    jarvis._llm_complete = lambda m, **kw: (
+        '{"clarify": null, "steps": [{"tool": "get_portfolio", "why": "own book"},'
+        ' {"tool": "made_up_tool", "why": "x"}], "angle": "rate sensitivity"}')
+    try:
+        p = jarvis._plan_approach("how exposed am i to rates")
+        check("planner: unknown tools filtered",
+              p is not None and [s["tool"] for s in p["steps"]] == ["get_portfolio"],
+              repr(p)[:100])
+        check("planner: angle kept", p is not None and p["angle"] == "rate sensitivity")
+    finally:
+        jarvis._llm_complete = orig_complete
+    jarvis._llm_complete = lambda m, **kw: '{"clarify": "no question mark", "steps": []}'
+    try:
+        check("planner: non-question clarify dropped → None",
+              jarvis._plan_approach("q") is None)
+    finally:
+        jarvis._llm_complete = orig_complete
+
+    # ── agent clarify short-circuit: zero completion calls ──
+    orig_key, orig_chat = ai_summarizer.get_openai_key, ai_summarizer._chat_completion
+    orig_plan = jarvis._plan_approach
+    ai_summarizer.get_openai_key = lambda: "k"
+
+    def _boom(*a, **kw):
+        raise AssertionError("completion must not run on clarify short-circuit")
+
+    ai_summarizer._chat_completion = _boom
+    jarvis._plan_approach = lambda q, h=None: {
+        "clarify": "Which symbol do you mean?", "steps": [], "angle": None}
+    try:
+        out = jarvis._agent_ask("forecast it please")
+        check("agent: planner clarify short-circuits the loop",
+              out is not None and out.get("clarify") is True
+              and out["answer"].endswith("?"), repr(out)[:100])
+    finally:
+        ai_summarizer.get_openai_key, ai_summarizer._chat_completion = orig_key, orig_chat
+        jarvis._plan_approach = orig_plan
+
+    # ── reasoning helpers + doctrine ──
+    check("trace: note passthrough",
+          jarvis._result_note('{"note": "no positions"}') == "no positions")
+    check("trace: keys summary",
+          jarvis._result_note('{"a": 1, "b": 2}').startswith("returned a, b"))
+    check("trace: rows summary", jarvis._result_note('[1,2,3]') == "returned 3 rows")
+    check("doctrine: clarify instruction in system prompt",
+          "clarifying question" in jarvis._AGENT_SYSTEM)
+    check("doctrine: depth instruction in system prompt",
+          "DEMONSTRATE DEPTH" in jarvis._AGENT_SYSTEM)
+
+    # ── frontend wiring ──
+    src = open("static/js/jarvis.js").read()
+    check("frontend: clarify chips + reasoning block",
+          "clarifyChipsHtml" in src and "reasoningHtml" in src and "jv-chip-reply" in src)
+    css = open("static/css/terminal.css").read()
+    check("frontend: clarify + reasoning styles", ".jv-clarify" in css and ".jv-reason" in css)
+
+
 def test_database_zero_shares():
     import database
     database.init_db()
@@ -1553,6 +1669,7 @@ def main():
         ("jarvis open-world research", test_jarvis_research),
         ("jarvis v2.0 live features", test_jarvis_v2_live),
         ("jarvis 30-enhancement sweep", test_jarvis_30x),
+        ("jarvis reasoning layer", test_jarvis_reasoning),
         ("jarvis lens + premium TTS", test_jarvis_lens),
         ("database zero-shares guard", test_database_zero_shares),
         ("cli quote None fields", test_cli_quote_none_fields),
