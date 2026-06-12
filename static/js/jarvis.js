@@ -178,10 +178,51 @@
     // Speak text aloud. `force` bypasses the enabled toggle (explicit 🔊
     // clicks). onend always fires exactly once — TTS missing, disabled,
     // cancelled or errored included — so callers can chain safely.
+    // Premium path: server-side OpenAI TTS through the user's key
+    // (/api/jarvis/tts). 404 = keyless/capped → browser speech, and we stop
+    // asking for the rest of the session. Strictly an upgrade.
+    _serverTts: null,   // null = untested, true/false = known
+    _audio: null,
+
     speak(text, onend, force) {
       const done = (() => { let fired = false;
         return () => { if (!fired) { fired = true; if (onend) onend(); } }; })();
-      if (!text || !this.ttsAvailable() || (!this.enabled && !force)) { done(); return; }
+      if (!text || (!this.enabled && !force)) { done(); return; }
+      this._stopAudio();
+      if (this._serverTts !== false) {
+        this._speakServer(text, done);
+      } else {
+        this._speakBrowser(text, done);
+      }
+    },
+
+    async _speakServer(text, done) {
+      try {
+        const r = await fetch('/api/jarvis/tts', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ text: text.slice(0, 600) }),
+        });
+        if (!r.ok) {
+          if (r.status === 404) this._serverTts = false;  // keyless — stop probing
+          this._speakBrowser(text, done);
+          return;
+        }
+        this._serverTts = true;
+        const blob = await r.blob();
+        const url = URL.createObjectURL(blob);
+        const a = new Audio(url);
+        this._audio = a;
+        const finish = () => { URL.revokeObjectURL(url); if (this._audio === a) this._audio = null; done(); };
+        a.onended = finish;
+        a.onerror = finish;
+        a.play().catch(() => { this._speakBrowser(text, done); });
+      } catch (e) {
+        this._speakBrowser(text, done);
+      }
+    },
+
+    _speakBrowser(text, done) {
+      if (!this.ttsAvailable()) { done(); return; }
       try {
         speechSynthesis.cancel();
         const u = new SpeechSynthesisUtterance(text);
@@ -192,6 +233,13 @@
         u.onerror = done;
         speechSynthesis.speak(u);
       } catch (e) { done(); }
+    },
+
+    _stopAudio() {
+      if (this._audio) {
+        try { this._audio.pause(); this._audio.src = ''; } catch (e) {}
+        this._audio = null;
+      }
     },
 
     // One push-to-talk capture. onResult(transcript) on success;
@@ -228,6 +276,7 @@
 
     stopAll() {
       this.stopListening();
+      this._stopAudio();
       if (this.ttsAvailable()) try { speechSynthesis.cancel(); } catch (e) {}
     },
   };
@@ -954,8 +1003,230 @@
     },
   };
 
+  // ── JARVIS command center — a full view, not just a palette ────────────────
+  // Left: persistent chat with the same conversation thread the palette uses
+  // (mic, premium voice, proposals with confirm). Right: the investor lenses —
+  // macro brief, temperament check, position review, memory manager.
+  const CommandCenter = {
+    _convId: null, _busy: false,
+
+    async load() {
+      const view = document.getElementById('view-jarvis');
+      if (!view) return;
+      view.innerHTML = `
+        <div class="jv-grid">
+          <div class="panel jv-chat-panel">
+            <div class="panel-header"><span class="panel-title jarvis-title">◉ JARVIS</span>
+              <span class="jarvis-hint">your analyst, on the record</span>
+              <button class="btn btn-ghost btn-sm" id="jv-new-thread">⌫ NEW THREAD</button>
+            </div>
+            <div class="jv-chat" id="jv-chat"><div class="loading"><div class="spinner"></div></div></div>
+            <div class="jv-input-row">
+              <input id="jv-input" type="text" placeholder="Ask anything — your book, a business, the macro picture…"
+                     autocomplete="off" spellcheck="false">
+              <button id="jv-mic" type="button" title="Talk" aria-label="Talk to Jarvis">🎙</button>
+              <button id="jv-send" type="button" class="btn btn-green btn-sm">ASK</button>
+            </div>
+          </div>
+          <div class="jv-side">
+            <div class="panel"><div class="panel-header"><span class="panel-title">MACRO BRIEF</span>
+              <button class="btn btn-ghost btn-sm" id="jv-macro-speak" title="Read aloud">🔊</button></div>
+              <div class="panel-body" id="jv-macro"><div class="loading"><div class="spinner"></div></div></div></div>
+            <div class="panel"><div class="panel-header"><span class="panel-title">TEMPERAMENT</span></div>
+              <div class="panel-body" id="jv-temperament"><div class="loading"><div class="spinner"></div></div></div></div>
+            <div class="panel"><div class="panel-header"><span class="panel-title">POSITION REVIEW</span></div>
+              <div class="panel-body" id="jv-review">
+                <div style="display:flex;gap:6px"><input class="form-input" id="jv-review-symbol" placeholder="Symbol…" style="flex:1">
+                <button class="btn btn-green btn-sm" id="jv-review-go">REVIEW</button></div>
+                <div id="jv-review-picks" style="margin-top:6px"></div>
+                <div id="jv-review-out"></div></div></div>
+            <div class="panel"><div class="panel-header"><span class="panel-title">JARVIS REMEMBERS</span></div>
+              <div class="panel-body" id="jv-memory"><div class="loading"><div class="spinner"></div></div></div></div>
+          </div>
+        </div>`;
+
+      document.getElementById('jv-send').addEventListener('click', () => this._send());
+      document.getElementById('jv-input').addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') this._send();
+      });
+      document.getElementById('jv-mic').addEventListener('click', () => {
+        Voice.listen((t) => { document.getElementById('jv-input').value = t; this._send(true); },
+                     () => {});
+      });
+      document.getElementById('jv-new-thread').addEventListener('click', async () => {
+        try {
+          const r = await API.post('/api/jarvis/conversation/new', {});
+          this._convId = r.conversation_id;
+          document.getElementById('jv-chat').innerHTML =
+            '<div class="jv-bubble assistant">Fresh thread. What are we working on?</div>';
+        } catch (e) { Toast.error(e.message); }
+      });
+      document.getElementById('jv-review-go').addEventListener('click', () => this._review());
+      document.getElementById('jv-review-symbol').addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') this._review();
+      });
+
+      this._loadChat();
+      this._loadSide();
+    },
+
+    async _loadChat() {
+      try {
+        const c = await API.get('/api/jarvis/conversation');
+        this._convId = c.conversation_id;
+        const el = document.getElementById('jv-chat');
+        if (!el) return;
+        const msgs = (c.messages || []).slice(-20);
+        el.innerHTML = msgs.length
+          ? msgs.map(m => `<div class="jv-bubble ${m.role === 'user' ? 'user' : 'assistant'}">${esc(m.content)}</div>`).join('')
+          : '<div class="jv-bubble assistant">At your service. Ask about your book, a business, or the macro picture — or just talk to me.</div>';
+        el.scrollTop = el.scrollHeight;
+      } catch (e) { /* chat stays on spinner-replacement below */ }
+    },
+
+    _append(role, html) {
+      const el = document.getElementById('jv-chat');
+      if (!el) return null;
+      const div = document.createElement('div');
+      div.className = 'jv-bubble ' + role;
+      div.innerHTML = html;
+      el.appendChild(div);
+      el.scrollTop = el.scrollHeight;
+      return div;
+    },
+
+    async _send(spoken) {
+      const input = document.getElementById('jv-input');
+      const q = (input.value || '').trim();
+      if (!q || this._busy) return;
+      this._busy = true;
+      input.value = '';
+      this._append('user', esc(q));
+      const thinking = this._append('assistant', '<span class="jv-thinking">◉ working…</span>');
+      try {
+        const r = await API.post('/api/jarvis/ask', { query: q, conversation_id: this._convId });
+        if (r.conversation_id) this._convId = r.conversation_id;
+        let html = esc(r.answer);
+        if (r.used && r.used.length) {
+          html += `<div class="jv-used">◉ consulted: ${esc([...new Set(r.used)].join(', ').replace(/_/g, ' '))}</div>`;
+        }
+        if (thinking) thinking.innerHTML = html;
+        if (r.proposal) {
+          const prop = this._append('assistant',
+            `<div class="jp-proposal"><span>⚡ ${esc(r.proposal.label)}</span>
+             <button class="jarvis-go jv-confirm">CONFIRM</button></div>`);
+          if (prop) prop.querySelector('.jv-confirm').addEventListener('click', async () => {
+            try {
+              const out = await API.post('/api/jarvis/act', { tool: r.proposal.tool, args: r.proposal.args });
+              prop.innerHTML = `✓ Done — ${esc(out.label || r.proposal.label)}.`;
+            } catch (e) { prop.innerHTML = `<span class="col-negative">${esc(e.message)}</span>`; }
+          });
+        }
+        Voice.speak(r.answer, null, spoken);
+      } catch (e) {
+        if (thinking) thinking.innerHTML = `<span class="col-negative">${esc(e.message)}</span>`;
+      } finally {
+        this._busy = false;
+      }
+    },
+
+    async _loadSide() {
+      API.get('/api/jarvis/lens/macro').then(m => {
+        const el = document.getElementById('jv-macro');
+        if (!el) return;
+        const chips = [];
+        if (m.liquidity && m.liquidity.regime) chips.push(`LIQUIDITY ${esc(String(m.liquidity.regime).toUpperCase())}`);
+        if (m.regime && m.regime.regime) chips.push(`VOL ${esc(m.regime.regime)}`);
+        el.innerHTML = `<div class="jv-macro-text${m.voice ? ' jarvis-voice' : ''}">${esc(m.voice || m.narrative)}</div>`
+          + (chips.length ? `<div class="jv-chips">${chips.map(c => `<span class="jv-chip">${c}</span>`).join('')}</div>` : '');
+        const spk = document.getElementById('jv-macro-speak');
+        if (spk) spk.onclick = () => Voice.speak(m.voice || m.narrative, null, true);
+      }).catch(e => {
+        const el = document.getElementById('jv-macro');
+        if (el) el.innerHTML = `<span class="text-dim" style="font-size:11px">${esc(e.message)}</span>`;
+      });
+
+      API.get('/api/jarvis/lens/temperament').then(t => {
+        const el = document.getElementById('jv-temperament');
+        if (!el) return;
+        el.innerHTML = `<div class="jv-verdict">${esc(t.verdict)}</div>`
+          + (t.observations || []).map(o =>
+              `<div class="jv-obs ${o.tone}">${o.tone === 'warn' ? '▲' : '●'} ${esc(o.text)}</div>`).join('');
+      }).catch(() => {});
+
+      API.get('/api/portfolio').then(p => {
+        const picks = (p.holdings || []).slice(0, 6).map(h =>
+          `<button class="btn btn-ghost btn-sm" onclick="Jarvis.reviewSymbol('${esc(h.symbol)}')">${esc(h.symbol)}</button>`).join(' ');
+        const el = document.getElementById('jv-review-picks');
+        if (el) el.innerHTML = picks;
+      }).catch(() => {});
+
+      this._loadMemory();
+    },
+
+    async _review(sym) {
+      const input = document.getElementById('jv-review-symbol');
+      const symbol = (sym || (input ? input.value : '') || '').trim().toUpperCase();
+      if (!symbol) return;
+      if (input) input.value = symbol;
+      const out = document.getElementById('jv-review-out');
+      if (out) out.innerHTML = '<div class="loading"><div class="spinner"></div></div>';
+      try {
+        const r = await API.get('/api/jarvis/lens/review/' + encodeURIComponent(symbol));
+        if (!out) return;
+        const q = r.quality || {}; const v = r.valuation || {}; const o = r.ownership || {};
+        out.innerHTML = `
+          <div class="jv-review">
+            <div class="jv-review-head"><b>${esc(r.business.name)}</b>
+              <span class="jv-chip">${esc(q.verdict || '—')} ${q.score != null ? q.score : ''}</span>
+              <span class="jv-chip">${esc((v.tone || '—').toUpperCase())}</span></div>
+            <div class="jv-review-sum">${esc(r.business.summary || '')}</div>
+            ${(q.reasons || []).map(x => `<div class="jv-obs pos">● ${esc(x)}</div>`).join('')}
+            ${(v.flags || []).map(x => `<div class="jv-obs info">◆ ${esc(x)}</div>`).join('')}
+            ${o.held ? `<div class="jv-obs info">◈ You hold ${o.shares} @ $${o.avg_cost}${o.unrealized_pct != null ? ' (' + (o.unrealized_pct >= 0 ? '+' : '') + o.unrealized_pct + '%)' : ''}${o.holding_days != null ? ', ' + o.holding_days + ' days' : ''}</div>` : ''}
+            <div class="jv-take">${esc(r.take)}</div>
+          </div>`;
+      } catch (e) {
+        if (out) out.innerHTML = `<span class="col-negative" style="font-size:11px">${esc(e.message)}</span>`;
+      }
+    },
+
+    async _loadMemory() {
+      const el = document.getElementById('jv-memory');
+      if (!el) return;
+      try {
+        const m = await API.get('/api/jarvis/memory');
+        const rows = (m.memories || []).map(f =>
+          `<div class="jv-mem"><span>${esc(f.fact)}</span>
+           <button class="jv-mem-x" data-id="${f.id}" title="Forget" aria-label="Forget">×</button></div>`).join('');
+        el.innerHTML = (rows || '<div class="text-dim" style="font-size:11px">Nothing yet. Tell Jarvis “remember: …” and it sticks.</div>')
+          + `<div style="display:flex;gap:6px;margin-top:8px">
+             <input class="form-input" id="jv-mem-add" placeholder="Teach Jarvis a fact…" style="flex:1">
+             <button class="btn btn-ghost btn-sm" id="jv-mem-save">REMEMBER</button></div>`;
+        el.querySelectorAll('.jv-mem-x').forEach(btn => btn.addEventListener('click', async () => {
+          try { await API.del('/api/jarvis/memory/' + btn.dataset.id); this._loadMemory(); }
+          catch (e) { Toast.error(e.message); }
+        }));
+        const save = document.getElementById('jv-mem-save');
+        if (save) save.addEventListener('click', async () => {
+          const inp = document.getElementById('jv-mem-add');
+          const fact = (inp.value || '').trim();
+          if (!fact) return;
+          try {
+            await API.post('/api/jarvis/ask', { query: 'remember: ' + fact });
+            this._loadMemory();
+          } catch (e) { Toast.error(e.message); }
+        });
+      } catch (e) {
+        el.innerHTML = `<span class="text-dim" style="font-size:11px">${esc(e.message)}</span>`;
+      }
+    },
+  };
+
   const Jarvis = {
     renderBriefing: (id, force) => Briefing.render(id, force),
+    loadView: () => CommandCenter.load(),
+    reviewSymbol: (s) => CommandCenter._review(s),
     initPalette: () => Palette.init(),
     openPalette: () => { Palette.init(); Palette.open(); },
     // Called by navigate() / loadResearchFor(). Deferred a tick so callers

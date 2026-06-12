@@ -3063,6 +3063,57 @@ def forecast_accountability_route():
 
 
 # ── Jarvis: unified assistant layer ────────────────────────────────
+@app.route("/api/jarvis/lens/review/<symbol>", methods=["GET"])
+def jarvis_lens_review_route(symbol):
+    """Buffett-lens position review: business quality, valuation, basis."""
+    if not _valid_ticker(symbol):
+        return jsonify({"error": "Invalid symbol"}), 400
+    try:
+        import jarvis_lens
+        return jsonify(jarvis_lens.position_review(symbol.upper()))
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/jarvis/lens/temperament", methods=["GET"])
+def jarvis_lens_temperament_route():
+    try:
+        import jarvis_lens
+        return jsonify(jarvis_lens.temperament_check())
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/jarvis/lens/macro", methods=["GET"])
+def jarvis_lens_macro_route():
+    try:
+        import jarvis_lens
+        return jsonify(jarvis_lens.macro_brief())
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/jarvis/tts", methods=["POST"])
+def jarvis_tts_route():
+    """Premium voice: synthesize speech through the user's OpenAI key.
+    404 when keyless/capped/failed — the frontend falls back to browser
+    speechSynthesis, so this endpoint is strictly an upgrade."""
+    data = request.get_json(silent=True) or {}
+    text = data.get("text")
+    if not text or not isinstance(text, str):
+        return jsonify({"error": "expected JSON body with a 'text' string"}), 400
+    try:
+        import ai_summarizer
+        voice = str(data.get("voice") or "onyx")[:20]
+        audio = ai_summarizer.tts_speech(text, voice=voice)
+        if not audio:
+            return jsonify({"error": "tts unavailable"}), 404
+        return Response(audio, mimetype="audio/mpeg",
+                        headers={"Cache-Control": "no-store"})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
 @app.route("/api/jarvis/act", methods=["POST"])
 def jarvis_act_route():
     """Execute a user-CONFIRMED mutating action proposed by the Jarvis agent.

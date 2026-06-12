@@ -485,6 +485,24 @@ TOOLS: Dict[str, Dict[str, Any]] = {
         "description": "Use when asked for new investment ideas: instant, pre-scored symbols from the warmed idea pool.",
         "parameters": _p({}),
     },
+    "position_review": {
+        "fn": lambda args: __import__("jarvis_lens").position_review(_sym(args)),
+        "mutating": False,
+        "description": "Use for 'is X a good business / should I keep holding X / what am I actually paying for': Buffett-style review — business summary, quality score with reasons, valuation flags, the user's basis/holding period, and a margin-of-safety take.",
+        "parameters": _p(dict(_SYM_PROP), ["symbol"]),
+    },
+    "temperament_check": {
+        "fn": lambda args: __import__("jarvis_lens").temperament_check(),
+        "mutating": False,
+        "description": "Use for 'how is my trading behavior / am I overtrading / be honest with me': behavioral analysis of the user's REAL transaction history — quick flips, chasing strength, churn rate. Instant and local.",
+        "parameters": _p({}),
+    },
+    "macro_brief": {
+        "fn": lambda args: {k: v for k, v in __import__("jarvis_lens").macro_brief().items() if k != "voice"},
+        "mutating": False,
+        "description": "Use for 'what's the macro picture / what regime are we in / weekly outlook': fused strategist read — vol regime, sector rotation, liquidity stress, crypto risk appetite, one narrative.",
+        "parameters": _p({}),
+    },
     "stress_test": {
         "fn": _t_stress_test, "mutating": False,
         "description": "Use for 'what if the market crashes' on the user's actual book: replays 2008/COVID/rate-shock scenarios. Optional custom_drop_pct (e.g. -30).",

@@ -350,6 +350,7 @@ const NAV_GROUPS = {
     label: 'DASHBOARD',
     items: [
       { view: 'overview',     label: 'Overview' },
+      { view: 'jarvis',       label: '◉ Jarvis' },
       { view: 'portfolio',    label: 'Portfolio' },
       { view: 'watchlist',    label: 'Watchlist' },
       { view: 'transactions', label: 'Transactions' },
@@ -464,6 +465,7 @@ function navigate(view) {
   // Lazy-load views (unchanged)
   switch (view) {
     case 'overview':     loadOverview(); break;
+    case 'jarvis':       if (window.Jarvis) Jarvis.loadView(); break;
     case 'portfolio':    loadPortfolio(); break;
     case 'markets':      loadMarkets(); break;
     case 'crypto':       loadCrypto(); break;
@@ -3597,7 +3599,7 @@ async function loadSettings() {
           <div class="panel-body">
             <div class="fund-grid">
               ${[
-                ['SYSTEM', 'AUGUR v1.5.0'],
+                ['SYSTEM', 'AUGUR v1.6.0'],
                 ['DATA SOURCE', 'YAHOO FINANCE + COINGECKO'],
                 ['DATABASE', 'SQLITE3 (LOCAL)'],
                 ['BACKEND', 'PYTHON / FLASK'],

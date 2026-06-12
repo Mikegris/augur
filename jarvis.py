@@ -1363,7 +1363,13 @@ def ask(query: str, history: Any = None, conversation_id: Any = None,
             return done("portfolio", _answer_portfolio(ql))
         if any(w in ql for w in ("market", "vix", "s&p", "spx", "nasdaq", "fear", "regime", "volatil")):
             return done("market", _answer_market())
-        if symbol and not (_ACTIONISH_RE.search(ql) and _llm_available()):
+        # Bare-ticker quote fallthrough: only for short, quote-shaped queries
+        # ("NVDA", "price of AAPL"). Rich questions that merely MENTION a
+        # symbol ("is AAPL still a good business to own?") deserve the agent
+        # and its lens tools, not a price line — when the LLM is available.
+        if symbol and not _llm_available():
+            return done("quote", _answer_quote(symbol))
+        if symbol and len(ql.split()) <= 4 and not _ACTIONISH_RE.search(ql):
             return done("quote", _answer_quote(symbol))
     except Exception as e:
         log.warning("jarvis.ask failed for %r: %s", q, e)
