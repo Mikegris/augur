@@ -296,7 +296,10 @@ def _agent_ask(query: str, history: Optional[List[Dict[str, Any]]] = None) -> Op
     if not key:
         return None
     from openai import OpenAI
-    client = OpenAI(api_key=key, timeout=25.0)
+    # gpt-5.x reasoning models with tool schemas can take 20-40s per round;
+    # a 25s timeout cut them off under load and dropped the whole agent path
+    # to the local-only fallback. Give each round room, with one auto-retry.
+    client = OpenAI(api_key=key, timeout=55.0, max_retries=2)
 
     messages: List[Dict[str, Any]] = [
         {"role": "system", "content": _AGENT_SYSTEM + _memory_block()}]
@@ -1525,6 +1528,17 @@ def ask(query: str, history: Any = None, conversation_id: Any = None,
                 return done("llm", payload)
         except Exception as e:
             log.debug("jarvis.ask agent failed for %r: %s", q, e)
+        # The multi-round agent makes several OpenAI round-trips and can be
+        # flaky under rate-limiting. Before giving up to the local-only
+        # snapshot (which wrongly says "no data" for outside-world questions),
+        # try ONE direct web_research call — far more reliable than the agent
+        # dance, and it answers the SpaceX-IPO class of question every time.
+        try:
+            r2 = _direct_research(q)
+            if r2 and r2.get("answer"):
+                return done("llm", r2)
+        except Exception as e:
+            log.debug("jarvis.ask direct research failed for %r: %s", q, e)
         try:
             answer = _llm_ask(q, turns)
             if answer:
@@ -1533,3 +1547,20 @@ def ask(query: str, history: Any = None, conversation_id: Any = None,
             log.debug("jarvis.ask llm fallback failed for %r: %s", q, e)
 
     return _persisted({"intent": "help", "answer": _HELP_ANSWER, "symbol": symbol})
+
+
+def _direct_research(query: str) -> Optional[Dict[str, Any]]:
+    """One-shot web_research — the reliable fallback when the agent loop
+    can't complete. Returns {answer, used, citations} or None."""
+    try:
+        import jarvis_research
+    except Exception:
+        return None
+    r = jarvis_research.web_research(query)
+    answer = r.get("answer")
+    if not answer:
+        return None
+    out = {"answer": answer, "used": ["web_research"]}
+    if r.get("citations"):
+        out["citations"] = r["citations"]
+    return out
