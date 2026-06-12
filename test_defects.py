@@ -597,6 +597,95 @@ def test_defect_sweep_c():
           "_AUTO_TURN_CAP" in jjs and "_listenTurn(true)" in jjs)
 
 
+# ── 11f. v1.6: investor lens engines + premium TTS ───────────────────────────
+def test_jarvis_lens():
+    import jarvis_lens as jl
+    import jarvis_tools
+
+    # Quality scoring: a fortress business vs a leveraged cash-burner.
+    good = {"return_on_equity": 0.25, "operating_margin": 0.30, "debt_equity": 40,
+            "free_cashflow": 1e9, "revenue_growth": 0.12}
+    bad = {"return_on_equity": 0.03, "operating_margin": 0.05, "debt_equity": 350,
+           "free_cashflow": -5e8, "revenue_growth": -0.10}
+    q_good = jl._quality_score(good)
+    q_bad = jl._quality_score(bad)
+    check("lens: quality engine separates fortress from burner",
+          q_good["verdict"] == "QUALITY" and q_bad["verdict"] == "WEAK",
+          "%s/%s" % (q_good["verdict"], q_bad["verdict"]))
+    check("lens: quality reasons explain themselves",
+          any("ROE" in r for r in q_good["reasons"]))
+
+    # Valuation tones
+    check("lens: cheap+growing reads reasonable",
+          jl._valuation_flags({"pe_ratio": 12, "peg_ratio": 1.0})["tone"] == "reasonable")
+    check("lens: nosebleed multiple reads expensive",
+          jl._valuation_flags({"pe_ratio": 60, "peg_ratio": 3.0})["tone"] == "expensive")
+    check("lens: negative earnings reads speculative",
+          jl._valuation_flags({"pe_ratio": -8})["tone"] == "speculative")
+
+    # The take never produces a mid-sentence ". but" join.
+    take = jl._buffett_take(q_good, jl._valuation_flags({"pe_ratio": 60, "peg_ratio": 3.0}),
+                            {"held": True, "holding_days": 30}, "TestCo")
+    check("lens: take joins clauses grammatically", ". but" not in take, take)
+
+    # Temperament: synthetic history with a quick flip and a chase.
+    orig_txn = jl.db.get_transactions
+    jl.db.get_transactions = lambda **k: [
+        {"symbol": "AAA", "action": "BUY", "shares": 10, "price": 100, "date": "2026-06-01"},
+        {"symbol": "AAA", "action": "SELL", "shares": 10, "price": 105, "date": "2026-06-08"},
+        {"symbol": "BBB", "action": "BUY", "shares": 5, "price": 100, "date": "2026-05-01"},
+        {"symbol": "BBB", "action": "SELL", "shares": 5, "price": 99, "date": "2026-05-10"},
+        {"symbol": "CCC", "action": "BUY", "shares": 5, "price": 100, "date": "2026-04-01"},
+        {"symbol": "CCC", "action": "BUY", "shares": 5, "price": 140, "date": "2026-06-05"},
+    ]
+    try:
+        t = jl._temperament_uncached()
+        kinds = {o["kind"] for o in t["observations"]}
+        check("lens: quick flips detected", "quick_flips" in kinds, str(kinds))
+        check("lens: chasing detected", "chasing" in kinds, str(kinds))
+        check("lens: stats counted", t["stats"]["quick_flips"] == 2, str(t["stats"]))
+    finally:
+        jl.db.get_transactions = orig_txn
+    # Empty history is calm, not crashy.
+    jl.db.get_transactions = lambda **k: []
+    try:
+        t0 = jl._temperament_uncached()
+        check("lens: empty history unmeasured", "unmeasured" in t0["verdict"])
+    finally:
+        jl.db.get_transactions = orig_txn
+
+    # New tools registered with valid schemas (shape pin exists elsewhere).
+    for name in ("position_review", "temperament_check", "macro_brief"):
+        check("lens: tool '%s' registered (read-only)" % name,
+              name in jarvis_tools.TOOLS and not jarvis_tools.TOOLS[name]["mutating"])
+
+    # Routes: lens endpoints + TTS contract (keyless → 404 fallback signal).
+    import app, ai_summarizer
+    c = app.app.test_client()
+    r1 = c.get("/api/jarvis/lens/temperament")
+    check("route: lens/temperament -> 200 JSON", r1.status_code == 200 and r1.is_json)
+    r2 = c.get("/api/jarvis/lens/review/bad!sym")
+    check("route: lens/review invalid symbol -> 400", r2.status_code == 400)
+    orig_tts = ai_summarizer.tts_speech
+    ai_summarizer.tts_speech = lambda text, voice="onyx": None
+    try:
+        r3 = c.post("/api/jarvis/tts", json={"text": "hello"})
+        check("route: tts unavailable -> 404 (frontend fallback signal)",
+              r3.status_code == 404)
+    finally:
+        ai_summarizer.tts_speech = orig_tts
+    r4 = c.post("/api/jarvis/tts", json={})
+    check("route: tts bad body -> 400", r4.status_code == 400)
+    ai_summarizer.tts_speech = lambda text, voice="onyx": b"ID3fakeaudio"
+    try:
+        r5 = c.post("/api/jarvis/tts", json={"text": "hello"})
+        check("route: tts success -> audio/mpeg bytes",
+              r5.status_code == 200 and r5.mimetype == "audio/mpeg"
+              and r5.data == b"ID3fakeaudio")
+    finally:
+        ai_summarizer.tts_speech = orig_tts
+
+
 # ── 12. database add_position: offsetting to zero shares must not crash ──────
 def test_database_zero_shares():
     import database
@@ -825,6 +914,7 @@ def main():
         ("key console + tool agent", test_keys_and_agent),
         ("jarvis statefulness + memory", test_jarvis_state),
         ("defect sweep C pins", test_defect_sweep_c),
+        ("jarvis lens + premium TTS", test_jarvis_lens),
         ("database zero-shares guard", test_database_zero_shares),
         ("cli quote None fields", test_cli_quote_none_fields),
         ("xss escaping intact", test_xss_escaping_intact),

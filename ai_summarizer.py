@@ -36,6 +36,8 @@ _DEFAULT_MODEL_HEAVY = "gpt-5.5"
 _DEFAULT_MODEL_LIGHT = "gpt-5.4-mini"
 MODEL_HEAVY = (os.environ.get("AUGUR_OPENAI_MODEL_HEAVY") or _DEFAULT_MODEL_HEAVY).strip() or _DEFAULT_MODEL_HEAVY
 MODEL_LIGHT = (os.environ.get("AUGUR_OPENAI_MODEL_LIGHT") or _DEFAULT_MODEL_LIGHT).strip() or _DEFAULT_MODEL_LIGHT
+_DEFAULT_MODEL_TTS = "gpt-4o-mini-tts"
+MODEL_TTS = (os.environ.get("AUGUR_OPENAI_MODEL_TTS") or _DEFAULT_MODEL_TTS).strip() or _DEFAULT_MODEL_TTS
 
 # Last-resort retry target when the configured model isn't available on the
 # user's account (e.g. an account without gpt-5.x access yet).
@@ -166,6 +168,44 @@ def _cap_error_envelope(context: str) -> dict:
         "context": context,
         "ai_powered": False,
     }
+
+
+# In-process audio cache: the briefing voice line is spoken repeatedly and
+# costs real money per synthesis. Tiny LRU keyed on (model, voice, text).
+_TTS_CACHE_MAX = 24
+_tts_cache = {}  # key -> bytes (insertion-ordered; py3.7+ dicts)
+
+
+def tts_speech(text, voice="onyx"):
+    """Synthesize speech via the user's OpenAI key. Returns MP3 bytes or
+    None (keyless, capped, or any failure — callers fall back to browser
+    speech). Counts against the daily cap like every other AI call."""
+    text = (text or "").strip()
+    if not text:
+        return None
+    text = text[:600]  # hard bound — TTS is priced per character
+    key = get_openai_key()
+    if not key or _cap_exceeded():
+        return None
+    ck = (MODEL_TTS, voice, text)
+    hit = _tts_cache.get(ck)
+    if hit is not None:
+        return hit
+    try:
+        from openai import OpenAI
+        client = OpenAI(api_key=key, timeout=20)
+        resp = client.audio.speech.create(model=MODEL_TTS, voice=voice, input=text)
+        audio = resp.read() if hasattr(resp, "read") else getattr(resp, "content", None)
+        if not audio:
+            return None
+        _record_ai_call()
+        _tts_cache[ck] = audio
+        while len(_tts_cache) > _TTS_CACHE_MAX:
+            _tts_cache.pop(next(iter(_tts_cache)))
+        return audio
+    except Exception as e:
+        log.debug("tts_speech failed: %s", e)
+        return None
 
 
 def get_openai_key():
