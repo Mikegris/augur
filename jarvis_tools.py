@@ -524,6 +524,90 @@ def _t_compare(args):
             "b": slim(jarvis_lens.position_review(b))}
 
 
+def _t_price_history(args):
+    """Condensed window stats — 'how did X do this month' wants four numbers,
+    not 60 OHLCV bars burning the result budget."""
+    import fetcher
+    import time as _t
+    from datetime import datetime as _dt
+    sym = _sym(args)
+    n = _num_arg(args.get("days"))
+    days = int(max(5, min(n, 365))) if n else 30
+    # Fetch the smallest cached period that covers the window — get_chart_data
+    # is the same heavily-cached path the /api/chart routes ride.
+    period = ("1mo" if days <= 31 else
+              "3mo" if days <= 93 else
+              "6mo" if days <= 186 else "1y")
+    bars = [b for b in (fetcher.get_chart_data(sym, period=period, interval="1d") or [])
+            if b.get("close")]
+    cutoff = _t.time() - days * 86400
+    window = [b for b in bars if (b.get("time") or 0) >= cutoff] or bars
+    if len(window) < 2:
+        return {"note": "no daily history available for {}".format(sym)}
+    start, end = window[0]["close"], window[-1]["close"]
+    lows = [(b.get("low") or b["close"]) for b in window]
+    highs = [(b.get("high") or b["close"]) for b in window]
+    _day = lambda b: _dt.utcfromtimestamp(int(b.get("time") or 0)).strftime("%Y-%m-%d")
+    return {"symbol": sym, "days": days, "bars": len(window),
+            "start_date": _day(window[0]), "end_date": _day(window[-1]),
+            "start": round(start, 2), "end": round(end, 2),
+            "low": round(min(lows), 2), "high": round(max(highs), 2),
+            "return_pct": round((end / start - 1) * 100, 2) if start else None}
+
+
+# The headline macro series — FRED ids → prompt-friendly labels. CPI is an
+# index level, so the YoY change (the number people mean by "inflation") is
+# computed alongside it.
+_FRED_HEADLINE = (
+    ("CPIAUCSL", "cpi"),
+    ("UNRATE", "unemployment_rate_pct"),
+    ("FEDFUNDS", "fed_funds_rate_pct"),
+    ("DFII10", "ten_year_real_yield_pct"),
+    ("T10Y2Y", "yield_curve_10y_minus_2y_pct"),
+)
+
+
+def _t_macro_snapshot(args):
+    try:
+        import fred_data
+    except Exception as e:
+        return {"note": "macro data unavailable: {}".format(str(e)[:100])}
+    out: Dict[str, Any] = {}
+    for sid, label in _FRED_HEADLINE:
+        # Per-series guard: one dead series must not blank the snapshot.
+        try:
+            s = fred_data.fetch_series(sid, observations=13)
+            pts = s.get("points") or []
+            if not pts:
+                continue
+            entry: Dict[str, Any] = {"value": pts[-1]["value"], "date": pts[-1]["date"]}
+            if sid == "CPIAUCSL" and len(pts) >= 13 and pts[-13].get("value"):
+                entry["yoy_pct"] = round(
+                    (pts[-1]["value"] / pts[-13]["value"] - 1) * 100, 2)
+            out[label] = entry
+        except Exception:
+            continue
+    if not out:
+        return {"note": "macro feed unavailable right now"}
+    return out
+
+
+def _t_crypto_market(args):
+    import fetcher
+    g = fetcher.get_crypto_global() or {}
+    mcap = _num_arg(g.get("total_market_cap_usd"))
+    if mcap is None:
+        return {"note": "crypto global data unavailable right now"}
+    rnd = lambda v, p=2: round(v, p) if _num_arg(v) is not None else None
+    return {"total_market_cap_usd": round(mcap),
+            "total_market_cap_t": round(mcap / 1e12, 2),
+            "btc_dominance_pct": rnd(g.get("btc_dominance"), 1),
+            "eth_dominance_pct": rnd(g.get("eth_dominance"), 1),
+            "market_cap_change_24h_pct": rnd(g.get("market_cap_change_24h")),
+            "total_volume_usd": rnd(g.get("total_volume_usd"), 0),
+            "active_coins": g.get("active_coins")}
+
+
 # ─── mutating-tool implementations (only via execute_mutating) ───────────────
 
 def _t_remember(args):
@@ -655,6 +739,21 @@ TOOLS: Dict[str, Dict[str, Any]] = {
         "fn": _t_options_flow, "mutating": False,
         "description": "Use when asked about unusual options activity or large directional bets in a symbol.",
         "parameters": _p(dict(_SYM_PROP), ["symbol"]),
+    },
+    "get_price_history": {
+        "fn": _t_price_history, "mutating": False,
+        "description": "Use for 'how did X do this month/quarter/year': condensed price window for a symbol — start, end, low, high, and total return over the last N days. Cheaper and more direct than reasoning from a quote's 52-week range.",
+        "parameters": _p(dict(_SYM_PROP, days={"type": "integer", "description": "Lookback window in calendar days (5-365, default 30)"}), ["symbol"]),
+    },
+    "get_macro_snapshot": {
+        "fn": _t_macro_snapshot, "mutating": False,
+        "description": "Use for 'where is inflation / unemployment / rates': latest cached FRED readings — CPI (with YoY inflation), unemployment, fed funds, 10Y real yield, 10Y-2Y curve — each with its observation date.",
+        "parameters": _p({}),
+    },
+    "get_crypto_market": {
+        "fn": _t_crypto_market, "mutating": False,
+        "description": "Use for 'how is crypto doing overall': global crypto market overview — total market cap, 24h change, BTC/ETH dominance, total volume. Market-wide, not a single coin.",
+        "parameters": _p({}),
     },
     "get_news": {
         "fn": _t_news, "mutating": False,

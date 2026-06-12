@@ -42,6 +42,7 @@ import logging
 import re
 import threading
 import time
+from collections import deque
 from datetime import datetime, timezone
 
 import safe_executor
@@ -66,6 +67,10 @@ except Exception:
 
 log = logging.getLogger("augur")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+
+# Single source of truth for the app version — surfaced at /api/version and
+# in jarvis.health_snapshot().
+APP_VERSION = "2.1.0"
 
 _TICKER_RE = re.compile(r"^[A-Z0-9][A-Z0-9.\-]{0,9}$")
 
@@ -3143,6 +3148,21 @@ def jarvis_tts_route():
         return jsonify({"error": str(e)}), 500
 
 
+@app.route("/api/version", methods=["GET"])
+def api_version_route():
+    """The running app version — lets UIs and health checks confirm what
+    they're talking to."""
+    return jsonify({"version": APP_VERSION})
+
+
+# Rolling-window rate limit for confirmed Jarvis actions: timestamps of the
+# last executions. A deque + GIL is enough fidelity for a single-user local
+# app — this guards against a runaway client loop, not an adversary.
+_JARVIS_ACT_TIMES = deque()
+_JARVIS_ACT_MAX = 10     # executions…
+_JARVIS_ACT_WINDOW = 60  # …per rolling window, seconds
+
+
 @app.route("/api/jarvis/act", methods=["POST"])
 def jarvis_act_route():
     """Execute a user-CONFIRMED mutating action proposed by the Jarvis agent.
@@ -3163,6 +3183,14 @@ def jarvis_act_route():
     # crafted /act request can do.
     if not jarvis_tools.valid_proposal_args(tool, args):
         return jsonify({"error": "invalid or incomplete action arguments"}), 400
+    # Rate limit counts EXECUTIONS (checked after validation) so malformed
+    # requests can't burn the budget of legitimate confirmations.
+    now = time.time()
+    while _JARVIS_ACT_TIMES and now - _JARVIS_ACT_TIMES[0] > _JARVIS_ACT_WINDOW:
+        _JARVIS_ACT_TIMES.popleft()
+    if len(_JARVIS_ACT_TIMES) >= _JARVIS_ACT_MAX:
+        return jsonify({"error": "rate limited"}), 429
+    _JARVIS_ACT_TIMES.append(now)
     r = jarvis_tools.execute_mutating(tool, args)
     return (jsonify(r), 400) if r.get("error") else jsonify(r)
 

@@ -111,36 +111,102 @@ async function _apiError(r) {
   } catch (_) { /* non-JSON body */ }
   return new Error(`HTTP ${r.status}`);
 }
+// ── Resilient-API banner ──────────────────────────────────────────────────────
+// ≥3 consecutive API.get failures inside a 30s window → one dismissible
+// "Connection trouble" banner; the next successful call removes it. DOM is
+// built with createElement + addEventListener (no inline handlers).
+const ApiHealth = {
+  _fails: [],          // timestamps of consecutive GET failures
+  _banner: null,
+  fail() {
+    const now = Date.now();
+    this._fails = this._fails.filter(t => now - t < 30000);
+    this._fails.push(now);
+    if (this._fails.length >= 3) this._show();
+  },
+  ok() {
+    this._fails = [];  // "consecutive" — any success resets the streak
+    this._hide();
+  },
+  _show() {
+    if (this._banner || !document.body) return;
+    const b = document.createElement('div');
+    b.id = 'api-trouble-banner';
+    b.setAttribute('role', 'alert');
+    b.style.cssText = 'position:fixed;top:0;left:0;right:0;z-index:9500;'
+      + 'display:flex;align-items:center;justify-content:center;gap:10px;'
+      + 'padding:4px 12px;font-size:11px;letter-spacing:.05em;'
+      + 'background:var(--red,#ff3366);color:#000';
+    const span = document.createElement('span');
+    span.textContent = 'Connection trouble — retrying…';
+    const x = document.createElement('button');
+    x.textContent = '×';
+    x.setAttribute('aria-label', 'Dismiss');
+    x.style.cssText = 'background:none;border:none;color:#000;cursor:pointer;font-size:14px;line-height:1;padding:0 4px';
+    x.addEventListener('click', () => this._hide());
+    b.appendChild(span);
+    b.appendChild(x);
+    document.body.appendChild(b);
+    this._banner = b;
+  },
+  _hide() {
+    if (this._banner) { this._banner.remove(); this._banner = null; }
+  },
+};
+
 const API = {
   async get(path) {
-    const r = await fetch(path);
-    if (!r.ok) throw await _apiError(r);
+    let r;
+    try {
+      r = await fetch(path);
+    } catch (e) {
+      ApiHealth.fail();   // network-level failure (server down, offline)
+      throw e;
+    }
+    if (!r.ok) { ApiHealth.fail(); throw await _apiError(r); }
+    ApiHealth.ok();
     return r.json();
   },
   async post(path, body) {
     const r = await fetch(path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
     if (!r.ok) throw await _apiError(r);
+    ApiHealth.ok();
     return r.json();
   },
   async del(path) {
     const r = await fetch(path, { method: 'DELETE' });
     if (!r.ok) throw await _apiError(r);
+    ApiHealth.ok();
     return r.json();
   },
   async put(path, body) {
     const r = await fetch(path, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
     if (!r.ok) throw await _apiError(r);
+    ApiHealth.ok();
     return r.json();
   },
 };
 
 // ── Toast notifications ───────────────────────────────────────────────────────
 const Toast = {
-  show(msg, type = 'green', duration = 3000) {
+  // Optional 4th arg: action {label, onClick} renders a small button inside
+  // the toast (createElement + addEventListener — never an inline handler).
+  show(msg, type = 'green', duration = 3000, action) {
     const container = document.getElementById('toast-container');
     const el = document.createElement('div');
     el.className = `toast ${type}`;
     el.innerHTML = `<span>${_esc(msg)}</span>`;
+    if (action && action.label && typeof action.onClick === 'function') {
+      const btn = document.createElement('button');
+      btn.textContent = action.label;
+      btn.style.cssText = 'margin-left:8px;background:none;border:1px solid currentColor;'
+        + 'color:inherit;font:inherit;font-size:10px;letter-spacing:.05em;'
+        + 'padding:1px 6px;cursor:pointer;border-radius:2px';
+      btn.addEventListener('click', () => {
+        try { action.onClick(); } finally { el.remove(); }
+      });
+      el.appendChild(btn);
+    }
     container.appendChild(el);
     setTimeout(() => { el.style.opacity = '0'; el.style.transform = 'translateX(20px)'; el.style.transition = '0.2s'; setTimeout(() => el.remove(), 200); }, duration);
   },
@@ -237,6 +303,112 @@ const MacroBar = {
   },
 };
 
+// ── Holdings tape (header strip of held symbols + day %) ─────────────────────
+// Thin marquee under the header showing every held symbol with its day move.
+// rAF-driven translateX (no CSS keyframes needed), paused on hidden tabs,
+// static under prefers-reduced-motion. Click a symbol → openResearch().
+// Inserted inside #main (after the macro bar) so the fixed #app grid rows
+// stay untouched — same trick MacroBar uses.
+const HoldingsTape = {
+  el: null, inner: null,
+  _raf: null, _x: 0, _timer: null,
+
+  _reduced() {
+    return !!(window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches);
+  },
+
+  init() {
+    if (document.getElementById('holdings-tape')) return;
+    const main = document.getElementById('main');
+    if (!main) return;
+    const bar = document.createElement('div');
+    bar.id = 'holdings-tape';
+    bar.style.cssText = [
+      'overflow:hidden', 'white-space:nowrap', 'position:relative',
+      'padding:3px 0', 'font-size:10px', 'letter-spacing:.05em',
+      'background:var(--bg-secondary,#0a0e0a)',
+      'border-bottom:1px solid var(--border,#1c1c1c)',
+      'display:none',  // shown once holdings arrive
+    ].join(';');
+    const inner = document.createElement('div');
+    inner.id = 'holdings-tape-inner';
+    inner.style.cssText = 'display:inline-block;white-space:nowrap;will-change:transform';
+    bar.appendChild(inner);
+    const macro = document.getElementById('macro-bar');
+    if (macro && macro.parentNode === main) macro.insertAdjacentElement('afterend', bar);
+    else main.insertBefore(bar, main.firstChild);
+    this.el = bar;
+    this.inner = inner;
+    // Delegated click — symbols carry data-sym, no inline handlers.
+    bar.addEventListener('click', (e) => {
+      const t = e.target.closest('[data-sym]');
+      if (t && typeof openResearch === 'function') openResearch(t.dataset.sym);
+    });
+    this.refresh();
+    // Data refresh every 5 minutes, visible tabs only (forced — don't just
+    // re-read the possibly-stale State cache).
+    this._timer = setInterval(() => { if (!document.hidden) this.refresh(true); }, 5 * 60 * 1000);
+    // Marquee pauses while hidden; resumes on return.
+    document.addEventListener('visibilitychange', () => {
+      if (document.hidden) this._stop();
+      else if (this.el && this.el.style.display !== 'none') this._start();
+    });
+  },
+
+  async refresh(force) {
+    let p = (!force && State.portfolio && State.portfolio.holdings) ? State.portfolio : null;
+    if (!p) {
+      try { p = await API.get('/api/portfolio'); State.portfolio = p; }
+      catch (e) {
+        p = State.portfolio;                       // fall back to the cache
+        if (!p || !p.holdings) return;             // nothing to show yet
+      }
+    }
+    const hs = (p.holdings || []).filter(h => h && h.symbol);
+    if (!this.el || !this.inner) return;
+    if (!hs.length) { this.el.style.display = 'none'; this._stop(); return; }
+    const item = (h) => {
+      const chg = h.day_change_pct;
+      const cls = chg > 0 ? 'up' : chg < 0 ? 'down' : 'flat';
+      const arrow = chg > 0 ? '▲' : chg < 0 ? '▼' : '';
+      return `<span class="ticker-item" data-sym="${_esc(h.symbol)}" style="cursor:pointer;margin:0 12px">`
+        + `<span class="ticker-label">${_esc(h.symbol)}</span>`
+        + `<span class="ticker-chg ${cls}">${arrow}${fmt.pct(chg)}</span>`
+        + `</span>`;
+    };
+    const row = hs.map(item).join('');
+    const reduced = this._reduced();
+    // Duplicate the row for a seamless wrap; reduced motion gets one static row.
+    this.inner.innerHTML = reduced ? row : row + row;
+    this.el.style.display = '';
+    if (reduced) {
+      this._stop();
+      this.inner.style.transform = 'none';
+      this._x = 0;
+    } else {
+      this._start();
+    }
+  },
+
+  _start() {
+    if (this._raf || !this.inner || this._reduced()) return;
+    const step = () => {
+      this._raf = null;
+      if (document.hidden || !this.inner || !document.body.contains(this.inner)) return;
+      this._x -= 0.5;                          // ~30px/s at 60fps
+      const half = this.inner.scrollWidth / 2;
+      if (half > 0 && -this._x >= half) this._x += half;
+      this.inner.style.transform = 'translateX(' + this._x + 'px)';
+      this._raf = requestAnimationFrame(step);
+    };
+    this._raf = requestAnimationFrame(step);
+  },
+
+  _stop() {
+    if (this._raf) { cancelAnimationFrame(this._raf); this._raf = null; }
+  },
+};
+
 // ── Keyboard Shortcut Help & global hotkeys ───────────────────────────────────
 const ShortcutHelp = {
   el: null,
@@ -277,8 +449,14 @@ const ShortcutHelp = {
       this.isOpen() ? this.close() : this.open();
       return;
     }
-    // / focuses command bar
+    // / opens the Jarvis palette (jarvis.js owns the open — just don't
+    // also grab the command bar); fall back to the command bar when the
+    // Jarvis layer isn't loaded.
     if (e.key === '/' && !e.shiftKey && !e.metaKey && !e.ctrlKey) {
+      if (window.Jarvis && typeof Jarvis.openPalette === 'function') {
+        e.preventDefault();
+        return;
+      }
       const cmd = document.getElementById('cmd-input');
       if (cmd) { e.preventDefault(); cmd.focus(); cmd.select(); }
       return;
@@ -669,6 +847,7 @@ async function loadOverview() {
     if (el('ov-kpi-ndx'))  el('ov-kpi-ndx').innerHTML  = `<div class="kpi-label">NASDAQ 100</div>${renderIndexKpi(ndx)}`;
     if (el('ov-kpi-vix'))  el('ov-kpi-vix').innerHTML  = `<div class="kpi-label">VIX (FEAR INDEX)</div>${renderIndexKpi(vix, true)}`;
     if (el('ov-kpi-gold')) el('ov-kpi-gold').innerHTML = `<div class="kpi-label">GOLD</div>${renderIndexKpi(gold)}`;
+    ['ov-kpi-sp', 'ov-kpi-ndx', 'ov-kpi-vix', 'ov-kpi-gold'].forEach(kpiCountUp);
     const tbody = indices.map(idx => `<tr>
       <td><span class="col-symbol" onclick="openResearch('${_esc(idx.symbol)}')">${_esc(idx.label || idx.symbol)}</span></td>
       <td class="col-price">${fmt.price(idx.price)}</td>
@@ -683,6 +862,7 @@ async function loadOverview() {
     State.cryptoGlobal = cryptoGlobal;
     const el = document.getElementById('ov-kpi-crypto');
     if (el) el.innerHTML = `<div class="kpi-label">CRYPTO MKT CAP</div><div class="kpi-value">$${fmt.compact(cryptoGlobal.total_market_cap_usd)}</div><div class="kpi-sub">BTC DOM: ${fmt.num(cryptoGlobal.btc_dominance)}%</div>`;
+    kpiCountUp('ov-kpi-crypto');
   }).catch(() => {});
 
   const sectorsP = API.get('/api/market/sectors').then(sectors => {
@@ -713,6 +893,7 @@ async function loadOverview() {
     if (el('ov-kpi-pnl'))   el('ov-kpi-pnl').innerHTML  = `<div class="kpi-label">UNREALIZED P&L</div><div class="kpi-value ${col.kpi(summary.total_pnl)}">${summary.total_pnl >= 0 ? '+' : ''}$${fmt.compact(summary.total_pnl)}</div><div class="kpi-sub">${fmt.pct(summary.total_pnl_pct)}</div>`;
     if (el('ov-kpi-pnl'))   el('ov-kpi-pnl').className  = `kpi-card ${col.kpi(summary.total_pnl)}`;
     if (el('ov-kpi-pos'))   el('ov-kpi-pos').innerHTML   = `<div class="kpi-label">POSITIONS</div><div class="kpi-value blue">${summary.num_positions || 0}</div><div class="kpi-sub">TOTAL HOLDINGS</div>`;
+    ['ov-kpi-value', 'ov-kpi-pnl', 'ov-kpi-pos'].forEach(kpiCountUp);
     const sect = el('ov-portfolio-section');
     if (sect && portfolio.holdings?.length) {
       sect.innerHTML = `<div class="panel" style="margin-top:8px">
@@ -779,6 +960,41 @@ function renderAllocationPanel(a) {
       <div class="panel-body">${types.map((s, i) => sectorRow(s[0].toUpperCase(), s[1], i)).join('')}</div>
     </div>
   </div>`;
+}
+
+// ── KPI count-up ──────────────────────────────────────────────────────────────
+// Animate the first numeric token inside a KPI card's .kpi-value from 0 to its
+// final value over ~500ms (rAF). The final frame restores the exact original
+// string, so the at-rest format is byte-identical to the non-animated render.
+// Skipped entirely under prefers-reduced-motion.
+function kpiCountUp(cardId) {
+  const card = document.getElementById(cardId);
+  if (!card) return;
+  if (window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+  const el = card.querySelector('.kpi-value');
+  if (!el) return;
+  const finalText = el.textContent;
+  const m = finalText.match(/-?\d[\d,]*\.?\d*/);
+  if (!m) return;                                  // "—" placeholders etc.
+  const target = parseFloat(m[0].replace(/,/g, ''));
+  if (!isFinite(target) || target === 0) return;
+  const decimals = (m[0].split('.')[1] || '').length;
+  const grouped = m[0].includes(',');
+  const renderNum = (v) => grouped
+    ? v.toLocaleString('en-US', { minimumFractionDigits: decimals, maximumFractionDigits: decimals })
+    : v.toFixed(decimals);
+  const t0 = performance.now();
+  const DUR = 500;
+  const step = (now) => {
+    // The card re-renders on refresh — if our value node is gone, stop.
+    if (!document.body.contains(el)) return;
+    const k = Math.min(1, (now - t0) / DUR);
+    if (k >= 1) { el.textContent = finalText; return; }
+    const eased = 1 - Math.pow(1 - k, 3);
+    el.textContent = finalText.replace(m[0], renderNum(target * eased));
+    requestAnimationFrame(step);
+  };
+  requestAnimationFrame(step);
 }
 
 function renderIndexKpi(idx, inverted = false) {
@@ -958,6 +1174,11 @@ async function loadPortfolio() {
     html += '<div class="panel"><div class="panel-header">'
       + '<span class="panel-title">HOLDINGS</span>'
       + '<div class="flex gap-8 align-center">'
+      // Quick-filter: client-side row filter on symbol/name substring.
+      // Wired with addEventListener after render (never an inline handler).
+      + '<input class="form-input" id="pf-quick-filter" type="text" placeholder="FILTER…" '
+      + 'autocomplete="off" spellcheck="false" aria-label="Filter holdings by symbol or name" '
+      + 'style="font-size:10px;padding:2px 6px;height:24px;width:120px">'
       + '<span class="text-dim" style="font-size:10px">' + summary.num_positions + ' POSITIONS</span>'
       + '<button class="btn btn-ghost btn-sm" style="font-size:9px" onclick="_portfolioGroupByAccount=!_portfolioGroupByAccount;loadPortfolio()">'
       + (_portfolioGroupByAccount ? '\u25BC UNGROUP' : '\u25B6 GROUP BY ACCOUNT') + '</button>'
@@ -1002,6 +1223,25 @@ async function loadPortfolio() {
     html += '</div></div>';
 
     view.innerHTML = html;
+
+    // Holdings quick-filter — hides table rows whose SYMBOL or NAME cell
+    // doesn't contain the typed substring (works in grouped view too; the
+    // group header bands stay visible).
+    var pfFilter = document.getElementById('pf-quick-filter');
+    if (pfFilter) {
+      var pfPanel = pfFilter.closest('.panel');
+      pfFilter.addEventListener('input', function() {
+        var q = pfFilter.value.trim().toLowerCase();
+        if (!pfPanel) return;
+        pfPanel.querySelectorAll('tbody tr').forEach(function(tr) {
+          if (!q) { tr.style.display = ''; return; }
+          var cells = tr.querySelectorAll('td');
+          var sym = cells[0] ? cells[0].textContent.toLowerCase() : '';
+          var name = cells[1] ? cells[1].textContent.toLowerCase() : '';
+          tr.style.display = (sym.indexOf(q) >= 0 || name.indexOf(q) >= 0) ? '' : 'none';
+        });
+      });
+    }
 
     // Render charts
     if (holdings.length) {
@@ -3591,10 +3831,14 @@ async function loadSettings() {
                 AUGUR_AI_DAILY_CAP environment variable overrides this.
               </div>
               <label class="form-label" style="margin-top:8px">JARVIS VOICE (PREMIUM TTS)</label>
-              <select class="form-select" id="set-tts-voice">
-                ${['onyx','alloy','echo','fable','nova','shimmer'].map(v =>
-                  `<option value="${v}" ${(settings.jarvis_tts_voice || 'onyx') === v ? 'selected' : ''}>${v.toUpperCase()}</option>`).join('')}
-              </select>
+              <div style="display:flex;gap:6px;align-items:center">
+                <select class="form-select" id="set-tts-voice" style="flex:1">
+                  ${['onyx','alloy','echo','fable','nova','shimmer'].map(v =>
+                    `<option value="${v}" ${(settings.jarvis_tts_voice || 'onyx') === v ? 'selected' : ''}>${v.toUpperCase()}</option>`).join('')}
+                </select>
+                <button class="btn btn-ghost btn-sm" id="tts-preview-btn" type="button"
+                        title="Preview this voice" aria-label="Preview the selected Jarvis voice">▶</button>
+              </div>
             </div>
             <button class="btn btn-green btn-lg" onclick="saveSettings()" style="margin-top:8px">SAVE SETTINGS</button>
           </div>
@@ -3604,7 +3848,7 @@ async function loadSettings() {
           <div class="panel-body">
             <div class="fund-grid">
               ${[
-                ['SYSTEM', 'AUGUR v2.0.0'],
+                ['SYSTEM', 'AUGUR v2.1.0'],
                 ['DATA SOURCE', 'YAHOO FINANCE + COINGECKO'],
                 ['DATABASE', 'SQLITE3 (LOCAL)'],
                 ['BACKEND', 'PYTHON / FLASK'],
@@ -3624,6 +3868,8 @@ async function loadSettings() {
         <div class="panel-body" id="keys-panel"><div class="loading"><div class="spinner"></div></div></div>
       </div>
     `;
+    const ttsPreview = document.getElementById('tts-preview-btn');
+    if (ttsPreview) ttsPreview.addEventListener('click', previewTtsVoice);
     loadKeysPanel();
   } catch(e) {
     // Render failed — show the error plus a minimal key form rather than a
@@ -3636,6 +3882,51 @@ async function loadSettings() {
       + '<input class="form-input" id="set-openai-key" type="password" placeholder="sk-..." autocomplete="off"></div>'
       + '<button class="btn btn-green" onclick="saveSettings()" style="margin-top:8px">SAVE SETTINGS</button>'
       + '</div></div>';
+  }
+}
+
+// ── Jarvis voice preview (Settings) ──────────────────────────────────────────
+// POSTs a short fixed phrase to /api/jarvis/tts with the currently selected
+// voice (the route accepts an explicit `voice`) and plays the returned clip.
+// 404 = keyless/capped → friendly info toast, mirroring jarvis.js Voice.
+let _ttsPreviewAudio = null;
+async function previewTtsVoice() {
+  const btn = document.getElementById('tts-preview-btn');
+  const sel = document.getElementById('set-tts-voice');
+  if (!sel) return;
+  if (btn) { btn.disabled = true; btn.textContent = '…'; }
+  // Stop a previous preview so two clips never overlap.
+  if (_ttsPreviewAudio) {
+    try { _ttsPreviewAudio.pause(); _ttsPreviewAudio.src = ''; } catch (e) {}
+    _ttsPreviewAudio = null;
+  }
+  try {
+    const r = await fetch('/api/jarvis/tts', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text: 'At your service. This is how I sound.', voice: sel.value }),
+    });
+    if (!r.ok) {
+      if (r.status === 404) Toast.info('Premium voice needs an OpenAI key — Jarvis uses browser speech meanwhile.');
+      else Toast.warn('Voice preview failed (HTTP ' + r.status + ')');
+      return;
+    }
+    const blob = await r.blob();
+    const url = URL.createObjectURL(blob);
+    const a = new Audio(url);
+    _ttsPreviewAudio = a;
+    let revoked = false;
+    const fin = () => {
+      if (!revoked) { revoked = true; URL.revokeObjectURL(url); }
+      if (_ttsPreviewAudio === a) _ttsPreviewAudio = null;
+    };
+    a.onended = fin;
+    a.onerror = fin;
+    a.play().catch(fin);
+  } catch (e) {
+    Toast.warn('Voice preview failed: ' + e.message);
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = '▶'; }
   }
 }
 
@@ -3959,6 +4250,9 @@ async function init() {
 
   // Macro context bar across all views (Treasury/VIX strip)
   MacroBar.init();
+
+  // Holdings tape — held symbols + day % marquee under the header
+  HoldingsTape.init();
 
   // Navigate to overview immediately — don't block on data fetches
   navigate('overview');
@@ -5689,7 +5983,7 @@ function loadTerminalView() {
   el.innerHTML = `
     <div class="term-container">
       <div class="term-header">
-        <span class="term-title">▸ ${_esc(m)}AUGUR SHELL</span>
+        <span class="term-title">▸ AUGUR SHELL</span>
         <span class="term-subtitle">Type a command below — try <code>help</code> or <code>quote AAPL</code></span>
         <button class="btn btn-ghost btn-sm" onclick="termClear()" style="margin-left:auto">CLEAR</button>
       </div>

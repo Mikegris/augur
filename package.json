@@ -1,0 +1,15 @@
+{
+  "name": "stock-tracker",
+  "version": "1.0.0",
+  "description": "**Wealth Intelligence System** — a local, self-hosted personal stock & crypto tracker styled after a Bloomberg Terminal. Reads omens from a constellation of public signals to forecast investment outcomes.",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "puppeteer-core": "^24.43.1"
+  }
+}

@@ -266,6 +266,10 @@ def init_db():
 
     # ── Indexes for performance ──
     c.execute("CREATE INDEX IF NOT EXISTS idx_jarvis_messages_conv ON jarvis_messages(conversation_id, id)")
+    # jarvis_insights_since filters on created_at (the digest's "while you
+    # were away" query) and jarvis_log_insights prunes on it daily — both
+    # were full-table scans without this.
+    c.execute("CREATE INDEX IF NOT EXISTS idx_jarvis_insights_created ON jarvis_insights(created_at)")
     c.execute("CREATE INDEX IF NOT EXISTS idx_portfolio_symbol ON portfolio(symbol)")
     c.execute("CREATE INDEX IF NOT EXISTS idx_transactions_symbol ON transactions(symbol)")
     c.execute("CREATE INDEX IF NOT EXISTS idx_transactions_date ON transactions(date)")
@@ -586,6 +590,40 @@ def add_transaction(symbol, action, shares, price, fees=0, date=None, notes="", 
             (symbol.upper(), action.upper(), shares, price, total, fees, date, notes, account_id)
         )
         conn.commit()
+
+
+def get_transaction_stats():
+    """Aggregate trading-activity stats in a single query — feeds Jarvis
+    context blocks, where one round trip matters more than normalization.
+    Actions are stored upper-cased by add_transaction, but upper() in the
+    SQL tolerates rows imported by older builds / external tools.
+    Returns zeros/Nones (never raises) so callers can render unconditionally."""
+    try:
+        conn = get_conn()
+        row = conn.execute(
+            """SELECT COUNT(*) AS total_trades,
+                      COALESCE(SUM(upper(action) = 'BUY'), 0) AS buys,
+                      COALESCE(SUM(upper(action) = 'SELL'), 0) AS sells,
+                      MIN(date) AS first_trade_date,
+                      MAX(date) AS last_trade_date,
+                      (SELECT symbol FROM transactions
+                       GROUP BY symbol
+                       ORDER BY COUNT(*) DESC, symbol ASC
+                       LIMIT 1) AS most_traded_symbol
+               FROM transactions"""
+        ).fetchone()
+        return {
+            "total_trades": int(row["total_trades"] or 0),
+            "buys": int(row["buys"] or 0),
+            "sells": int(row["sells"] or 0),
+            "first_trade_date": row["first_trade_date"],
+            "last_trade_date": row["last_trade_date"],
+            "most_traded_symbol": row["most_traded_symbol"],
+        }
+    except Exception:
+        return {"total_trades": 0, "buys": 0, "sells": 0,
+                "first_trade_date": None, "last_trade_date": None,
+                "most_traded_symbol": None}
 
 
 # ── Price Alerts ──────────────────────────────────────────────────────────────
@@ -1331,6 +1369,34 @@ def prune_api_cache(grace_days=3):
             return 0
 
 
+def prune_jarvis_conversations(days=90):
+    """Drop ARCHIVED jarvis conversations older than `days` (by started_at),
+    along with their messages. Active (archived=0) threads are never touched.
+
+    The schema declares ON DELETE CASCADE on jarvis_messages.conversation_id
+    and get_conn enables PRAGMA foreign_keys, but a wealth.db created by a
+    build that predates the cascade clause keeps its original table DDL
+    (CREATE TABLE IF NOT EXISTS never rewrites it) — so delete the messages
+    explicitly first. On cascade-enabled DBs that's a cheap no-op overlap.
+    Returns conversations deleted."""
+    with _write_lock:
+        conn = get_conn()
+        cutoff = (f"-{int(days)} days",)
+        conn.execute(
+            "DELETE FROM jarvis_messages WHERE conversation_id IN ("
+            "  SELECT id FROM jarvis_conversations"
+            "  WHERE archived=1 AND datetime(started_at) < datetime('now', ?))",
+            cutoff
+        )
+        cur = conn.execute(
+            "DELETE FROM jarvis_conversations "
+            "WHERE archived=1 AND datetime(started_at) < datetime('now', ?)",
+            cutoff
+        )
+        conn.commit()
+        return cur.rowcount or 0
+
+
 def prune_ai_call_log(days=90):
     """Drop ai_call_log rows older than `days`."""
     with _write_lock:
@@ -1404,4 +1470,8 @@ def run_daily_prune():
         out["api_cache"] = prune_api_cache(3)
     except Exception:
         out["api_cache"] = -1
+    try:
+        out["jarvis_conversations"] = prune_jarvis_conversations(90)
+    except Exception:
+        out["jarvis_conversations"] = -1
     return out

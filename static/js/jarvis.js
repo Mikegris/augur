@@ -13,6 +13,48 @@
 
   const esc = (s) => (typeof _esc === 'function' ? _esc(s) : String(s == null ? '' : s));
 
+  // Safe mini-markdown: runs AFTER esc(), on the already-escaped string, so
+  // the only tags that can appear are the three we emit here. No links, no
+  // other tags, no attributes.
+  //   **bold** → <b>   *italic* → <i>   `code` → <code>
+  function mdLite(escaped) {
+    return String(escaped)
+      .replace(/`([^`\n]+)`/g, '<code>$1</code>')
+      .replace(/\*\*([^*\n]+)\*\*/g, '<b>$1</b>')
+      .replace(/\*([^*\n]+)\*/g, '<i>$1</i>');
+  }
+
+  // True when the keystroke belongs to a text field — global shortcuts must
+  // never hijack typing.
+  function isTypingTarget(t) {
+    if (!t) return false;
+    const tag = (t.tagName || '').toLowerCase();
+    return tag === 'input' || tag === 'textarea' || tag === 'select' || t.isContentEditable;
+  }
+
+  // Clipboard with the execCommand fallback for older engines.
+  function copyToClipboard(text) {
+    const legacy = () => {
+      try {
+        const ta = document.createElement('textarea');
+        ta.value = text;
+        ta.style.cssText = 'position:fixed;left:-9999px;top:0';
+        document.body.appendChild(ta);
+        ta.select();
+        const ok = document.execCommand('copy');
+        ta.remove();
+        if (ok && typeof Toast === 'object') Toast.success('Copied to clipboard');
+      } catch (e) { /* clipboard unavailable — stay silent */ }
+    };
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text).then(
+        () => { if (typeof Toast === 'object') Toast.success('Copied to clipboard'); },
+        legacy);
+    } else {
+      legacy();
+    }
+  }
+
   // Poll for a DOM hook after navigate() — views render async. ~10 tries ×
   // 100ms, then give up silently (the plain navigation already happened).
   function pollFor(getEl, run, tries) {
@@ -122,6 +164,7 @@
           <div class="panel-header">
             <span class="panel-title jarvis-title">◉ JARVIS</span>
             <span class="jarvis-hint">⌘K to ask anything</span>
+            <span class="jarvis-hint" id="jarvis-updated"></span>
             <button class="btn btn-ghost btn-sm" id="jarvis-speak" title="Read the briefing aloud" aria-label="Read the briefing aloud">🔊</button>
             <button class="btn btn-ghost btn-sm" id="jarvis-refresh">↻</button>
           </div>
@@ -146,10 +189,32 @@
         ]);
         this._last = b;
         this._renderBody(b);
+        this._startStamp(b.generated_at);
       } catch (e) {
         const body = document.getElementById('jarvis-body');
         if (body) body.innerHTML = `<div class="empty-state"><span>Briefing unavailable: ${esc(e.message)}</span></div>`;
       }
+    },
+
+    // Staleness stamp: "updated Xs/Xm ago" in the panel header, derived from
+    // the briefing's generated_at and re-painted every 30s while the tab is
+    // visible. Self-cancels once the span leaves the DOM (view re-render).
+    _stampAt: null, _stampTimer: null,
+    _startStamp(generatedAt) {
+      const t = generatedAt ? new Date(generatedAt).getTime() : NaN;
+      this._stampAt = isNaN(t) ? Date.now() : t;
+      if (this._stampTimer) { clearInterval(this._stampTimer); this._stampTimer = null; }
+      const paint = () => {
+        const node = document.getElementById('jarvis-updated');
+        if (!node) {
+          if (this._stampTimer) { clearInterval(this._stampTimer); this._stampTimer = null; }
+          return;
+        }
+        const s = Math.max(0, Math.round((Date.now() - this._stampAt) / 1000));
+        node.textContent = 'updated ' + (s < 60 ? s + 's' : Math.floor(s / 60) + 'm') + ' ago';
+      };
+      paint();
+      this._stampTimer = setInterval(() => { if (!document.hidden) paint(); }, 30000);
     },
 
     _renderBody(b) {
@@ -428,7 +493,7 @@
             <span class="jp-glyph">◉</span>
             <input id="jp-input" type="text" placeholder="Ask Jarvis or jump anywhere... (e.g. 'forecast NVDA', 'biggest loser today')"
                    autocomplete="off" spellcheck="false">
-            <button id="jp-mic" type="button" title="Talk to Jarvis" aria-label="Talk to Jarvis (push to talk)">🎙</button>
+            <button id="jp-mic" type="button" title="Talk to Jarvis" aria-label="Talk to Jarvis (push to talk)" aria-pressed="false">🎙</button>
             <button id="jp-voice" type="button" title="Jarvis speaks replies aloud" aria-label="Toggle spoken replies" aria-pressed="false">🔊</button>
           </div>
           <div id="jp-answer"></div>
@@ -475,8 +540,20 @@
         if ((e.metaKey || e.ctrlKey) && (e.key === 'k' || e.key === 'K')) {
           e.preventDefault();
           this.isOpen() ? this.close() : this.open();
+        } else if (e.key === '/' && !e.metaKey && !e.ctrlKey && !e.altKey && !e.shiftKey
+                   && !this.isOpen() && !isTypingTarget(e.target)) {
+          // "/" opens the palette like ⌘K — but never while typing in any
+          // input/textarea/contenteditable (app.js's "/" handler defers to us).
+          e.preventDefault();
+          this.open();
         } else if (e.key === 'Escape' && this.isOpen()) {
-          this.close();
+          // First Escape clears a typed query; second Escape closes.
+          if (this.input && this.input.value) {
+            this.input.value = '';
+            this._refresh();
+          } else {
+            this.close();
+          }
         }
       });
     },
@@ -536,6 +613,14 @@
     _setListening(on) {
       const row = this.el && this.el.querySelector('.jp-input-row');
       if (row) row.classList.toggle('listening', !!on);
+      // Mic button itself: pulsing class (jarvis-pulse keyframes via the
+      // existing .jarvis-core rule — globally stilled under
+      // prefers-reduced-motion) + aria-pressed for AT users.
+      const mic = document.getElementById('jp-mic');
+      if (mic) {
+        mic.classList.toggle('jarvis-core', !!on);
+        mic.setAttribute('aria-pressed', String(!!on));
+      }
       if (this.input) this.input.placeholder = on
         ? 'Listening…'
         : "Ask Jarvis or jump anywhere... (e.g. 'forecast NVDA', 'biggest loser today')";
@@ -664,9 +749,22 @@
     },
 
     _onKey(e) {
-      if (e.key === 'ArrowDown') { e.preventDefault(); this._sel = Math.min(this._sel + 1, this._items.length - 1); this._renderList(); }
-      else if (e.key === 'ArrowUp') { e.preventDefault(); this._sel = Math.max(this._sel - 1, 0); this._renderList(); }
+      const n = this._items.length;
+      // Arrow navigation wraps around both ends of the list.
+      if (e.key === 'ArrowDown') { e.preventDefault(); if (n) { this._sel = (this._sel + 1) % n; this._renderList(); } }
+      else if (e.key === 'ArrowUp') { e.preventDefault(); if (n) { this._sel = (this._sel - 1 + n) % n; this._renderList(); } }
       else if (e.key === 'Enter') { e.preventDefault(); this._run(); }
+      else if ((e.metaKey || e.ctrlKey) && /^[1-9]$/.test(e.key)) {
+        // Cmd/Ctrl+1..9 quick-select — modifier required so typing plain
+        // digits into a query is never hijacked.
+        const idx = Number(e.key) - 1;
+        if ((this.input.value.trim() !== '' || n > 0) && idx < n) {
+          e.preventDefault();
+          this._sel = idx;
+          this._renderList();
+          this._run();
+        }
+      }
     },
 
     _run() {
@@ -754,7 +852,7 @@
                 `<a class="jv-cite" href="${esc(c.url)}" target="_blank" rel="noopener noreferrer">${esc(c.title || c.url)}</a>`).join('')}</div>` : '';
         this.answer.innerHTML = `
           <div class="jp-answer">
-            <div class="jp-answer-text">${esc(r.answer)}</div>
+            <div class="jp-answer-text">${mdLite(esc(r.answer))}</div>
             ${r.detail ? `<div class="jp-answer-detail">${esc(r.detail)}</div>` : ''}
             ${citesLine}
             ${usedLine}
@@ -1213,13 +1311,52 @@
           for (const c of p1) {
             if (!this._seen.has(c.title)) {
               this._seen.add(c.title);
-              Toast.show('◉ JARVIS: ' + c.title, 'amber', 8000);
+              // Actionable toast: "OPEN →" deep-links into the insight's view
+              // (Toast.show's optional 4th arg, added in app.js).
+              Toast.show('◉ JARVIS: ' + c.title, 'amber', 8000,
+                c.action ? { label: 'OPEN →', onClick: () => runAction(c.action) } : undefined);
             }
           }
         } catch (e) { /* server asleep or offline — stay quiet */ }
       };
       tick();
       this._timer = setInterval(tick, 5 * 60 * 1000);
+    },
+  };
+
+  // ── Digest freshness — re-fetch "while you were away" after a long absence ──
+  // If the tab was hidden for more than 30 minutes, re-pull the digest on
+  // return (default mark_seen, advancing the watermark), toast a one-liner
+  // when something happened, and refresh the Overview briefing if that view
+  // is what the user comes back to.
+  const AWAY_THRESHOLD_MS = 30 * 60 * 1000;
+  const Freshness = {
+    _hiddenAt: null,   // module-level timestamp of when the page went hidden
+    init() {
+      document.addEventListener('visibilitychange', () => {
+        if (document.hidden) { this._hiddenAt = Date.now(); return; }
+        const away = this._hiddenAt ? Date.now() - this._hiddenAt : 0;
+        this._hiddenAt = null;
+        if (away < AWAY_THRESHOLD_MS) return;
+        this._refetch();
+      });
+    },
+    async _refetch() {
+      try {
+        const d = await API.get('/api/jarvis/digest');
+        if (!d || !d.count) return;
+        // Hand the fresh digest to the briefing panel (it normally fetches
+        // only once per page load) before re-rendering.
+        Briefing._digest = d;
+        Briefing._digestFetched = true;
+        if (typeof Toast === 'object' && Toast.info) {
+          Toast.info('◉ JARVIS: while you were away — ' + (d.line || (d.count + ' things happened.')));
+        }
+        if (typeof State === 'object' && State && State.activeView === 'overview'
+            && document.getElementById('ov-jarvis')) {
+          Briefing.render('ov-jarvis');
+        }
+      } catch (e) { /* server asleep — stay quiet */ }
     },
   };
 
@@ -1256,7 +1393,7 @@
             <div class="jv-input-row">
               <input id="jv-input" type="text" placeholder="Ask anything — your book, a business, the macro picture…"
                      autocomplete="off" spellcheck="false">
-              <button id="jv-mic" type="button" title="Talk" aria-label="Talk to Jarvis">🎙</button>
+              <button id="jv-mic" type="button" title="Talk" aria-label="Talk to Jarvis" aria-pressed="false">🎙</button>
               <button id="jv-send" type="button" class="btn btn-green btn-sm">ASK</button>
             </div>
           </div>
@@ -1289,11 +1426,30 @@
       if (!Voice.sttAvailable()) {
         jvMic.style.display = 'none';  // dead button on browsers without STT
       } else {
+        // Listening state: pulsing class (existing .jarvis-core rule, stilled
+        // globally under prefers-reduced-motion) + aria-pressed, cleared on
+        // result, silence and error alike (Voice.listen fires exactly one of
+        // the two callbacks).
+        const micState = (on) => {
+          const m = document.getElementById('jv-mic');
+          if (!m) return;
+          m.classList.toggle('jarvis-core', on);
+          m.setAttribute('aria-pressed', String(on));
+        };
         jvMic.addEventListener('click', () => {
-          Voice.listen((t) => { document.getElementById('jv-input').value = t; this._send(true); },
-                       () => {});
+          micState(true);
+          Voice.listen(
+            (t) => { micState(false); const inp = document.getElementById('jv-input'); if (inp) inp.value = t; this._send(true); },
+            () => micState(false));
         });
       }
+      // Copy affordance: hovering any assistant bubble lazily attaches a ⧉
+      // button (delegated, so bubbles created or rewritten later get it too).
+      const chatBox = document.getElementById('jv-chat');
+      if (chatBox) chatBox.addEventListener('mouseover', (e) => {
+        const b = e.target.closest && e.target.closest('.jv-bubble.assistant');
+        if (b && !b.querySelector('.jv-copy-btn')) this._attachCopy(b);
+      });
       // Spoken-replies toggle — shares the same persisted flag as the palette,
       // so "voice on" is consistent across both Jarvis surfaces and the
       // command center finally has its own control for it.
@@ -1325,6 +1481,44 @@
       this._loadSide();
     },
 
+    // ⧉ copy button for an assistant bubble — JS-created, shown on hover,
+    // copies the bubble's textContent (minus the button itself).
+    _attachCopy(bubble) {
+      const btn = document.createElement('button');
+      btn.className = 'jv-copy-btn';
+      btn.type = 'button';
+      btn.textContent = '⧉';
+      btn.title = 'Copy';
+      btn.setAttribute('aria-label', 'Copy this reply');
+      btn.style.cssText = 'position:absolute;top:2px;right:2px;'
+        + 'background:none;border:1px solid var(--border,#1c1c1c);border-radius:2px;'
+        + 'color:var(--text-dim,#888);font-size:10px;line-height:1;padding:2px 4px;'
+        + 'cursor:pointer;opacity:0;transition:opacity .15s';
+      if (!bubble.style.position) bubble.style.position = 'relative';
+      bubble.appendChild(btn);
+      const show = () => { btn.style.opacity = '1'; };
+      const hide = () => { btn.style.opacity = '0'; };
+      bubble.addEventListener('mouseenter', show);
+      bubble.addEventListener('mouseleave', hide);
+      btn.addEventListener('focus', show);
+      btn.addEventListener('blur', hide);
+      show();  // attached mid-hover — make it visible right away
+      btn.addEventListener('click', () => {
+        const clone = bubble.cloneNode(true);
+        clone.querySelectorAll('.jv-copy-btn').forEach(n => n.remove());
+        copyToClipboard((clone.textContent || '').trim());
+      });
+    },
+
+    // "— Jun 12 —" label from a YYYY-MM-DD prefix; parsed by parts so the
+    // label never shifts a day across timezones.
+    _dayLabel(day) {
+      const p = String(day).split('-').map(Number);
+      if (p.length !== 3 || p.some(isNaN)) return day;
+      return new Date(p[0], p[1] - 1, p[2])
+        .toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+    },
+
     async _loadChat() {
       const gen = this._chatGen;
       try {
@@ -1335,7 +1529,21 @@
         if (!el) return;
         const msgs = (c.messages || []).slice(-20);
         if (msgs.length) {
-          el.innerHTML = msgs.map(m => `<div class="jv-bubble ${m.role === 'user' ? 'user' : 'assistant'}">${esc(m.content)}</div>`).join('');
+          // Dim day separators between messages from different days
+          // (created_at is the server's timestamp on each persisted message).
+          let html = '';
+          let prevDay = null;
+          for (const m of msgs) {
+            const day = (m.created_at || '').slice(0, 10);
+            if (day && prevDay && day !== prevDay) {
+              html += `<div class="jv-day-sep" style="text-align:center;color:var(--text-dim,#666);`
+                + `font-size:9px;letter-spacing:.1em;margin:8px 0">— ${esc(this._dayLabel(day))} —</div>`;
+            }
+            if (day) prevDay = day;
+            const body = m.role === 'user' ? esc(m.content) : mdLite(esc(m.content));
+            html += `<div class="jv-bubble ${m.role === 'user' ? 'user' : 'assistant'}">${body}</div>`;
+          }
+          el.innerHTML = html;
         } else {
           // Empty thread → offer clickable starters so the feature is
           // discoverable instead of a blank prompt.
@@ -1411,7 +1619,7 @@
           r = await API.post('/api/jarvis/ask', body);
         }
         if (r.conversation_id) this._convId = r.conversation_id;
-        let html = esc(r.answer);
+        let html = mdLite(esc(r.answer));
         if (r.citations && r.citations.length) {
           html += '<div class="jv-cites"><span class="jv-cites-h">sources</span>'
             + r.citations.slice(0, 6).map(c =>
@@ -1580,7 +1788,7 @@
   };
 
   global.Jarvis = Jarvis;
-  const boot = () => { Activity.instrument(); Orb.init(); Palette.init(); Watch.start(); };
+  const boot = () => { Activity.instrument(); Orb.init(); Palette.init(); Watch.start(); Freshness.init(); };
   if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', boot);
   } else {

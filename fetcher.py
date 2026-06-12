@@ -443,11 +443,76 @@ def _try_crypto_fallback(symbol, ttl=30):
     return cg_quote
 
 
+# ── Negative quote cache ──────────────────────────────────────────────────────
+# Delisted / typo'd symbols (HBAR-style watchlist noise) fail get_quote on
+# EVERY briefing/strip refresh, and each failure walks the full fallback chain
+# (yfinance → Yahoo direct → CoinGecko → Finviz scrape). Once Yahoo has
+# *confirmed* there's no data for a symbol, remember that verdict for 10
+# minutes so repeat callers stop burning rate-limit budget on a known-bad
+# name. Two guards keep this safe:
+#   1. only CONFIRMED no-data responses (404 / "delisted" / empty 200 body)
+#      are negative-cached — transient network/429/5xx errors never are;
+#   2. a symbol with any recent good quote (stale-cache lookback) is never
+#      negative-cached, so a one-off bad upstream answer can't blank out a
+#      ticker that demonstrably works.
+# Memory-only (persist=False): the verdict must not outlive the process — a
+# boot-time upstream wobble shouldn't be replayed from disk next session.
+
+_NEG_QUOTE_TTL = 600  # 10 min
+
+
+def _confirmed_no_quote(err) -> bool:
+    """True only for error text that means "the symbol has no data", never
+    for transient transport/rate-limit failures."""
+    s = str(err or "").lower()
+    if not s:
+        return False
+    # Transient signatures first — any of these means "try again later".
+    # "50" catches requests' "500/502/503 Server Error" status prefixes.
+    for transient in ("rate limit", "too many requests", "429", "timed out",
+                      "timeout", "connection", "temporarily", "50"):
+        if transient in s:
+            return False
+    return ("404" in s or "not found" in s or "delisted" in s
+            or "empty result" in s or "no data found" in s)
+
+
+def _maybe_negative_cache_quote(symbol: str, direct_probe) -> None:
+    """Record a confirmed quote miss for `symbol` if the Yahoo direct probe
+    says the symbol genuinely has no data. Fail-open: never raises."""
+    try:
+        sym = symbol.upper()
+        if not isinstance(direct_probe, dict):
+            return
+        if not _confirmed_no_quote(direct_probe.get("error")):
+            return
+        # A previously-good quote (even an expired one) outranks one bad
+        # answer — Yahoo intermittently 404s symbols it served minutes ago.
+        stale = cache_store.cache_get_stale(("quote", sym))
+        if isinstance(stale, dict) and stale.get("price") is not None:
+            return
+        # No "error" key on purpose: cache_get drops small error-envelopes
+        # at read time, which would silently disable this negative cache.
+        envelope = {"symbol": sym, "note": "no_quote",
+                    "timestamp": datetime.now(timezone.utc).isoformat()}
+        cache_store.cache_set(("quote_neg", sym), envelope, ttl=_NEG_QUOTE_TTL,
+                              allow_empty=True, persist=False)
+    except Exception:
+        pass
+
+
 def get_quote(symbol: str) -> dict:
     ck = ("quote", symbol.upper())
     hit = _cached(ck, ttl=30)
     if hit is not None:
         return hit
+
+    # Known-bad symbol inside the negative-cache window → return the
+    # price-less envelope immediately instead of re-walking the fallback
+    # chain. Copied so a caller annotating the dict can't poison the cache.
+    neg = _cached(("quote_neg", symbol.upper()))
+    if isinstance(neg, dict) and neg.get("note") == "no_quote":
+        return dict(neg)
 
     # For known crypto symbols, prefer CoinGecko over yfinance. Yahoo's
     # crypto data has been silently shipping wildly-wrong prices for some
@@ -499,11 +564,17 @@ def get_quote(symbol: str) -> dict:
         }
         # yfinance returned a quote but no price → fallback chain.
         if result.get("price") is None:
+            direct_probe = None
             for fb in (_yahoo_chart_direct, _try_crypto_fallback, _finviz_quote_fallback):
                 fbq = fb(symbol) if fb is not _try_crypto_fallback else fb(symbol)
+                if fb is _yahoo_chart_direct:
+                    direct_probe = fbq  # keep for the negative-cache verdict
                 if fbq and "error" not in fbq and fbq.get("price") is not None:
                     _set_cache(ck, fbq, ttl=30)
                     return fbq
+            # Whole chain came up empty — if Yahoo *confirmed* no-data
+            # (vs. a transient failure), remember it for 10 minutes.
+            _maybe_negative_cache_quote(symbol, direct_probe)
         # Only cache a real price. A price-less result (prev_close but no
         # price, all fallbacks failed) isn't failure-SHAPED, so it would be
         # served for 30s while batch callers re-fetch it anyway — worst of
@@ -514,11 +585,17 @@ def get_quote(symbol: str) -> dict:
     except Exception as e:
         # yfinance 1.2.0 trips YFRateLimitError when fc.yahoo.com (crumb host)
         # 404s. Fallback chain: Yahoo direct → crypto-via-CoinGecko → Finviz.
+        direct_probe = None
         for fb in (_yahoo_chart_direct, _try_crypto_fallback, _finviz_quote_fallback):
             fbq = fb(symbol)
+            if fb is _yahoo_chart_direct:
+                direct_probe = fbq  # keep for the negative-cache verdict
             if fbq and "error" not in fbq and fbq.get("price") is not None:
                 _set_cache(ck, fbq, ttl=30)
                 return fbq
+        # The yfinance exception alone is ambiguous (usually rate-limit noise)
+        # — only the direct probe's confirmed no-data answer negative-caches.
+        _maybe_negative_cache_quote(symbol, direct_probe)
         return {"symbol": symbol.upper(), "error": str(e)}
 
 
@@ -659,6 +736,42 @@ def get_quotes_batch(symbols: list) -> dict:
                 results[yf_sym] = quote
                 _set_cache(("quote", yf_sym), quote, ttl=120)
     return results
+
+
+def get_portfolio_quotes(holdings) -> dict:
+    """Batch quotes for db.get_portfolio()-shaped rows, keyed by the rows'
+    ORIGINAL symbols.
+
+    Every portfolio consumer (briefing, analytics, the /api/portfolio route)
+    re-implements the same dance: split crypto from equities, map crypto to
+    yfinance's `SYM-USD` form, batch-fetch, then unwrap the suffix to get
+    back to the symbol the DB row carries. Centralizing it here means the
+    mapping lives in exactly one place. Pure addition — callers migrate at
+    their own pace. Fail-open: any failure returns {} rather than raising
+    into a UI path."""
+    try:
+        yf_to_orig = {}  # yfinance symbol -> original holding symbol
+        for h in holdings or []:
+            if not isinstance(h, dict):
+                continue
+            sym = (h.get("symbol") or "").strip().upper()
+            if not sym:
+                continue
+            if h.get("asset_type") == "crypto" and not sym.endswith("-USD"):
+                yf_to_orig[sym + "-USD"] = sym
+            else:
+                yf_to_orig[sym] = sym
+        if not yf_to_orig:
+            return {}
+        batch = get_quotes_batch(list(yf_to_orig.keys())) or {}
+        out = {}
+        for yf_sym, orig in yf_to_orig.items():
+            q = batch.get(yf_sym)
+            if q is not None:
+                out[orig] = q
+        return out
+    except Exception:
+        return {}
 
 
 def get_fundamentals(symbol: str) -> dict:
@@ -1047,10 +1160,18 @@ def _top_movers_uncached() -> dict:
         split = len(ranked) // 2
         gainers = ranked[:min(10, split or len(ranked))]
         losers_slice = ranked[-min(10, len(ranked) - len(gainers)):] if len(ranked) > len(gainers) else []
-        return {
+        out = {
             "gainers": gainers,
             "losers": losers_slice[::-1],
         }
+        # Stamp build time so UIs can show freshness — the coalesce cache
+        # serves this for up to 90s and the underlying quotes are 30s old at
+        # most on top of that. Only stamped when we actually ranked names:
+        # adding it to an all-empty result would make the failure shape look
+        # like real data and get it cached (see _looks_like_failure).
+        if ranked:
+            out["source_ts"] = datetime.now(timezone.utc).isoformat()
+        return out
     except Exception:
         return {"gainers": [], "losers": []}
 

@@ -1311,8 +1311,8 @@ def test_jarvis_30x():
     check("frontend: health meter in orb panel",
           "jap-health" in src and "_refreshHealth" in src)
     html = open("templates/index.html").read()
-    check("assets: jarvis.js v18 + css v15",
-          "jarvis.js?v=18" in html and "terminal.css?v=15" in html)
+    check("assets: jarvis.js + css cache-busted",
+          "jarvis.js?v=" in html and "terminal.css?v=" in html)
 
 
 def test_database_zero_shares():

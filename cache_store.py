@@ -57,6 +57,13 @@ _mem_lock = threading.RLock()
 _MEM_SOFT_CAP = 2000
 _MEM_EVICT_TARGET = 1800
 
+# Hit/miss counters for stats(). Plain `int +=` without a lock: under the GIL
+# each increment is close-enough-to-atomic that the worst case is an
+# occasionally lost count — these are approximate observability counters, not
+# billing, so the cost of a lock on every cache read isn't worth it.
+_hits = 0
+_misses = 0
+
 # Per-key locking so a stampede on key A doesn't block traffic for key B.
 # key -> (threading.Event, claimed_at_ts). The timestamp lets a periodic
 # sweep release events whose fetch_fn never returned (e.g. a network deadlock
@@ -297,8 +304,12 @@ def init() -> None:
     # the SQLite table from growing without bound across many sessions.
     try:
         now = time.time()
-        c.execute("DELETE FROM api_cache WHERE expiry < ?", (now,))
+        cur = c.execute("DELETE FROM api_cache WHERE expiry < ?", (now,))
         c.commit()
+        # Single summary line (count only — summing freed bytes would mean
+        # reading every doomed row's value first, defeating the cheap sweep).
+        if cur.rowcount and cur.rowcount > 0:
+            log.debug("cache prune dropped %d expired rows", cur.rowcount)
     except Exception:
         pass
 
@@ -414,11 +425,13 @@ def cache_get(key, ttl: Optional[float] = None):
     A defensive failure check runs at read time too, so even if some legacy
     code path slipped a null-shaped value into the map, we treat it as a
     miss and let the caller refetch."""
+    global _hits, _misses
     k = _serialize_key(key)
     hit = _mem.get(k)
     if hit is None:
         hit = _load_from_disk(k)
     if hit is None:
+        _misses += 1
         return None
     # Hydrate from legacy 2-tuple format if a prior version's _mem leaked in.
     if len(hit) == 2:
@@ -433,6 +446,7 @@ def cache_get(key, ttl: Optional[float] = None):
         # in cache_set, not here. (Popping it on read is what made
         # cache_get_stale dead in its documented "call after cache_get
         # returns None" pattern.)
+        _misses += 1
         return None
     # Read-time defense against legacy null-shaped values, but NOT against
     # empty collections — those may be a legitimate negative cache written
@@ -441,11 +455,13 @@ def cache_get(key, ttl: Optional[float] = None):
     if isinstance(value, dict) and value.get("error") and len(value) <= 3:
         with _mem_lock:
             _mem.pop(k, None)
+        _misses += 1
         return None
     # Refresh last_access so LRU eviction favors recently-read entries.
     # Avoid the lock on every read by writing the tuple back directly —
     # dict item replacement is atomic in CPython.
     _mem[k] = (value, expiry, now)
+    _hits += 1
     return value
 
 
@@ -485,7 +501,8 @@ def cache_get_stale(key, max_age_seconds: float = 24 * 3600) -> Any:
     return value
 
 
-def cache_set(key, value, ttl: float, allow_empty: bool = False) -> None:
+def cache_set(key, value, ttl: float, allow_empty: bool = False,
+              persist: bool = True) -> None:
     """Store in memory + (if ttl >= _PERSIST_MIN_TTL) write through to disk.
 
     Refuses to cache values that look like upstream failures — neither in
@@ -497,6 +514,11 @@ def cache_set(key, value, ttl: float, allow_empty: bool = False) -> None:
     empty/falsy value is a LEGITIMATE answer to cache (e.g. a NEGATIVE cache:
     "this PTR genuinely has no trades / 404'd" — caching that for a short TTL
     is the whole point, and the heuristic would otherwise silently drop it).
+
+    `persist=False` keeps the entry memory-only even when its TTL clears the
+    persistence threshold. Negative caches want this: a "symbol had no quote"
+    verdict must not survive a restart (the upstream may simply have been
+    mid-outage when the verdict was recorded).
     """
     if not allow_empty and _looks_like_failure(value):
         return
@@ -510,6 +532,7 @@ def cache_set(key, value, ttl: float, allow_empty: bool = False) -> None:
         # already-expired entries; (2) if still over cap, drop the
         # least-recently-accessed entries (true LRU, not just oldest-by-write).
         if len(_mem) > _MEM_SOFT_CAP:
+            n_before = len(_mem)
             for stale_k in [kk for kk, t in _mem.items() if t[1] < now]:
                 _mem.pop(stale_k, None)
             if len(_mem) > _MEM_SOFT_CAP:
@@ -522,8 +545,12 @@ def cache_set(key, value, ttl: float, allow_empty: bool = False) -> None:
                 ordered = sorted(_mem.items(), key=_lru_key)
                 for kk, _ in ordered[: len(_mem) - _MEM_EVICT_TARGET]:
                     _mem.pop(kk, None)
+            # One summary line instead of silence — eviction storms are the
+            # first thing to look for when "cached" panels keep refetching.
+            log.debug("cache mem sweep evicted %d entries (%d -> %d)",
+                      n_before - len(_mem), n_before, len(_mem))
 
-    if ttl < _PERSIST_MIN_TTL:
+    if not persist or ttl < _PERSIST_MIN_TTL:
         return
     # Lazy table creation: if init() was called before the DB was writable
     # (rare boot-time SQLITE_BUSY), retry here so the disk cache doesn't
@@ -674,11 +701,18 @@ def stats() -> dict:
         n_disk = -1
     with _inflight_lock:
         n_inflight = len(_inflight)
+    # Snapshot the counters once so hits/misses/hit_rate are mutually
+    # consistent within this response even if reads land mid-call.
+    hits, misses = _hits, _misses
+    total = hits + misses
     return {
         "in_memory": n_mem,
         "fresh": fresh,
         "on_disk": n_disk,
         "in_flight": n_inflight,
+        "hits": hits,
+        "misses": misses,
+        "hit_rate": round(hits / total, 2) if total else 0.0,
     }
 
 

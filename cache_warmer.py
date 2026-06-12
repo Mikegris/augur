@@ -96,6 +96,14 @@ HYPOTHESIS_SCORE_INTERVAL = 24 * 3600  # research_hypothesis daily scoring
 CLUSTER_INTERVAL = int(5.5 * 3600)  # synth_cluster bull+bear scans (SCAN_TTL_S = 6h)
 DIVMAP_INTERVAL = 55 * 60           # synth_divmap divergence scan (_CACHE_TTL = 1h)
 SECTORFLOW_INTERVAL = 9 * 60        # synth_sectorflow heatmap (CACHE_TTL = 600s)
+# Jarvis briefing (_BRIEFING_TTL = 240s) — warmed just inside the TTL so the
+# Overview's first paint reads a hot cache instead of paying the full
+# briefing pipeline (quote batch + earnings + regime, multi-second cold).
+# get_briefing() is read-through, so a tick that lands while the entry is
+# still fresh is a cheap cache read; the recompute lands within one cadence
+# of expiry rather than at the exact boundary — close enough, and it keeps
+# the warmer from forcing extra LLM-voice calls the way force_refresh would.
+JARVIS_BRIEFING_INTERVAL = 200
 # Daily housekeeping: prune monotonically-growing tables + occasional VACUUM.
 # Without this an active user's wealth.db grows without bound (observed 535MB).
 PRUNE_INTERVAL = 24 * 3600
@@ -241,6 +249,19 @@ def _loop():
         # ── medium cadence: macro ────────────────────────────────────
         if _due("macro", MACRO_INTERVAL, now):
             _safe("macro", fetcher.get_macro_indicators)
+            time.sleep(INTER_REQUEST_DELAY)
+
+        # ── Jarvis briefing cadence: every 200s (TTL 240s) ───────────
+        # Lazy import: jarvis pulls the whole engine stack; a broken or
+        # missing module must degrade to "briefing warms on first user hit"
+        # rather than killing the warmer loop. Failures ride the standard
+        # backoff via _safe, like every other task.
+        if _due("jarvis_briefing", JARVIS_BRIEFING_INTERVAL, now):
+            try:
+                import jarvis
+                _safe("jarvis_briefing", jarvis.get_briefing)
+            except Exception as e:
+                log.debug("jarvis_briefing skipped: %s", e)
             time.sleep(INTER_REQUEST_DELAY)
 
         # ── portfolio quotes (cheap when batched) ────────────────────
@@ -452,5 +473,6 @@ def status() -> dict:
             "cluster_interval": CLUSTER_INTERVAL,
             "divmap_interval": DIVMAP_INTERVAL,
             "sectorflow_interval": SECTORFLOW_INTERVAL,
+            "jarvis_briefing_interval": JARVIS_BRIEFING_INTERVAL,
         },
     }

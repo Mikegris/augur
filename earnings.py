@@ -147,6 +147,7 @@ def get_earnings_calendar(symbols):
     """
     results = []
     cache_misses = 0
+    today = datetime.date.today()
 
     for symbol in symbols:
         # Only sleep between *upstream* calls (cache misses). The old
@@ -163,8 +164,25 @@ def get_earnings_calendar(symbols):
             cache_misses += 1
 
         entry = _calendar_for_one(symbol)
-        if entry is not None:
-            results.append(entry)
+        if entry is None:
+            continue
+        # _calendar_for_one only ever STORES future dates, but its 6h cache
+        # straddles midnight (and weekends), so a served row can reference a
+        # date that has since passed and a days_until counted from the wrong
+        # "today". Recompute from earnings_date at read time, and drop rows
+        # already in the past — a negative countdown is stale upstream noise,
+        # not a calendar item. Copy before patching: `entry` may be the very
+        # dict cached in cache_store's memory tier.
+        try:
+            ed = datetime.date.fromisoformat(str(entry.get("earnings_date"))[:10])
+            days_until = (ed - today).days
+        except (TypeError, ValueError):
+            days_until = entry.get("days_until")
+        if days_until is None or days_until < 0:
+            continue
+        entry = dict(entry)
+        entry["days_until"] = days_until
+        results.append(entry)
 
     results.sort(key=lambda x: x["earnings_date"])
     return results

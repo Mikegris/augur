@@ -27,11 +27,18 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
+import time
 from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, List, Optional
 
 log = logging.getLogger("augur.jarvis")
+
+# Captured at import — health_snapshot reports process uptime relative to
+# this, which is what "how long has Jarvis been up" actually means in a
+# single-process Flask app.
+_STARTED = time.time()
 
 try:
     import cache_store
@@ -352,8 +359,18 @@ def _agent_ask(query: str, history: Optional[List[Dict[str, Any]]] = None,
     # to the local-only fallback. Give each round room, with one auto-retry.
     client = OpenAI(api_key=key, timeout=55.0, max_retries=2)
 
+    # Ground the agent in NOW — without this, the model reasons from its
+    # training-cutoff sense of "today" and confidently misdates earnings,
+    # Fed meetings, and "is the market open" reasoning. Dynamic, so it must
+    # not live in the _AGENT_SYSTEM constant.
+    try:
+        _now_et = _et_now()
+        grounding = "Today is {}; markets are {}. ".format(
+            _now_et.strftime("%Y-%m-%d"), _market_phase(_now_et))
+    except Exception:
+        grounding = ""
     messages: List[Dict[str, Any]] = [
-        {"role": "system", "content": _AGENT_SYSTEM + _memory_block()}]
+        {"role": "system", "content": grounding + _AGENT_SYSTEM + _memory_block()}]
     for turn in (history or [])[-6:]:
         if turn.get("q"):
             messages.append({"role": "user", "content": turn["q"]})
@@ -929,6 +946,13 @@ def _run_briefing_uncached() -> Dict[str, Any]:
     except Exception as e:
         log.debug("briefing: insight log failed: %s", e)
 
+    # A zero-card briefing renders as a bare panel that reads like a bug.
+    # Say "all clear" explicitly — appended AFTER the insight log so the
+    # away-digest history stays pure signal.
+    if not cards:
+        cards.append(_card(3, "all_clear", "info", "All clear",
+                           "All quiet — book steady, no alerts, calendar clear."))
+
     out = {
         "greeting": "{}. Markets are {}.".format(_greeting(), _market_phase(now_et)),
         "headline": _build_headline(pulse, regime, n_urgent),
@@ -937,6 +961,19 @@ def _run_briefing_uncached() -> Dict[str, Any]:
         "market": regime,
         "generated_at": datetime.now(timezone.utc).isoformat(),
     }
+
+    # Fresh away-digest items earn a mention in the headline itself (additive
+    # string only — peek without moving the watermark, and any failure leaves
+    # the headline exactly as _build_headline made it).
+    try:
+        dig = away_digest(mark_seen=False)
+        n_away = dig.get("count") or 0
+        if n_away:
+            out["headline"] = out["headline"].rstrip() + \
+                " {} event{} logged while you were out.".format(
+                    n_away, "s" if n_away != 1 else "")
+    except Exception as e:
+        log.debug("briefing: away-count headline skipped: %s", e)
 
     # Optional LLM polish: rides the same briefing coalesce (240s TTL), so the
     # cost ceiling is ~1 light call per 4 minutes. `headline` is never touched
@@ -992,7 +1029,7 @@ def away_digest(mark_seen: bool = True) -> Dict[str, Any]:
             log.debug("away_digest: mark seen failed: %s", e)
 
     out: Dict[str, Any] = {"since": last_seen, "insights": [], "count": 0,
-                           "away_minutes": None, "line": None}
+                           "kind_counts": {}, "away_minutes": None, "line": None}
     if not last_seen:
         return out  # first visit ever — nothing to recap
     try:
@@ -1014,6 +1051,13 @@ def away_digest(mark_seen: bool = True) -> Dict[str, Any]:
         return out
     out["insights"] = rows
     out["count"] = len(rows)
+    # Per-kind tally so a UI can summarize ("2 alerts, 1 mover") without
+    # re-walking the insight list.
+    kc: Dict[str, int] = {}
+    for r in rows:
+        k = str(r.get("kind") or "other")
+        kc[k] = kc.get(k, 0) + 1
+    out["kind_counts"] = kc
 
     if gap_min is None:
         away = "you were away"
@@ -1353,6 +1397,19 @@ def health_snapshot() -> Dict[str, Any]:
         out["insights_14d"] = row["n"] if row else 0
     except Exception:
         out["insights_14d"] = None
+    try:
+        # db IS the shared database module; DB_PATH is its absolute path.
+        out["db_size_mb"] = round(os.path.getsize(db.DB_PATH) / 1e6, 2)
+    except Exception:
+        out["db_size_mb"] = None
+    out["uptime_s"] = int(time.time() - _STARTED)
+    try:
+        # Lazy import — app.py is the route layer and may import US lazily;
+        # resolving APP_VERSION at call time avoids any import-order coupling.
+        import app as _app
+        out["version"] = getattr(_app, "APP_VERSION", None)
+    except Exception:
+        out["version"] = None
     return out
 
 
@@ -1445,9 +1502,48 @@ _COMPANY_NAMES = {
 }
 
 
+# Words that appear in position names but would hijack ordinary English if
+# treated as a company reference ("Apple Inc" → "apple" is the point; "First
+# Trust" → "first" is a trap).
+_NAME_SKIP_WORDS = {
+    "inc", "corp", "corporation", "company", "companies", "group", "holdings",
+    "holding", "class", "trust", "fund", "shares", "common", "stock", "the",
+    "first", "global", "international", "american", "united", "national",
+    "general", "world", "capital", "financial", "technologies", "systems",
+    "platforms", "with", "this", "that", "from", "what", "when", "will",
+    "range", "solid", "state", "core", "total", "value", "growth", "income",
+    "select", "small", "large", "high", "real",
+}
+
+
+def _held_name_map() -> Dict[str, str]:
+    """lowercase name → symbol for HELD positions, so "how is my palantir
+    doing" resolves without a _COMPANY_NAMES entry. Both the full stored name
+    and its first word are keyed; short or common words are skipped because a
+    false positive (quoting the wrong ticker) is worse than a miss."""
+    out: Dict[str, str] = {}
+    try:
+        for h in db.get_portfolio():
+            name = str(h.get("name") or "").strip().lower()
+            sym = str(h.get("symbol") or "").strip().upper()
+            if not name or not sym:
+                continue
+            if len(name) >= 4 and name not in _NAME_SKIP_WORDS:
+                out.setdefault(name, sym)
+            # First word, stripped of trailing punctuation ("Backblaze," →
+            # "backblaze") — the natural way people refer to a holding.
+            first = name.split()[0].strip(".,;:&")
+            if (len(first) >= 4 and first not in _NAME_SKIP_WORDS
+                    and first.upper() not in _STOPWORDS):
+                out.setdefault(first, sym)
+    except Exception:
+        pass
+    return out
+
+
 def _extract_symbol(query: str) -> Optional[str]:
     """$SYM beats known portfolio/watchlist symbols beats company names
-    beats bare ALL-CAPS token."""
+    beats held-position names beats bare ALL-CAPS token."""
     m = re.search(r"\$([A-Za-z][A-Za-z.\-]{0,9})", query)
     if m:
         return m.group(1).upper()
@@ -1466,6 +1562,18 @@ def _extract_symbol(query: str) -> Optional[str]:
         sym = _COMPANY_NAMES.get(t.lower())
         if sym:
             return sym
+    # Held-position names, resolved dynamically from the book — checked after
+    # the static map so a curated entry always wins.
+    held_names = _held_name_map()
+    if held_names:
+        for t in tokens:
+            sym = held_names.get(t.lower())
+            if sym:
+                return sym
+        low_q = query.lower()
+        for name, sym in held_names.items():
+            if " " in name and name in low_q:
+                return sym
     # bare all-caps token the user typed in caps (intentional ticker)
     for t in tokens:
         if t.isupper() and 1 <= len(t) <= 5 and t not in _STOPWORDS:
@@ -1494,9 +1602,29 @@ def _answer_quote(symbol: str) -> Dict[str, Any]:
             "action": {"view": "research", "symbol": symbol}}
 
 
-def _answer_forecast(symbol: str) -> Dict[str, Any]:
+# Natural-language horizons → trading days. Ordered: first match wins, and
+# "next month" must be tried before any looser "month" matching ever added.
+# "tomorrow" maps to 5 — the minimum the ensemble supports — and the answer
+# says so rather than pretending to a 1-day call.
+_HORIZON_PHRASES = (
+    ("tomorrow", 5), ("next week", 5), ("this week", 5),
+    ("next month", 20), ("next quarter", 60),
+    ("this year", 120), ("next year", 120),
+)
+
+
+def _answer_forecast(symbol: str, q_lower: str = "") -> Dict[str, Any]:
     import forecast_ensemble
-    f = forecast_ensemble.ensemble_forecast(symbol)
+    horizon = None
+    phrase = None
+    for p, d in _HORIZON_PHRASES:
+        if p in q_lower:
+            horizon, phrase = d, p
+            break
+    if horizon is not None:
+        f = forecast_ensemble.ensemble_forecast(symbol, horizon_days=horizon)
+    else:
+        f = forecast_ensemble.ensemble_forecast(symbol)
     ens = (f or {}).get("ensemble") or {}
     if not ens:
         return {"answer": "The forecast ensemble has no read on {} right now.".format(symbol)}
@@ -1509,6 +1637,9 @@ def _answer_forecast(symbol: str) -> Dict[str, Any]:
     if p05 is not None and p95 is not None:
         answer += " Return cone: {} to {} (5th–95th percentile).".format(
             _fmt_pct(p05), _fmt_pct(p95))
+    if phrase:
+        answer += " (Your “{}” reads as ~{} trading days — the closest horizon I model.)".format(
+            phrase, f.get("horizon_days", horizon))
     notes = f.get("notes") or []
     return {"answer": answer,
             "detail": notes[0] if notes else None,
@@ -1520,13 +1651,29 @@ def _answer_portfolio(q_lower: str) -> Dict[str, Any]:
     if not pulse:
         return {"answer": "You don't have any portfolio positions yet. Add holdings to get portfolio intelligence.",
                 "action": {"view": "portfolio"}}
+    # "All time" / "overall" flips best/worst from today's tape to unrealized
+    # P&L — a different question with a different honest answer.
+    alltime = any(p in q_lower for p in ("all time", "all-time", "alltime",
+                                         "overall", "since the beginning",
+                                         "since inception"))
+    ranked = [r for r in pulse["holdings"] if _finite(r.get("unrealized_pct")) is not None]
     if "worst" in q_lower or "loser" in q_lower or "losing" in q_lower:
+        if alltime and ranked:
+            w = min(ranked, key=lambda r: r["unrealized_pct"])
+            return {"answer": "Your worst position all-time is {} at {} unrealized ({}).".format(
+                        w["symbol"], _fmt_pct(w["unrealized_pct"]), _fmt_usd(w["unrealized_pnl"])),
+                    "action": {"view": "research", "symbol": w["symbol"]}}
         w = pulse.get("worst")
         if w:
             return {"answer": "Your weakest position today is {} at {} ({} day P&L).".format(
                         w["symbol"], _fmt_pct(w["day_change_pct"]), _fmt_usd(w["day_pnl"])),
                     "action": {"view": "research", "symbol": w["symbol"]}}
     if "best" in q_lower or "winner" in q_lower or "winning" in q_lower:
+        if alltime and ranked:
+            b = max(ranked, key=lambda r: r["unrealized_pct"])
+            return {"answer": "Your best position all-time is {} at {} unrealized ({}).".format(
+                        b["symbol"], _fmt_pct(b["unrealized_pct"]), _fmt_usd(b["unrealized_pnl"])),
+                    "action": {"view": "research", "symbol": b["symbol"]}}
         b = pulse.get("best")
         if b:
             return {"answer": "Your strongest position today is {} at {} ({} day P&L).".format(
@@ -1563,6 +1710,115 @@ def _answer_exposure() -> Dict[str, Any]:
         heavy[0]["symbol"], _CONCENTRATION_PCT) if heavy else ""
     return {"answer": "Largest exposures: {}.{} Full sector breakdown is in Analytics.".format(tops, warn),
             "action": {"view": "analytics"}}
+
+
+def _answer_biggest() -> Dict[str, Any]:
+    """One-liner top weight — lighter than the full exposure breakdown."""
+    pulse = _portfolio_pulse()
+    if not pulse:
+        return {"answer": "No positions yet — nothing is biggest in an empty book.",
+                "action": {"view": "portfolio"}}
+    top = max(pulse["holdings"], key=lambda r: r["market_value"])
+    return {"answer": "Your biggest position is {} at {} — {:.1f}% of the book.".format(
+                top["symbol"], _fmt_usd(top["market_value"]), top.get("weight_pct") or 0),
+            "action": {"view": "research", "symbol": top["symbol"]}}
+
+
+def _answer_holding_period(symbol: str) -> Dict[str, Any]:
+    """'When did I buy X / how long have I held X' — from the transaction log,
+    earliest BUY is the position's birthday."""
+    txns = db.get_transactions(symbol=symbol, limit=500) or []
+    buys = [t for t in txns
+            if str(t.get("action") or "").upper() == "BUY" and t.get("date")]
+    if not buys:
+        return {"answer": "I have no recorded buys for {} — if you hold it, the "
+                          "fills predate the transaction log.".format(symbol),
+                "action": {"view": "transactions"}}
+    first = min(buys, key=lambda t: str(t["date"]))
+    held = ""
+    try:
+        d0 = datetime.strptime(str(first["date"])[:10], "%Y-%m-%d")
+        days = max(0, (datetime.now() - d0).days)
+        if days < 1:
+            held = " — bought today"
+        elif days < 60:
+            held = " — held {} day{}".format(days, "s" if days != 1 else "")
+        elif days < 730:
+            held = " — held about {} months".format(int(round(days / 30.44)))
+        else:
+            held = " — held about {:.1f} years".format(days / 365.25)
+    except Exception:
+        pass
+    return {"answer": "You first bought {} on {}{}, across {} fill{}.".format(
+                symbol, str(first["date"])[:10], held,
+                len(buys), "s" if len(buys) != 1 else ""),
+            "action": {"view": "transactions"}}
+
+
+def _answer_basis(symbol: str) -> Dict[str, Any]:
+    """'What did I pay for X' — basis from the book, marked against the live
+    quote (crypto prices live at SYM-USD)."""
+    rows = [h for h in db.get_portfolio()
+            if str(h.get("symbol") or "").upper() == symbol.upper()]
+    if not rows:
+        return {"answer": "You don't hold {} — no cost basis to report.".format(symbol),
+                "action": {"view": "portfolio"}}
+    shares = sum(h["shares"] for h in rows)
+    cost = sum(h["shares"] * h["avg_cost"] for h in rows)
+    avg = cost / shares if shares else 0
+    is_crypto = any(h.get("asset_type") == "crypto" for h in rows)
+    unit = "unit" if is_crypto else "share"
+    tail = ""
+    try:
+        q = fetcher.get_quote(symbol + "-USD" if is_crypto else symbol) or {}
+        price = _finite(q.get("price"))
+        if price:
+            mv = price * shares
+            pnl = mv - cost
+            tail = " Worth {} now at ${:,.2f} — {} {} ({}).".format(
+                _fmt_usd(mv), price, "up" if pnl >= 0 else "down",
+                _fmt_usd(abs(pnl)),
+                _fmt_pct(pnl / cost * 100) if cost > 0 else "—")
+    except Exception:
+        pass
+    return {"answer": "Your basis in {}: {:g} {}{} at ${:,.2f} average — {} in.{}".format(
+                symbol, shares, unit, "s" if shares != 1 else "", avg,
+                _fmt_usd(cost), tail),
+            "action": {"view": "portfolio"}}
+
+
+def _fmt_minutes(m: int) -> str:
+    h, r = divmod(max(0, int(m)), 60)
+    if h and r:
+        return "{}h {}m".format(h, r)
+    if h:
+        return "{}h".format(h)
+    return "{}m".format(r)
+
+
+def _answer_hours() -> Dict[str, Any]:
+    """'Is the market open' — phase, ET clock, and what comes next. The minute
+    boundaries mirror _market_phase exactly (240/570/960/1200)."""
+    now = _et_now()
+    phase = _market_phase(now)
+    clock = now.strftime("%I:%M %p").lstrip("0")
+    mins = now.hour * 60 + now.minute
+    wd = now.weekday()
+    if wd >= 5:
+        nxt = "the bell rings Monday at 9:30 AM ET"
+    elif mins < 240:
+        nxt = "pre-market starts in {} (4:00 AM ET), the bell at 9:30 AM ET".format(
+            _fmt_minutes(240 - mins))
+    elif mins < 570:
+        nxt = "the opening bell is in {} (9:30 AM ET)".format(_fmt_minutes(570 - mins))
+    elif mins < 960:
+        nxt = "the close is in {} (4:00 PM ET)".format(_fmt_minutes(960 - mins))
+    elif mins < 1200:
+        nxt = "after-hours ends in {} (8:00 PM ET); next open {} at 9:30 AM ET".format(
+            _fmt_minutes(1200 - mins), "Monday" if wd == 4 else "tomorrow")
+    else:
+        nxt = "next open {} at 9:30 AM ET".format("Monday" if wd == 4 else "tomorrow")
+    return {"answer": "Markets are {} right now ({} ET) — {}.".format(phase, clock, nxt)}
 
 
 def portfolio_attribution() -> Optional[Dict[str, Any]]:
@@ -1976,6 +2232,44 @@ _HELP_ANSWER = (
 )
 
 
+# Whole-message greeting only ($-anchored) — "hello, how's my portfolio" must
+# still reach the portfolio intent. Thanks is a word-boundary search but only
+# fires on short messages, so "thanks, now forecast NVDA" passes through.
+_GREETING_RE = re.compile(
+    r"^(hi|hiya|hello|hey|yo|howdy|good\s+(morning|afternoon|evening))"
+    r"[\s,!.]*(jarvis|there)?[\s!.?]*$",
+    re.IGNORECASE)
+_THANKS_RE = re.compile(
+    r"\b(thank you|thanks|thank u|thx|good job|well done|nice work|great job|"
+    r"appreciate (it|that|you))\b",
+    re.IGNORECASE)
+
+# Deterministic rotation keyed on query length — no random, so tests and
+# repeated identical messages get a stable response.
+_THANKS_ACKS = (
+    "Anytime. The book never sleeps, and neither do I.",
+    "My pleasure — that's what I'm here for.",
+    "Noted. Flattery accepted; vigilance continues.",
+    "You're welcome. I'll keep watch.",
+)
+
+
+def _answer_social(q: str, ql: str) -> Optional[Dict[str, Any]]:
+    """Greetings and thanks — checked before any data access so a 'thanks'
+    never costs a portfolio read. Returns None for everything substantive."""
+    stripped = ql.strip()
+    if _GREETING_RE.match(stripped):
+        try:
+            phase = _market_phase(_et_now())
+        except Exception:
+            phase = "doing their thing"
+        return {"answer": "{}. Markets are {} — what shall we look at?".format(
+            _greeting(), phase)}
+    if len(stripped.split()) <= 5 and _THANKS_RE.search(stripped):
+        return {"answer": _THANKS_ACKS[len(q) % len(_THANKS_ACKS)]}
+    return None
+
+
 def _sanitize_history(history: Any) -> List[Dict[str, Any]]:
     """Clamp a client-supplied conversation history to a safe shape:
     ≤8 turns of {"q": str≤500, "a": str≤800, "symbol": ticker|None}."""
@@ -1988,11 +2282,16 @@ def _sanitize_history(history: Any) -> List[Dict[str, Any]]:
         sym = turn.get("symbol")
         if not (isinstance(sym, str) and re.fullmatch(r"[A-Za-z][A-Za-z.\-]{0,9}", sym)):
             sym = None
-        out.append({
+        entry = {
             "q": str(turn.get("q") or "")[:500],
             "a": str(turn.get("a") or "")[:800],
             "symbol": sym.upper() if sym else None,
-        })
+        }
+        # Junk client payloads sometimes carry empty turns — they'd burn
+        # history slots and feed blank messages to the LLM. Drop them.
+        if not entry["q"] and not entry["a"]:
+            continue
+        out.append(entry)
     return out
 
 
@@ -2006,6 +2305,23 @@ _ATTRIB_RE = re.compile(
     r"|what(?:'s|\s+is)?\s+(driving|moving|hurting)\s+(my|the\s+(book|portfolio))"
     r"|what\s+(moved|drove|hit)\s+(my|the\s+(book|portfolio))"
     r"|\battribution\b",
+    re.IGNORECASE)
+
+# "Is the market open" / "when does the market close" — must be checked
+# BEFORE the market intent, which would otherwise swallow these on the bare
+# word "market" and answer with index moves instead of the clock.
+_HOURS_RE = re.compile(
+    r"market\s+hours"
+    r"|\b(is|are)\s+(the\s+)?markets?\s+(open|closed|still\s+open)"
+    r"|when\s+do(es)?\s+(the\s+)?markets?\s+(open|close)"
+    r"|when\s+(is|are)\s+(the\s+)?markets?\s+(open|closed|opening|closing)",
+    re.IGNORECASE)
+
+# "When did I buy X" / "how long have I held X" — distinct from the
+# transactions intent ("what did i buy"), which lists recent fills instead.
+_HOLDING_RE = re.compile(
+    r"\bwhen did i (?:first\s+)?(?:buy|purchase|get)\b"
+    r"|\bhow long have i (?:held|owned|had)\b",
     re.IGNORECASE)
 
 # Action-phrased queries ("keep an eye on PLTR", "add X", "track Y") must
@@ -2030,6 +2346,10 @@ _LIST_MEMORY_RE = re.compile(
     r"^(what do you (remember|know)( about me)?|list (your )?memor(y|ies)|"
     r"your memor(y|ies)|what do you know about me)\??$",
     re.IGNORECASE)
+# Topic search: "what do you remember about <topic>". Checked BEFORE the list
+# form — "about me/myself" still routes to the full list.
+_MEMORY_TOPIC_RE = re.compile(
+    r"^what do you (?:remember|know) about (.+?)\??$", re.IGNORECASE)
 
 
 # Implicit learning: a message must carry a first-person durable cue before
@@ -2112,7 +2432,8 @@ def _answer_memory(q: str) -> Optional[Dict[str, Any]]:
     if m:
         ok = db.jarvis_delete_memory(int(m.group(1)))
         return {"answer": "Forgotten." if ok else "I have no memory #{}.".format(m.group(1))}
-    if _LIST_MEMORY_RE.match(q.strip()):
+
+    def _full_list() -> Dict[str, Any]:
         facts = db.jarvis_list_memories()
         if not facts:
             return {"answer": "Nothing yet. Tell me “remember: …” and it sticks across sessions."}
@@ -2121,6 +2442,22 @@ def _answer_memory(q: str) -> Optional[Dict[str, Any]]:
                                " (picked up in conversation)" if f.get("source") == "auto" else "")
             for f in facts[-12:])
         return {"answer": "Here's what I'm holding onto: {} Say “forget <number>” to drop one.".format(listing)}
+
+    m = _MEMORY_TOPIC_RE.match(q.strip())
+    if m and m.group(1).strip().lower() not in ("me", "myself", "me?"):
+        topic = m.group(1).strip()
+        try:
+            hits = [f for f in db.jarvis_list_memories()
+                    if topic.lower() in str(f.get("fact") or "").lower()]
+        except Exception:
+            hits = []
+        if hits:
+            listing = " ".join("#{} {}.".format(f["id"], f["fact"]) for f in hits[-8:])
+            return {"answer": "On “{}”: {}".format(topic, listing)}
+        # No matches — the honest fallback is everything I hold.
+        return _full_list()
+    if _LIST_MEMORY_RE.match(q.strip()):
+        return _full_list()
     return None
 
 
@@ -2141,6 +2478,19 @@ def ask(query: str, history: Any = None, conversation_id: Any = None,
         except Exception:
             pass
     ql = q.lower()
+
+    # Social niceties before anything else — a "thanks" or "good morning"
+    # must never pay the symbol-extraction or DB cost. Deliberately not
+    # persisted: pleasantries aren't turns worth replaying into prompts.
+    try:
+        social = _answer_social(q, ql)
+        if social is not None:
+            social["intent"] = "social"
+            social.setdefault("symbol", None)
+            return social
+    except Exception:
+        pass
+
     symbol = _extract_symbol(q)
     turns = _sanitize_history(history)
 
@@ -2220,7 +2570,21 @@ def ask(query: str, history: Any = None, conversation_id: Any = None,
         "should i", "vs ", " versus ", "compare", "quality", "moat", "risky",
         "temperament", "behavior", "behaviour", "what if", "macro"))
 
+    # One status line before the rule chain — even instant answers should
+    # flash SOMETHING in the stream UI rather than appearing from nowhere.
+    notify("Checking the book…")
+
     try:
+        # Capabilities: route explicitly to the help text instead of leaving
+        # it as the fallthrough only the keyless path ever reached.
+        if (any(p in ql for p in ("what can you do", "what can you help",
+                                  "capabilit", "what do you do",
+                                  "how do i use you"))
+                or ql.strip(" ?!.") in ("help", "help me")):
+            return done("help", {"answer": _HELP_ANSWER})
+        # Market hours before EVERYTHING market-flavored — see _HOURS_RE.
+        if _HOURS_RE.search(ql):
+            return done("hours", _answer_hours())
         # Attribution first: "why am i down" contains "am i down", which the
         # broader portfolio intent below would swallow into a value line.
         if _ATTRIB_RE.search(ql) and not symbol:
@@ -2253,14 +2617,31 @@ def ask(query: str, history: Any = None, conversation_id: Any = None,
         # a whole "prob"/"probability" word, plus a symbol.
         if symbol and (any(w in ql for w in ("forecast", "predict", "outlook", "go up", "go down"))
                        or re.search(r"\bprob(ability)?\b", ql)):
-            return done("forecast", _answer_forecast(symbol))
+            return done("forecast", _answer_forecast(symbol, ql))
         # 52-week range position — "is NVDA near its high?"
         if symbol and (re.search(r"\b52\b|52-week|fifty[- ]two", ql)
                        or (("high" in ql or "low" in ql)
                            and any(w in ql for w in ("near", "close to", "off the", "from its")))):
             return done("range", _answer_range(symbol))
+        # Holding period / cost basis: position-history questions about ONE
+        # name. Without a symbol, the holding phrasing degrades to the
+        # recent-fills listing rather than a dead end.
+        if _HOLDING_RE.search(ql):
+            if symbol:
+                return done("holding_period", _answer_holding_period(symbol))
+            return done("transactions", _answer_transactions())
+        if symbol and any(p in ql for p in ("cost basis", "my basis", "average cost",
+                                            "avg cost", "what did i pay",
+                                            "how much did i pay")):
+            return done("basis", _answer_basis(symbol))
         if any(w in ql for w in ("earnings", "report", "reports", "reporting")):
             return done("earnings", _answer_earnings(symbol))
+        # Biggest position before exposure AND portfolio — a one-liner, not
+        # the full weights table ("position"/"holding" overlap both intents).
+        if any(p in ql for p in ("biggest position", "largest position",
+                                 "biggest holding", "largest holding",
+                                 "top holding", "top position")):
+            return done("biggest", _answer_biggest())
         # Crypto share before exposure — "crypto exposure" contains "exposure".
         if "crypto" in ql and any(w in ql for w in ("how much", "share", "allocation",
                                                     "exposure", "weight", "percent", " %")):
