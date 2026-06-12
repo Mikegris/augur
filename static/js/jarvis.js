@@ -197,11 +197,19 @@
     },
 
     async _speakServer(text, done) {
+      // Abort any in-flight synthesis from a previous speak() — without this,
+      // two rapid calls fetched two clips and both played over each other,
+      // leaking the first Audio (only the second was tracked in _audio).
+      if (this._fetchAbort) { try { this._fetchAbort.abort(); } catch (e) {} }
+      const ctrl = ('AbortController' in window) ? new AbortController() : null;
+      this._fetchAbort = ctrl;
       try {
         const r = await fetch('/api/jarvis/tts', {
           method: 'POST', headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ text: text.slice(0, 600) }),
+          signal: ctrl ? ctrl.signal : undefined,
         });
+        if (this._fetchAbort === ctrl) this._fetchAbort = null;
         if (!r.ok) {
           if (r.status === 404) this._serverTts = false;  // keyless — stop probing
           this._speakBrowser(text, done);
@@ -210,6 +218,7 @@
         this._serverTts = true;
         const blob = await r.blob();
         const url = URL.createObjectURL(blob);
+        this._stopAudio();  // a later call may have started while we awaited
         const a = new Audio(url);
         this._audio = a;
         const finish = () => { URL.revokeObjectURL(url); if (this._audio === a) this._audio = null; done(); };
@@ -217,6 +226,7 @@
         a.onerror = finish;
         a.play().catch(() => { this._speakBrowser(text, done); });
       } catch (e) {
+        if (e && e.name === 'AbortError') { done(); return; }  // superseded — don't double-speak
         this._speakBrowser(text, done);
       }
     },
@@ -236,6 +246,7 @@
     },
 
     _stopAudio() {
+      if (this._fetchAbort) { try { this._fetchAbort.abort(); } catch (e) {} this._fetchAbort = null; }
       if (this._audio) {
         try { this._audio.pause(); this._audio.src = ''; } catch (e) {}
         this._audio = null;
@@ -905,7 +916,9 @@
     _startPolling() {
       if (this._bgTimer) return;
       this._refreshBackground();
-      this._bgTimer = setInterval(() => this._refreshBackground(), 60000);
+      this._bgTimer = setInterval(() => {
+        if (!document.hidden) this._refreshBackground();
+      }, 60000);
     },
 
     _stopSse() {
@@ -983,6 +996,9 @@
     start() {
       if (this._timer) return;
       const tick = async () => {
+        // A backgrounded tab does zero network — this hits the AI-budgeted
+        // briefing endpoint, so guard it like app.js guards its timers.
+        if (document.hidden) return;
         try {
           const b = await API.get('/api/jarvis/briefing');
           const p1 = (b.insights || []).filter(c => c.priority === 1);
@@ -1008,11 +1024,17 @@
   // (mic, premium voice, proposals with confirm). Right: the investor lenses —
   // macro brief, temperament check, position review, memory manager.
   const CommandCenter = {
-    _convId: null, _busy: false,
+    _convId: null, _busy: false, _chatGen: 0,
 
     async load() {
       const view = document.getElementById('view-jarvis');
       if (!view) return;
+      // load() runs on every navigation to the view and rebuilds the DOM.
+      // Bump the generation so a still-in-flight _loadChat from a prior
+      // visit can't overwrite the fresh chat, and clear any stranded send
+      // lock (a send awaiting when the user navigated away leaves _busy true).
+      this._chatGen++;
+      this._busy = false;
       view.innerHTML = `
         <div class="jv-grid">
           <div class="panel jv-chat-panel">
@@ -1071,8 +1093,10 @@
     },
 
     async _loadChat() {
+      const gen = this._chatGen;
       try {
         const c = await API.get('/api/jarvis/conversation');
+        if (gen !== this._chatGen) return;  // a newer load() superseded us
         this._convId = c.conversation_id;
         const el = document.getElementById('jv-chat');
         if (!el) return;
@@ -1155,10 +1179,17 @@
       }).catch(() => {});
 
       API.get('/api/portfolio').then(p => {
+        // data-attribute + delegated listener, NOT an inline onclick — esc()
+        // is an HTML escaper and does not protect a single-quoted JS string
+        // (a "'" in a symbol would break out of the argument).
         const picks = (p.holdings || []).slice(0, 6).map(h =>
-          `<button class="btn btn-ghost btn-sm" onclick="Jarvis.reviewSymbol('${esc(h.symbol)}')">${esc(h.symbol)}</button>`).join(' ');
+          `<button class="btn btn-ghost btn-sm jv-pick" data-sym="${esc(h.symbol)}">${esc(h.symbol)}</button>`).join(' ');
         const el = document.getElementById('jv-review-picks');
-        if (el) el.innerHTML = picks;
+        if (el) {
+          el.innerHTML = picks;
+          el.querySelectorAll('.jv-pick').forEach(b =>
+            b.addEventListener('click', () => this._review(b.dataset.sym)));
+        }
       }).catch(() => {});
 
       this._loadMemory();

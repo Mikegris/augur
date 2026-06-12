@@ -696,8 +696,11 @@ def jarvis_add_memory(fact, source="user"):
         return None
     with _write_lock:
         conn = get_conn()
-        # Idempotent on exact duplicates — "remember X" twice keeps one row.
-        row = conn.execute("SELECT id FROM jarvis_memory WHERE fact=?", (fact,)).fetchone()
+        # Idempotent on duplicates, case-insensitive — "I prefer ETFs" and
+        # "i prefer etfs" are the same fact and shouldn't both occupy a slot
+        # in the 12-fact prompt window.
+        row = conn.execute(
+            "SELECT id FROM jarvis_memory WHERE lower(fact)=lower(?)", (fact,)).fetchone()
         if row:
             return row["id"]
         cur = conn.execute(
@@ -707,10 +710,15 @@ def jarvis_add_memory(fact, source="user"):
 
 
 def jarvis_conversation_exists(conversation_id):
+    # Only NON-archived threads are adoptable. After a NEW THREAD in one UI
+    # surface archives the old thread, the other surface still holds the old
+    # id; rejecting archived ids makes ask() fall back to the active thread so
+    # both surfaces converge instead of forking (one writing to a dead thread).
     try:
         conn = get_conn()
         row = conn.execute(
-            "SELECT 1 FROM jarvis_conversations WHERE id=?", (int(conversation_id),)
+            "SELECT 1 FROM jarvis_conversations WHERE id=? AND archived=0",
+            (int(conversation_id),)
         ).fetchone()
         return row is not None
     except (OverflowError, ValueError, TypeError):

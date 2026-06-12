@@ -312,6 +312,12 @@ def _agent_ask(query: str, history: Optional[List[Dict[str, Any]]] = None) -> Op
                     args = json.loads(tc.function.arguments or "{}")
                 except Exception:
                     args = {}
+                # Don't offer a CONFIRM for garbage args ("Set alert: None
+                # $None") — ask the user to restate instead.
+                if not jarvis_tools.valid_proposal_args(name, args):
+                    return {"answer": "I think you want me to do something, but I'm "
+                                      "missing the details — try again with the symbol "
+                                      "and the specifics?", "used": used}
                 label = jarvis_tools.proposal_label(name, args)
                 return {"answer": "I can do that: {}. Confirm and I'll execute.".format(label),
                         "proposal": {"tool": name, "args": args, "label": label},
@@ -636,7 +642,32 @@ def _run_briefing_uncached() -> Dict[str, Any]:
                     "Consider the optimizer or a stress test.".format(_CONCENTRATION_PCT),
                     view="stress"))
 
-        cards.extend(earnings_cards or [])
+        # Drawdown coach: on a hard down day, the most valuable thing an
+        # analyst can do is steady the hand BEFORE the panic sell. Framing
+        # only — never advice to act.
+        dd = pulse.get("day_pnl_pct")
+        if dd is not None and dd <= -3.0:
+            detail = ("The book is down {:.1f}% today. Days like this are where the "
+                      "long-term record is made or broken — selling into them locks "
+                      "the mark-to-market in. The stress test shows what this book "
+                      "survives.".format(abs(dd)))
+            try:
+                import jarvis_lens
+                t = jarvis_lens.temperament_check()
+                flips = (t.get("stats") or {}).get("quick_flips") or 0
+                if flips:
+                    detail += " Your record shows {} quick flip{} recently — worth remembering today.".format(
+                        flips, "s" if flips != 1 else "")
+            except Exception:
+                pass
+            cards.append(_card(1, "coach", "warn",
+                               "Steady — down {:.1f}% today".format(abs(dd)),
+                               detail, view="stress"))
+
+    # Earnings cards are computed independently of portfolio pulse — surface
+    # them even when the quote feed is down (pulse=None), so a transient
+    # outage can't silently swallow earnings warnings.
+    cards.extend(earnings_cards or [])
 
     if regime and regime.get("regime") in ("ELEVATED", "STRESSED"):
         cards.append(_card(
@@ -686,6 +717,7 @@ def get_briefing(force_refresh: bool = False) -> Dict[str, Any]:
 # pool); persona-voiced and static where live data would cost an upstream hit.
 
 _VIEW_LINES = {
+    "jarvis":    "This is me. Ask anything — your book, a business, the macro picture — by voice or text.",
     "scanner":   "Scanner standing by — I rank the whole universe by your own profile weights.",
     "sectorflow": "Sector flow maps where capital is rotating. I refresh it every 30 minutes.",
     "liquidity": "Liquidity is the tide every other signal floats on. Watch it turn before the headlines do.",
@@ -1006,6 +1038,9 @@ _STOPWORDS = {
     "VS", "ETF", "USD", "CEO", "AI", "PE", "EPS", "YTD", "ALL", "ANY", "NOW",
     "BUY", "SELL", "HOLD", "WHY", "WHO", "CAN", "GET", "OUT", "WAS", "HAS",
     "DAY", "NEW", "TOP", "BIG", "LOW", "OFF", "SO", "AT", "IF",
+    "KEY", "REAL", "CAR", "GOOD", "LOVE", "FUN", "WORK", "PLAY", "NICE",
+    "OPEN", "NEXT", "BEST", "SAFE", "WELL", "FAST", "HUGE", "RISE", "FALL",
+    "ID", "TV", "BY",
 }
 
 
@@ -1028,11 +1063,14 @@ def _extract_symbol(query: str) -> Optional[str]:
     if m:
         return m.group(1).upper()
     tokens = re.findall(r"\b[A-Za-z][A-Za-z.\-]{0,9}\b", query)
-    upper = [t.upper() for t in tokens]
     known = _known_symbols()
-    for t in upper:
-        if t in known:
-            return t
+    # A held/watched symbol matches only when the token is an EXACT-CASE ticker
+    # (already uppercase) OR clearly the intended subject. Matching common
+    # English words case-insensitively turned "is a recession coming" into a
+    # quote of Agilent (A) and "should i sell now" into ServiceNow (NOW).
+    for t in tokens:
+        if t.upper() in known and (t.isupper() or t.upper() not in _STOPWORDS):
+            return t.upper()
     # bare all-caps token the user typed in caps (intentional ticker)
     for t in tokens:
         if t.isupper() and 1 <= len(t) <= 5 and t not in _STOPWORDS:
@@ -1243,12 +1281,20 @@ _ACTIONISH_RE = re.compile(
     re.IGNORECASE)
 
 
-# "remember X" / "remember that X" / "note that X" — but NOT bare "note X",
-# which would silently memory-write queries like "note AAPL looks weak".
-_REMEMBER_RE = re.compile(r"^(?:remember(?:\s+that)?|note\s+that)[:,]?\s+(.+)$", re.IGNORECASE)
+# Two accepted fact forms:
+#   "remember that X" / "note that X"  → always a fact (X may start with "the")
+#   bare "remember X"                  → a fact, UNLESS it's a question about
+#                                        the past ("remember when…", "remember
+#                                        the dip?", "do you remember…")
+# Group 1 captures the "…that X" form; group 2 the bare form.
+_REMEMBER_RE = re.compile(
+    r"^(?:remember|note)\s+that[:,]?\s+(.+)$"
+    r"|^remember[:,]?\s+(?!when\b|the\b|that\b|do you\b|how\b|why\b|the time\b)(.+)$",
+    re.IGNORECASE)
 _FORGET_RE = re.compile(r"^forget\s+(?:#|memory\s*)?(\d{1,9})$", re.IGNORECASE)
 _LIST_MEMORY_RE = re.compile(
-    r"^(what do you (remember|know about me)|list (your )?memor(y|ies)|your memory)\??$",
+    r"^(what do you (remember|know)( about me)?|list (your )?memor(y|ies)|"
+    r"your memor(y|ies)|what do you know about me)\??$",
     re.IGNORECASE)
 
 
@@ -1256,7 +1302,7 @@ def _answer_memory(q: str) -> Optional[Dict[str, Any]]:
     """Rule-based memory management — free, instant, no LLM required."""
     m = _REMEMBER_RE.match(q)
     if m:
-        fact = m.group(1).strip().rstrip(".")
+        fact = (m.group(1) or m.group(2) or "").strip().rstrip(".")
         mid = db.jarvis_add_memory(fact, source="user")
         if mid is None:
             return {"answer": "There wasn't anything to remember in that — give me a fact."}
@@ -1346,8 +1392,21 @@ def ask(query: str, history: Any = None, conversation_id: Any = None,
         payload.setdefault("symbol", symbol)
         return _persisted(payload)
 
+    # When the LLM agent is available, hand it any genuinely analytical
+    # question — judgment words ("good business", "overvalued", "should i
+    # sell", "worth holding", "vs", "compare") deserve the lens tools, not a
+    # canned rule-based line. Short quote-shaped queries still take the fast
+    # path below.
+    _analytical = any(w in ql for w in (
+        "good business", "overvalued", "undervalued", "fairly valued", "worth",
+        "should i", "vs ", " versus ", "compare", "quality", "moat", "risky",
+        "temperament", "behavior", "behaviour", "what if", "macro"))
+
     try:
-        if any(w in ql for w in ("forecast", "predict", "outlook", "go up", "go down", "prob")) and symbol:
+        # "prob" matched "problem"/"probably" — require a forecasting verb or
+        # a whole "prob"/"probability" word, plus a symbol.
+        if symbol and (any(w in ql for w in ("forecast", "predict", "outlook", "go up", "go down"))
+                       or re.search(r"\bprob(ability)?\b", ql)):
             return done("forecast", _answer_forecast(symbol))
         if any(w in ql for w in ("earnings", "report", "reports", "reporting")):
             return done("earnings", _answer_earnings(symbol))
@@ -1357,24 +1416,26 @@ def ask(query: str, history: Any = None, conversation_id: Any = None,
             return done("alerts", _answer_alerts())
         if any(w in ql for w in ("idea", "opportunit", "what should i buy", "what to buy")):
             return done("ideas", _answer_ideas())
-        if any(w in ql for w in ("portfolio", "am i up", "am i down", "my position",
-                                 "p&l", "pnl", "net worth", "winner", "loser",
-                                 "best position", "worst position", "how am i doing")):
+        if (any(w in ql for w in ("portfolio", "am i up", "am i down", "my position",
+                                  "p&l", "pnl", "net worth", "winner", "loser",
+                                  "best position", "worst position", "how am i doing"))
+                and not _analytical):
             return done("portfolio", _answer_portfolio(ql))
-        if any(w in ql for w in ("market", "vix", "s&p", "spx", "nasdaq", "fear", "regime", "volatil")):
+        if (any(w in ql for w in ("market", "vix", "s&p", "spx", "nasdaq", "fear", "regime", "volatil"))
+                and not _analytical):
             return done("market", _answer_market())
         # Bare-ticker quote fallthrough: only for short, quote-shaped queries
-        # ("NVDA", "price of AAPL"). Rich questions that merely MENTION a
-        # symbol ("is AAPL still a good business to own?") deserve the agent
-        # and its lens tools, not a price line — when the LLM is available.
+        # ("NVDA", "price of AAPL"). Rich/analytical questions that merely
+        # MENTION a symbol deserve the agent and its lens tools, not a price
+        # line — when the LLM is available.
         if symbol and not _llm_available():
             return done("quote", _answer_quote(symbol))
-        if symbol and len(ql.split()) <= 4 and not _ACTIONISH_RE.search(ql):
+        if symbol and len(ql.split()) <= 4 and not _ACTIONISH_RE.search(ql) and not _analytical:
             return done("quote", _answer_quote(symbol))
     except Exception as e:
         log.warning("jarvis.ask failed for %r: %s", q, e)
-        return {"intent": "error",
-                "answer": "Something went wrong answering that — the data source may be rate-limited. Try again in a moment."}
+        return _persisted({"intent": "error", "symbol": symbol,
+                "answer": "Something went wrong answering that — the data source may be rate-limited. Try again in a moment."})
 
     # Unrecognized intent: optionally let the LLM answer from local data only.
     # Keyless (or cap-exhausted) behavior is identical to before — "help".

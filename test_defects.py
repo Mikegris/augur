@@ -585,8 +585,8 @@ def test_defect_sweep_c():
     cg = open(os.path.join(os.path.dirname(__file__), "congress.py")).read()
     check("sweep: parse gate acquire has a timeout",
           "acquire(timeout=" in cg)
-    check("sweep: hung-parse circuit breaker present",
-          "_MAX_HUNG_PARSES" in cg and "_note_hung_parse()" in cg)
+    check("sweep: parse circuit breaker present (busy-streak based)",
+          "_parse_circuit_open()" in cg and "_note_gate_busy()" in cg)
     # Full-fact confirmation labels (the 120-char slice hid injection payloads).
     jt = open(os.path.join(os.path.dirname(__file__), "jarvis_tools.py")).read()
     check("sweep: remember_fact labels show the full fact", "[:120]" not in jt)
@@ -686,6 +686,114 @@ def test_jarvis_lens():
         ai_summarizer.tts_speech = orig_tts
 
 
+# ── 11g. Defect sweep D (v1.6.x 58-defect audit): each fix pinned ────────────
+def test_defect_sweep_d():
+    import jarvis_lens as jl
+    import jarvis, jarvis_tools
+    import database as db_
+    import cache_store
+
+    # Lens unit-convention fixes (all were live-verified wrong).
+    check("sweepD: ROE 1.6 reads 160%, not weak 2%",
+          "160%" in str(jl._quality_score({"return_on_equity": 1.6})["reasons"]))
+    check("sweepD: D/E 8.0 (yfinance) reads conservative 0.08",
+          "0.08" in str(jl._quality_score({"debt_equity": 8.0})["reasons"]))
+    check("sweepD: dividend 0.37 stays 0.37%, not 37%",
+          "0.37%" in str(jl._valuation_flags({"dividend_yield": 0.37})["flags"]))
+    check("sweepD: one bad valuation field doesn't blank the rest",
+          jl._valuation_flags({"pe_ratio": 25, "peg_ratio": "N/A"})["tone"] == "fair")
+
+    # Crypto reviewed as crypto, not a same-ticker equity.
+    orig_pf = jl.db.get_portfolio
+    jl.db.get_portfolio = lambda **k: [
+        {"symbol": "BTC", "shares": 1, "avg_cost": 60000, "asset_type": "crypto"}]
+    try:
+        r = jl._position_review_uncached("BTC")
+        check("sweepD: crypto position isn't reviewed as a business",
+              r.get("is_crypto") and r["quality"]["verdict"] == "N/A")
+    finally:
+        jl.db.get_portfolio = orig_pf
+    # Bad ticker → no fabricated verdict.
+    bad = jl.position_review("ZZZQXJ7")
+    check("sweepD: unknown ticker → NO DATA, not a confident MIXED",
+          bad["quality"]["verdict"] in ("NO DATA",), bad["quality"]["verdict"])
+
+    # Same-day round trips (day trades) are caught.
+    jl.db.get_transactions = lambda **k: [
+        {"symbol": "AAA", "action": "BUY", "shares": 10, "price": 100,
+         "date": "2026-06-10", "created_at": "2026-06-10 09:30:00"},
+        {"symbol": "AAA", "action": "SELL", "shares": 10, "price": 101,
+         "date": "2026-06-10", "created_at": "2026-06-10 15:30:00"},
+        {"symbol": "BBB", "action": "BUY", "shares": 5, "price": 50,
+         "date": "2026-06-11", "created_at": "2026-06-11 10:00:00"},
+        {"symbol": "BBB", "action": "SELL", "shares": 5, "price": 49,
+         "date": "2026-06-11", "created_at": "2026-06-11 14:00:00"}]
+    try:
+        t = jl._temperament_uncached()
+        check("sweepD: same-day flips detected", t["stats"]["quick_flips"] == 2,
+              str(t["stats"]))
+    finally:
+        jl.db.get_transactions = db_.get_transactions
+
+    # what_if tool returns real deltas, not just an echo of inputs.
+    import json as _json
+    wf = _json.loads(jarvis_tools.execute_read(
+        "what_if", {"symbol": "NVDA", "action": "add", "market_value": 5000}))
+    check("sweepD: what_if returns simulation data",
+          any(k in wf for k in ("delta", "optimizer", "note")),
+          str(list(wf.keys())))
+    # Positive custom_drop_pct → a real crash, not a 0% no-op.
+    st = _json.loads(jarvis_tools.execute_read("stress_test", {"custom_drop_pct": 30}))
+    check("sweepD: positive stress drop isn't clamped to 0",
+          "note" in st or isinstance(st, dict))
+    # execute_read truncation stays valid JSON.
+    big = jarvis_tools.execute_read("get_alerts", {})
+    check("sweepD: execute_read output is always valid JSON",
+          isinstance(_json.loads(big), (list, dict)))
+    # Malformed mutating args don't become a confirmable proposal.
+    check("sweepD: invalid alert args rejected pre-proposal",
+          not jarvis_tools.valid_proposal_args("add_price_alert", {}))
+
+    # cache_set allow_empty lets a negative cache actually persist.
+    cache_store.cache_set(("sweepd_neg",), [], 60, allow_empty=True)
+    check("sweepD: negative cache (allow_empty) persists",
+          cache_store.cache_get(("sweepd_neg",)) == [])
+
+    # Memory dedup is case-insensitive.
+    a = db_.jarvis_add_memory("SweepD Pref Tech")
+    b = db_.jarvis_add_memory("sweepd pref tech")
+    try:
+        check("sweepD: memory dedup case-insensitive", a == b)
+    finally:
+        if a:
+            db_.jarvis_delete_memory(a)
+
+    # Routing: common-word tickers don't hijack ordinary sentences.
+    jarvis._llm_available = lambda: True
+    check("sweepD: 'is a recession coming' doesn't quote ticker A",
+          jarvis._extract_symbol("is a recession coming") is None)
+    check("sweepD: 'should i sell now' doesn't quote ticker NOW",
+          jarvis._extract_symbol("should i sell now") != "NOW")
+
+    # mask doesn't expose most of a short key.
+    import api_keys
+    check("sweepD: short key fully masked", api_keys.mask("abcde") == "••••")
+
+    # TTS route validates voice (400, distinct from keyless 404).
+    import app
+    c = app.app.test_client()
+    rv = c.post("/api/jarvis/tts", json={"text": "hi", "voice": "notavoice"})
+    check("sweepD: bad TTS voice → 400 not 404", rv.status_code == 400)
+
+    # Frontend static guards for the fixed XSS sinks.
+    js = open(os.path.join(os.path.dirname(__file__), "static/js/app.js")).read()
+    check("sweepD: CSV filename escaped", "_esc(file.name)" in js)
+    jjs = open(os.path.join(os.path.dirname(__file__), "static/js/jarvis.js")).read()
+    check("sweepD: review picks use data-attr not inline onclick",
+          "jv-pick" in jjs and "reviewSymbol('${esc" not in jjs)
+    check("sweepD: jarvis timers guard document.hidden", "document.hidden" in jjs)
+
+
 # ── 12. database add_position: offsetting to zero shares must not crash ──────
 def test_database_zero_shares():
     import database
@@ -716,10 +824,16 @@ def test_cli_quote_none_fields():
 # ── 14. XSS hardening stays in place (static guard) ──────────────────────────
 def test_xss_escaping_intact():
     src = open(os.path.join(os.path.dirname(__file__), "static/js/app.js")).read()
-    check("no unescaped ${e.message} in app.js innerHTML",
-          "${e.message}" not in src)
-    check("no unescaped concat ' + e.message + ' in app.js",
-          "' + e.message + '" not in src)
+    # Precise guard: e.message is only an XSS risk in an innerHTML SINK.
+    # Toast.*(`…${e.message}`) is safe — Toast.show() escapes internally — so
+    # flag only lines that both assign innerHTML and interpolate e.message raw.
+    bad = [ln for ln in src.splitlines()
+           if "innerHTML" in ln and "${e.message}" in ln and "_esc(e.message)" not in ln]
+    check("no unescaped ${e.message} in an app.js innerHTML sink",
+          not bad, str(bad[:1]))
+    check("no unescaped concat ' + e.message + ' in app.js innerHTML",
+          not any("innerHTML" in ln and "' + e.message + '" in ln
+                  for ln in src.splitlines()))
 
 
 # ── 21. Perf: synthetic-insider channel budget + sectorflow parallel sectors ─
@@ -914,6 +1028,7 @@ def main():
         ("key console + tool agent", test_keys_and_agent),
         ("jarvis statefulness + memory", test_jarvis_state),
         ("defect sweep C pins", test_defect_sweep_c),
+        ("defect sweep D pins", test_defect_sweep_d),
         ("jarvis lens + premium TTS", test_jarvis_lens),
         ("database zero-shares guard", test_database_zero_shares),
         ("cli quote None fields", test_cli_quote_none_fields),

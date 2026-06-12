@@ -558,7 +558,8 @@ def _score_crypto(symbol, profile, weights):
                 "change_24h": cdata.get("change_24h"),
                 "change_7d": cdata.get("change_7d"),
                 "change_30d": cdata.get("change_30d"),
-                "rank": cdata.get("rank"),
+                # fetcher emits market_cap_rank, not rank — was always None.
+                "rank": cdata.get("market_cap_rank") or cdata.get("rank"),
             }
 
             # Momentum from price changes

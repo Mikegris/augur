@@ -504,7 +504,12 @@ def get_quote(symbol: str) -> dict:
                 if fbq and "error" not in fbq and fbq.get("price") is not None:
                     _set_cache(ck, fbq, ttl=30)
                     return fbq
-        _set_cache(ck, result, ttl=30)
+        # Only cache a real price. A price-less result (prev_close but no
+        # price, all fallbacks failed) isn't failure-SHAPED, so it would be
+        # served for 30s while batch callers re-fetch it anyway — worst of
+        # both. Return it without caching.
+        if result.get("price") is not None:
+            _set_cache(ck, result, ttl=30)
         return result
     except Exception as e:
         # yfinance 1.2.0 trips YFRateLimitError when fc.yahoo.com (crumb host)
@@ -947,7 +952,11 @@ def get_market_indices() -> list:
     try:
         batch = get_quotes_batch(list(symbols.keys()))
         for sym, label in symbols.items():
-            q = batch.get(sym.upper(), {})
+            # Copy before annotating — get_quotes_batch returns objects that
+            # may be the very dicts stored in cache_store under ("quote", sym).
+            # Mutating them in place poisoned the shared cache (e.g. a later
+            # /api/quote/^VIX would carry an injected "label").
+            q = dict(batch.get(sym.upper(), {}))
             q["label"] = label
             q["symbol"] = sym
             results.append(q)
@@ -1915,8 +1924,17 @@ def _finviz_dividend_fallback(symbol: str) -> dict:
         try: div_yield = float(parts[1])
         except ValueError: pass
     if div_yield is None:
-        # Some Finviz pages use "Dividend %" directly
-        div_yield = _num(fund.get("Dividend %"))
+        # Some Finviz pages use "Dividend %" directly. Keep it in PERCENT
+        # form to match the "Dividend TTM" branch and the yfinance main path
+        # (which all store percent). _num() divides %-suffixed values by 100,
+        # which would make this branch 100x smaller than the others.
+        raw_pct = fund.get("Dividend %")
+        if raw_pct:
+            s = str(raw_pct).strip().replace(",", "").rstrip("%").strip()
+            try:
+                div_yield = float(s.split()[0]) if s not in ("", "-", "—") else None
+            except (ValueError, IndexError):
+                div_yield = None
 
     return {
         "symbol": sym,

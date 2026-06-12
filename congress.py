@@ -46,7 +46,14 @@ _PDF_PARSE_GATE = threading.BoundedSemaphore(2)
 #   • hung >= gate capacity  → both permits leaked, the gate is starved
 #   • a streak of gate-busy acquire timeouts → starvation detected even if
 #     the hung accounting missed it. Streak resets on any successful parse.
-_MAX_HUNG_PARSES = 2   # == BoundedSemaphore capacity above
+# The breaker trips on STARVATION, detected by a streak of gate-busy
+# acquire timeouts. A truly-hung parse leaks its gate permit forever, so
+# permits run out and every later worker times out acquiring → busy_streak
+# climbs → circuit opens. A merely SLOW (but finite) parse releases its
+# permit when it finishes, so it never starves the gate and must NOT count
+# against the breaker — that was the bug where two slow parses blanked
+# congress permanently. `hung` is kept only as telemetry. Any successful
+# parse resets the streak.
 _BUSY_TRIP = 5
 _hung_lock = threading.Lock()
 _breaker = {"hung": 0, "busy_streak": 0}
@@ -54,7 +61,7 @@ _breaker = {"hung": 0, "busy_streak": 0}
 
 def _note_hung_parse():
     with _hung_lock:
-        _breaker["hung"] += 1
+        _breaker["hung"] += 1  # telemetry only — does NOT open the circuit
 
 
 def _note_gate_busy():
@@ -69,8 +76,7 @@ def _note_parse_ok():
 
 def _parse_circuit_open():
     with _hung_lock:
-        return (_breaker["hung"] >= _MAX_HUNG_PARSES
-                or _breaker["busy_streak"] >= _BUSY_TRIP)
+        return _breaker["busy_streak"] >= _BUSY_TRIP
 
 # Negative-result TTL: timeouts, parse failures, 404s and legitimately
 # trade-less PTRs were never cached, so every sweep re-downloaded and
@@ -122,8 +128,27 @@ TXN_LABELS = {
 
 
 def _fetch_fd_index(year):
-    """Download and parse the House FD ZIP for a given year.
-    Returns list of PTR dicts: {last, first, state, date_str, doc_id, year}"""
+    """Download and parse the House FD ZIP for a given year (cached).
+
+    The multi-MB ZIP + XML parse ran fresh on EVERY get_recent_trades() call —
+    and that's invoked per-symbol by cluster/divmap/scanner/sectorflow (≈100
+    symbols/scan = ~200 ZIP downloads). A 6h cache (the index updates at most
+    daily) collapses that to ~2 downloads per refresh window."""
+    if cache_store is not None:
+        ck = ("congress_fd_index", year)
+        hit = cache_store.cache_get(ck, ttl=6 * 3600)
+        if hit is not None:
+            return hit
+    recs = _fetch_fd_index_uncached(year)
+    if cache_store is not None and recs:
+        try:
+            cache_store.cache_set(("congress_fd_index", year), recs, 6 * 3600)
+        except Exception:
+            pass
+    return recs
+
+
+def _fetch_fd_index_uncached(year):
     url = HOUSE_FD_ZIP.format(year=year)
     try:
         resp = requests.get(url, headers=_HOUSE_HEADERS, timeout=20)
@@ -441,10 +466,13 @@ def get_recent_trades(days=90, max_pdfs=100, tickers=None):
                 return _rehydrate_dt(cached)
 
         def _neg_cache():
-            """Remember a bad/empty doc so concurrent + later sweeps skip it."""
+            """Remember a bad/empty doc so concurrent + later sweeps skip it.
+            allow_empty=True is essential — without it cache_set drops the
+            `[]` as failure-shaped and the negative cache is a silent no-op
+            (the whole anti-thundering-herd point is to cache the emptiness)."""
             if cache_store is not None:
                 try:
-                    cache_store.cache_set(cache_key, [], _PTR_NEG_TTL)
+                    cache_store.cache_set(cache_key, [], _PTR_NEG_TTL, allow_empty=True)
                 except Exception:
                     pass
 
@@ -547,7 +575,8 @@ def get_recent_trades(days=90, max_pdfs=100, tickers=None):
                 # trade-less PTR used to be re-downloaded and re-parsed on
                 # every sweep because only truthy lists were cached.
                 cache_store.cache_set(cache_key, trades,
-                                      _PTR_CACHE_TTL if trades else _PTR_NEG_TTL)
+                                      _PTR_CACHE_TTL if trades else _PTR_NEG_TTL,
+                                      allow_empty=not trades)
             except Exception:
                 pass
         return trades

@@ -156,14 +156,15 @@ def _safe(label: str, fn, *args, **kwargs):
         log.warning("warmer %s exceeded %.0fs soft timeout; moving on",
                     label, WARM_CALL_TIMEOUT)
         _record_failure(label)
-        return
+        return False
     if holder["err"] is not None:
         log.debug("warmer %s failed: %s", label, holder["err"])
         _record_failure(label)
-        return
+        return False
     _last_cycle[label] = time.time()
     _fail_count.pop(label, None)
     _next_retry.pop(label, None)
+    return True
 
 
 def _record_failure(label: str) -> None:
@@ -258,17 +259,23 @@ def _loop():
         # ── slow cadence: fundamentals + news + benchmark ────────────
         if _due("fundamentals", FUNDAMENTALS_INTERVAL, now):
             eq, _ = _portfolio_symbols()
+            any_ok = False
             for sym in eq:
-                _safe("fundamentals", fetcher.get_fundamentals, sym)
+                any_ok = _safe("fundamentals", fetcher.get_fundamentals, sym) or any_ok
                 time.sleep(INTER_REQUEST_DELAY)
-            _last_cycle["fundamentals"] = time.time()
+            # Only advance the cadence if SOMETHING succeeded — an all-failed
+            # sweep must stay in backoff, not be stamped done for 12h.
+            if any_ok or not eq:
+                _last_cycle["fundamentals"] = time.time()
 
         if _due("news", NEWS_INTERVAL, now):
             eq, _ = _portfolio_symbols()
+            any_ok = False
             for sym in eq:
-                _safe("news", fetcher.get_news, sym)
+                any_ok = _safe("news", fetcher.get_news, sym) or any_ok
                 time.sleep(INTER_REQUEST_DELAY)
-            _last_cycle["news"] = time.time()
+            if any_ok or not eq:
+                _last_cycle["news"] = time.time()
 
         if _due("benchmark", BENCHMARK_INTERVAL, now):
             _safe("benchmark", fetcher.get_benchmark_history, "SPY", "1y")
@@ -283,10 +290,12 @@ def _loop():
             eq, _ = _portfolio_symbols()
             wl = _watchlist_symbols()
             symbols = list(dict.fromkeys(eq + wl))[:PORTFOLIO_WARM_CAP]
+            any_ok = False
             for sym in symbols:
-                _safe("chart", fetcher.get_chart_data, sym, "6mo", "1d")
+                any_ok = _safe("chart", fetcher.get_chart_data, sym, "6mo", "1d") or any_ok
                 time.sleep(INTER_REQUEST_DELAY)
-            _last_cycle["chart"] = time.time()
+            if any_ok or not symbols:
+                _last_cycle["chart"] = time.time()
 
         # ── score-due forecasts cadence: every 6h ────────────────────────
         # research_tracker queues a row each time a tracked signal panel
