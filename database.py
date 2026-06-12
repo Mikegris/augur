@@ -673,6 +673,29 @@ def jarvis_add_message(conversation_id, role, content, symbol=None):
         conn.commit()
 
 
+def jarvis_add_exchange(conversation_id, question, answer, symbol=None):
+    """Write a user message and its assistant reply ATOMICALLY (one lock, one
+    commit). Two ask() calls racing on the same conversation otherwise
+    interleave as U1,U2,A1,A2 — and the Q/A pairing then mismatches answers
+    to questions. Writing the pair together keeps them adjacent."""
+    with _write_lock:
+        conn = get_conn()
+        conn.execute(
+            "INSERT INTO jarvis_messages (conversation_id, role, content, symbol) "
+            "VALUES (?,?,?,?)",
+            (conversation_id, "user", (question or "")[:4000], symbol))
+        conn.execute(
+            "INSERT INTO jarvis_messages (conversation_id, role, content, symbol) "
+            "VALUES (?,?,?,?)",
+            (conversation_id, "assistant", (answer or "")[:4000], symbol))
+        conn.execute(
+            "DELETE FROM jarvis_messages WHERE conversation_id=? AND id NOT IN "
+            "(SELECT id FROM jarvis_messages WHERE conversation_id=? "
+            " ORDER BY id DESC LIMIT ?)",
+            (conversation_id, conversation_id, _JARVIS_TURN_LIMIT))
+        conn.commit()
+
+
 def jarvis_get_messages(conversation_id, limit=40):
     """Last `limit` messages, oldest→newest."""
     conn = get_conn()

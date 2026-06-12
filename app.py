@@ -3157,6 +3157,12 @@ def jarvis_act_route():
     args = data.get("args")
     if not isinstance(tool, str) or not isinstance(args, dict):
         return jsonify({"error": "expected {tool: str, args: object}"}), 400
+    # Re-validate the args server-side — the payload is client-supplied, so
+    # don't trust that a well-formed proposal produced it. Combined with the
+    # registry whitelist (mutating-only, 3 benign tools) this bounds what a
+    # crafted /act request can do.
+    if not jarvis_tools.valid_proposal_args(tool, args):
+        return jsonify({"error": "invalid or incomplete action arguments"}), 400
     r = jarvis_tools.execute_mutating(tool, args)
     return (jsonify(r), 400) if r.get("error") else jsonify(r)
 
@@ -3223,13 +3229,19 @@ def jarvis_activity_stream_route():
                     last_yield = _time.time()
                     yield ": hb\n\n"
             except Exception:
-                # One bad snapshot must not kill the stream — heartbeat so
-                # the very first chunk still arrives promptly even on error.
-                # (GeneratorExit is BaseException: client disconnects still
-                # close the generator normally.)
-                if _time.time() - last_yield >= 15 or not sent_any:
+                # One bad snapshot must not kill the stream. The documented
+                # contract is "first chunk is a data frame" — so on a FIRST
+                # iteration error, emit an empty-but-valid data frame rather
+                # than a bare comment heartbeat. (GeneratorExit is
+                # BaseException: client disconnects still close normally.)
+                if not sent_any:
+                    last_sig = None
                     last_yield = _time.time()
                     sent_any = True
+                    yield "data: {}\n\n".format(_json.dumps(
+                        {"background": [], "summary": "Background status unavailable."}))
+                elif _time.time() - last_yield >= 15:
+                    last_yield = _time.time()
                     yield ": hb\n\n"
             _time.sleep(2)
 

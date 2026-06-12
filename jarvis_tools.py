@@ -27,7 +27,9 @@ from typing import Any, Callable, Dict, List, Optional
 log = logging.getLogger("augur.jarvis_tools")
 
 _RESULT_CHAR_BUDGET = 1800
-_SYM_RE = re.compile(r"^[A-Za-z][A-Za-z.\-]{0,9}$")
+# At most ONE interior separator (BRK.B, RDS-A are valid; "A.", "X-",
+# "A.B.C.D" are not). Total length capped at ~10.
+_SYM_RE = re.compile(r"^[A-Za-z0-9]{1,9}(?:[.\-][A-Za-z0-9]{1,4})?$")
 
 
 def _sym(args: Dict[str, Any]) -> str:
@@ -35,6 +37,20 @@ def _sym(args: Dict[str, Any]) -> str:
     if not _SYM_RE.match(s):
         raise ValueError("invalid symbol")
     return s
+
+
+def _num_arg(v: Any) -> Optional[float]:
+    """Coerce a model-supplied number that may arrive as '5000', '-30%', etc.
+    Returns None if it isn't a finite number."""
+    if v is None:
+        return None
+    try:
+        f = float(str(v).strip().replace("%", "").replace(",", "").replace("$", ""))
+    except (TypeError, ValueError):
+        return None
+    if f != f or f in (float("inf"), float("-inf")):
+        return None
+    return f
 
 
 def _portfolio_stock_symbols(max_n: int = 15) -> List[str]:
@@ -50,9 +66,11 @@ def _portfolio_stock_symbols(max_n: int = 15) -> List[str]:
 
 def _t_get_quote(args):
     import fetcher
-    q = fetcher.get_quote(_sym(args))
+    q = fetcher.get_quote(_sym(args)) or {}
     keep = ("symbol", "price", "change", "change_pct", "prev_close", "volume",
             "market_cap", "fifty_two_week_high", "fifty_two_week_low")
+    if not q.get("price"):
+        return {"note": "no quote available for {}".format(_sym(args))}
     return {k: q.get(k) for k in keep}
 
 
@@ -98,8 +116,19 @@ def _t_earnings(args):
     import earnings
     import database as db
     syms = args.get("symbols")
+    # The model sometimes sends a comma-string instead of a list.
+    if isinstance(syms, str):
+        syms = [s for s in re.split(r"[,\s]+", syms) if s]
     if isinstance(syms, list) and syms:
-        syms = [_sym({"symbol": s}) for s in syms[:10]]
+        # Skip invalid entries rather than aborting the whole batch.
+        clean = []
+        for s in syms[:10]:
+            try:
+                clean.append(_sym({"symbol": s}))
+            except ValueError:
+                continue
+        syms = clean or [h["symbol"] for h in db.get_portfolio()
+                         if h.get("asset_type") != "crypto"][:25]
     else:
         syms = [h["symbol"] for h in db.get_portfolio()
                 if h.get("asset_type") != "crypto"][:25]
@@ -108,12 +137,12 @@ def _t_earnings(args):
 
 def _t_smart_money(args):
     import smart_money
-    return smart_money.compute_score(_sym(args))
+    return smart_money.compute_score(_sym(args)) or {"note": "no smart-money data"}
 
 
 def _t_gex(args):
     import gex_engine
-    return gex_engine.get_gex_summary(_sym(args))
+    return gex_engine.get_gex_summary(_sym(args)) or {"note": "no GEX data"}
 
 
 def _t_options_flow(args):
@@ -161,7 +190,7 @@ def _t_watchlist(args):
 
 def _t_narrative(args):
     import narrative_engine
-    return narrative_engine.analyze_narrative(_sym(args))
+    return narrative_engine.analyze_narrative(_sym(args)) or {"note": "no narrative data"}
 
 
 def _t_top_ideas(args):
@@ -172,9 +201,8 @@ def _t_top_ideas(args):
 def _t_stress_test(args):
     import database as db
     import fetcher
-    drop = args.get("custom_drop_pct")
+    drop = _num_arg(args.get("custom_drop_pct"))  # tolerates "-30%" / "30"
     if drop is not None:
-        drop = float(drop)
         # The model often sends 30 for "a 30% drop" — a positive magnitude.
         # Treat any positive value as the loss size rather than clamping it
         # to a no-op 0%.
@@ -272,10 +300,12 @@ def _t_transactions_summary(args):
         return {"note": "no transactions recorded"}
     buys = [r for r in rows if str(r.get("action") or "").upper() == "BUY"]
     sells = [r for r in rows if str(r.get("action") or "").upper() == "SELL"]
+    # Skip non-numeric totals rather than aborting the whole summary.
+    _tot = lambda rs: round(sum((_num_arg(r.get("total")) or 0) for r in rs), 2)
     return {"symbol_filter": sym, "count": len(rows),
             "buys": len(buys), "sells": len(sells),
-            "bought_usd": round(sum(float(r.get("total") or 0) for r in buys), 2),
-            "sold_usd": round(sum(float(r.get("total") or 0) for r in sells), 2),
+            "bought_usd": _tot(buys),
+            "sold_usd": _tot(sells),
             "recent": [{"date": r.get("date"), "symbol": r.get("symbol"),
                         "action": r.get("action"), "shares": r.get("shares"),
                         "price": r.get("price")} for r in rows[:8]]}
@@ -399,8 +429,12 @@ def _t_what_if(args):
     if action not in ("add", "remove", "resize_to"):
         raise ValueError("action must be add, remove or resize_to")
     mv = 0.0
-    if action != "remove":
-        mv = float(args.get("market_value") or 0)
+    note = None
+    if action == "remove":
+        if args.get("market_value"):
+            note = "market_value ignored for a full remove"
+    else:
+        mv = _num_arg(args.get("market_value")) or 0
         if not (0 < mv < 100_000_000):
             raise ValueError("market_value required for add/resize_to")
     holdings = db.get_portfolio()
@@ -419,6 +453,8 @@ def _t_what_if(args):
     # optimizer verdict. The old code copied keys that don't exist, so the
     # tool returned nothing but an echo of its inputs.
     out = {"symbol": sym, "action": action, "market_value": mv}
+    if note:
+        out["note"] = note
     delta = r.get("delta")
     if isinstance(delta, dict):
         out["delta"] = {k: delta.get(k) for k in (
@@ -747,9 +783,11 @@ def execute_read(name: str, args: Dict[str, Any]) -> str:
         return json.dumps({"error": str(e)[:200]})
     s = json.dumps(result, default=str)
     if len(s) > _RESULT_CHAR_BUDGET:
-        # Truncating raw JSON yields a syntactically broken string the model
-        # can't parse. Drop list items / dict keys until it fits, keeping
-        # VALID JSON, and flag the truncation explicitly.
+        # Keep VALID JSON, but DON'T drop whole keys — the substantive data
+        # (per_symbol, flows, sectors) is usually the last-inserted key, so
+        # popping keys sacrificed exactly what the model needs. Instead shrink
+        # the largest LIST value (keeping every key), and only as a last
+        # resort drop trailing list items.
         try:
             if isinstance(result, list):
                 trimmed = list(result)
@@ -759,10 +797,18 @@ def execute_read(name: str, args: Dict[str, Any]) -> str:
                                    "total": len(result)}, default=str)
             if isinstance(result, dict):
                 trimmed = dict(result)
-                keys = list(trimmed.keys())
-                while keys and len(json.dumps(trimmed, default=str)) > _RESULT_CHAR_BUDGET - 40:
-                    trimmed.pop(keys.pop(), None)
                 trimmed["truncated"] = True
+                # Repeatedly halve the longest list-valued field until it fits.
+                for _ in range(40):
+                    if len(json.dumps(trimmed, default=str)) <= _RESULT_CHAR_BUDGET:
+                        break
+                    longest_k, longest_len = None, 0
+                    for k, v in trimmed.items():
+                        if isinstance(v, list) and len(v) > longest_len:
+                            longest_k, longest_len = k, len(v)
+                    if longest_k is None or longest_len == 0:
+                        break
+                    trimmed[longest_k] = trimmed[longest_k][:max(1, longest_len // 2)]
                 return json.dumps(trimmed, default=str)
         except Exception:
             pass

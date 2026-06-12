@@ -2469,3 +2469,24 @@ input:focus, select:focus, textarea:focus {
 .jv-mem span { flex: 1; }
 .jv-mem-x { background: none; border: none; color: var(--text-dim); cursor: pointer; font-size: 13px; }
 .jv-mem-x:hover { color: var(--red); }
+
+/* ── v1.8 Jarvis defect-sweep-E: a11y + responsive ──────────────── */
+/* Long unbroken tokens (URLs, ticker runs) in LLM answers must wrap. */
+.jv-bubble { overflow-wrap: anywhere; word-break: break-word; }
+.jv-macro-text, .jv-take, .jv-obs { overflow-wrap: anywhere; }
+/* Reduced-motion: the newer Jarvis indicators were missed by earlier blocks. */
+@media (prefers-reduced-motion: reduce) {
+  .jv-thinking { animation: none; }
+  .jap-run { animation: none; border-top-color: var(--cyan); }
+}
+
+/* ── v1.8 Jarvis UX: starter chips + voice toggle ───────────────── */
+.jv-starters { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.jv-starter {
+  background: var(--bg-elevated); border: 1px solid var(--border-bright);
+  border-radius: var(--radius); color: var(--blue);
+  font-family: var(--font-mono); font-size: var(--font-size-xs);
+  padding: 4px 9px; cursor: pointer;
+}
+.jv-starter:hover { border-color: var(--blue); background: var(--blue-glow); color: var(--text-primary); }
+#jv-voice.on { color: var(--green); border-color: var(--green-dim); }
