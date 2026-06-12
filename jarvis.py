@@ -27,11 +27,18 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
+import time
 from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, List, Optional
 
 log = logging.getLogger("augur.jarvis")
+
+# Captured at import — health_snapshot reports process uptime relative to
+# this, which is what "how long has Jarvis been up" actually means in a
+# single-process Flask app.
+_STARTED = time.time()
 
 try:
     import cache_store
@@ -138,6 +145,20 @@ def _fmt_pct(v: Optional[float]) -> str:
     if v is None:
         return "—"
     return "{}{:.2f}%".format("+" if v >= 0 else "", v)
+
+
+def _fmt_cap(v: Optional[float]) -> Optional[str]:
+    """$1.23T / $456B / $789M — None when unknown/zero."""
+    v = _finite(v)
+    if not v or v <= 0:
+        return None
+    if v >= 1e12:
+        return "${:.2f}T".format(v / 1e12)
+    if v >= 1e9:
+        return "${:.0f}B".format(v / 1e9)
+    if v >= 1e6:
+        return "${:.0f}M".format(v / 1e6)
+    return "${:,.0f}".format(v)
 
 
 # ─── optional LLM polish (fail-open; keyless behavior is unchanged) ──────────
@@ -268,41 +289,206 @@ _AGENT_SYSTEM = (
     "forecast, smart_money_score, position_review, …). (2) OPEN-WORLD "
     "research that reaches OUTSIDE the app: web_research, search_news, "
     "search_sec_filings, search_hacker_news, news_sentiment. "
-    "Plan a short tool sequence first. For the user's own money or holdings, "
-    "consult get_portfolio first; when conviction matters, cross-reference at "
-    "least two independent local engines and say where they agree or disagree. "
+    "REASON before you act: privately work out what the question really asks, "
+    "what evidence would settle it, and which tools supply that evidence — "
+    "then execute the shortest sequence that gets there. When a plan is "
+    "suggested below, follow it, adapting as results come in. "
+    "ASK WHEN AMBIGUOUS: if a critical fact is missing (which symbol, what "
+    "amount, what timeframe) and any answer would be a guess, reply with ONE "
+    "focused clarifying question ending in '?' as your ENTIRE message — the "
+    "thread continues and you'll get the answer next turn. Prefer answering "
+    "over asking; clarify only when truly required. "
+    "For the user's own money or holdings, consult get_portfolio first; when "
+    "conviction matters, cross-reference at least two independent local "
+    "engines and say where they agree or disagree. "
     "CRUCIALLY: for ANY question your local tools can't answer — a private "
     "company (SpaceX, Stripe), an upcoming IPO, a Fed decision, breaking news, "
     "a regulation, a theme, 'what's happening with X' — DO NOT say you can't "
     "help. Use web_research (or search_news / search_sec_filings) and answer "
     "from what you find, citing sources. Researching beats refusing. "
+    "DEMONSTRATE DEPTH: name the mechanism, not just the fact (dealers hedge "
+    "gamma, multiples compress when rates rise); surface one non-obvious "
+    "second-order effect when it's real; state what evidence would change "
+    "your mind. Never pad — depth is precision, not length. "
     "Cite numbers exactly as tools give them. Be concise (a short paragraph), "
     "confident, dry wit welcome. No investment advice — evidence and framing, "
     "not buy/sell instructions. For an action (alert, watchlist add) call the "
     "matching tool; the app asks the user to confirm."
 )
 
+# ─── planner: think before acting ────────────────────────────────────────────
+# One cheap MODEL_LIGHT call that decides, BEFORE the tool loop spends real
+# money: (a) is the question answerable at all without a clarification, and
+# (b) what's the shortest tool sequence + the non-obvious angle worth
+# checking. Entirely fail-open — a dead/slow/junk planner means the agent
+# runs exactly as it did before planning existed.
+
+_PLANNER_SYSTEM = (
+    "You are the planning faculty of JARVIS, an investing copilot with tools. "
+    "Decide BEFORE acting. If a critical fact is missing (which symbol, what "
+    "amount, what timeframe) such that ANY answer would be a guess, set "
+    "\"clarify\" to one focused question. Otherwise clarify=null and plan the "
+    "shortest tool sequence (≤4 steps). Also name the one non-obvious angle "
+    "worth checking. Reply ONLY JSON: "
+    '{"clarify": null, "steps": [{"tool": "name", "why": "≤8 words"}], '
+    '"angle": "≤12 words"}. Prefer answering over clarifying.'
+)
+
+
+def _plan_approach(query: str, history: Optional[List[Dict[str, Any]]] = None) -> Optional[Dict[str, Any]]:
+    """Returns {"clarify": str|None, "steps": [{tool, why}], "angle": str|None}
+    or None when planning is unavailable/unparseable. Steps naming unknown
+    tools are dropped; a clarify that isn't a question is ignored."""
+    try:
+        import jarvis_tools
+        tool_names = sorted(jarvis_tools.TOOLS.keys())
+        ctx = ""
+        last = [t for t in (history or []) if t.get("q")][-2:]
+        if last:
+            ctx = "Recent turns: " + " | ".join(
+                "Q: {}".format((t.get("q") or "")[:120]) for t in last) + "\n"
+        text = _llm_complete(
+            [{"role": "system", "content": _PLANNER_SYSTEM},
+             {"role": "user", "content": "{}Tools: {}\n\nQuestion: {}".format(
+                 ctx, ", ".join(tool_names), query[:400])}],
+            max_tokens=160, temperature=0.0)
+        if not text:
+            return None
+        m = re.search(r"\{.*\}", text, re.DOTALL)
+        if not m:
+            return None
+        data = json.loads(m.group(0))
+        out: Dict[str, Any] = {"clarify": None, "steps": [], "angle": None}
+        c = data.get("clarify")
+        if isinstance(c, str) and c.strip().endswith("?") and len(c.strip()) >= 8:
+            out["clarify"] = c.strip()[:200]
+        known = set(tool_names)
+        for s in (data.get("steps") or [])[:4]:
+            if isinstance(s, dict) and s.get("tool") in known:
+                out["steps"].append({"tool": s["tool"],
+                                     "why": str(s.get("why") or "")[:60]})
+        a = data.get("angle")
+        if isinstance(a, str) and a.strip():
+            out["angle"] = a.strip()[:100]
+        if not out["clarify"] and not out["steps"]:
+            return None
+        return out
+    except Exception as e:
+        log.debug("planner skipped: %s", e)
+        return None
+
 _AGENT_MAX_ROUNDS = 5  # +1 round headroom for a research call + synthesis
 
+# Human-voiced progress lines for the streaming UI, keyed by tool name.
+# Anything not listed falls back to "Consulting <tool name>…".
+_TOOL_PROGRESS = {
+    "get_portfolio":        "Reading your portfolio…",
+    "get_quote":            "Pulling the live quote…",
+    "forecast":             "Running the forecast ensemble…",
+    "smart_money_score":    "Scoring the smart-money trail…",
+    "position_review":      "Reviewing the position like an owner…",
+    "temperament_check":    "Auditing your own trading record…",
+    "macro_brief":          "Reading the macro weather…",
+    "what_if":              "Simulating the trade…",
+    "compare_positions":    "Comparing the two side by side…",
+    "web_research":         "Researching the open web…",
+    "search_news":          "Scanning the wires…",
+    "news_sentiment":       "Measuring news tone…",
+    "search_sec_filings":   "Digging through SEC filings…",
+    "search_hacker_news":   "Listening to Hacker News…",
+    "get_earnings_calendar": "Checking the earnings calendar…",
+    "portfolio_attribution": "Attributing today's P&L…",
+}
 
-def _agent_ask(query: str, history: Optional[List[Dict[str, Any]]] = None) -> Optional[Dict[str, Any]]:
+
+def _progress_label(tool_name: str) -> str:
+    return _TOOL_PROGRESS.get(
+        tool_name, "Consulting {}…".format(tool_name.replace("_", " ")))
+
+
+def _result_note(result_json: str) -> str:
+    """One dim line for the reasoning trace — what a tool came back with,
+    without dumping its payload into the UI."""
+    try:
+        parsed = json.loads(result_json)
+    except Exception:
+        return "returned data"
+    if isinstance(parsed, dict):
+        if parsed.get("note"):
+            return str(parsed["note"])[:90]
+        if parsed.get("error"):
+            return "error: " + str(parsed["error"])[:70]
+        return "returned " + ", ".join(list(parsed.keys())[:6])
+    if isinstance(parsed, list):
+        return "returned {} rows".format(len(parsed))
+    return "returned data"
+
+
+def _agent_ask(query: str, history: Optional[List[Dict[str, Any]]] = None,
+               progress: Any = None) -> Optional[Dict[str, Any]]:
     """Tool-calling agent over the full engine registry. Returns
     {"answer", "used": [tool names]} or {"answer", "proposal": {...}} for a
     mutating request awaiting user confirmation. Raises on transport errors;
-    the caller fails open to the plain-context path."""
+    the caller fails open to the plain-context path. `progress` is an optional
+    callable(str) fed human-readable status lines for the streaming UI — it
+    must never raise into the loop, so every call is guarded."""
     import ai_summarizer
     import jarvis_tools
     key = ai_summarizer.get_openai_key()
     if not key:
         return None
+
+    def notify(text: str) -> None:
+        if progress is None:
+            return
+        try:
+            progress(text)
+        except Exception:
+            pass
+
+    # ── plan first ──
+    # Cheap, fail-open. A clarify verdict short-circuits the whole loop —
+    # one question back to the user costs less than four rounds of guessing.
+    notify("Planning the approach…")
+    plan = _plan_approach(query, history)
+    reasoning: Dict[str, Any] = {"plan": [], "angle": None, "consulted": []}
+    plan_hint = ""
+    if plan:
+        if plan.get("clarify"):
+            return {"answer": plan["clarify"], "clarify": True, "used": [],
+                    "reasoning": {"plan": [], "angle": plan.get("angle"),
+                                  "consulted": [],
+                                  "note": "asked instead of guessing"}}
+        if plan.get("steps"):
+            reasoning["plan"] = plan["steps"]
+            reasoning["angle"] = plan.get("angle")
+            notify("Plan: " + " → ".join(s["tool"].replace("_", " ")
+                                         for s in plan["steps"]))
+            plan_hint = "\n\nSuggested plan (adapt as results come in): " + \
+                "; ".join("{} ({})".format(s["tool"], s["why"]) if s.get("why")
+                          else s["tool"] for s in plan["steps"])
+            if plan.get("angle"):
+                plan_hint += ". Angle worth checking: {}.".format(plan["angle"])
+
     from openai import OpenAI
     # gpt-5.x reasoning models with tool schemas can take 20-40s per round;
     # a 25s timeout cut them off under load and dropped the whole agent path
     # to the local-only fallback. Give each round room, with one auto-retry.
     client = OpenAI(api_key=key, timeout=55.0, max_retries=2)
 
+    # Ground the agent in NOW — without this, the model reasons from its
+    # training-cutoff sense of "today" and confidently misdates earnings,
+    # Fed meetings, and "is the market open" reasoning. Dynamic, so it must
+    # not live in the _AGENT_SYSTEM constant.
+    try:
+        _now_et = _et_now()
+        grounding = "Today is {}; markets are {}. ".format(
+            _now_et.strftime("%Y-%m-%d"), _market_phase(_now_et))
+    except Exception:
+        grounding = ""
     messages: List[Dict[str, Any]] = [
-        {"role": "system", "content": _AGENT_SYSTEM + _memory_block()}]
+        {"role": "system",
+         "content": grounding + _AGENT_SYSTEM + _memory_block() + plan_hint}]
     for turn in (history or [])[-6:]:
         if turn.get("q"):
             messages.append({"role": "user", "content": turn["q"]})
@@ -315,12 +501,13 @@ def _agent_ask(query: str, history: Optional[List[Dict[str, Any]]] = None) -> Op
     tool_cache: Dict[str, str] = {}  # (name+args) -> result, dedup across rounds
     citations: List[Dict[str, Any]] = []  # web_research sources, for the UI
 
-    for _ in range(_AGENT_MAX_ROUNDS):
+    for round_i in range(_AGENT_MAX_ROUNDS):
         # The daily cap is a hard money ceiling — re-check it EACH round, not
         # just at entry, so a multi-round answer (or a runaway tool loop)
         # can't overshoot the budget 4-5x. Bail to the plain-context fallback.
         if ai_summarizer._cap_exceeded():
             break
+        notify("Thinking…" if round_i == 0 else "Synthesizing what I found…")
         # MODEL_HEAVY synthesis once >2 DISTINCT tools have run (duplicates
         # mustn't inflate the count and force the expensive model).
         model = (ai_summarizer.MODEL_HEAVY if len(set(used)) > 2
@@ -336,6 +523,13 @@ def _agent_ask(query: str, history: Optional[List[Dict[str, Any]]] = None) -> Op
             if not answer:
                 return None
             out = {"answer": answer, "used": used}
+            # The doctrine tells the model a pure clarifying question is a
+            # complete reply — surface that to the UI so it can render the
+            # question style + keep the thread primed.
+            if answer.endswith("?") and len(answer) <= 200 and not used:
+                out["clarify"] = True
+            if reasoning["plan"] or reasoning["consulted"]:
+                out["reasoning"] = reasoning
             if citations:
                 out["citations"] = citations[:6]
             return out
@@ -379,8 +573,12 @@ def _agent_ask(query: str, history: Optional[List[Dict[str, Any]]] = None) -> Op
             mkey = tc.function.name + "|" + raw_args
             result = tool_cache.get(mkey)
             if result is None:
+                notify(_progress_label(tc.function.name))
                 result = jarvis_tools.execute_read(tc.function.name, args)
                 tool_cache[mkey] = result
+                if len(reasoning["consulted"]) < 8:
+                    reasoning["consulted"].append(
+                        {"tool": tc.function.name, "note": _result_note(result)})
             # Harvest web_research source citations to surface in the UI.
             if tc.function.name == "web_research":
                 try:
@@ -395,6 +593,7 @@ def _agent_ask(query: str, history: Optional[List[Dict[str, Any]]] = None) -> Op
     if ai_summarizer._cap_exceeded():
         return None  # budget gone mid-loop — fail open to the cheaper paths
     # Round budget exhausted — ask for a final synthesis without tools.
+    notify("Wrapping up…")
     model = (ai_summarizer.MODEL_HEAVY if len(set(used)) > 2
              else ai_summarizer.MODEL_LIGHT)
     resp = ai_summarizer._chat_completion(
@@ -406,6 +605,8 @@ def _agent_ask(query: str, history: Optional[List[Dict[str, Any]]] = None) -> Op
     if not answer:
         return None
     out = {"answer": answer, "used": used}
+    if reasoning["plan"] or reasoning["consulted"]:
+        out["reasoning"] = reasoning
     if citations:
         out["citations"] = citations[:6]
     return out
@@ -472,6 +673,7 @@ def _portfolio_pulse() -> Optional[Dict[str, Any]]:
             day_pnl_known = True
         rows.append({
             "symbol": h["symbol"],
+            "asset_type": h.get("asset_type") or "stock",
             "market_value": round(mv, 2),
             "unrealized_pnl": round(mv - cost, 2),
             "unrealized_pct": round((mv - cost) / cost * 100, 2) if cost > 0 else 0,
@@ -590,12 +792,125 @@ def _earnings_insights(symbols: List[str]) -> List[Dict[str, Any]]:
         extra = ""
         if e.get("beat_rate") is not None:
             extra = " Historical beat rate: {}%.".format(e["beat_rate"])
+        # Earnings TODAY is a P1 — it's the one day the position can gap
+        # double digits and the user should not learn that after the close.
+        pri = 1 if days == 0 else (2 if days <= 2 else 3)
         cards.append(_card(
-            2 if days <= 2 else 3, "earnings", "info",
+            pri, "earnings", "info",
             "{} reports earnings {}".format(e["symbol"], when),
             "Next earnings date {}.{}".format(e.get("earnings_date", "—"), extra),
             view="earnings", symbol=e["symbol"]))
     return cards
+
+
+_WATCHLIST_MOVE_PCT = 5.0  # watchlist names earn a card on bigger moves than holdings
+_RANGE_EPS_PCT = 0.5       # within 0.5% of a 52-week boundary counts as "at" it
+
+
+def _watchlist_mover_cards() -> List[Dict[str, Any]]:
+    """Watchlist names moving hard today — stuff you watch but don't own."""
+    cards: List[Dict[str, Any]] = []
+    wl = db.get_watchlist()
+    if not wl:
+        return cards
+    held = set()
+    try:
+        held = {h["symbol"].upper() for h in db.get_portfolio()}
+    except Exception:
+        pass
+    syms = [w["symbol"] for w in wl if w["symbol"].upper() not in held][:15]
+    if not syms:
+        return cards
+    quotes = fetcher.get_quotes_batch(syms)
+    movers = [(s, (quotes.get(s) or {}).get("change_pct")) for s in syms]
+    movers = [(s, cp) for s, cp in movers
+              if cp is not None and abs(cp) >= _WATCHLIST_MOVE_PCT]
+    movers.sort(key=lambda m: -abs(m[1]))
+    for s, cp in movers[:2]:
+        cards.append(_card(
+            3, "watch_mover", "pos" if cp > 0 else "neg",
+            "{} (watchlist) {} {:.1f}% today".format(s, "up" if cp > 0 else "down", abs(cp)),
+            "A name you watch is moving hard — worth a look while it's in motion.",
+            view="research", symbol=s))
+    return cards
+
+
+def _streak_card() -> List[Dict[str, Any]]:
+    """3+ consecutive up/down sessions from the daily snapshot history."""
+    snaps = db.get_snapshots()[-12:]
+    vals = [_finite(s.get("total_value")) for s in snaps]
+    vals = [v for v in vals if v]
+    if len(vals) < 4:
+        return []
+    diffs = [vals[i] - vals[i - 1] for i in range(1, len(vals))]
+    streak = 0
+    for d in reversed(diffs):
+        if d > 0 and streak >= 0:
+            streak += 1
+        elif d < 0 and streak <= 0:
+            streak -= 1
+        else:
+            break
+    n = abs(streak)
+    if n < 3:
+        return []
+    up = streak > 0
+    cum = vals[-1] - vals[-1 - n]
+    return [_card(
+        3, "streak", "pos" if up else "warn",
+        "Portfolio {} {} sessions in a row".format("up" if up else "down", n),
+        "{} {} over the run. {}".format(
+            "Gained" if up else "Gave back", _fmt_usd(abs(cum)),
+            "Momentum is nice — discipline is nicer." if up
+            else "Drawdowns are where temperament gets tested."),
+        view="portfolio")]
+
+
+def _range_extreme_cards(pulse: Optional[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Holdings sitting AT their 52-week high/low today (top 8 by value).
+    Per-symbol quotes are 30s-cached and warmed, so this is usually free."""
+    if not pulse:
+        return []
+    # Equities only — a bare crypto symbol 404s on the stock quote endpoint
+    # (crypto prices live at SYM-USD), and a 52-week range matters less for
+    # an asset that trades 24/7 anyway.
+    rows = sorted((r for r in pulse["holdings"] if r.get("asset_type") != "crypto"),
+                  key=lambda r: -r["market_value"])[:8]
+
+    def _one(r: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        q = fetcher.get_quote(r["symbol"])
+        if not q or q.get("error"):
+            return None
+        p = _finite(q.get("price"))
+        hi = _finite(q.get("fifty_two_week_high"))
+        lo = _finite(q.get("fifty_two_week_low"))
+        if p is None or not hi or not lo or hi <= lo:
+            return None
+        if p >= hi * (1 - _RANGE_EPS_PCT / 100):
+            return _card(3, "range_high", "pos",
+                         "{} is at a 52-week high".format(r["symbol"]),
+                         "${:,.2f} — the top of its one-year range. Strength, "
+                         "but also where chasing starts.".format(p),
+                         view="research", symbol=r["symbol"])
+        if p <= lo * (1 + _RANGE_EPS_PCT / 100):
+            return _card(2, "range_low", "warn",
+                         "{} is at a 52-week low".format(r["symbol"]),
+                         "${:,.2f} — the bottom of its one-year range. "
+                         "Position-review territory.".format(p),
+                         view="research", symbol=r["symbol"])
+        return None
+
+    if safe_executor is not None:
+        results = safe_executor.parallel_map(_one, rows, max_workers=4,
+                                             thread_name_prefix="jarvis-range")
+    else:
+        results = []
+        for r in rows:
+            try:
+                results.append(_one(r))
+            except Exception:
+                results.append(None)
+    return [c for c in results if c][:2]
 
 
 def _idea_insights() -> List[Dict[str, Any]]:
@@ -661,6 +976,8 @@ def _run_briefing_uncached() -> Dict[str, Any]:
         _alert_insights,
         _idea_insights,
         lambda: _earnings_insights(held),
+        _watchlist_mover_cards,
+        _streak_card,
     ]
     if safe_executor is not None:
         results = safe_executor.parallel_map(
@@ -675,7 +992,8 @@ def _run_briefing_uncached() -> Dict[str, Any]:
             except Exception as e:
                 log.warning("briefing: section failed: %s", e)
                 results.append(None)
-    pulse, regime, alert_cards, idea_cards, earnings_cards = results
+    (pulse, regime, alert_cards, idea_cards, earnings_cards,
+     watch_cards, streak_cards) = results
 
     cards.extend(alert_cards or [])
 
@@ -738,9 +1056,32 @@ def _run_briefing_uncached() -> Dict[str, Any]:
             view="macro"))
 
     cards.extend(idea_cards or [])
+    cards.extend(watch_cards or [])
+    cards.extend(streak_cards or [])
+    # 52-week extremes need the priced holdings, so they run after the
+    # parallel wave — guarded like every other section.
+    try:
+        cards.extend(_range_extreme_cards(pulse) or [])
+    except Exception as e:
+        log.debug("briefing: range extremes failed: %s", e)
 
     cards.sort(key=lambda c: c["priority"])
     n_urgent = sum(1 for c in cards if c["priority"] == 1)
+
+    # History: persist today's cards so "while you were away" can replay what
+    # surfaced between visits. Idempotent per (day, kind, title); cache-miss
+    # only, so this runs at most ~once per TTL window.
+    try:
+        db.jarvis_log_insights(cards)
+    except Exception as e:
+        log.debug("briefing: insight log failed: %s", e)
+
+    # A zero-card briefing renders as a bare panel that reads like a bug.
+    # Say "all clear" explicitly — appended AFTER the insight log so the
+    # away-digest history stays pure signal.
+    if not cards:
+        cards.append(_card(3, "all_clear", "info", "All clear",
+                           "All quiet — book steady, no alerts, calendar clear."))
 
     out = {
         "greeting": "{}. Markets are {}.".format(_greeting(), _market_phase(now_et)),
@@ -750,6 +1091,19 @@ def _run_briefing_uncached() -> Dict[str, Any]:
         "market": regime,
         "generated_at": datetime.now(timezone.utc).isoformat(),
     }
+
+    # Fresh away-digest items earn a mention in the headline itself (additive
+    # string only — peek without moving the watermark, and any failure leaves
+    # the headline exactly as _build_headline made it).
+    try:
+        dig = away_digest(mark_seen=False)
+        n_away = dig.get("count") or 0
+        if n_away:
+            out["headline"] = out["headline"].rstrip() + \
+                " {} event{} logged while you were out.".format(
+                    n_away, "s" if n_away != 1 else "")
+    except Exception as e:
+        log.debug("briefing: away-count headline skipped: %s", e)
 
     # Optional LLM polish: rides the same briefing coalesce (240s TTL), so the
     # cost ceiling is ~1 light call per 4 minutes. `headline` is never touched
@@ -780,6 +1134,74 @@ def get_briefing(force_refresh: bool = False) -> Dict[str, Any]:
             pass
         return result
     return cache_store.coalesce(("jarvis_briefing",), _BRIEFING_TTL, _run_briefing_uncached)
+
+
+# ─── away digest: what happened since you last looked ───────────────────────
+
+_AWAY_MIN_GAP_MIN = 30  # visits closer together than this aren't "away"
+
+
+def away_digest(mark_seen: bool = True) -> Dict[str, Any]:
+    """Insights that surfaced since the user's last visit. `jarvis_last_seen`
+    (a settings row, UTC 'YYYY-MM-DD HH:MM:SS') is the watermark; mark_seen
+    advances it. Gaps under ~30 minutes return an empty digest — tab switches
+    aren't absences."""
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+    last_seen = None
+    try:
+        last_seen = (db.get_settings() or {}).get("jarvis_last_seen") or None
+    except Exception:
+        pass
+    if mark_seen:
+        try:
+            db.set_setting("jarvis_last_seen", now)
+        except Exception as e:
+            log.debug("away_digest: mark seen failed: %s", e)
+
+    out: Dict[str, Any] = {"since": last_seen, "insights": [], "count": 0,
+                           "kind_counts": {}, "away_minutes": None, "line": None}
+    if not last_seen:
+        return out  # first visit ever — nothing to recap
+    try:
+        gap_min = max(0, (datetime.strptime(now, "%Y-%m-%d %H:%M:%S")
+                          - datetime.strptime(str(last_seen)[:19], "%Y-%m-%d %H:%M:%S")
+                          ).total_seconds() / 60.0)
+    except Exception:
+        gap_min = None
+    out["away_minutes"] = round(gap_min) if gap_min is not None else None
+    if gap_min is not None and gap_min < _AWAY_MIN_GAP_MIN:
+        return out
+
+    try:
+        rows = db.jarvis_insights_since(last_seen, limit=10)
+    except Exception as e:
+        log.debug("away_digest: query failed: %s", e)
+        rows = []
+    if not rows:
+        return out
+    out["insights"] = rows
+    out["count"] = len(rows)
+    # Per-kind tally so a UI can summarize ("2 alerts, 1 mover") without
+    # re-walking the insight list.
+    kc: Dict[str, int] = {}
+    for r in rows:
+        k = str(r.get("kind") or "other")
+        kc[k] = kc.get(k, 0) + 1
+    out["kind_counts"] = kc
+
+    if gap_min is None:
+        away = "you were away"
+    elif gap_min >= 2880:
+        away = "the last {} days".format(int(gap_min // 1440))
+    elif gap_min >= 120:
+        away = "the last {} hours".format(int(gap_min // 60))
+    else:
+        away = "the last {} minutes".format(int(gap_min))
+    titles = [r["title"] for r in rows[:3]]
+    out["line"] = "While you were out ({}): {}{}".format(
+        away, "; ".join(titles),
+        " — and {} more.".format(len(rows) - 3) if len(rows) > 3 else ".")
+    return out
 
 
 # ─── view context: Jarvis speaks on every view ───────────────────────────────
@@ -1060,6 +1482,67 @@ def _ago(ts: float) -> str:
     return "{}h ago".format(s // 3600)
 
 
+def health_snapshot() -> Dict[str, Any]:
+    """Self-diagnostics: LLM key + AI budget, warmer liveness, cache size,
+    memory/insight counts. Every section guarded — health reporting must
+    never itself be a source of failure."""
+    out: Dict[str, Any] = {"as_of": datetime.now(timezone.utc).isoformat()}
+    try:
+        import ai_summarizer
+        cap = ai_summarizer._daily_cap()
+        used = 0
+        try:
+            used = db.get_ai_call_count()
+        except Exception:
+            pass
+        out["ai"] = {"key": bool(ai_summarizer.get_openai_key()),
+                     "calls_today": used, "daily_cap": cap,
+                     "remaining": max(0, cap - used)}
+    except Exception:
+        out["ai"] = {"key": False, "calls_today": None, "daily_cap": None,
+                     "remaining": None}
+    try:
+        import cache_warmer
+        import time as _t
+        cycles = (cache_warmer.status() or {}).get("last_cycle") or {}
+        if cycles:
+            age = int(_t.time() - max(cycles.values()))
+            out["warmer"] = {"alive": age < 900, "last_cycle_age_s": age}
+        else:
+            out["warmer"] = {"alive": False, "last_cycle_age_s": None}
+    except Exception:
+        out["warmer"] = {"alive": False, "last_cycle_age_s": None}
+    try:
+        st = (cache_store.stats() if cache_store is not None else {}) or {}
+        out["cache"] = {"on_disk": st.get("on_disk"), "in_memory": st.get("in_memory")}
+    except Exception:
+        out["cache"] = {}
+    try:
+        out["memory_facts"] = len(db.jarvis_list_memories())
+    except Exception:
+        out["memory_facts"] = None
+    try:
+        row = db.get_conn().execute(
+            "SELECT COUNT(*) AS n FROM jarvis_insights").fetchone()
+        out["insights_14d"] = row["n"] if row else 0
+    except Exception:
+        out["insights_14d"] = None
+    try:
+        # db IS the shared database module; DB_PATH is its absolute path.
+        out["db_size_mb"] = round(os.path.getsize(db.DB_PATH) / 1e6, 2)
+    except Exception:
+        out["db_size_mb"] = None
+    out["uptime_s"] = int(time.time() - _STARTED)
+    try:
+        # Lazy import — app.py is the route layer and may import US lazily;
+        # resolving APP_VERSION at call time avoids any import-order coupling.
+        import app as _app
+        out["version"] = getattr(_app, "APP_VERSION", None)
+    except Exception:
+        out["version"] = None
+    return out
+
+
 def activity_snapshot() -> Dict[str, Any]:
     background: List[Dict[str, Any]] = []
     summary_bits: List[str] = []
@@ -1132,8 +1615,65 @@ def _known_symbols() -> set:
     return syms
 
 
+# Well-known company names → tickers, so "how is apple doing" works without
+# the user knowing to type AAPL. Equities only — crypto names resolve through
+# the held-symbol path, and a wrong stock quote is worse than no match.
+_COMPANY_NAMES = {
+    "apple": "AAPL", "microsoft": "MSFT", "google": "GOOGL", "alphabet": "GOOGL",
+    "amazon": "AMZN", "nvidia": "NVDA", "meta": "META", "facebook": "META",
+    "tesla": "TSLA", "netflix": "NFLX", "amd": "AMD", "intel": "INTC",
+    "berkshire": "BRK-B", "disney": "DIS", "boeing": "BA", "walmart": "WMT",
+    "costco": "COST", "starbucks": "SBUX", "nike": "NKE", "paypal": "PYPL",
+    "palantir": "PLTR", "coinbase": "COIN", "robinhood": "HOOD", "uber": "UBER",
+    "airbnb": "ABNB", "salesforce": "CRM", "oracle": "ORCL", "broadcom": "AVGO",
+    "qualcomm": "QCOM", "spotify": "SPOT", "shopify": "SHOP", "snowflake": "SNOW",
+    "micron": "MU", "ford": "F", "gm": "GM", "exxon": "XOM", "chevron": "CVX",
+    "jpmorgan": "JPM", "goldman": "GS", "visa": "V", "mastercard": "MA",
+}
+
+
+# Words that appear in position names but would hijack ordinary English if
+# treated as a company reference ("Apple Inc" → "apple" is the point; "First
+# Trust" → "first" is a trap).
+_NAME_SKIP_WORDS = {
+    "inc", "corp", "corporation", "company", "companies", "group", "holdings",
+    "holding", "class", "trust", "fund", "shares", "common", "stock", "the",
+    "first", "global", "international", "american", "united", "national",
+    "general", "world", "capital", "financial", "technologies", "systems",
+    "platforms", "with", "this", "that", "from", "what", "when", "will",
+    "range", "solid", "state", "core", "total", "value", "growth", "income",
+    "select", "small", "large", "high", "real",
+}
+
+
+def _held_name_map() -> Dict[str, str]:
+    """lowercase name → symbol for HELD positions, so "how is my palantir
+    doing" resolves without a _COMPANY_NAMES entry. Both the full stored name
+    and its first word are keyed; short or common words are skipped because a
+    false positive (quoting the wrong ticker) is worse than a miss."""
+    out: Dict[str, str] = {}
+    try:
+        for h in db.get_portfolio():
+            name = str(h.get("name") or "").strip().lower()
+            sym = str(h.get("symbol") or "").strip().upper()
+            if not name or not sym:
+                continue
+            if len(name) >= 4 and name not in _NAME_SKIP_WORDS:
+                out.setdefault(name, sym)
+            # First word, stripped of trailing punctuation ("Backblaze," →
+            # "backblaze") — the natural way people refer to a holding.
+            first = name.split()[0].strip(".,;:&")
+            if (len(first) >= 4 and first not in _NAME_SKIP_WORDS
+                    and first.upper() not in _STOPWORDS):
+                out.setdefault(first, sym)
+    except Exception:
+        pass
+    return out
+
+
 def _extract_symbol(query: str) -> Optional[str]:
-    """$SYM beats known portfolio/watchlist symbols beats bare ALL-CAPS token."""
+    """$SYM beats known portfolio/watchlist symbols beats company names
+    beats held-position names beats bare ALL-CAPS token."""
     m = re.search(r"\$([A-Za-z][A-Za-z.\-]{0,9})", query)
     if m:
         return m.group(1).upper()
@@ -1146,6 +1686,24 @@ def _extract_symbol(query: str) -> Optional[str]:
     for t in tokens:
         if t.upper() in known and (t.isupper() or t.upper() not in _STOPWORDS):
             return t.upper()
+    # Company names: "apple", "nvidia", "berkshire" — lowercase words a ticker
+    # match could never catch.
+    for t in tokens:
+        sym = _COMPANY_NAMES.get(t.lower())
+        if sym:
+            return sym
+    # Held-position names, resolved dynamically from the book — checked after
+    # the static map so a curated entry always wins.
+    held_names = _held_name_map()
+    if held_names:
+        for t in tokens:
+            sym = held_names.get(t.lower())
+            if sym:
+                return sym
+        low_q = query.lower()
+        for name, sym in held_names.items():
+            if " " in name and name in low_q:
+                return sym
     # bare all-caps token the user typed in caps (intentional ticker)
     for t in tokens:
         if t.isupper() and 1 <= len(t) <= 5 and t not in _STOPWORDS:
@@ -1164,13 +1722,39 @@ def _answer_quote(symbol: str) -> Dict[str, Any]:
     if hi and lo and hi > lo:  # hi > lo, not just truthy — guards inverted data
         pos = (q["price"] - lo) / (hi - lo) * 100
         parts.append("sitting at {:.0f}% of its 52-week range".format(pos))
+    cap = _fmt_cap(q.get("market_cap"))
+    if cap:
+        parts.append("{} market cap".format(cap))
+    vol = _finite(q.get("volume"))
+    if vol and vol >= 1e6:
+        parts.append("{:.1f}M shares traded".format(vol / 1e6))
     return {"answer": ", ".join(parts) + ".",
             "action": {"view": "research", "symbol": symbol}}
 
 
-def _answer_forecast(symbol: str) -> Dict[str, Any]:
+# Natural-language horizons → trading days. Ordered: first match wins, and
+# "next month" must be tried before any looser "month" matching ever added.
+# "tomorrow" maps to 5 — the minimum the ensemble supports — and the answer
+# says so rather than pretending to a 1-day call.
+_HORIZON_PHRASES = (
+    ("tomorrow", 5), ("next week", 5), ("this week", 5),
+    ("next month", 20), ("next quarter", 60),
+    ("this year", 120), ("next year", 120),
+)
+
+
+def _answer_forecast(symbol: str, q_lower: str = "") -> Dict[str, Any]:
     import forecast_ensemble
-    f = forecast_ensemble.ensemble_forecast(symbol)
+    horizon = None
+    phrase = None
+    for p, d in _HORIZON_PHRASES:
+        if p in q_lower:
+            horizon, phrase = d, p
+            break
+    if horizon is not None:
+        f = forecast_ensemble.ensemble_forecast(symbol, horizon_days=horizon)
+    else:
+        f = forecast_ensemble.ensemble_forecast(symbol)
     ens = (f or {}).get("ensemble") or {}
     if not ens:
         return {"answer": "The forecast ensemble has no read on {} right now.".format(symbol)}
@@ -1178,6 +1762,14 @@ def _answer_forecast(symbol: str) -> Dict[str, Any]:
     answer = "{}: ensemble of {} signals puts P(up) at {:.0f}% over {} trading days — {} conviction {}.".format(
         symbol, f.get("n_signals", 0), (prob or 0.5) * 100, f.get("horizon_days", 20),
         (ens.get("conviction") or "").lower(), ens.get("direction") or "")
+    cone = ens.get("return_cone") or {}
+    p05, p95 = _finite(cone.get("p05")), _finite(cone.get("p95"))
+    if p05 is not None and p95 is not None:
+        answer += " Return cone: {} to {} (5th–95th percentile).".format(
+            _fmt_pct(p05), _fmt_pct(p95))
+    if phrase:
+        answer += " (Your “{}” reads as ~{} trading days — the closest horizon I model.)".format(
+            phrase, f.get("horizon_days", horizon))
     notes = f.get("notes") or []
     return {"answer": answer,
             "detail": notes[0] if notes else None,
@@ -1189,13 +1781,29 @@ def _answer_portfolio(q_lower: str) -> Dict[str, Any]:
     if not pulse:
         return {"answer": "You don't have any portfolio positions yet. Add holdings to get portfolio intelligence.",
                 "action": {"view": "portfolio"}}
+    # "All time" / "overall" flips best/worst from today's tape to unrealized
+    # P&L — a different question with a different honest answer.
+    alltime = any(p in q_lower for p in ("all time", "all-time", "alltime",
+                                         "overall", "since the beginning",
+                                         "since inception"))
+    ranked = [r for r in pulse["holdings"] if _finite(r.get("unrealized_pct")) is not None]
     if "worst" in q_lower or "loser" in q_lower or "losing" in q_lower:
+        if alltime and ranked:
+            w = min(ranked, key=lambda r: r["unrealized_pct"])
+            return {"answer": "Your worst position all-time is {} at {} unrealized ({}).".format(
+                        w["symbol"], _fmt_pct(w["unrealized_pct"]), _fmt_usd(w["unrealized_pnl"])),
+                    "action": {"view": "research", "symbol": w["symbol"]}}
         w = pulse.get("worst")
         if w:
             return {"answer": "Your weakest position today is {} at {} ({} day P&L).".format(
                         w["symbol"], _fmt_pct(w["day_change_pct"]), _fmt_usd(w["day_pnl"])),
                     "action": {"view": "research", "symbol": w["symbol"]}}
     if "best" in q_lower or "winner" in q_lower or "winning" in q_lower:
+        if alltime and ranked:
+            b = max(ranked, key=lambda r: r["unrealized_pct"])
+            return {"answer": "Your best position all-time is {} at {} unrealized ({}).".format(
+                        b["symbol"], _fmt_pct(b["unrealized_pct"]), _fmt_usd(b["unrealized_pnl"])),
+                    "action": {"view": "research", "symbol": b["symbol"]}}
         b = pulse.get("best")
         if b:
             return {"answer": "Your strongest position today is {} at {} ({} day P&L).".format(
@@ -1234,14 +1842,210 @@ def _answer_exposure() -> Dict[str, Any]:
             "action": {"view": "analytics"}}
 
 
+def _answer_biggest() -> Dict[str, Any]:
+    """One-liner top weight — lighter than the full exposure breakdown."""
+    pulse = _portfolio_pulse()
+    if not pulse:
+        return {"answer": "No positions yet — nothing is biggest in an empty book.",
+                "action": {"view": "portfolio"}}
+    top = max(pulse["holdings"], key=lambda r: r["market_value"])
+    return {"answer": "Your biggest position is {} at {} — {:.1f}% of the book.".format(
+                top["symbol"], _fmt_usd(top["market_value"]), top.get("weight_pct") or 0),
+            "action": {"view": "research", "symbol": top["symbol"]}}
+
+
+def _answer_holding_period(symbol: str) -> Dict[str, Any]:
+    """'When did I buy X / how long have I held X' — from the transaction log,
+    earliest BUY is the position's birthday."""
+    txns = db.get_transactions(symbol=symbol, limit=500) or []
+    buys = [t for t in txns
+            if str(t.get("action") or "").upper() == "BUY" and t.get("date")]
+    if not buys:
+        return {"answer": "I have no recorded buys for {} — if you hold it, the "
+                          "fills predate the transaction log.".format(symbol),
+                "action": {"view": "transactions"}}
+    first = min(buys, key=lambda t: str(t["date"]))
+    held = ""
+    try:
+        d0 = datetime.strptime(str(first["date"])[:10], "%Y-%m-%d")
+        days = max(0, (datetime.now() - d0).days)
+        if days < 1:
+            held = " — bought today"
+        elif days < 60:
+            held = " — held {} day{}".format(days, "s" if days != 1 else "")
+        elif days < 730:
+            held = " — held about {} months".format(int(round(days / 30.44)))
+        else:
+            held = " — held about {:.1f} years".format(days / 365.25)
+    except Exception:
+        pass
+    return {"answer": "You first bought {} on {}{}, across {} fill{}.".format(
+                symbol, str(first["date"])[:10], held,
+                len(buys), "s" if len(buys) != 1 else ""),
+            "action": {"view": "transactions"}}
+
+
+def _answer_basis(symbol: str) -> Dict[str, Any]:
+    """'What did I pay for X' — basis from the book, marked against the live
+    quote (crypto prices live at SYM-USD)."""
+    rows = [h for h in db.get_portfolio()
+            if str(h.get("symbol") or "").upper() == symbol.upper()]
+    if not rows:
+        return {"answer": "You don't hold {} — no cost basis to report.".format(symbol),
+                "action": {"view": "portfolio"}}
+    shares = sum(h["shares"] for h in rows)
+    cost = sum(h["shares"] * h["avg_cost"] for h in rows)
+    avg = cost / shares if shares else 0
+    is_crypto = any(h.get("asset_type") == "crypto" for h in rows)
+    unit = "unit" if is_crypto else "share"
+    tail = ""
+    try:
+        q = fetcher.get_quote(symbol + "-USD" if is_crypto else symbol) or {}
+        price = _finite(q.get("price"))
+        if price:
+            mv = price * shares
+            pnl = mv - cost
+            tail = " Worth {} now at ${:,.2f} — {} {} ({}).".format(
+                _fmt_usd(mv), price, "up" if pnl >= 0 else "down",
+                _fmt_usd(abs(pnl)),
+                _fmt_pct(pnl / cost * 100) if cost > 0 else "—")
+    except Exception:
+        pass
+    return {"answer": "Your basis in {}: {:g} {}{} at ${:,.2f} average — {} in.{}".format(
+                symbol, shares, unit, "s" if shares != 1 else "", avg,
+                _fmt_usd(cost), tail),
+            "action": {"view": "portfolio"}}
+
+
+def _fmt_minutes(m: int) -> str:
+    h, r = divmod(max(0, int(m)), 60)
+    if h and r:
+        return "{}h {}m".format(h, r)
+    if h:
+        return "{}h".format(h)
+    return "{}m".format(r)
+
+
+def _answer_hours() -> Dict[str, Any]:
+    """'Is the market open' — phase, ET clock, and what comes next. The minute
+    boundaries mirror _market_phase exactly (240/570/960/1200)."""
+    now = _et_now()
+    phase = _market_phase(now)
+    clock = now.strftime("%I:%M %p").lstrip("0")
+    mins = now.hour * 60 + now.minute
+    wd = now.weekday()
+    if wd >= 5:
+        nxt = "the bell rings Monday at 9:30 AM ET"
+    elif mins < 240:
+        nxt = "pre-market starts in {} (4:00 AM ET), the bell at 9:30 AM ET".format(
+            _fmt_minutes(240 - mins))
+    elif mins < 570:
+        nxt = "the opening bell is in {} (9:30 AM ET)".format(_fmt_minutes(570 - mins))
+    elif mins < 960:
+        nxt = "the close is in {} (4:00 PM ET)".format(_fmt_minutes(960 - mins))
+    elif mins < 1200:
+        nxt = "after-hours ends in {} (8:00 PM ET); next open {} at 9:30 AM ET".format(
+            _fmt_minutes(1200 - mins), "Monday" if wd == 4 else "tomorrow")
+    else:
+        nxt = "next open {} at 9:30 AM ET".format("Monday" if wd == 4 else "tomorrow")
+    return {"answer": "Markets are {} right now ({} ET) — {}.".format(phase, clock, nxt)}
+
+
+def portfolio_attribution() -> Optional[Dict[str, Any]]:
+    """Per-holding contribution to TODAY's portfolio move — the data behind
+    'why am I up/down'. Returns None when there are no priced positions or
+    no day-change data (e.g. crypto-only book with a dead feed)."""
+    pulse = _portfolio_pulse()
+    if not pulse:
+        return None
+    rows = [r for r in pulse["holdings"] if _finite(r.get("day_pnl")) is not None]
+    if not rows:
+        return None
+    total = _finite(pulse.get("day_pnl"))
+
+    def _entry(r: Dict[str, Any]) -> Dict[str, Any]:
+        e = {"symbol": r["symbol"], "day_pnl": r["day_pnl"],
+             "day_change_pct": r.get("day_change_pct"),
+             "weight_pct": r.get("weight_pct")}
+        # Share of the net move — only meaningful when the net isn't ~flat
+        # (dividing by a near-zero net turns tiny moves into 4000% shares).
+        if total is not None and abs(total) >= 1.0:
+            e["share_of_move_pct"] = round(r["day_pnl"] / total * 100, 1)
+        return e
+
+    rows.sort(key=lambda r: r["day_pnl"])
+    detractors = [_entry(r) for r in rows[:3] if r["day_pnl"] < 0]
+    contributors = [_entry(r) for r in rows[::-1][:3] if r["day_pnl"] > 0]
+
+    out = {
+        "day_pnl": pulse.get("day_pnl"),
+        "day_pnl_pct": pulse.get("day_pnl_pct"),
+        "total_value": pulse.get("total_value"),
+        "contributors": contributors,
+        "detractors": detractors,
+    }
+    try:
+        regime = _market_regime()
+        if regime:
+            out["spx_pct"] = regime.get("spx_pct")
+            out["vix"] = regime.get("vix")
+    except Exception:
+        pass
+    return out
+
+
+def _answer_why() -> Dict[str, Any]:
+    a = portfolio_attribution()
+    if not a:
+        return {"answer": "I don't have day-move data for your positions right "
+                          "now — either the book is empty or the quote feed is "
+                          "still warming.",
+                "action": {"view": "portfolio"}}
+    total = _finite(a.get("day_pnl")) or 0.0
+    head = "You're {} {} ({}) today".format(
+        "up" if total >= 0 else "down", _fmt_usd(abs(total)),
+        _fmt_pct(a.get("day_pnl_pct")))
+
+    def _phrase(e: Dict[str, Any]) -> str:
+        s = "{} ({}, {})".format(e["symbol"], _fmt_usd(e["day_pnl"]),
+                                 _fmt_pct(e.get("day_change_pct")))
+        if e.get("share_of_move_pct") is not None and e["share_of_move_pct"] > 0:
+            s += " — {:.0f}% of the move".format(min(e["share_of_move_pct"], 999))
+        return s
+
+    bits = [head + "."]
+    main = a["detractors"] if total < 0 else a["contributors"]
+    other = a["contributors"] if total < 0 else a["detractors"]
+    if main:
+        bits.append("{} of it: {}.".format(
+            "Most" if len(main) > 1 else "All", "; ".join(_phrase(e) for e in main)))
+    if other:
+        bits.append("Fighting the tide: {}.".format(
+            "; ".join("{} ({})".format(e["symbol"], _fmt_usd(e["day_pnl"]))
+                      for e in other[:2])))
+    spx = _finite(a.get("spx_pct"))
+    mine = _finite(a.get("day_pnl_pct"))
+    if spx is not None and mine is not None:
+        if abs(spx) >= 0.3 and (spx >= 0) == (mine >= 0) and abs(mine) <= abs(spx) * 2:
+            bits.append("Context: the S&P is {} too — a chunk of this is just "
+                        "the tape.".format(_fmt_pct(spx)))
+        elif (spx >= 0) != (mine >= 0):
+            bits.append("Notably, you're moving AGAINST the tape (S&P {}) — "
+                        "this one is your positioning, not the market.".format(_fmt_pct(spx)))
+    return {"answer": " ".join(bits), "data": a, "action": {"view": "portfolio"}}
+
+
 def _answer_earnings(symbol: Optional[str]) -> Dict[str, Any]:
     import earnings
     if symbol:
         cal = earnings.get_earnings_calendar([symbol])
         if cal:
             e = cal[0]
-            return {"answer": "{} reports earnings on {} ({} days away).".format(
-                        e["symbol"], e["earnings_date"], e["days_until"]),
+            beat = ""
+            if e.get("beat_rate") is not None:
+                beat = " Historical beat rate: {}%.".format(e["beat_rate"])
+            return {"answer": "{} reports earnings on {} ({} days away).{}".format(
+                        e["symbol"], e["earnings_date"], e["days_until"], beat),
                     "action": {"view": "earnings", "symbol": symbol}}
         return {"answer": "No upcoming earnings date found for {}.".format(symbol)}
     held = []
@@ -1318,11 +2122,490 @@ def _answer_ideas() -> Dict[str, Any]:
             "action": {"view": "ideas"}}
 
 
+def _answer_watchlist() -> Dict[str, Any]:
+    wl = db.get_watchlist()
+    if not wl:
+        return {"answer": "Your watchlist is empty. Add names and I'll track them tick by tick.",
+                "action": {"view": "watchlist"}}
+    syms = [w["symbol"] for w in wl][:15]
+    quotes = fetcher.get_quotes_batch(syms)
+    movers = [(s, (quotes.get(s) or {}).get("change_pct")) for s in syms]
+    movers = [m for m in movers if m[1] is not None]
+    movers.sort(key=lambda m: -abs(m[1]))
+    tail = ""
+    if movers:
+        tail = " Today: " + "; ".join(
+            "{} {}".format(s, _fmt_pct(p)) for s, p in movers[:4]) + "."
+    return {"answer": "Watching {} name{}.{}".format(
+                len(wl), "s" if len(wl) != 1 else "", tail),
+            "action": {"view": "watchlist"}}
+
+
+def _answer_range(symbol: str) -> Dict[str, Any]:
+    """52-week range position — 'is NVDA near its high?'"""
+    q = fetcher.get_quote(symbol)
+    if not q or q.get("error") or q.get("price") is None:
+        return {"answer": "I couldn't get a quote for {} right now.".format(symbol)}
+    hi, lo = _finite(q.get("fifty_two_week_high")), _finite(q.get("fifty_two_week_low"))
+    if not hi or not lo or hi <= lo:
+        return {"answer": "{} is at ${:,.2f}, but I don't have a clean 52-week range for it.".format(
+                    symbol, q["price"]),
+                "action": {"view": "research", "symbol": symbol}}
+    price = q["price"]
+    pos = (price - lo) / (hi - lo) * 100
+    off_hi = (hi - price) / hi * 100
+    above_lo = (price - lo) / lo * 100
+    if pos >= 90:
+        verdict = "that's knocking on the high — momentum territory"
+    elif pos >= 60:
+        verdict = "upper end of the range"
+    elif pos >= 40:
+        verdict = "mid-range, no extreme either way"
+    else:
+        verdict = "closer to the low than the high"
+    return {"answer": "{} at ${:,.2f} sits at {:.0f}% of its 52-week range "
+                      "(${:,.2f}–${:,.2f}) — {:.1f}% below the high, {:.0f}% above "
+                      "the low. In short: {}.".format(
+                          symbol, price, pos, lo, hi, off_hi, above_lo, verdict),
+            "action": {"view": "research", "symbol": symbol}}
+
+
+def _answer_recap() -> Dict[str, Any]:
+    """'What did I miss' — replay the away digest without moving the watermark."""
+    d = away_digest(mark_seen=False)
+    if not d.get("count"):
+        return {"answer": "Nothing new since your last look — no alerts tripped, "
+                          "no notable moves logged. I'll keep watch."}
+    extra = ""
+    if d["count"] > 3:
+        titles = [r["title"] for r in d["insights"][3:6]]
+        if titles:
+            extra = " Also: {}.".format("; ".join(titles))
+    return {"answer": (d.get("line") or "") + extra, "data": {"count": d["count"]},
+            "action": {"view": "overview"}}
+
+
+def _answer_day_summary() -> Dict[str, Any]:
+    """One composed paragraph: book, driver, market, alerts."""
+    bits: List[str] = []
+    try:
+        pulse = _portfolio_pulse()
+    except Exception:
+        pulse = None
+    if pulse:
+        if pulse.get("day_pnl") is not None:
+            bits.append("Book {} {} ({}) today at {}.".format(
+                "up" if pulse["day_pnl"] >= 0 else "down",
+                _fmt_usd(abs(pulse["day_pnl"])), _fmt_pct(pulse.get("day_pnl_pct")),
+                _fmt_usd(pulse["total_value"])))
+        try:
+            a = portfolio_attribution()
+            main = (a or {}).get("detractors" if (pulse.get("day_pnl") or 0) < 0
+                                 else "contributors") or []
+            if main:
+                bits.append("Main driver: {} ({}).".format(
+                    main[0]["symbol"], _fmt_usd(main[0]["day_pnl"])))
+        except Exception:
+            pass
+    try:
+        regime = _market_regime()
+    except Exception:
+        regime = None
+    if regime and regime.get("spx_pct") is not None:
+        vix_bit = ""
+        if regime.get("vix") is not None:
+            vix_bit = ", VIX {:.1f} ({})".format(regime["vix"], regime.get("regime") or "—")
+        bits.append("Market: S&P {}{}.".format(_fmt_pct(regime["spx_pct"]), vix_bit))
+    try:
+        trig = [x for x in db.get_price_alerts(include_triggered=True) if x.get("triggered")]
+        if trig:
+            bits.append("{} alert{} triggered.".format(len(trig), "s" if len(trig) != 1 else ""))
+    except Exception:
+        pass
+    if not bits:
+        return {"answer": "Quiet day — I have no portfolio or market data to summarize right now."}
+    return {"answer": " ".join(bits), "action": {"view": "overview"}}
+
+
+def _answer_risk() -> Dict[str, Any]:
+    """Rule-based risk read: concentration, crypto share, market regime."""
+    pulse = _portfolio_pulse()
+    if not pulse:
+        return {"answer": "No positions, no risk. Add holdings and I'll keep score.",
+                "action": {"view": "portfolio"}}
+    rows = sorted(pulse["holdings"], key=lambda r: -r.get("weight_pct", 0))
+    top = rows[0]
+    top3 = sum(r.get("weight_pct") or 0 for r in rows[:3])
+    crypto_pct = sum(r.get("weight_pct") or 0 for r in rows
+                     if r.get("asset_type") == "crypto")
+    flags: List[str] = []
+    if (top.get("weight_pct") or 0) >= _CONCENTRATION_PCT:
+        flags.append("{} alone is {:.0f}% of the book".format(top["symbol"], top["weight_pct"]))
+    if top3 >= 70:
+        flags.append("top 3 positions are {:.0f}% combined".format(top3))
+    if crypto_pct >= 30:
+        flags.append("crypto is {:.0f}% of the book".format(crypto_pct))
+    regime_bit = ""
+    try:
+        regime = _market_regime()
+        if regime and regime.get("regime") in ("ELEVATED", "STRESSED"):
+            regime_bit = " And the volatility regime is {} right now — sizing matters more than usual.".format(
+                regime["regime"])
+    except Exception:
+        pass
+    head = "Across {} positions: {} is your largest at {:.0f}%, top 3 hold {:.0f}%, crypto {:.0f}%.".format(
+        pulse["num_positions"], top["symbol"], top.get("weight_pct") or 0, top3, crypto_pct)
+    if flags:
+        verdict = " Concentration flags: {}.".format("; ".join(flags))
+    else:
+        verdict = " No concentration flags at my thresholds — reasonably spread."
+    return {"answer": head + verdict + regime_bit + " The stress test shows what this book survives.",
+            "action": {"view": "stress"}}
+
+
+def _answer_crypto_share() -> Dict[str, Any]:
+    pulse = _portfolio_pulse()
+    if not pulse:
+        return {"answer": "No positions yet — crypto share of nothing is nothing.",
+                "action": {"view": "portfolio"}}
+    crypto = [r for r in pulse["holdings"] if r.get("asset_type") == "crypto"]
+    if not crypto:
+        return {"answer": "You hold no crypto right now — the book is all equities.",
+                "action": {"view": "portfolio"}}
+    mv = sum(r["market_value"] for r in crypto)
+    pct = sum(r.get("weight_pct") or 0 for r in crypto)
+    names = ", ".join("{} ({:.1f}%)".format(r["symbol"], r.get("weight_pct") or 0)
+                      for r in sorted(crypto, key=lambda r: -r["market_value"])[:4])
+    return {"answer": "Crypto is {} of the book — {:.1f}% across {} position{}: {}.".format(
+                _fmt_usd(mv), pct, len(crypto), "s" if len(crypto) != 1 else "", names),
+            "action": {"view": "crypto"}}
+
+
+def _answer_transactions() -> Dict[str, Any]:
+    txns = db.get_transactions(limit=5)
+    if not txns:
+        return {"answer": "No transactions on record yet.",
+                "action": {"view": "transactions"}}
+    bits = []
+    for t in txns:
+        bits.append("{} {:g} {} @ ${:,.2f} on {}".format(
+            (t.get("action") or "?").upper(), t.get("shares") or 0,
+            t.get("symbol") or "?", t.get("price") or 0, t.get("date") or "—"))
+    return {"answer": "Last fills: {}.".format("; ".join(bits)),
+            "action": {"view": "transactions"}}
+
+
+def _answer_benchmark() -> Dict[str, Any]:
+    """'Am I beating the market?' — honest day-scope comparison."""
+    pulse = _portfolio_pulse()
+    if not pulse or pulse.get("day_pnl_pct") is None:
+        return {"answer": "I don't have a clean day move for your book right now to compare against the index."}
+    regime = None
+    try:
+        regime = _market_regime()
+    except Exception:
+        pass
+    spx = _finite((regime or {}).get("spx_pct"))
+    mine = _finite(pulse.get("day_pnl_pct"))
+    if spx is None or mine is None:
+        return {"answer": "Index data is unavailable right now, so I can't make the comparison."}
+    diff = mine - spx
+    verdict = ("ahead of" if diff > 0.05 else ("behind" if diff < -0.05 else "tracking"))
+    alltime = " All-time, the book is {} ({}).".format(
+        "up" if pulse["total_pnl"] >= 0 else "down", _fmt_pct(pulse.get("total_pnl_pct")))
+    return {"answer": "Today: you {} vs S&P {} — {} the tape by {:.2f}pt. "
+                      "One day proves nothing, but that's the score.{}".format(
+                          _fmt_pct(mine), _fmt_pct(spx), verdict, abs(diff), alltime),
+            "action": {"view": "analytics"}}
+
+
+_VS_RE = re.compile(
+    r"\b([A-Za-z][A-Za-z.\-]{0,9})\s+(?:vs\.?|versus)\s+([A-Za-z][A-Za-z.\-]{0,9})\b",
+    re.IGNORECASE)
+
+
+def _answer_compare_quotes(s1: str, s2: str) -> Dict[str, Any]:
+    """Instant keyless side-by-side — 'NVDA vs AMD'."""
+    q1, q2 = fetcher.get_quote(s1), fetcher.get_quote(s2)
+
+    def _line(sym: str, q: Optional[Dict[str, Any]]) -> Optional[str]:
+        if not q or q.get("error") or q.get("price") is None:
+            return None
+        parts = ["{} ${:,.2f} ({})".format(sym, q["price"], _fmt_pct(q.get("change_pct")))]
+        hi, lo = _finite(q.get("fifty_two_week_high")), _finite(q.get("fifty_two_week_low"))
+        if hi and lo and hi > lo:
+            parts.append("{:.0f}% of 52-wk range".format((q["price"] - lo) / (hi - lo) * 100))
+        cap = _fmt_cap(q.get("market_cap"))
+        if cap:
+            parts.append(cap)
+        return ", ".join(parts)
+
+    l1, l2 = _line(s1, q1), _line(s2, q2)
+    if not l1 or not l2:
+        missing = s1 if not l1 else s2
+        return {"answer": "I couldn't price {} right now — try again in a moment.".format(missing)}
+    tail = ""
+    c1, c2 = _finite((q1 or {}).get("change_pct")), _finite((q2 or {}).get("change_pct"))
+    if c1 is not None and c2 is not None and abs(c1 - c2) >= 0.05:
+        tail = " {} has the better day.".format(s1 if c1 > c2 else s2)
+    return {"answer": "{} — versus — {}.{}".format(l1, l2, tail),
+            "action": {"view": "research", "symbol": s1}}
+
+
+# ─── deep knowledge: instant, keyless concept explanations ──────────────────
+# Curated, expert-grade. Each entry: 2-3 sentences naming the MECHANISM (not
+# a dictionary definition), an optional AUGUR view where the concept is live,
+# and aliases. Terms outside the glossary fall through to the agent, which
+# now has web_research — so this is the fast path, not the ceiling.
+
+_GLOSSARY: Dict[str, Dict[str, Any]] = {
+    "p/e ratio": {"aliases": ["p/e", "pe ratio", "pe", "price to earnings", "price-to-earnings"],
+        "text": "Price divided by earnings per share — the price of one dollar of profit. "
+                "It's really a compressed forecast: a high P/E says the market expects earnings to grow into the price, "
+                "a low one says it doesn't believe the E will last. Compare within a sector, never across them.",
+        "view": "screener"},
+    "market cap": {"aliases": ["market capitalization", "mcap"],
+        "text": "Share price × shares outstanding — what the market says the whole company is worth. "
+                "Price moves don't create or destroy cash, they reprice every share simultaneously; "
+                "that's why a 3% move on a $3T name 'moves' $90B without a dollar changing hands."},
+    "dividend yield": {"aliases": ["yield"],
+        "text": "Annual dividend ÷ share price. A rising yield is double-edged: either the payout grew or the price fell. "
+                "Yields far above peers usually mean the market is pricing a cut — the yield is high because trust is low.",
+        "view": "dividends"},
+    "beta": {"aliases": [],
+        "text": "How much a stock historically moves per 1% move in the market. Beta 1.5 amplifies both directions — "
+                "it's leverage you didn't borrow. Low-beta names mute the tape; they don't defy it."},
+    "vix": {"aliases": ["fear index", "volatility index"],
+        "text": "The market's 30-day implied volatility for the S&P 500, extracted from option prices — "
+                "literally what hedging costs right now. Under ~15 is complacent, over ~28 is stress. "
+                "It spikes when everyone wants insurance at once.",
+        "view": "macro"},
+    "gamma exposure": {"aliases": ["gex", "gamma", "dealer gamma"],
+        "text": "Options dealers hedge what they sell. When dealers are long gamma they sell rallies and buy dips — "
+                "pinning price; when short gamma they must chase moves, amplifying them. "
+                "The flip level between those regimes is where the tape's character changes.",
+        "view": "gex"},
+    "short interest": {"aliases": ["short squeeze", "shorts"],
+        "text": "Shares sold short as a fraction of float. High short interest is stored buying pressure: "
+                "every short must eventually buy to close. A squeeze is that buying forced all at once — "
+                "fuel, not a verdict on the business."},
+    "rsi": {"aliases": ["relative strength index"],
+        "text": "A 0-100 oscillator of recent gains vs losses. Above ~70 reads overbought, below ~30 oversold — "
+                "but strong trends stay 'overbought' for months. It measures stretch, not direction.",
+        "view": "research"},
+    "moving average": {"aliases": ["50dma", "200dma", "sma", "ema", "moving averages"],
+        "text": "The average price over a trailing window — a smoothed memory of what holders recently paid. "
+                "The 50/200-day crossovers matter mostly because enough money believes they do; "
+                "they're coordination points, not physics.",
+        "view": "research"},
+    "sharpe ratio": {"aliases": ["sharpe"],
+        "text": "Excess return per unit of volatility — how much you're paid per unit of sleep lost. "
+                "Two portfolios with equal returns aren't equal if one took twice the swings; Sharpe is the tiebreaker.",
+        "view": "analytics"},
+    "drawdown": {"aliases": ["max drawdown"],
+        "text": "Peak-to-trough decline. The brutal math: a 50% drawdown needs +100% to recover. "
+                "It's the number that tests temperament — returns decide how rich you get, drawdowns decide whether you stay invested.",
+        "view": "stress"},
+    "stop loss": {"aliases": ["stop-loss", "stop order"],
+        "text": "An order that sells once price crosses a level. It caps downside but converts volatility into realized loss — "
+                "in a gap or flash dip you sell the low. Position sizing is the stop loss that can't be gapped through."},
+    "limit order": {"aliases": ["market order"],
+        "text": "A limit order names your price and waits; a market order takes whatever's offered now. "
+                "In thin names the spread IS a cost — market orders pay it, limit orders earn it."},
+    "etf": {"aliases": ["index fund", "etfs"],
+        "text": "A fund that trades like a stock, usually tracking an index. The quiet revolution: it made "
+                "diversification nearly free. The catch: you own the index's concentration too — "
+                "the S&P 500 is a tech-weighted bet wearing a diversified costume."},
+    "dollar cost averaging": {"aliases": ["dca", "dollar-cost averaging"],
+        "text": "Investing a fixed amount on a schedule regardless of price. It's behavioral armor, not magic: "
+                "lump-sum wins on average because markets drift up, but DCA removes the regret that makes people freeze at highs and panic at lows."},
+    "diversification": {"aliases": ["diversify"],
+        "text": "Owning risks that don't fail together. The free lunch is correlation, not count — "
+                "twenty tech names is one bet worn twenty ways. The test is what happens to everything you own on the same bad day.",
+        "view": "analytics"},
+    "concentration risk": {"aliases": ["concentration"],
+        "text": "When one position is big enough to set your whole outcome. Concentration builds wealth; "
+                "diversification keeps it. The danger isn't being wrong — it's being wrong in size.",
+        "view": "stress"},
+    "sector rotation": {"aliases": ["rotation"],
+        "text": "Capital migrating between sectors as the cycle turns — banks like rising rates, tech likes falling ones, "
+                "staples catch the bid when fear rises. Watching flows tells you what the market believes about the NEXT six months.",
+        "view": "sectorflow"},
+    "yield curve": {"aliases": ["inverted yield curve", "yield curve inversion", "curve inversion"],
+        "text": "Treasury yields plotted short to long. Inversion — short rates above long — means the market "
+                "expects the Fed to be forced into cuts, historically the cleanest recession signal. "
+                "The slope is the bond market's macro forecast in one line.",
+        "view": "macro"},
+    "fed funds rate": {"aliases": ["fed rate", "interest rates", "rate hike", "rate cut"],
+        "text": "The overnight rate the Fed sets — the price of money everything else is priced off. "
+                "Raising it makes future cash flows worth less today, which is why long-duration assets (growth stocks) feel it hardest.",
+        "view": "macro"},
+    "quantitative easing": {"aliases": ["qe", "qt", "quantitative tightening"],
+        "text": "QE: the Fed buys bonds, pushing money into riskier assets — the tide that lifts everything. "
+                "QT is the drain. Liquidity is the variable most investors ignore until it's the only one that matters.",
+        "view": "liquidity"},
+    "cpi": {"aliases": ["inflation"],
+        "text": "The consumer price index — inflation's headline number. Markets trade the SURPRISE, not the level: "
+                "a hot print repriced rate expectations within seconds. Core (ex food/energy) is what the Fed actually watches.",
+        "view": "macro"},
+    "recession": {"aliases": [],
+        "text": "A broad contraction in activity. Markets bottom BEFORE recessions end — prices turn on the second "
+                "derivative, when things get worse more slowly. Waiting for the all-clear means buying the recovery at full price."},
+    "bull market": {"aliases": ["bear market", "correction"],
+        "text": "Bull: +20% off a low; bear: −20% off a high; correction: −10%. Arbitrary thresholds, real psychology — "
+                "bears compress years of fear into months, bulls climb a wall of disbelief for years. Time in beats timing, statistically."},
+    "options": {"aliases": ["call option", "put option", "calls", "puts"],
+        "text": "Calls are the right to buy at a strike, puts the right to sell. You pay premium for asymmetry: "
+                "defined loss, leveraged gain. Most expire worthless — the seller's edge is time; the buyer's edge is being right about WHEN, not just what.",
+        "view": "options-flow"},
+    "implied volatility": {"aliases": ["iv", "implied vol"],
+        "text": "The volatility baked into an option's price — the market's bet on future movement. "
+                "Buying options when IV is high means overpaying for drama already expected; the edge is when realized exceeds implied.",
+        "view": "options-flow"},
+    "theta": {"aliases": ["time decay"],
+        "text": "Option value lost per day to time. It accelerates near expiry — long options bleed fastest exactly when "
+                "they're most exciting. Theta is why being early and being wrong feel identical to an option buyer."},
+    "covered call": {"aliases": ["covered calls", "the wheel"],
+        "text": "Owning shares and selling calls against them — renting out upside for income. "
+                "It outperforms sideways and underperforms in melt-ups; you've sold the right tail, which is where equity's long-run return lives."},
+    "margin": {"aliases": ["leverage"],
+        "text": "Borrowed money amplifying both directions. The asymmetry kills: leverage forces selling at lows "
+                "(margin calls arrive at maximum pain), so it converts temporary drawdowns into permanent losses."},
+    "liquidity": {"aliases": [],
+        "text": "How much you can trade without moving the price. It evaporates exactly when needed most — "
+                "in a panic, bids vanish and 'the market price' becomes theoretical. Position size should respect exit size.",
+        "view": "liquidity"},
+    "momentum": {"aliases": [],
+        "text": "Winners keep winning — the most stubborn anomaly in finance, likely powered by underreaction and herding. "
+                "It works until it crashes: momentum's worst days cluster at regime turns.",
+        "view": "research"},
+    "mean reversion": {"aliases": ["reversion to the mean"],
+        "text": "Stretched prices snapping back toward average. The catch is the timeframe: days-to-weeks for oscillators, "
+                "years for valuations. 'Cheap' is a mean-reversion bet that can stay wrong longer than you stay solvent.",
+        "view": "forecast"},
+    "smart money": {"aliases": ["institutional money", "13f"],
+        "text": "Insiders, institutions, and funds whose trades are disclosed (Form 4s, 13Fs, congressional filings). "
+                "The signal is CONVERGENCE — one buyer is noise, insiders plus funds plus options flow agreeing is a tell.",
+        "view": "signals"},
+    "dark pool": {"aliases": ["dark pools"],
+        "text": "Private venues where large blocks trade without showing on the public book — "
+                "institutions hiding their footprints so the market can't front-run them. Prints surface after the fact, "
+                "which is why unusual volume often precedes visible news."},
+    "insider trading": {"aliases": ["form 4", "insider buying", "insider selling"],
+        "text": "Executives trading their own stock, legally, disclosed on Form 4s within two days. "
+                "Insider BUYING is the cleaner signal — there's one reason to buy but a dozen innocent reasons to sell.",
+        "view": "intel"},
+    "moat": {"aliases": ["economic moat", "competitive advantage"],
+        "text": "A structural reason competitors can't take the profits — network effects, switching costs, scale, brand. "
+                "Returns on capital above the cost of capital ATTRACT attack; the moat is whatever makes the attack fail. "
+                "No moat means today's margins are tomorrow's commodity.",
+        "view": "jarvis"},
+    "margin of safety": {"aliases": ["intrinsic value"],
+        "text": "Buying well below your estimate of value so being somewhat wrong still works out. "
+                "It's epistemic humility priced in: the discount isn't extra profit, it's insurance against your own analysis.",
+        "view": "jarvis"},
+    "compounding": {"aliases": ["compound interest"],
+        "text": "Returns earning returns. The curve is deceptively flat early and vertical late — "
+                "the first double takes years, the last double of a lifetime is bigger than all the others combined. "
+                "Interrupting it (selling winners, big drawdowns, fees) is the most expensive mistake in investing."},
+}
+
+# alias → canonical term, built once at import
+_GLOSSARY_INDEX: Dict[str, str] = {}
+for _term, _spec in _GLOSSARY.items():
+    _GLOSSARY_INDEX[_term] = _term
+    for _a in _spec.get("aliases", []):
+        _GLOSSARY_INDEX[_a] = _term
+
+_EXPLAIN_RE = re.compile(
+    r"^(?:what(?:'s|s)?(?:\s+(?:is|are|does))?|explain|define|tell me about|how do(?:es)?)\s+"
+    r"(?:a |an |the |my )?(.+?)(?:\s+(?:mean|work|works))?[\s?.!]*$",
+    re.IGNORECASE)
+
+
+def _answer_explain(ql: str) -> Optional[Dict[str, Any]]:
+    """Instant concept explanations — the deep-knowledge fast path. Returns
+    None when the phrase isn't glossary-shaped (so the chain continues)."""
+    m = _EXPLAIN_RE.match(ql)
+    if not m:
+        return None
+    term = " ".join(m.group(1).lower().split())
+    canon = _GLOSSARY_INDEX.get(term)
+    if not canon:
+        return None
+    spec = _GLOSSARY[canon]
+    out: Dict[str, Any] = {"answer": spec["text"]}
+    if spec.get("view"):
+        out["action"] = {"view": spec["view"]}
+    # Live flavor where it's nearly free: the VIX entry quotes the tape.
+    if canon == "vix":
+        try:
+            regime = _market_regime()
+            if regime and regime.get("vix") is not None:
+                out["answer"] += " Right now it's at {:.1f} ({}).".format(
+                    regime["vix"], regime.get("regime") or "—")
+        except Exception:
+            pass
+    # Concentration gets the user's own number — knowledge lands harder
+    # when it's about their book.
+    if canon == "concentration risk":
+        try:
+            pulse = _portfolio_pulse()
+            if pulse and pulse.get("holdings"):
+                top = max(pulse["holdings"], key=lambda r: r.get("weight_pct") or 0)
+                out["answer"] += " Yours right now: {} at {:.0f}% of the book.".format(
+                    top["symbol"], top.get("weight_pct") or 0)
+        except Exception:
+            pass
+    return out
+
+
 _HELP_ANSWER = (
-    "I can answer things like: “how's my portfolio”, “biggest loser today”, "
-    "“price of NVDA”, “forecast TSLA”, “when does AAPL report”, "
-    "“how are markets”, “my exposure”, “any ideas”, or “my alerts”."
+    "Try me on: “why am I down today”, “how's my portfolio”, “how risky is my "
+    "book”, “what did I miss”, “summarize my day”, “price of NVDA”, “NVDA vs "
+    "AMD”, “is AAPL near its high”, “forecast TSLA”, “when does AAPL report”, "
+    "“what did I buy recently”, “am I beating the market”, “how much crypto do "
+    "I have”, “my watchlist”, “any ideas” — or just tell me something to "
+    "remember and I'll keep it."
 )
+
+
+# Whole-message greeting only ($-anchored) — "hello, how's my portfolio" must
+# still reach the portfolio intent. Thanks is a word-boundary search but only
+# fires on short messages, so "thanks, now forecast NVDA" passes through.
+_GREETING_RE = re.compile(
+    r"^(hi|hiya|hello|hey|yo|howdy|good\s+(morning|afternoon|evening))"
+    r"[\s,!.]*(jarvis|there)?[\s!.?]*$",
+    re.IGNORECASE)
+_THANKS_RE = re.compile(
+    r"\b(thank you|thanks|thank u|thx|good job|well done|nice work|great job|"
+    r"appreciate (it|that|you))\b",
+    re.IGNORECASE)
+
+# Deterministic rotation keyed on query length — no random, so tests and
+# repeated identical messages get a stable response.
+_THANKS_ACKS = (
+    "Anytime. The book never sleeps, and neither do I.",
+    "My pleasure — that's what I'm here for.",
+    "Noted. Flattery accepted; vigilance continues.",
+    "You're welcome. I'll keep watch.",
+)
+
+
+def _answer_social(q: str, ql: str) -> Optional[Dict[str, Any]]:
+    """Greetings and thanks — checked before any data access so a 'thanks'
+    never costs a portfolio read. Returns None for everything substantive."""
+    stripped = ql.strip()
+    if _GREETING_RE.match(stripped):
+        try:
+            phase = _market_phase(_et_now())
+        except Exception:
+            phase = "doing their thing"
+        return {"answer": "{}. Markets are {} — what shall we look at?".format(
+            _greeting(), phase)}
+    if len(stripped.split()) <= 5 and _THANKS_RE.search(stripped):
+        return {"answer": _THANKS_ACKS[len(q) % len(_THANKS_ACKS)]}
+    return None
 
 
 def _sanitize_history(history: Any) -> List[Dict[str, Any]]:
@@ -1337,15 +2620,47 @@ def _sanitize_history(history: Any) -> List[Dict[str, Any]]:
         sym = turn.get("symbol")
         if not (isinstance(sym, str) and re.fullmatch(r"[A-Za-z][A-Za-z.\-]{0,9}", sym)):
             sym = None
-        out.append({
+        entry = {
             "q": str(turn.get("q") or "")[:500],
             "a": str(turn.get("a") or "")[:800],
             "symbol": sym.upper() if sym else None,
-        })
+        }
+        # Junk client payloads sometimes carry empty turns — they'd burn
+        # history slots and feed blank messages to the LLM. Drop them.
+        if not entry["q"] and not entry["a"]:
+            continue
+        out.append(entry)
     return out
 
 
 _FOLLOW_UP_RE = re.compile(r"\b(it|its|that|this|same|again)\b", re.IGNORECASE)
+
+# "Why am I down today" / "what's driving my book" → per-holding attribution.
+# Deliberately anchored on MY portfolio/book phrasing so "why is the market
+# down" still reaches the market intent and "why is NVDA down" the agent.
+_ATTRIB_RE = re.compile(
+    r"why\s+(am\s+i|is\s+my\s+(portfolio|book))"
+    r"|what(?:'s|\s+is)?\s+(driving|moving|hurting)\s+(my|the\s+(book|portfolio))"
+    r"|what\s+(moved|drove|hit)\s+(my|the\s+(book|portfolio))"
+    r"|\battribution\b",
+    re.IGNORECASE)
+
+# "Is the market open" / "when does the market close" — must be checked
+# BEFORE the market intent, which would otherwise swallow these on the bare
+# word "market" and answer with index moves instead of the clock.
+_HOURS_RE = re.compile(
+    r"market\s+hours"
+    r"|\b(is|are)\s+(the\s+)?markets?\s+(open|closed|still\s+open)"
+    r"|when\s+do(es)?\s+(the\s+)?markets?\s+(open|close)"
+    r"|when\s+(is|are)\s+(the\s+)?markets?\s+(open|closed|opening|closing)",
+    re.IGNORECASE)
+
+# "When did I buy X" / "how long have I held X" — distinct from the
+# transactions intent ("what did i buy"), which lists recent fills instead.
+_HOLDING_RE = re.compile(
+    r"\bwhen did i (?:first\s+)?(?:buy|purchase|get)\b"
+    r"|\bhow long have i (?:held|owned|had)\b",
+    re.IGNORECASE)
 
 # Action-phrased queries ("keep an eye on PLTR", "add X", "track Y") must
 # reach the tool agent, not short-circuit into the bare-ticker quote path.
@@ -1369,6 +2684,77 @@ _LIST_MEMORY_RE = re.compile(
     r"^(what do you (remember|know)( about me)?|list (your )?memor(y|ies)|"
     r"your memor(y|ies)|what do you know about me)\??$",
     re.IGNORECASE)
+# Topic search: "what do you remember about <topic>". Checked BEFORE the list
+# form — "about me/myself" still routes to the full list.
+_MEMORY_TOPIC_RE = re.compile(
+    r"^what do you (?:remember|know) about (.+?)\??$", re.IGNORECASE)
+
+
+# Implicit learning: a message must carry a first-person durable cue before
+# we spend an LLM call deciding whether it holds a fact worth keeping.
+_LEARN_CUE_RE = re.compile(
+    r"\b(i'?m|i am|i have|i've|i will|i'?ll|call me|i work|i invest|i retire|"
+    r"my (goal|plan|strategy|style|risk|horizon|timeline|wife|husband|kids?|"
+    r"family|job|salary|income|age|retirement|broker|account|name)|"
+    r"i (want|need|prefer|plan|hate|dislike|like|love|avoid|never|always|aim|"
+    r"tend|focus|care))\b",
+    re.IGNORECASE)
+
+_AUTO_MEMORY_CAP = 30  # auto-learned facts; explicit "remember:" is uncapped
+
+_LEARN_SYSTEM = (
+    "You decide if a user message contains ONE durable personal fact worth "
+    "remembering across sessions: a goal, preference, constraint, or life "
+    "circumstance relevant to an investing copilot (e.g. 'retiring in 2030', "
+    "'prefers ETFs over single names', 'risk-averse', 'saving for a house'). "
+    "NOT questions, NOT market opinions about a stock, NOT one-time requests. "
+    'Reply with ONLY JSON: {"fact": "third-person fact, max 25 words"} or '
+    '{"fact": null} if there is nothing durable.'
+)
+
+
+def _maybe_learn(query: str) -> None:
+    """Fire-and-forget implicit memory: when the user reveals something
+    durable mid-conversation ('I'm retiring in 2030 so I want less risk'),
+    keep it without requiring the 'remember:' incantation. Regex cheap-gate
+    first, then one MODEL_LIGHT call on a daemon thread; every failure is
+    silent and nothing here can touch the request path's latency."""
+    try:
+        if len(query) < 12 or not _LEARN_CUE_RE.search(query):
+            return
+        if not _llm_available():
+            return
+    except Exception:
+        return
+
+    def _run() -> None:
+        try:
+            facts = db.jarvis_list_memories()
+            autos = [f for f in facts if f.get("source") == "auto"]
+            if len(autos) >= _AUTO_MEMORY_CAP:
+                return
+            text = _llm_complete(
+                [{"role": "system", "content": _LEARN_SYSTEM},
+                 {"role": "user", "content": query[:500]}],
+                max_tokens=80, temperature=0.0)
+            if not text:
+                return
+            m = re.search(r"\{.*\}", text, re.DOTALL)
+            if not m:
+                return
+            data = json.loads(m.group(0))
+            fact = data.get("fact")
+            if not isinstance(fact, str):
+                return
+            fact = fact.strip().rstrip(".")
+            if not (8 <= len(fact) <= 300):
+                return
+            db.jarvis_add_memory(fact, source="auto")  # idempotent on dupes
+        except Exception as e:
+            log.debug("auto-memory skipped: %s", e)
+
+    import threading
+    threading.Thread(target=_run, daemon=True, name="jarvis-learn").start()
 
 
 def _answer_memory(q: str) -> Optional[Dict[str, Any]]:
@@ -1384,23 +2770,89 @@ def _answer_memory(q: str) -> Optional[Dict[str, Any]]:
     if m:
         ok = db.jarvis_delete_memory(int(m.group(1)))
         return {"answer": "Forgotten." if ok else "I have no memory #{}.".format(m.group(1))}
-    if _LIST_MEMORY_RE.match(q.strip()):
+
+    def _full_list() -> Dict[str, Any]:
         facts = db.jarvis_list_memories()
         if not facts:
             return {"answer": "Nothing yet. Tell me “remember: …” and it sticks across sessions."}
-        listing = " ".join("#{} {}.".format(f["id"], f["fact"]) for f in facts[-12:])
+        listing = " ".join(
+            "#{} {}{}.".format(f["id"], f["fact"],
+                               " (picked up in conversation)" if f.get("source") == "auto" else "")
+            for f in facts[-12:])
         return {"answer": "Here's what I'm holding onto: {} Say “forget <number>” to drop one.".format(listing)}
+
+    m = _MEMORY_TOPIC_RE.match(q.strip())
+    if m and m.group(1).strip().lower() not in ("me", "myself", "me?"):
+        topic = m.group(1).strip()
+        try:
+            hits = [f for f in db.jarvis_list_memories()
+                    if topic.lower() in str(f.get("fact") or "").lower()]
+        except Exception:
+            hits = []
+        if hits:
+            listing = " ".join("#{} {}.".format(f["id"], f["fact"]) for f in hits[-8:])
+            return {"answer": "On “{}”: {}".format(topic, listing)}
+        # No matches — the honest fallback is everything I hold.
+        return _full_list()
+    if _LIST_MEMORY_RE.match(q.strip()):
+        return _full_list()
     return None
 
 
+# Pending clarifying questions keyed by conversation id, so "give me a
+# forecast" → "Which symbol?" → "NVDA" completes the ORIGINAL intent.
+# In-memory and short-lived by design: a clarify older than the TTL is a
+# conversation that moved on.
+_PENDING_CLARIFY: Dict[int, Dict[str, Any]] = {}
+_CLARIFY_TTL = 300  # seconds
+
+
+def _set_pending_clarify(conv_id: Optional[int], intent: str) -> None:
+    if conv_id is None:
+        return
+    try:
+        import time as _t
+        # Opportunistic GC so the dict can't grow unboundedly.
+        if len(_PENDING_CLARIFY) > 64:
+            cutoff = _t.time() - _CLARIFY_TTL
+            for k in [k for k, v in _PENDING_CLARIFY.items()
+                      if v.get("ts", 0) < cutoff]:
+                _PENDING_CLARIFY.pop(k, None)
+        _PENDING_CLARIFY[conv_id] = {"intent": intent, "ts": _t.time()}
+    except Exception:
+        pass
+
+
 def ask(query: str, history: Any = None, conversation_id: Any = None,
-        persist: bool = True) -> Dict[str, Any]:
+        persist: bool = True, progress: Any = None) -> Dict[str, Any]:
     """Route a natural-language question to the right engine. Local-only,
-    with server-persisted conversation state for follow-up resolution."""
+    with server-persisted conversation state for follow-up resolution.
+    `progress` is an optional callable(str) for streaming status lines."""
     q = (query or "").strip()
     if not q:
         return {"intent": "help", "answer": _HELP_ANSWER}
+
+    def notify(text: str) -> None:
+        if progress is None:
+            return
+        try:
+            progress(text)
+        except Exception:
+            pass
     ql = q.lower()
+
+    # Social niceties before anything else — a "thanks" or "good morning"
+    # must never pay the symbol-extraction or DB cost. Deliberately not
+    # persisted: pleasantries aren't turns worth replaying into prompts.
+    try:
+        social = _answer_social(q, ql)
+        if social is not None:
+            social["intent"] = "social"
+            social.setdefault("symbol", None)
+            return social
+    except Exception:
+        pass
+
     symbol = _extract_symbol(q)
     turns = _sanitize_history(history)
 
@@ -1439,6 +2891,10 @@ def ask(query: str, history: Any = None, conversation_id: Any = None,
                                        payload.get("symbol"))
             except Exception as e:
                 log.debug("ask: persist failed: %s", e)
+        # Implicit learning — skip the explicit memory intent (it already
+        # stored or deleted exactly what the user asked for).
+        if payload.get("intent") != "memory":
+            _maybe_learn(q)
         return payload
 
     # Durable memory management — checked first, never needs a key.
@@ -1466,6 +2922,21 @@ def ask(query: str, history: Any = None, conversation_id: Any = None,
         payload.setdefault("symbol", symbol)
         return _persisted(payload)
 
+    # Clarify resume: if the last turn was Jarvis asking which symbol, and
+    # the reply is essentially just a symbol, re-dispatch the ORIGINAL
+    # intent instead of treating "NVDA" as a bare quote request.
+    if conv_id is not None and symbol and len(ql.split()) <= 3:
+        pend = _PENDING_CLARIFY.get(conv_id)
+        if pend is not None:
+            import time as _t
+            _PENDING_CLARIFY.pop(conv_id, None)
+            if _t.time() - pend.get("ts", 0) < _CLARIFY_TTL:
+                try:
+                    if pend.get("intent") == "forecast":
+                        return done("forecast", _answer_forecast(symbol, ql))
+                except Exception as e:
+                    log.debug("clarify resume failed: %s", e)
+
     # When the LLM agent is available, hand it any genuinely analytical
     # question — judgment words ("good business", "overvalued", "should i
     # sell", "worth holding", "vs", "compare") deserve the lens tools, not a
@@ -1476,18 +2947,120 @@ def ask(query: str, history: Any = None, conversation_id: Any = None,
         "should i", "vs ", " versus ", "compare", "quality", "moat", "risky",
         "temperament", "behavior", "behaviour", "what if", "macro"))
 
+    # One status line before the rule chain — even instant answers should
+    # flash SOMETHING in the stream UI rather than appearing from nowhere.
+    notify("Checking the book…")
+
     try:
+        # Capabilities: route explicitly to the help text instead of leaving
+        # it as the fallthrough only the keyless path ever reached.
+        if (any(p in ql for p in ("what can you do", "what can you help",
+                                  "capabilit", "what do you do",
+                                  "how do i use you"))
+                or ql.strip(" ?!.") in ("help", "help me")):
+            return done("help", {"answer": _HELP_ANSWER})
+        # Deep knowledge: "what is gamma exposure" / "explain p/e". Before
+        # the market/quote intents ("what is the vix" should TEACH, not just
+        # quote a level) but only when no symbol is in play — "what is
+        # NVDA's P/E" stays an agent question about NVDA.
+        if not symbol:
+            exp = _answer_explain(ql)
+            if exp is not None:
+                return done("explain", exp)
+        # Market hours before EVERYTHING market-flavored — see _HOURS_RE.
+        if _HOURS_RE.search(ql):
+            return done("hours", _answer_hours())
+        # Attribution first: "why am i down" contains "am i down", which the
+        # broader portfolio intent below would swallow into a value line.
+        if _ATTRIB_RE.search(ql) and not symbol:
+            return done("attribution", _answer_why())
+        if any(p in ql for p in ("what did i miss", "while i was away",
+                                 "while i was gone", "catch me up",
+                                 "anything new since", "what happened while")):
+            return done("recap", _answer_recap())
+        if ("summar" in ql or "wrap up" in ql) and ("day" in ql or "today" in ql):
+            return done("summary", _answer_day_summary())
+        # "NVDA vs AMD" — instant keyless side-by-side for short, two-name
+        # queries; longer comparison questions still reach the agent's
+        # compare_positions lens.
+        m_vs = _VS_RE.search(q)
+        if m_vs and len(ql.split()) <= 4:
+            def _vs_resolve(tok: str) -> Optional[str]:
+                low = tok.lower()
+                if low in _COMPANY_NAMES:
+                    return _COMPANY_NAMES[low]
+                up = tok.upper()
+                if up in _known_symbols():
+                    return up
+                if len(up) <= 5 and up not in _STOPWORDS:
+                    return up
+                return None
+            s1, s2 = _vs_resolve(m_vs.group(1)), _vs_resolve(m_vs.group(2))
+            if s1 and s2 and s1 != s2:
+                return done("compare", _answer_compare_quotes(s1, s2))
         # "prob" matched "problem"/"probably" — require a forecasting verb or
         # a whole "prob"/"probability" word, plus a symbol.
         if symbol and (any(w in ql for w in ("forecast", "predict", "outlook", "go up", "go down"))
                        or re.search(r"\bprob(ability)?\b", ql)):
-            return done("forecast", _answer_forecast(symbol))
+            return done("forecast", _answer_forecast(symbol, ql))
+        # Forecast asked with NO symbol → one clarifying question beats a
+        # guess. Held names become quick-reply chips; the pending-intent
+        # marker lets the bare-symbol reply complete the forecast.
+        if not symbol and any(w in ql for w in ("forecast", "predict", "outlook")) \
+                and "market" not in ql:
+            choices: List[str] = []
+            try:
+                choices = [h["symbol"] for h in sorted(
+                    db.get_portfolio(), key=lambda h: -(h.get("shares") or 0) * (h.get("avg_cost") or 0))
+                    if h.get("asset_type") != "crypto"][:4]
+            except Exception:
+                pass
+            _set_pending_clarify(conv_id, "forecast")
+            return done("clarify", {
+                "answer": "Happy to run the ensemble — which symbol should I forecast?",
+                "choices": choices})
+        # 52-week range position — "is NVDA near its high?"
+        if symbol and (re.search(r"\b52\b|52-week|fifty[- ]two", ql)
+                       or (("high" in ql or "low" in ql)
+                           and any(w in ql for w in ("near", "close to", "off the", "from its")))):
+            return done("range", _answer_range(symbol))
+        # Holding period / cost basis: position-history questions about ONE
+        # name. Without a symbol, the holding phrasing degrades to the
+        # recent-fills listing rather than a dead end.
+        if _HOLDING_RE.search(ql):
+            if symbol:
+                return done("holding_period", _answer_holding_period(symbol))
+            return done("transactions", _answer_transactions())
+        if symbol and any(p in ql for p in ("cost basis", "my basis", "average cost",
+                                            "avg cost", "what did i pay",
+                                            "how much did i pay")):
+            return done("basis", _answer_basis(symbol))
         if any(w in ql for w in ("earnings", "report", "reports", "reporting")):
             return done("earnings", _answer_earnings(symbol))
+        # Biggest position before exposure AND portfolio — a one-liner, not
+        # the full weights table ("position"/"holding" overlap both intents).
+        if any(p in ql for p in ("biggest position", "largest position",
+                                 "biggest holding", "largest holding",
+                                 "top holding", "top position")):
+            return done("biggest", _answer_biggest())
+        # Crypto share before exposure — "crypto exposure" contains "exposure".
+        if "crypto" in ql and any(w in ql for w in ("how much", "share", "allocation",
+                                                    "exposure", "weight", "percent", " %")):
+            return done("crypto_share", _answer_crypto_share())
+        if any(p in ql for p in ("how risky", "risk level", "portfolio risk",
+                                 "my risk", "too risky", "risk profile")):
+            return done("risk", _answer_risk())
         if any(w in ql for w in ("exposure", "allocation", "concentrat", "diversif", "weight")):
             return done("exposure", _answer_exposure())
         if "alert" in ql and not (_ACTIONISH_RE.search(ql) and _llm_available()):
             return done("alerts", _answer_alerts())
+        if ("watchlist" in ql or "what am i watching" in ql) \
+                and not (_ACTIONISH_RE.search(ql) and _llm_available()):
+            return done("watchlist", _answer_watchlist())
+        if any(p in ql for p in ("what did i buy", "what did i sell", "recent trade",
+                                 "recent transaction", "last trade", "my trades",
+                                 "my fills", "recent fills")):
+            return done("transactions", _answer_transactions())
         if any(w in ql for w in ("idea", "opportunit", "what should i buy", "what to buy")):
             return done("ideas", _answer_ideas())
         if (any(w in ql for w in ("portfolio", "am i up", "am i down", "my position",
@@ -1495,6 +3068,11 @@ def ask(query: str, history: Any = None, conversation_id: Any = None,
                                   "best position", "worst position", "how am i doing"))
                 and not _analytical):
             return done("portfolio", _answer_portfolio(ql))
+        # Benchmark before market — "beating the market" contains "market".
+        if any(p in ql for p in ("beat the market", "beating the market", "outperform",
+                                 "underperform", "vs the market", "versus the market",
+                                 "against the market")):
+            return done("benchmark", _answer_benchmark())
         if (any(w in ql for w in ("market", "vix", "s&p", "spx", "nasdaq", "fear", "regime", "volatil"))
                 and not _analytical):
             return done("market", _answer_market())
@@ -1517,9 +3095,14 @@ def ask(query: str, history: Any = None, conversation_id: Any = None,
         # Tool-calling agent first — it can reach every engine. Fall back to
         # the plain context-snapshot answer if the agent path errors out.
         try:
-            r = _agent_ask(q, turns)
+            r = _agent_ask(q, turns, progress=progress)
             if r and r.get("answer"):
                 payload = {"answer": r["answer"], "used": r.get("used") or []}
+                if r.get("reasoning"):
+                    payload["reasoning"] = r["reasoning"]
+                if r.get("clarify"):
+                    # The agent (or planner) chose to ask rather than guess.
+                    return done("clarify", payload)
                 if r.get("citations"):
                     payload["citations"] = r["citations"]
                 if r.get("proposal"):
@@ -1534,12 +3117,14 @@ def ask(query: str, history: Any = None, conversation_id: Any = None,
         # try ONE direct web_research call — far more reliable than the agent
         # dance, and it answers the SpaceX-IPO class of question every time.
         try:
+            notify("Researching the open web…")
             r2 = _direct_research(q)
             if r2 and r2.get("answer"):
                 return done("llm", r2)
         except Exception as e:
             log.debug("jarvis.ask direct research failed for %r: %s", q, e)
         try:
+            notify("Answering from the local snapshot…")
             answer = _llm_ask(q, turns)
             if answer:
                 return done("llm", {"answer": answer})
@@ -1564,3 +3149,68 @@ def _direct_research(query: str) -> Optional[Dict[str, Any]]:
     if r.get("citations"):
         out["citations"] = r["citations"]
     return out
+
+
+# ─── streaming ask: live status narration while the answer is computed ───────
+
+_ASK_STREAM_DEADLINE = 300  # s — agent worst case is ~5 rounds × 55s client timeout
+
+
+def ask_stream(query: str, history: Any = None, conversation_id: Any = None):
+    """Generator wrapping ask() for the streaming route. Yields dict events:
+    {"type": "status", "text": …} as the answer is worked on, {"type": "hb"}
+    roughly every 10 quiet seconds (the route maps it to an SSE comment so
+    proxies don't reap the connection), and exactly one terminal
+    {"type": "answer", "payload": <ask() result>}.
+
+    ask() runs on a DAEMON worker thread feeding a queue — the generator
+    never block-acquires anything (the post-sweep-C thread rule), and a hard
+    deadline abandons the worker rather than waiting forever. The worker is
+    daemonized so an abandoned straggler can't wedge interpreter exit."""
+    import queue as _queue
+    import threading
+    import time as _time
+
+    events: "_queue.Queue" = _queue.Queue()
+
+    def _progress(text: str) -> None:
+        try:
+            events.put({"type": "status", "text": str(text)[:140]})
+        except Exception:
+            pass
+
+    def _run() -> None:
+        try:
+            payload = ask(query, history=history,
+                          conversation_id=conversation_id, progress=_progress)
+        except Exception as e:
+            log.warning("ask_stream worker failed for %r: %s", query, e)
+            payload = {"intent": "error",
+                       "answer": "Something went wrong answering that — the "
+                                 "data source may be rate-limited. Try again "
+                                 "in a moment."}
+        events.put({"type": "answer", "payload": payload})
+
+    threading.Thread(target=_run, daemon=True, name="jarvis-ask-stream").start()
+
+    deadline = _time.time() + _ASK_STREAM_DEADLINE
+    last_emit = _time.time()
+    while True:
+        try:
+            ev = events.get(timeout=1.0)
+        except _queue.Empty:
+            if _time.time() > deadline:
+                yield {"type": "answer",
+                       "payload": {"intent": "error",
+                                   "answer": "That one ran long and I cut it "
+                                             "off — ask again and I'll take a "
+                                             "faster route."}}
+                return
+            if _time.time() - last_emit >= 10:
+                last_emit = _time.time()
+                yield {"type": "hb"}
+            continue
+        last_emit = _time.time()
+        yield ev
+        if ev.get("type") == "answer":
+            return

@@ -42,6 +42,7 @@ import logging
 import re
 import threading
 import time
+from collections import deque
 from datetime import datetime, timezone
 
 import safe_executor
@@ -66,6 +67,10 @@ except Exception:
 
 log = logging.getLogger("augur")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+
+# Single source of truth for the app version — surfaced at /api/version and
+# in jarvis.health_snapshot().
+APP_VERSION = "2.1.0"
 
 _TICKER_RE = re.compile(r"^[A-Z0-9][A-Z0-9.\-]{0,9}$")
 
@@ -3143,6 +3148,21 @@ def jarvis_tts_route():
         return jsonify({"error": str(e)}), 500
 
 
+@app.route("/api/version", methods=["GET"])
+def api_version_route():
+    """The running app version — lets UIs and health checks confirm what
+    they're talking to."""
+    return jsonify({"version": APP_VERSION})
+
+
+# Rolling-window rate limit for confirmed Jarvis actions: timestamps of the
+# last executions. A deque + GIL is enough fidelity for a single-user local
+# app — this guards against a runaway client loop, not an adversary.
+_JARVIS_ACT_TIMES = deque()
+_JARVIS_ACT_MAX = 10     # executions…
+_JARVIS_ACT_WINDOW = 60  # …per rolling window, seconds
+
+
 @app.route("/api/jarvis/act", methods=["POST"])
 def jarvis_act_route():
     """Execute a user-CONFIRMED mutating action proposed by the Jarvis agent.
@@ -3163,6 +3183,14 @@ def jarvis_act_route():
     # crafted /act request can do.
     if not jarvis_tools.valid_proposal_args(tool, args):
         return jsonify({"error": "invalid or incomplete action arguments"}), 400
+    # Rate limit counts EXECUTIONS (checked after validation) so malformed
+    # requests can't burn the budget of legitimate confirmations.
+    now = time.time()
+    while _JARVIS_ACT_TIMES and now - _JARVIS_ACT_TIMES[0] > _JARVIS_ACT_WINDOW:
+        _JARVIS_ACT_TIMES.popleft()
+    if len(_JARVIS_ACT_TIMES) >= _JARVIS_ACT_MAX:
+        return jsonify({"error": "rate limited"}), 429
+    _JARVIS_ACT_TIMES.append(now)
     r = jarvis_tools.execute_mutating(tool, args)
     return (jsonify(r), 400) if r.get("error") else jsonify(r)
 
@@ -3178,6 +3206,52 @@ def jarvis_briefing_route():
     try:
         force = request.args.get("refresh") == "1"
         return jsonify(jarvis.get_briefing(force_refresh=force))
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/jarvis/digest", methods=["GET"])
+def jarvis_digest_route():
+    """'While you were away' — insights logged since the last visit.
+    ?mark_seen=0 peeks without advancing the watermark."""
+    try:
+        import jarvis
+    except Exception as e:
+        return jsonify({"error": "jarvis unavailable: {}".format(e)}), 500
+    mark = request.args.get("mark_seen", "1") != "0"
+    try:
+        return jsonify(jarvis.away_digest(mark_seen=mark))
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/jarvis/health", methods=["GET"])
+def jarvis_health_route():
+    """Jarvis self-diagnostics: LLM key/budget, warmer liveness, cache size."""
+    try:
+        import jarvis
+        return jsonify(jarvis.health_snapshot())
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/jarvis/conversation/export", methods=["GET"])
+def jarvis_conversation_export_route():
+    """Download the active conversation as a Markdown transcript."""
+    try:
+        conv_id = db.jarvis_active_conversation()
+        msgs = db.jarvis_get_messages(conv_id, limit=200)
+        lines = ["# JARVIS conversation #{}".format(conv_id), ""]
+        for m in msgs:
+            who = "**You**" if m.get("role") == "user" else "**JARVIS**"
+            ts = (m.get("created_at") or "")[:16]
+            lines.append("{} ({}):".format(who, ts))
+            lines.append((m.get("content") or "").strip())
+            lines.append("")
+        resp = Response("\n".join(lines), mimetype="text/markdown")
+        resp.headers["Content-Disposition"] = \
+            "attachment; filename=jarvis-conversation-{}.md".format(conv_id)
+        return resp
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
@@ -3289,6 +3363,47 @@ def jarvis_ask_route():
                                   conversation_id=conversation_id))
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/jarvis/ask/stream", methods=["POST"])
+def jarvis_ask_stream_route():
+    """Streaming ask: SSE-formatted frames over a POST fetch-stream. Emits
+    `data: {"type":"status","text":…}` lines while Jarvis works, comment
+    heartbeats on quiet stretches, and one terminal
+    `data: {"type":"answer","payload":…}` frame. The generator is bounded
+    (jarvis.ask_stream hard-deadlines), so no immortal response threads."""
+    try:
+        import jarvis
+    except Exception as e:
+        return jsonify({"error": "jarvis unavailable: {}".format(e)}), 500
+    data = request.get_json(silent=True) or {}
+    query = data.get("query") if isinstance(data, dict) else None
+    if not query or not isinstance(query, str):
+        return jsonify({"error": "expected JSON body with a 'query' string"}), 400
+    if len(query) > 500:
+        return jsonify({"error": "query too long (max 500 chars)"}), 400
+    history = data.get("history")
+    conversation_id = data.get("conversation_id")
+
+    def generate():
+        import json as _json
+        try:
+            for ev in jarvis.ask_stream(query, history=history,
+                                        conversation_id=conversation_id):
+                if ev.get("type") == "hb":
+                    yield ": hb\n\n"
+                else:
+                    yield "data: {}\n\n".format(_json.dumps(ev, default=str))
+        except Exception as e:
+            # Terminal error frame so the client always gets an answer event.
+            yield "data: {}\n\n".format(_json.dumps(
+                {"type": "answer",
+                 "payload": {"intent": "error", "answer": str(e)}}))
+
+    resp = Response(generate(), mimetype="text/event-stream")
+    resp.headers["Cache-Control"] = "no-cache"
+    resp.headers["X-Accel-Buffering"] = "no"
+    return resp
 
 
 @app.route("/api/jarvis/conversation", methods=["GET"])

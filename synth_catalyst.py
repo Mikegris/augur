@@ -678,28 +678,41 @@ def _compute(symbols: List[str], days_ahead: int) -> Dict[str, Any]:
     # equity exposure.
     has_equity = bool(symbols)
 
-    for sym in symbols:
-        # 2a. Earnings — per-symbol
+    # Per-symbol earnings + ex-div each hit upstreams — serially that's
+    # O(symbols × latency) and a 20-name book took >60s cold (e2e timeout).
+    # Parallelize per symbol; signal_cache entries are keyed per symbol so
+    # concurrent workers touch disjoint keys.
+    def _symbol_events(sym):
+        ev, errs = [], []
         try:
             er = _upcoming_earnings_for(sym, horizon_end, today)
             if er is not None:
-                events.append(
-                    _make_event(sym, "earnings", er, signal_cache, today)
-                )
+                ev.append(_make_event(sym, "earnings", er, signal_cache, today))
         except Exception as e:
-            errors.append(f"earnings({sym}): {e}")
+            errs.append(f"earnings({sym}): {e}")
             log.debug("catalyst: earnings(%s) failed: %s", sym, e)
-
-        # 2b. Ex-dividend — per-symbol
         try:
             ed = _upcoming_ex_div(sym, horizon_end, today)
             if ed is not None:
-                events.append(
-                    _make_event(sym, "ex_dividend", ed, signal_cache, today)
-                )
+                ev.append(_make_event(sym, "ex_dividend", ed, signal_cache, today))
         except Exception as e:
-            errors.append(f"ex_dividend({sym}): {e}")
+            errs.append(f"ex_dividend({sym}): {e}")
             log.debug("catalyst: ex_div(%s) failed: %s", sym, e)
+        return ev, errs
+
+    try:
+        import safe_executor
+        per_sym = safe_executor.parallel_map(
+            _symbol_events, list(symbols), max_workers=6,
+            thread_name_prefix="catalyst")
+    except Exception:
+        per_sym = [_symbol_events(s) for s in symbols]
+    for r in per_sym:
+        if not r:
+            continue
+        ev, errs = r
+        events.extend(ev)
+        errors.extend(errs)
 
     # 2c. FOMC applies to every symbol when there is equity exposure.
     if has_equity:

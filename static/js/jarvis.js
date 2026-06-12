@@ -13,6 +13,92 @@
 
   const esc = (s) => (typeof _esc === 'function' ? _esc(s) : String(s == null ? '' : s));
 
+  // Safe mini-markdown: runs AFTER esc(), on the already-escaped string, so
+  // the only tags that can appear are the three we emit here. No links, no
+  // other tags, no attributes.
+  //   **bold** → <b>   *italic* → <i>   `code` → <code>
+  function mdLite(escaped) {
+    return String(escaped)
+      .replace(/`([^`\n]+)`/g, '<code>$1</code>')
+      .replace(/\*\*([^*\n]+)\*\*/g, '<b>$1</b>')
+      .replace(/\*([^*\n]+)\*/g, '<i>$1</i>');
+  }
+
+  // ── reasoning trace + clarify chips (shared by palette + command center) ──
+  // The backend attaches {reasoning: {plan, consulted, angle}} when the agent
+  // planned/consulted, and intent "clarify" (+ choices) when Jarvis asked a
+  // question instead of guessing. These render the collapsible "how I got
+  // here" block and the quick-reply chips.
+  function reasoningHtml(r) {
+    const rs = r && r.reasoning;
+    if (!rs) return '';
+    const plan = rs.plan || [], consulted = rs.consulted || [];
+    if (!plan.length && !consulted.length) return '';
+    const steps = plan.map(s =>
+      `<div class="jv-reason-row">▹ ${esc(String(s.tool || '').replace(/_/g, ' '))}${s.why ? ` <span>— ${esc(s.why)}</span>` : ''}</div>`).join('');
+    const used = consulted.map(c =>
+      `<div class="jv-reason-row">✓ ${esc(String(c.tool || '').replace(/_/g, ' '))}${c.note ? ` <span>— ${esc(c.note)}</span>` : ''}</div>`).join('');
+    const angle = rs.angle ? `<div class="jv-reason-row">◆ <span>${esc(rs.angle)}</span></div>` : '';
+    return `<div class="jv-reason">
+      <button class="jv-reason-toggle" type="button" aria-expanded="false">◉ how I got here ▾</button>
+      <div class="jv-reason-body" hidden>
+        ${steps ? `<div class="jv-reason-h">planned</div>${steps}` : ''}
+        ${used ? `<div class="jv-reason-h">consulted</div>${used}` : ''}
+        ${angle}
+      </div></div>`;
+  }
+
+  function wireReasoning(rootEl) {
+    if (!rootEl) return;
+    rootEl.querySelectorAll('.jv-reason-toggle').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const body = btn.parentElement && btn.parentElement.querySelector('.jv-reason-body');
+        if (!body) return;
+        const opening = body.hidden;
+        body.hidden = !opening;
+        btn.setAttribute('aria-expanded', String(opening));
+        btn.textContent = opening ? '◉ how I got here ▴' : '◉ how I got here ▾';
+      });
+    });
+  }
+
+  function clarifyChipsHtml(r) {
+    if (!r || r.intent !== 'clarify' || !(r.choices || []).length) return '';
+    return `<div class="jv-starters jv-clarify-chips">${r.choices.slice(0, 6).map(c =>
+      `<button class="jv-starter jv-chip-reply" type="button" data-q="${esc(c)}">${esc(c)}</button>`).join('')}</div>`;
+  }
+
+  // True when the keystroke belongs to a text field — global shortcuts must
+  // never hijack typing.
+  function isTypingTarget(t) {
+    if (!t) return false;
+    const tag = (t.tagName || '').toLowerCase();
+    return tag === 'input' || tag === 'textarea' || tag === 'select' || t.isContentEditable;
+  }
+
+  // Clipboard with the execCommand fallback for older engines.
+  function copyToClipboard(text) {
+    const legacy = () => {
+      try {
+        const ta = document.createElement('textarea');
+        ta.value = text;
+        ta.style.cssText = 'position:fixed;left:-9999px;top:0';
+        document.body.appendChild(ta);
+        ta.select();
+        const ok = document.execCommand('copy');
+        ta.remove();
+        if (ok && typeof Toast === 'object') Toast.success('Copied to clipboard');
+      } catch (e) { /* clipboard unavailable — stay silent */ }
+    };
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text).then(
+        () => { if (typeof Toast === 'object') Toast.success('Copied to clipboard'); },
+        legacy);
+    } else {
+      legacy();
+    }
+  }
+
   // Poll for a DOM hook after navigate() — views render async. ~10 tries ×
   // 100ms, then give up silently (the plain navigation already happened).
   function pollFor(getEl, run, tries) {
@@ -58,9 +144,61 @@
 
   const TONE_COLOR = { pos: 'var(--green)', neg: 'var(--red)', warn: 'var(--amber)', info: 'var(--blue)' };
 
+  // ── Streaming ask ───────────────────────────────────────────────────────────
+  // POST /api/jarvis/ask/stream over a fetch ReadableStream: SSE-formatted
+  // frames, `status` events narrate what Jarvis is doing (tool consults,
+  // research, synthesis), one terminal `answer` frame carries the same
+  // payload /api/jarvis/ask returns. Throws on any transport/parse trouble so
+  // callers fall back to the plain POST — streaming is strictly an upgrade.
+  async function askStream(body, onStatus, signal) {
+    const resp = await fetch('/api/jarvis/ask/stream', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+      signal,
+    });
+    if (!resp.ok || !resp.body) throw new Error('stream unavailable (' + resp.status + ')');
+    const reader = resp.body.getReader();
+    const dec = new TextDecoder();
+    let buf = '';
+    try {
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buf += dec.decode(value, { stream: true });
+        let idx;
+        while ((idx = buf.indexOf('\n\n')) >= 0) {
+          const frame = buf.slice(0, idx).trim();
+          buf = buf.slice(idx + 2);
+          if (!frame.startsWith('data:')) continue; // comment heartbeat
+          let ev;
+          try { ev = JSON.parse(frame.slice(5)); } catch (e) { continue; }
+          if (ev.type === 'status') {
+            if (onStatus) { try { onStatus(ev.text || ''); } catch (e) {} }
+          } else if (ev.type === 'answer') {
+            return ev.payload || {};
+          }
+        }
+      }
+    } finally {
+      try { reader.cancel(); } catch (e) {}
+    }
+    throw new Error('stream ended without an answer');
+  }
+
   // ── Briefing panel ──────────────────────────────────────────────────────────
   const Briefing = {
     _last: null,
+    _digest: null, _digestFetched: false,
+
+    // "While you were away" — fetched ONCE per page load (the fetch advances
+    // the server-side last-seen watermark, so SPA re-navigations must not
+    // re-mark or the recap would self-erase between views).
+    async _fetchDigest() {
+      if (this._digestFetched) return;
+      this._digestFetched = true;
+      try { this._digest = await API.get('/api/jarvis/digest'); } catch (e) { this._digest = null; }
+    },
 
     async render(containerId, force) {
       const el = document.getElementById(containerId);
@@ -70,6 +208,7 @@
           <div class="panel-header">
             <span class="panel-title jarvis-title">◉ JARVIS</span>
             <span class="jarvis-hint">⌘K to ask anything</span>
+            <span class="jarvis-hint" id="jarvis-updated"></span>
             <button class="btn btn-ghost btn-sm" id="jarvis-speak" title="Read the briefing aloud" aria-label="Read the briefing aloud">🔊</button>
             <button class="btn btn-ghost btn-sm" id="jarvis-refresh">↻</button>
           </div>
@@ -88,13 +227,38 @@
         });
       }
       try {
-        const b = await API.get('/api/jarvis/briefing' + (force ? '?refresh=1' : ''));
+        const [b] = await Promise.all([
+          API.get('/api/jarvis/briefing' + (force ? '?refresh=1' : '')),
+          this._fetchDigest(),
+        ]);
         this._last = b;
         this._renderBody(b);
+        this._startStamp(b.generated_at);
       } catch (e) {
         const body = document.getElementById('jarvis-body');
         if (body) body.innerHTML = `<div class="empty-state"><span>Briefing unavailable: ${esc(e.message)}</span></div>`;
       }
+    },
+
+    // Staleness stamp: "updated Xs/Xm ago" in the panel header, derived from
+    // the briefing's generated_at and re-painted every 30s while the tab is
+    // visible. Self-cancels once the span leaves the DOM (view re-render).
+    _stampAt: null, _stampTimer: null,
+    _startStamp(generatedAt) {
+      const t = generatedAt ? new Date(generatedAt).getTime() : NaN;
+      this._stampAt = isNaN(t) ? Date.now() : t;
+      if (this._stampTimer) { clearInterval(this._stampTimer); this._stampTimer = null; }
+      const paint = () => {
+        const node = document.getElementById('jarvis-updated');
+        if (!node) {
+          if (this._stampTimer) { clearInterval(this._stampTimer); this._stampTimer = null; }
+          return;
+        }
+        const s = Math.max(0, Math.round((Date.now() - this._stampAt) / 1000));
+        node.textContent = 'updated ' + (s < 60 ? s + 's' : Math.floor(s / 60) + 'm') + ' ago';
+      };
+      paint();
+      this._stampTimer = setInterval(() => { if (!document.hidden) paint(); }, 30000);
     },
 
     _renderBody(b) {
@@ -116,8 +280,17 @@
       const headline = b.voice
         ? `<div class="jarvis-headline jarvis-voice">${esc(b.voice)}</div>`
         : `<div class="jarvis-headline">${esc(b.headline || '')}</div>`;
+      const d = this._digest;
+      const digest = (d && d.count && d.line)
+        ? `<div class="jarvis-digest"><span class="jarvis-digest-h">◉ WHILE YOU WERE OUT</span> ${esc(d.line)}
+             <button class="btn btn-ghost btn-sm" id="jarvis-digest-speak" title="Read aloud" aria-label="Read the digest aloud">🔊</button>
+             <button class="btn btn-ghost btn-sm" id="jarvis-digest-more" aria-expanded="false">▾ all ${d.count}</button>
+             <div id="jarvis-digest-items" hidden></div>
+           </div>`
+        : '';
       body.innerHTML = `
         <div class="jarvis-greeting">${esc(b.greeting || '')}</div>
+        ${digest}
         ${headline}
         ${cards ? `<div class="jarvis-cards">${cards}</div>`
                 : '<div class="jarvis-allclear">All clear — nothing needs your attention right now.</div>'}`;
@@ -127,6 +300,28 @@
           if (c) runAction(c.action);
         });
       });
+      if (d && d.count) {
+        const spk = document.getElementById('jarvis-digest-speak');
+        if (spk) {
+          if (!Voice.ttsAvailable()) spk.style.display = 'none';
+          spk.addEventListener('click', () => Voice.speak(d.line, null, true));
+        }
+        const more = document.getElementById('jarvis-digest-more');
+        const items = document.getElementById('jarvis-digest-items');
+        if (more && items) more.addEventListener('click', () => {
+          const opening = items.hidden;
+          items.hidden = !opening;
+          more.setAttribute('aria-expanded', String(opening));
+          if (opening && !items.innerHTML) {
+            items.innerHTML = (d.insights || []).slice(0, 10).map((r, i) =>
+              `<div class="jv-obs ${esc(r.tone || 'info')}">• ${esc(r.title)}${r.view ? ` <button class="jarvis-go jd-go" data-i="${i}">OPEN →</button>` : ''}</div>`).join('');
+            items.querySelectorAll('.jd-go').forEach(btn => btn.addEventListener('click', () => {
+              const r = (d.insights || [])[Number(btn.dataset.i)];
+              if (r) runAction({ view: r.view, symbol: r.symbol || undefined });
+            }));
+          }
+        });
+      }
     },
   };
 
@@ -135,6 +330,8 @@
   // e.g. "alert NVDA above 190", "alert tsla < 200", "alert AAPL 250"
   const ALERT_CMD = /^alert\s+([A-Za-z.\-]{1,10})\s+(above|below|at|>|<)?\s*\$?(\d+(?:\.\d+)?)$/i;
   const STRESS_CMD = /^stress\s*test$/i;
+  const RECAP_CMD = /^(recap|digest|what did i miss\??)$/i;
+  const EXPORT_CMD = /^export( conversation| chat)?$/i;
 
   // ── Voice — speech out (TTS) and speech in (STT), browser-native ────────────
   // speechSynthesis works everywhere; SpeechRecognition is webkit-prefixed
@@ -320,10 +517,12 @@
     _convId: null,  // server-persisted conversation id (v1.4 statefulness)
 
     SUGGESTIONS: [
+      'why am I down today',
       "how's my portfolio",
-      'biggest loser today',
+      'what did I miss',
+      'how risky is my book',
       'how are markets',
-      'my exposure',
+      'am I beating the market',
       'any earnings coming up',
       'any ideas',
     ],
@@ -338,7 +537,7 @@
             <span class="jp-glyph">◉</span>
             <input id="jp-input" type="text" placeholder="Ask Jarvis or jump anywhere... (e.g. 'forecast NVDA', 'biggest loser today')"
                    autocomplete="off" spellcheck="false">
-            <button id="jp-mic" type="button" title="Talk to Jarvis" aria-label="Talk to Jarvis (push to talk)">🎙</button>
+            <button id="jp-mic" type="button" title="Talk to Jarvis" aria-label="Talk to Jarvis (push to talk)" aria-pressed="false">🎙</button>
             <button id="jp-voice" type="button" title="Jarvis speaks replies aloud" aria-label="Toggle spoken replies" aria-pressed="false">🔊</button>
           </div>
           <div id="jp-answer"></div>
@@ -385,8 +584,20 @@
         if ((e.metaKey || e.ctrlKey) && (e.key === 'k' || e.key === 'K')) {
           e.preventDefault();
           this.isOpen() ? this.close() : this.open();
+        } else if (e.key === '/' && !e.metaKey && !e.ctrlKey && !e.altKey && !e.shiftKey
+                   && !this.isOpen() && !isTypingTarget(e.target)) {
+          // "/" opens the palette like ⌘K — but never while typing in any
+          // input/textarea/contenteditable (app.js's "/" handler defers to us).
+          e.preventDefault();
+          this.open();
         } else if (e.key === 'Escape' && this.isOpen()) {
-          this.close();
+          // First Escape clears a typed query; second Escape closes.
+          if (this.input && this.input.value) {
+            this.input.value = '';
+            this._refresh();
+          } else {
+            this.close();
+          }
         }
       });
     },
@@ -446,6 +657,14 @@
     _setListening(on) {
       const row = this.el && this.el.querySelector('.jp-input-row');
       if (row) row.classList.toggle('listening', !!on);
+      // Mic button itself: pulsing class (jarvis-pulse keyframes via the
+      // existing .jarvis-core rule — globally stilled under
+      // prefers-reduced-motion) + aria-pressed for AT users.
+      const mic = document.getElementById('jp-mic');
+      if (mic) {
+        mic.classList.toggle('jarvis-core', !!on);
+        mic.setAttribute('aria-pressed', String(!!on));
+      }
       if (this.input) this.input.placeholder = on
         ? 'Listening…'
         : "Ask Jarvis or jump anywhere... (e.g. 'forecast NVDA', 'biggest loser today')";
@@ -531,6 +750,12 @@
         if (STRESS_CMD.test(q)) {
           items.push({ kind: 'stress', label: 'Run stress test' });
         }
+        if (RECAP_CMD.test(q)) {
+          items.push({ kind: 'recap', label: 'While you were out — replay the digest' });
+        }
+        if (EXPORT_CMD.test(q)) {
+          items.push({ kind: 'export', label: 'Export conversation as Markdown' });
+        }
         // View navigation matches
         for (const v of this._views()) {
           if (v.label.toLowerCase().includes(ql) || v.view.includes(ql)) {
@@ -552,7 +777,8 @@
     },
 
     _renderList() {
-      const ICON = { nav: '→', symbol: '◇', ask: '◉', alert: '⚡', stress: '⚡' };
+      const ICON = { nav: '→', symbol: '◇', ask: '◉', alert: '⚡', stress: '⚡',
+                     recap: '◉', export: '⇩' };
       const CMD = { alert: 1, stress: 1 };
       this.list.innerHTML = this._items.map((it, i) =>
         `<div class="jp-item${CMD[it.kind] ? ' jp-cmd' : ''}${i === this._sel ? ' sel' : ''}" data-i="${i}" role="option" aria-selected="${i === this._sel}">
@@ -567,9 +793,22 @@
     },
 
     _onKey(e) {
-      if (e.key === 'ArrowDown') { e.preventDefault(); this._sel = Math.min(this._sel + 1, this._items.length - 1); this._renderList(); }
-      else if (e.key === 'ArrowUp') { e.preventDefault(); this._sel = Math.max(this._sel - 1, 0); this._renderList(); }
+      const n = this._items.length;
+      // Arrow navigation wraps around both ends of the list.
+      if (e.key === 'ArrowDown') { e.preventDefault(); if (n) { this._sel = (this._sel + 1) % n; this._renderList(); } }
+      else if (e.key === 'ArrowUp') { e.preventDefault(); if (n) { this._sel = (this._sel - 1 + n) % n; this._renderList(); } }
       else if (e.key === 'Enter') { e.preventDefault(); this._run(); }
+      else if ((e.metaKey || e.ctrlKey) && /^[1-9]$/.test(e.key)) {
+        // Cmd/Ctrl+1..9 quick-select — modifier required so typing plain
+        // digits into a query is never hijacked.
+        const idx = Number(e.key) - 1;
+        if ((this.input.value.trim() !== '' || n > 0) && idx < n) {
+          e.preventDefault();
+          this._sel = idx;
+          this._renderList();
+          this._run();
+        }
+      }
     },
 
     _run() {
@@ -582,7 +821,27 @@
       else if (it.kind === 'symbol') { this.close(); if (typeof openResearch === 'function') openResearch(it.symbol); }
       else if (it.kind === 'alert') { this._setAlert(it); }
       else if (it.kind === 'stress') { this.close(); if (typeof runStressCommand === 'function') runStressCommand(); }
+      else if (it.kind === 'recap') { this._recap(); }
+      else if (it.kind === 'export') { this.close(); window.open('/api/jarvis/conversation/export', '_blank'); }
       else if (it.kind === 'ask') { this._ask(it.query); }
+    },
+
+    async _recap() {
+      this.answer.innerHTML = '<div class="jp-answer thinking"><div class="spinner"></div> Replaying the tape...</div>';
+      try {
+        // Peek only — the palette recap must not advance the seen-watermark
+        // (the Overview digest card owns that).
+        const d = await API.get('/api/jarvis/digest?mark_seen=0');
+        if (!d.count) {
+          this.answer.innerHTML = '<div class="jp-answer"><div class="jp-answer-text">Nothing new since your last look — no alerts tripped, no notable moves logged.</div></div>';
+          return;
+        }
+        const rows = (d.insights || []).slice(0, 8).map(r =>
+          `<div class="jv-obs ${esc(r.tone || 'info')}">• ${esc(r.title)}</div>`).join('');
+        this.answer.innerHTML = `<div class="jp-answer"><div class="jp-answer-text">${esc(d.line || '')}</div>${rows}</div>`;
+      } catch (e) {
+        this.answer.innerHTML = `<div class="jp-answer error">${esc(e.message)}</div>`;
+      }
     },
 
     async _setAlert(it) {
@@ -608,7 +867,16 @@
         const body = this._convId
           ? { query, conversation_id: this._convId }
           : { query, history: this._history.slice(-6) };
-        const r = await API.post('/api/jarvis/ask', body);
+        let r;
+        try {
+          r = await askStream(body, (t) => {
+            if (this.answer) {
+              this.answer.innerHTML = `<div class="jp-answer thinking"><div class="spinner"></div> ${esc(t)}</div>`;
+            }
+          });
+        } catch (streamErr) {
+          r = await API.post('/api/jarvis/ask', body);
+        }
         if (r.conversation_id) this._convId = r.conversation_id;
         this._history.push({ q: query, a: r.answer, symbol: r.symbol || null });
         if (this._history.length > 8) this._history.shift();
@@ -627,14 +895,19 @@
           ? `<div class="jv-cites"><span class="jv-cites-h">sources</span>${r.citations.slice(0,6).map(c =>
                 `<a class="jv-cite" href="${esc(c.url)}" target="_blank" rel="noopener noreferrer">${esc(c.title || c.url)}</a>`).join('')}</div>` : '';
         this.answer.innerHTML = `
-          <div class="jp-answer">
-            <div class="jp-answer-text">${esc(r.answer)}</div>
+          <div class="jp-answer${r.intent === 'clarify' ? ' jv-clarify' : ''}">
+            <div class="jp-answer-text">${mdLite(esc(r.answer))}</div>
+            ${clarifyChipsHtml(r)}
             ${r.detail ? `<div class="jp-answer-detail">${esc(r.detail)}</div>` : ''}
             ${citesLine}
+            ${reasoningHtml(r)}
             ${usedLine}
             ${proposal}
             ${action}
           </div>`;
+        wireReasoning(this.answer);
+        this.answer.querySelectorAll('.jv-chip-reply').forEach(b =>
+          b.addEventListener('click', () => this._ask(b.dataset.q)));
         const go = document.getElementById('jp-answer-go');
         if (go) go.addEventListener('click', () => { this.close(); runAction(r.action); });
         const confirmBtn = document.getElementById('jp-confirm');
@@ -1007,6 +1280,39 @@
         const a = await API.get('/api/jarvis/activity');
         this._renderBackground(a);
       } catch (e) { /* leave previous */ }
+      this._refreshHealth();
+    },
+
+    // Systems vitals: AI budget meter + warmer/cache liveness, rendered as a
+    // strip under the background section while the panel is open.
+    async _refreshHealth() {
+      try {
+        const h = await API.get('/api/jarvis/health');
+        const bg = document.getElementById('jap-bg');
+        if (!bg || !h) return;
+        let row = document.getElementById('jap-health');
+        if (!row) {
+          row = document.createElement('div');
+          row.id = 'jap-health';
+          row.className = 'jap-health';
+          bg.insertAdjacentElement('afterend', row);
+        }
+        const bits = [];
+        const ai = h.ai || {};
+        if (ai.key && ai.daily_cap) {
+          const used = ai.calls_today || 0;
+          const pct = Math.min(100, Math.round(used / ai.daily_cap * 100));
+          bits.push(`<span class="jap-meter" title="AI calls today">AI ${used}/${ai.daily_cap}` +
+            `<span class="jap-meter-bar"><span style="width:${pct}%"${pct >= 90 ? ' class="hot"' : ''}></span></span></span>`);
+        } else {
+          bits.push('<span class="jap-meter">AI OFFLINE — local engines only</span>');
+        }
+        const w = h.warmer || {};
+        bits.push(`<span>WARMER ${w.alive ? '◉ LIVE' : '○ idle'}</span>`);
+        if (h.cache && h.cache.on_disk) bits.push(`<span>${Number(h.cache.on_disk).toLocaleString()} facts</span>`);
+        if (h.memory_facts) bits.push(`<span>${h.memory_facts} memories</span>`);
+        row.innerHTML = bits.join('<span class="jap-dot">·</span>');
+      } catch (e) { /* vitals are decorative — never break the panel */ }
     },
 
     render() {
@@ -1054,13 +1360,52 @@
           for (const c of p1) {
             if (!this._seen.has(c.title)) {
               this._seen.add(c.title);
-              Toast.show('◉ JARVIS: ' + c.title, 'amber', 8000);
+              // Actionable toast: "OPEN →" deep-links into the insight's view
+              // (Toast.show's optional 4th arg, added in app.js).
+              Toast.show('◉ JARVIS: ' + c.title, 'amber', 8000,
+                c.action ? { label: 'OPEN →', onClick: () => runAction(c.action) } : undefined);
             }
           }
         } catch (e) { /* server asleep or offline — stay quiet */ }
       };
       tick();
       this._timer = setInterval(tick, 5 * 60 * 1000);
+    },
+  };
+
+  // ── Digest freshness — re-fetch "while you were away" after a long absence ──
+  // If the tab was hidden for more than 30 minutes, re-pull the digest on
+  // return (default mark_seen, advancing the watermark), toast a one-liner
+  // when something happened, and refresh the Overview briefing if that view
+  // is what the user comes back to.
+  const AWAY_THRESHOLD_MS = 30 * 60 * 1000;
+  const Freshness = {
+    _hiddenAt: null,   // module-level timestamp of when the page went hidden
+    init() {
+      document.addEventListener('visibilitychange', () => {
+        if (document.hidden) { this._hiddenAt = Date.now(); return; }
+        const away = this._hiddenAt ? Date.now() - this._hiddenAt : 0;
+        this._hiddenAt = null;
+        if (away < AWAY_THRESHOLD_MS) return;
+        this._refetch();
+      });
+    },
+    async _refetch() {
+      try {
+        const d = await API.get('/api/jarvis/digest');
+        if (!d || !d.count) return;
+        // Hand the fresh digest to the briefing panel (it normally fetches
+        // only once per page load) before re-rendering.
+        Briefing._digest = d;
+        Briefing._digestFetched = true;
+        if (typeof Toast === 'object' && Toast.info) {
+          Toast.info('◉ JARVIS: while you were away — ' + (d.line || (d.count + ' things happened.')));
+        }
+        if (typeof State === 'object' && State && State.activeView === 'overview'
+            && document.getElementById('ov-jarvis')) {
+          Briefing.render('ov-jarvis');
+        }
+      } catch (e) { /* server asleep — stay quiet */ }
     },
   };
 
@@ -1097,7 +1442,7 @@
             <div class="jv-input-row">
               <input id="jv-input" type="text" placeholder="Ask anything — your book, a business, the macro picture…"
                      autocomplete="off" spellcheck="false">
-              <button id="jv-mic" type="button" title="Talk" aria-label="Talk to Jarvis">🎙</button>
+              <button id="jv-mic" type="button" title="Talk" aria-label="Talk to Jarvis" aria-pressed="false">🎙</button>
               <button id="jv-send" type="button" class="btn btn-green btn-sm">ASK</button>
             </div>
           </div>
@@ -1118,7 +1463,11 @@
           </div>
         </div>`;
 
-      document.getElementById('jv-send').addEventListener('click', () => this._send());
+      document.getElementById('jv-send').addEventListener('click', () => {
+        // Busy → the button is ■ STOP: abort the stream instead of re-asking.
+        if (this._busy) { if (this._abort) this._abort.abort(); return; }
+        this._send();
+      });
       document.getElementById('jv-input').addEventListener('keydown', (e) => {
         if (e.key === 'Enter') this._send();
       });
@@ -1126,11 +1475,30 @@
       if (!Voice.sttAvailable()) {
         jvMic.style.display = 'none';  // dead button on browsers without STT
       } else {
+        // Listening state: pulsing class (existing .jarvis-core rule, stilled
+        // globally under prefers-reduced-motion) + aria-pressed, cleared on
+        // result, silence and error alike (Voice.listen fires exactly one of
+        // the two callbacks).
+        const micState = (on) => {
+          const m = document.getElementById('jv-mic');
+          if (!m) return;
+          m.classList.toggle('jarvis-core', on);
+          m.setAttribute('aria-pressed', String(on));
+        };
         jvMic.addEventListener('click', () => {
-          Voice.listen((t) => { document.getElementById('jv-input').value = t; this._send(true); },
-                       () => {});
+          micState(true);
+          Voice.listen(
+            (t) => { micState(false); const inp = document.getElementById('jv-input'); if (inp) inp.value = t; this._send(true); },
+            () => micState(false));
         });
       }
+      // Copy affordance: hovering any assistant bubble lazily attaches a ⧉
+      // button (delegated, so bubbles created or rewritten later get it too).
+      const chatBox = document.getElementById('jv-chat');
+      if (chatBox) chatBox.addEventListener('mouseover', (e) => {
+        const b = e.target.closest && e.target.closest('.jv-bubble.assistant');
+        if (b && !b.querySelector('.jv-copy-btn')) this._attachCopy(b);
+      });
       // Spoken-replies toggle — shares the same persisted flag as the palette,
       // so "voice on" is consistent across both Jarvis surfaces and the
       // command center finally has its own control for it.
@@ -1162,6 +1530,44 @@
       this._loadSide();
     },
 
+    // ⧉ copy button for an assistant bubble — JS-created, shown on hover,
+    // copies the bubble's textContent (minus the button itself).
+    _attachCopy(bubble) {
+      const btn = document.createElement('button');
+      btn.className = 'jv-copy-btn';
+      btn.type = 'button';
+      btn.textContent = '⧉';
+      btn.title = 'Copy';
+      btn.setAttribute('aria-label', 'Copy this reply');
+      btn.style.cssText = 'position:absolute;top:2px;right:2px;'
+        + 'background:none;border:1px solid var(--border,#1c1c1c);border-radius:2px;'
+        + 'color:var(--text-dim,#888);font-size:10px;line-height:1;padding:2px 4px;'
+        + 'cursor:pointer;opacity:0;transition:opacity .15s';
+      if (!bubble.style.position) bubble.style.position = 'relative';
+      bubble.appendChild(btn);
+      const show = () => { btn.style.opacity = '1'; };
+      const hide = () => { btn.style.opacity = '0'; };
+      bubble.addEventListener('mouseenter', show);
+      bubble.addEventListener('mouseleave', hide);
+      btn.addEventListener('focus', show);
+      btn.addEventListener('blur', hide);
+      show();  // attached mid-hover — make it visible right away
+      btn.addEventListener('click', () => {
+        const clone = bubble.cloneNode(true);
+        clone.querySelectorAll('.jv-copy-btn').forEach(n => n.remove());
+        copyToClipboard((clone.textContent || '').trim());
+      });
+    },
+
+    // "— Jun 12 —" label from a YYYY-MM-DD prefix; parsed by parts so the
+    // label never shifts a day across timezones.
+    _dayLabel(day) {
+      const p = String(day).split('-').map(Number);
+      if (p.length !== 3 || p.some(isNaN)) return day;
+      return new Date(p[0], p[1] - 1, p[2])
+        .toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+    },
+
     async _loadChat() {
       const gen = this._chatGen;
       try {
@@ -1172,12 +1578,27 @@
         if (!el) return;
         const msgs = (c.messages || []).slice(-20);
         if (msgs.length) {
-          el.innerHTML = msgs.map(m => `<div class="jv-bubble ${m.role === 'user' ? 'user' : 'assistant'}">${esc(m.content)}</div>`).join('');
+          // Dim day separators between messages from different days
+          // (created_at is the server's timestamp on each persisted message).
+          let html = '';
+          let prevDay = null;
+          for (const m of msgs) {
+            const day = (m.created_at || '').slice(0, 10);
+            if (day && prevDay && day !== prevDay) {
+              html += `<div class="jv-day-sep" style="text-align:center;color:var(--text-dim,#666);`
+                + `font-size:9px;letter-spacing:.1em;margin:8px 0">— ${esc(this._dayLabel(day))} —</div>`;
+            }
+            if (day) prevDay = day;
+            const body = m.role === 'user' ? esc(m.content) : mdLite(esc(m.content));
+            html += `<div class="jv-bubble ${m.role === 'user' ? 'user' : 'assistant'}">${body}</div>`;
+          }
+          el.innerHTML = html;
         } else {
           // Empty thread → offer clickable starters so the feature is
           // discoverable instead of a blank prompt.
-          const starters = ["How's my portfolio?", "Is AAPL a good business to own?",
-                            "What's the macro picture?", "How's my trading behavior?"];
+          const starters = ["Why am I down today?", "What did I miss?",
+                            "How risky is my book?", "Is AAPL a good business to own?",
+                            "Am I beating the market?", "How's my trading behavior?"];
           el.innerHTML = '<div class="jv-bubble assistant">At your service. Ask about your book, a '
             + 'business, or the macro picture — or try one of these:'
             + '<div class="jv-starters">'
@@ -1216,20 +1637,59 @@
       const chatEl = document.getElementById('jv-chat');
       if (chatEl) chatEl.setAttribute('aria-busy', 'true');
       const thinking = this._append('assistant', '<span class="jv-thinking" aria-label="Jarvis is working">◉ working…</span>');
+      // While busy, the ASK button becomes ■ STOP and aborts the stream.
+      const sendBtn = document.getElementById('jv-send');
+      const abort = new AbortController();
+      this._abort = abort;
+      if (sendBtn) { sendBtn.textContent = '■ STOP'; sendBtn.classList.add('jv-stop'); }
       try {
-        const r = await API.post('/api/jarvis/ask', { query: q, conversation_id: this._convId });
+        const body = { query: q, conversation_id: this._convId };
+        let r;
+        const trail = [];
+        try {
+          // Live narration: each status frame appends to a fading trail of
+          // what Jarvis is doing ("Reading your portfolio…", "Researching
+          // the open web…") with the current step highlighted.
+          r = await askStream(body, (t) => {
+            if (!thinking || !document.body.contains(thinking)) return;
+            trail.push(t);
+            const prev = trail.slice(-4, -1).map(s => `<div class="jv-trail">${esc(s)}</div>`).join('');
+            thinking.innerHTML = prev + `<span class="jv-thinking">◉ ${esc(t)}</span>`;
+          }, abort.signal);
+        } catch (streamErr) {
+          if (abort.signal.aborted) {
+            // User hit STOP — the server finishes and persists the exchange
+            // in the background; the thread shows it on next load.
+            if (thinking) thinking.innerHTML = '<span class="jv-trail">■ stopped — I\'ll keep the answer in the thread.</span>';
+            return;
+          }
+          // Stream path failed (old server, proxy buffering) — the plain
+          // POST is the answer of record.
+          r = await API.post('/api/jarvis/ask', body);
+        }
         if (r.conversation_id) this._convId = r.conversation_id;
-        let html = esc(r.answer);
+        let html = mdLite(esc(r.answer));
+        html += clarifyChipsHtml(r);
         if (r.citations && r.citations.length) {
           html += '<div class="jv-cites"><span class="jv-cites-h">sources</span>'
             + r.citations.slice(0, 6).map(c =>
                 `<a class="jv-cite" href="${esc(c.url)}" target="_blank" rel="noopener noreferrer">${esc(c.title || c.url)}</a>`).join('')
             + '</div>';
         }
+        html += reasoningHtml(r);
         if (r.used && r.used.length) {
           html += `<div class="jv-used">◉ consulted: ${esc([...new Set(r.used)].join(', ').replace(/_/g, ' '))}</div>`;
         }
-        if (thinking) thinking.innerHTML = html;
+        if (thinking) {
+          thinking.innerHTML = html;
+          if (r.intent === 'clarify') thinking.classList.add('jv-clarify');
+          wireReasoning(thinking);
+          thinking.querySelectorAll('.jv-chip-reply').forEach(b =>
+            b.addEventListener('click', () => {
+              const inp = document.getElementById('jv-input');
+              if (inp) { inp.value = b.dataset.q; this._send(); }
+            }));
+        }
         if (r.proposal) {
           const prop = this._append('assistant',
             `<div class="jp-proposal"><span>⚡ ${esc(r.proposal.label)}</span>
@@ -1250,6 +1710,9 @@
         if (thinking) thinking.innerHTML = `<span class="col-negative">${esc(e.message)}</span>`;
       } finally {
         this._busy = false;
+        this._abort = null;
+        const sb = document.getElementById('jv-send');
+        if (sb) { sb.textContent = 'ASK'; sb.classList.remove('jv-stop'); }
         if (chatEl) chatEl.setAttribute('aria-busy', 'false');
       }
     },
@@ -1385,7 +1848,7 @@
   };
 
   global.Jarvis = Jarvis;
-  const boot = () => { Activity.instrument(); Orb.init(); Palette.init(); Watch.start(); };
+  const boot = () => { Activity.instrument(); Orb.init(); Palette.init(); Watch.start(); Freshness.init(); };
   if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', boot);
   } else {

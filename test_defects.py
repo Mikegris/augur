@@ -410,6 +410,10 @@ def test_keys_and_agent():
     ai_summarizer._record_ai_call = lambda: None
     state = {"n": 0}
     def fake_chat(client, model, messages, **kw):
+        if not kw.get("tools"):
+            # v2.2 planner runs a plain (tool-less) completion before the
+            # agent loop — answer it with an empty plan so it's a no-op.
+            return _Resp(_Msg(content='{"clarify": null, "steps": []}'))
         state["n"] += 1
         if state["n"] == 1:
             return _Resp(_Msg(tool_calls=[_TC("t1", "get_quote", '{"symbol":"NVDA"}')]))
@@ -565,7 +569,7 @@ def test_defect_sweep_c():
     # P2: "set an alert for X above N" was swallowed by the read-only alerts intent.
     orig_avail, orig_agent = jarvis._llm_available, jarvis._agent_ask
     jarvis._llm_available = lambda: True
-    jarvis._agent_ask = lambda q, t=None: {
+    jarvis._agent_ask = lambda q, t=None, **kw: {
         "answer": "proposing", "used": [],
         "proposal": {"tool": "add_price_alert", "args": {}, "label": "x"}}
     try:
@@ -953,7 +957,7 @@ def test_jarvis_research():
             "citations": [{"title": "T", "url": "http://x"}]}
     orig_avail, orig_agent = jarvis._llm_available, jarvis._agent_ask
     jarvis._llm_available = lambda: True
-    jarvis._agent_ask = lambda q, t=None: fake
+    jarvis._agent_ask = lambda q, t=None, **kw: fake
     try:
         r = jarvis.ask("what's the latest on the spacex ipo", persist=False)
         check("research: ask surfaces citations from web_research",
@@ -972,7 +976,7 @@ def test_jarvis_research():
     orig_avail2, orig_agent2 = jarvis._llm_available, jarvis._agent_ask
     orig_web = jr.web_research
     jarvis._llm_available = lambda: True
-    jarvis._agent_ask = lambda q, t=None: None  # simulate agent failure
+    jarvis._agent_ask = lambda q, t=None, **kw: None  # simulate agent failure
     jr.web_research = lambda q: {"answer": "SpaceX priced its IPO at $135.",
                                  "citations": [{"title": "Reuters", "url": "http://r"}]}
     try:
@@ -986,6 +990,447 @@ def test_jarvis_research():
 
 
 # ── 12. database add_position: offsetting to zero shares must not crash ──────
+def test_jarvis_v2_live():
+    """v2.0: streaming ask, portfolio attribution, auto-memory, away digest."""
+    import jarvis
+    import jarvis_tools
+    import database as db_
+    import app
+
+    # ── streaming ask: status frames then exactly one terminal answer ──
+    orig_ask = jarvis.ask
+
+    def fake_ask(query, history=None, conversation_id=None, persist=True, progress=None):
+        progress("Reading your portfolio…")
+        progress("Synthesizing what I found…")
+        return {"intent": "llm", "answer": "done", "symbol": None}
+
+    jarvis.ask = fake_ask
+    try:
+        evs = list(jarvis.ask_stream("test"))
+    finally:
+        jarvis.ask = orig_ask
+    check("stream: status frames then answer",
+          [e["type"] for e in evs] == ["status", "status", "answer"], repr(evs)[:120])
+    check("stream: terminal payload preserved",
+          evs[-1]["payload"].get("answer") == "done")
+
+    def boom_ask(query, **kw):
+        raise RuntimeError("boom")
+
+    jarvis.ask = boom_ask
+    try:
+        evs = list(jarvis.ask_stream("test"))
+    finally:
+        jarvis.ask = orig_ask
+    check("stream: worker crash still yields a terminal error answer",
+          evs and evs[-1]["type"] == "answer"
+          and evs[-1]["payload"].get("intent") == "error")
+
+    # ── streaming route: validation + SSE framing ──
+    c = app.app.test_client()
+    check("stream route: missing query is 400",
+          c.post("/api/jarvis/ask/stream", json={}).status_code == 400)
+    check("stream route: oversize query is 400",
+          c.post("/api/jarvis/ask/stream", json={"query": "x" * 501}).status_code == 400)
+    jarvis.ask = fake_ask
+    try:
+        r = c.post("/api/jarvis/ask/stream", json={"query": "hi"})
+        body = r.get_data(as_text=True)
+    finally:
+        jarvis.ask = orig_ask
+    check("stream route: event-stream mimetype", r.mimetype == "text/event-stream")
+    check("stream route: SSE data frames incl. terminal answer",
+          body.count("data: ") >= 3 and '"type": "answer"' in body, body[:160])
+
+    # ── attribution ──
+    orig_pulse, orig_regime = jarvis._portfolio_pulse, jarvis._market_regime
+    fake_rows = [
+        {"symbol": "NVDA", "market_value": 50000.0, "day_pnl": -900.0,
+         "day_change_pct": -1.8, "weight_pct": 50.0, "unrealized_pnl": 0, "unrealized_pct": 0},
+        {"symbol": "AAPL", "market_value": 30000.0, "day_pnl": 150.0,
+         "day_change_pct": 0.5, "weight_pct": 30.0, "unrealized_pnl": 0, "unrealized_pct": 0},
+        {"symbol": "MSFT", "market_value": 20000.0, "day_pnl": -50.0,
+         "day_change_pct": -0.2, "weight_pct": 20.0, "unrealized_pnl": 0, "unrealized_pct": 0},
+    ]
+    jarvis._portfolio_pulse = lambda: {
+        "total_value": 100000.0, "total_pnl": 1000.0, "total_pnl_pct": 1.0,
+        "day_pnl": -800.0, "day_pnl_pct": -0.8, "num_positions": 3,
+        "holdings": fake_rows, "best": fake_rows[1], "worst": fake_rows[0]}
+    jarvis._market_regime = lambda: {"spx_pct": 0.5, "vix": 15.0}
+    try:
+        a = jarvis.portfolio_attribution()
+        check("attrib: top detractor first", a["detractors"][0]["symbol"] == "NVDA")
+        check("attrib: share of move computed",
+              abs(a["detractors"][0]["share_of_move_pct"] - 112.5) < 0.1,
+              repr(a["detractors"][0]))
+        check("attrib: contributors on the other side",
+              a["contributors"] and a["contributors"][0]["symbol"] == "AAPL")
+        why = jarvis._answer_why()
+        check("attrib: against-the-tape callout", "AGAINST" in why["answer"])
+        r1 = jarvis.ask("why am i down today", persist=False)
+        check("attrib: 'why am i down' routes to attribution",
+              r1["intent"] == "attribution", r1["intent"])
+        r2 = jarvis.ask("what is driving my portfolio today", persist=False)
+        check("attrib: 'what's driving my portfolio' routes too",
+              r2["intent"] == "attribution", r2["intent"])
+        r3 = jarvis.ask("why is the market down", persist=False)
+        check("attrib: market question NOT swallowed",
+              r3["intent"] != "attribution", r3["intent"])
+    finally:
+        jarvis._portfolio_pulse, jarvis._market_regime = orig_pulse, orig_regime
+    check("attrib: tool registered read-only",
+          "portfolio_attribution" in jarvis_tools.TOOLS
+          and not jarvis_tools.is_mutating("portfolio_attribution"))
+
+    # ── auto-memory ──
+    import threading as _th
+
+    def _join_learners():
+        for t in _th.enumerate():
+            if t.name == "jarvis-learn":
+                t.join(timeout=5)
+
+    llm_calls = []
+    orig_avail, orig_complete = jarvis._llm_available, jarvis._llm_complete
+    jarvis._llm_available = lambda: True
+
+    def fake_complete(messages, max_tokens=200, temperature=0.4):
+        llm_calls.append(messages)
+        return '{"fact": "Wants lower risk heading into a 2030 retirement"}'
+
+    jarvis._llm_complete = fake_complete
+    try:
+        jarvis._maybe_learn("i want to retire in 2030 so please keep my risk lower")
+        _join_learners()
+        facts = db_.jarvis_list_memories()
+        check("auto-memory: durable fact stored with source=auto",
+              any(f["source"] == "auto" and "2030" in f["fact"] for f in facts),
+              repr(facts)[:120])
+        before = len(llm_calls)
+        jarvis._maybe_learn("what is the price of NVDA right now")  # no first-person cue
+        jarvis._maybe_learn("hi")  # too short
+        _join_learners()
+        check("auto-memory: cue/length gates skip the LLM entirely",
+              len(llm_calls) == before)
+        # Idempotent: same fact again must not duplicate.
+        n_before = len(db_.jarvis_list_memories())
+        jarvis._maybe_learn("i want to retire in 2030 so please keep my risk lower")
+        _join_learners()
+        check("auto-memory: exact dupe not re-stored",
+              len(db_.jarvis_list_memories()) == n_before)
+        check("auto-memory: listing marks learned facts",
+              "picked up in conversation" in jarvis.ask("what do you remember",
+                                                        persist=False)["answer"])
+    finally:
+        jarvis._llm_available, jarvis._llm_complete = orig_avail, orig_complete
+        for f in db_.jarvis_list_memories():
+            if f["source"] == "auto":
+                db_.jarvis_delete_memory(f["id"])
+
+    # ── away digest ──
+    card = {"kind": "alert", "tone": "warn", "priority": 1,
+            "title": "NVDA alert triggered", "detail": "crossed level",
+            "action": {"view": "alerts"}}
+    n1 = db_.jarvis_log_insights([card])
+    n2 = db_.jarvis_log_insights([card])
+    check("digest: insight log dedups per (day, kind, title)", n1 == 1 and n2 == 0,
+          "n1=%s n2=%s" % (n1, n2))
+    orig_settings, orig_set = db_.get_settings, db_.set_setting
+    seen = {}
+    db_.get_settings = lambda: {"jarvis_last_seen": "2020-01-01 00:00:00"}
+    db_.set_setting = lambda k, v: seen.update({k: v})
+    try:
+        d = jarvis.away_digest()
+        check("digest: replays insights since watermark",
+              d["count"] >= 1 and "NVDA alert triggered" in (d["line"] or ""),
+              repr(d)[:160])
+        check("digest: watermark advanced on mark_seen", "jarvis_last_seen" in seen)
+        from datetime import datetime, timezone, timedelta
+        recent = (datetime.now(timezone.utc) - timedelta(minutes=10)).strftime("%Y-%m-%d %H:%M:%S")
+        db_.get_settings = lambda: {"jarvis_last_seen": recent}
+        d2 = jarvis.away_digest(mark_seen=False)
+        check("digest: a 10-minute gap is a tab switch, not an absence",
+              d2["count"] == 0)
+        db_.get_settings = lambda: {}
+        d3 = jarvis.away_digest(mark_seen=False)
+        check("digest: first visit is empty", d3["count"] == 0 and d3["since"] is None)
+    finally:
+        db_.get_settings, db_.set_setting = orig_settings, orig_set
+    rr = c.get("/api/jarvis/digest?mark_seen=0")
+    check("digest: route responds", rr.status_code == 200 and "count" in rr.get_json())
+
+    # ── frontend wiring pinned by source grep (sweep convention) ──
+    src = open("static/js/jarvis.js").read()
+    check("frontend: askStream helper targets the stream route",
+          "function askStream" in src and "/api/jarvis/ask/stream" in src)
+    check("frontend: stream failure falls back to plain ask",
+          src.count("API.post('/api/jarvis/ask'") >= 2)
+    check("frontend: digest fetched once per page load", "_digestFetched" in src)
+    html = open("templates/index.html").read()
+    check("assets: jarvis.js cache-busted", "jarvis.js?v=" in html)
+    check("assets: terminal.css cache-busted", "terminal.css?v=" in html)
+
+
+def test_jarvis_30x():
+    """v2.0 wave 2: the 30-enhancement sweep — intents, briefing cards,
+    tools, routes, frontend wiring."""
+    import jarvis
+    import jarvis_tools
+    import database as db_
+    import app
+
+    fakeq = {"AAPL": {"symbol": "AAPL", "price": 99.0, "change_pct": 1.0,
+                      "fifty_two_week_high": 100.0, "fifty_two_week_low": 50.0,
+                      "market_cap": 3.1e12, "volume": 52e6},
+             "NVDA": {"symbol": "NVDA", "price": 80.0, "change_pct": -2.0,
+                      "fifty_two_week_high": 100.0, "fifty_two_week_low": 60.0,
+                      "market_cap": 2.0e12, "volume": 30e6}}
+    orig_quote = jarvis.fetcher.get_quote
+    jarvis.fetcher.get_quote = lambda s: fakeq.get(
+        s.upper(), {"symbol": s, "price": None})
+    try:
+        # Intent routing — every new rule answers without an LLM.
+        for q, want in (("whats on my watchlist", "watchlist"),
+                        ("is AAPL near its high", "range"),
+                        ("what did i miss", "recap"),
+                        ("summarize my day", "summary"),
+                        ("how risky is my portfolio", "risk"),
+                        ("how much crypto do i have", "crypto_share"),
+                        ("what did i buy recently", "transactions"),
+                        ("am i beating the market", "benchmark"),
+                        ("NVDA vs AAPL", "compare")):
+            r = jarvis.ask(q, persist=False)
+            check("intent: %r -> %s" % (q, want), r.get("intent") == want,
+                  "%s: %s" % (r.get("intent"), str(r.get("answer"))[:60]))
+
+        # Company-name resolution + enriched quote.
+        check("symbol: 'apple' resolves to AAPL",
+              jarvis._extract_symbol("how is apple doing") == "AAPL")
+        check("symbol: $SYM still beats names",
+              jarvis._extract_symbol("$TSLA or apple") == "TSLA")
+        rq = jarvis._answer_quote("AAPL")
+        check("quote: enriched with cap + volume",
+              "$3.10T" in rq["answer"] and "52.0M shares" in rq["answer"],
+              rq["answer"])
+
+        # 52-week range answer phrasing.
+        rr = jarvis._answer_range("AAPL")
+        check("range: position + distance phrased",
+              "98% of its 52-week range" in rr["answer"]
+              and "1.0% below the high" in rr["answer"], rr["answer"])
+
+        # Compare answer names the better day.
+        rc = jarvis._answer_compare_quotes("AAPL", "NVDA")
+        check("compare: side-by-side with verdict",
+              "versus" in rc["answer"] and "AAPL has the better day" in rc["answer"],
+              rc["answer"])
+    finally:
+        jarvis.fetcher.get_quote = orig_quote
+
+    # Crypto share + benchmark + risk on a fake pulse.
+    orig_pulse, orig_regime = jarvis._portfolio_pulse, jarvis._market_regime
+    jarvis._portfolio_pulse = lambda: {
+        "total_value": 10000.0, "total_pnl": 500.0, "total_pnl_pct": 5.0,
+        "day_pnl": 100.0, "day_pnl_pct": 1.0, "num_positions": 2,
+        "holdings": [
+            {"symbol": "BTC", "asset_type": "crypto", "market_value": 4000.0,
+             "weight_pct": 40.0, "day_pnl": 60.0, "day_change_pct": 1.5,
+             "unrealized_pnl": 0, "unrealized_pct": 0},
+            {"symbol": "AAPL", "asset_type": "stock", "market_value": 6000.0,
+             "weight_pct": 60.0, "day_pnl": 40.0, "day_change_pct": 0.7,
+             "unrealized_pnl": 0, "unrealized_pct": 0}],
+        "best": None, "worst": None}
+    jarvis._market_regime = lambda: {"spx_pct": 0.4, "vix": 14.0, "regime": "CALM"}
+    try:
+        cs = jarvis._answer_crypto_share()
+        check("crypto share: 40% surfaced", "40.0%" in cs["answer"], cs["answer"])
+        bm = jarvis._answer_benchmark()
+        check("benchmark: ahead of the tape",
+              "ahead of" in bm["answer"] and "+1.00%" in bm["answer"], bm["answer"])
+        rk = jarvis._answer_risk()
+        check("risk: crypto flag at 40%", "crypto is 40%" in rk["answer"], rk["answer"])
+    finally:
+        jarvis._portfolio_pulse, jarvis._market_regime = orig_pulse, orig_regime
+
+    # Briefing cards: streak, watchlist mover, earnings-today P1.
+    orig_snaps = db_.get_snapshots
+    db_.get_snapshots = lambda: [
+        {"date": "d%d" % i, "total_value": v}
+        for i, v in enumerate([100, 99, 100, 102, 104])]
+    try:
+        sc = jarvis._streak_card()
+        check("streak: 3 rising sessions carded",
+              bool(sc) and "up 3 sessions" in sc[0]["title"], repr(sc)[:100])
+    finally:
+        db_.get_snapshots = orig_snaps
+
+    orig_wl, orig_batch = db_.get_watchlist, jarvis.fetcher.get_quotes_batch
+    db_.get_watchlist = lambda: [{"symbol": "PLTR"}, {"symbol": "SOFI"}]
+    jarvis.fetcher.get_quotes_batch = lambda syms: {
+        "PLTR": {"change_pct": 7.5}, "SOFI": {"change_pct": 0.5}}
+    try:
+        wc = jarvis._watchlist_mover_cards()
+        check("watch mover: 7.5% move carded, 0.5% not",
+              len(wc) == 1 and "PLTR" in wc[0]["title"], repr(wc)[:100])
+    finally:
+        db_.get_watchlist, jarvis.fetcher.get_quotes_batch = orig_wl, orig_batch
+
+    import earnings as earn_
+    orig_cal = earn_.get_earnings_calendar
+    earn_.get_earnings_calendar = lambda syms: [
+        {"symbol": "AAPL", "days_until": 0, "earnings_date": "2026-06-12"}]
+    try:
+        ec = jarvis._earnings_insights(["AAPL"])
+        check("earnings: TODAY escalates to P1", bool(ec) and ec[0]["priority"] == 1,
+              repr(ec)[:100])
+    finally:
+        earn_.get_earnings_calendar = orig_cal
+
+    # New tools registered + read-only + executable.
+    for tool in ("get_away_digest", "recent_transactions"):
+        check("tool: %s read-only" % tool,
+              tool in jarvis_tools.TOOLS and not jarvis_tools.is_mutating(tool))
+    out = jarvis_tools.execute_read("get_away_digest", {})
+    check("tool: get_away_digest executes", '"count"' in out, out[:80])
+
+    # Health + export routes.
+    c = app.app.test_client()
+    h = c.get("/api/jarvis/health")
+    hj = h.get_json()
+    check("health: route 200 with ai/warmer/cache sections",
+          h.status_code == 200 and "ai" in hj and "warmer" in hj and "cache" in hj)
+    e = c.get("/api/jarvis/conversation/export")
+    check("export: markdown attachment",
+          e.status_code == 200 and "markdown" in e.mimetype
+          and "attachment" in (e.headers.get("Content-Disposition") or ""))
+
+    # Frontend wiring greps.
+    src = open("static/js/jarvis.js").read()
+    check("frontend: recap + export palette commands",
+          "RECAP_CMD" in src and "EXPORT_CMD" in src)
+    check("frontend: stop button aborts the stream",
+          "jv-stop" in src and "abort.signal" in src)
+    check("frontend: status trail kept", "jv-trail" in src)
+    check("frontend: health meter in orb panel",
+          "jap-health" in src and "_refreshHealth" in src)
+    html = open("templates/index.html").read()
+    check("assets: jarvis.js + css cache-busted",
+          "jarvis.js?v=" in html and "terminal.css?v=" in html)
+
+
+def test_jarvis_reasoning():
+    """v2.2: planner, clarifying questions, reasoning trace, glossary."""
+    import jarvis
+    import database as db_
+    import ai_summarizer
+
+    # ── glossary: instant expert answers, no key needed ──
+    orig_regime, orig_pulse = jarvis._market_regime, jarvis._portfolio_pulse
+    jarvis._market_regime = lambda: None
+    jarvis._portfolio_pulse = lambda: None
+    try:
+        for q in ("what is gamma exposure", "explain p/e", "whats a covered call",
+                  "define moat", "what is dca", "tell me about the yield curve"):
+            r = jarvis.ask(q, persist=False)
+            check("explain: %r" % q, r["intent"] == "explain",
+                  "%s: %s" % (r["intent"], str(r.get("answer"))[:60]))
+        gex = jarvis.ask("what is gamma exposure", persist=False)
+        check("explain: names the mechanism (dealers hedge)",
+              "dealers" in gex["answer"].lower() and "hedge" in gex["answer"].lower())
+        check("explain: action deep-links the live view",
+              (gex.get("action") or {}).get("view") == "gex")
+        r2 = jarvis.ask("what is driving my portfolio today", persist=False)
+        check("explain: doesn't swallow attribution", r2["intent"] == "attribution")
+    finally:
+        jarvis._market_regime, jarvis._portfolio_pulse = orig_regime, orig_pulse
+
+    # ── rule-based clarify + pending-intent resume ──
+    orig_avail = jarvis._llm_available
+    jarvis._llm_available = lambda: False
+    cid = db_.jarvis_new_conversation()
+    try:
+        r = jarvis.ask("give me a forecast", conversation_id=cid)
+        check("clarify: forecast w/o symbol asks", r["intent"] == "clarify"
+              and r["answer"].endswith("?"), repr(r)[:100])
+        check("clarify: choices list shape", isinstance(r.get("choices"), list))
+        check("clarify: pending intent recorded", cid in jarvis._PENDING_CLARIFY)
+        orig_fc = jarvis._answer_forecast
+        jarvis._answer_forecast = lambda s, ql=None: {"answer": "F:" + s}
+        try:
+            r2 = jarvis.ask("AAPL", conversation_id=cid)
+            check("clarify: bare-symbol reply resumes the forecast",
+                  r2["intent"] == "forecast" and r2["answer"] == "F:AAPL", repr(r2)[:80])
+        finally:
+            jarvis._answer_forecast = orig_fc
+        check("clarify: pending consumed", cid not in jarvis._PENDING_CLARIFY)
+    finally:
+        jarvis._llm_available = orig_avail
+
+    # ── planner: parse, validate, fail-open ──
+    orig_complete = jarvis._llm_complete
+    jarvis._llm_complete = lambda m, **kw: "not json at all"
+    try:
+        check("planner: junk → None", jarvis._plan_approach("q") is None)
+    finally:
+        jarvis._llm_complete = orig_complete
+    jarvis._llm_complete = lambda m, **kw: (
+        '{"clarify": null, "steps": [{"tool": "get_portfolio", "why": "own book"},'
+        ' {"tool": "made_up_tool", "why": "x"}], "angle": "rate sensitivity"}')
+    try:
+        p = jarvis._plan_approach("how exposed am i to rates")
+        check("planner: unknown tools filtered",
+              p is not None and [s["tool"] for s in p["steps"]] == ["get_portfolio"],
+              repr(p)[:100])
+        check("planner: angle kept", p is not None and p["angle"] == "rate sensitivity")
+    finally:
+        jarvis._llm_complete = orig_complete
+    jarvis._llm_complete = lambda m, **kw: '{"clarify": "no question mark", "steps": []}'
+    try:
+        check("planner: non-question clarify dropped → None",
+              jarvis._plan_approach("q") is None)
+    finally:
+        jarvis._llm_complete = orig_complete
+
+    # ── agent clarify short-circuit: zero completion calls ──
+    orig_key, orig_chat = ai_summarizer.get_openai_key, ai_summarizer._chat_completion
+    orig_plan = jarvis._plan_approach
+    ai_summarizer.get_openai_key = lambda: "k"
+
+    def _boom(*a, **kw):
+        raise AssertionError("completion must not run on clarify short-circuit")
+
+    ai_summarizer._chat_completion = _boom
+    jarvis._plan_approach = lambda q, h=None: {
+        "clarify": "Which symbol do you mean?", "steps": [], "angle": None}
+    try:
+        out = jarvis._agent_ask("forecast it please")
+        check("agent: planner clarify short-circuits the loop",
+              out is not None and out.get("clarify") is True
+              and out["answer"].endswith("?"), repr(out)[:100])
+    finally:
+        ai_summarizer.get_openai_key, ai_summarizer._chat_completion = orig_key, orig_chat
+        jarvis._plan_approach = orig_plan
+
+    # ── reasoning helpers + doctrine ──
+    check("trace: note passthrough",
+          jarvis._result_note('{"note": "no positions"}') == "no positions")
+    check("trace: keys summary",
+          jarvis._result_note('{"a": 1, "b": 2}').startswith("returned a, b"))
+    check("trace: rows summary", jarvis._result_note('[1,2,3]') == "returned 3 rows")
+    check("doctrine: clarify instruction in system prompt",
+          "clarifying question" in jarvis._AGENT_SYSTEM)
+    check("doctrine: depth instruction in system prompt",
+          "DEMONSTRATE DEPTH" in jarvis._AGENT_SYSTEM)
+
+    # ── frontend wiring ──
+    src = open("static/js/jarvis.js").read()
+    check("frontend: clarify chips + reasoning block",
+          "clarifyChipsHtml" in src and "reasoningHtml" in src and "jv-chip-reply" in src)
+    css = open("static/css/terminal.css").read()
+    check("frontend: clarify + reasoning styles", ".jv-clarify" in css and ".jv-reason" in css)
+
+
 def test_database_zero_shares():
     import database
     database.init_db()
@@ -1222,6 +1667,9 @@ def main():
         ("defect sweep D pins", test_defect_sweep_d),
         ("defect sweep E pins", test_defect_sweep_e),
         ("jarvis open-world research", test_jarvis_research),
+        ("jarvis v2.0 live features", test_jarvis_v2_live),
+        ("jarvis 30-enhancement sweep", test_jarvis_30x),
+        ("jarvis reasoning layer", test_jarvis_reasoning),
         ("jarvis lens + premium TTS", test_jarvis_lens),
         ("database zero-shares guard", test_database_zero_shares),
         ("cli quote None fields", test_cli_quote_none_fields),

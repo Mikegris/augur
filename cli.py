@@ -1656,6 +1656,70 @@ def cmd_alt_data(args):
         print(_c("  Subcommands: nowcast <symbol>, scan [symbols...]", DIM))
 
 
+# ── Jarvis (ask / briefing / health) ─────────────────────────────────────────
+
+def cmd_ask(args):
+    # Lazy import — jarvis pulls the full engine registry on import; only
+    # pay that cost when the user actually asks something.
+    import jarvis
+    res = jarvis.ask(args.question, persist=False) or {}
+    banner("JARVIS")
+    answer = (res.get("answer") or "").strip()
+    if not answer:
+        print(_c("  (no answer)", DIM))
+    else:
+        for line in answer.splitlines():
+            print(f"  {line}")
+    action = res.get("action") or {}
+    if isinstance(action, dict) and action.get("view"):
+        target = action["view"]
+        if action.get("symbol"):
+            target += f" ({action['symbol']})"
+        print(_c(f"\n  → view: {target}", CYAN))
+
+
+def cmd_briefing(args):
+    import jarvis
+    b = jarvis.get_briefing() or {}
+    banner("JARVIS BRIEFING")
+    if b.get("greeting"):
+        print(f"  {b['greeting']}")
+    if b.get("voice"):
+        print(_c(f"  {b['voice']}", DIM))
+    if b.get("headline"):
+        print(f"\n  {_c(b['headline'], WHITE + BOLD)}")
+    insights = b.get("insights") or []
+    if not insights:
+        print(_c("\n  (no insights)", DIM))
+        return
+    header("INSIGHTS")
+    for card in insights:
+        tone = card.get("tone") or "info"
+        col = GREEN if tone == "pos" else (RED if tone == "neg" else (YELLOW if tone == "warn" else DIM))
+        line = f"P{card.get('priority', '?')} [{card.get('kind', 'info')}] {card.get('title', '')}"
+        detail = (card.get("detail") or "").strip()
+        if detail:
+            line += f" — {detail}"
+        print(f"  {_c(line, col)}")
+
+
+def cmd_health(args):
+    import jarvis
+    h = jarvis.health_snapshot() or {}
+    banner("JARVIS HEALTH")
+    ai = h.get("ai") or {}
+    key = _c("configured", GREEN) if ai.get("key") else _c("missing", YELLOW)
+    print(f"  AI key:        {key}   calls today: {ai.get('calls_today')}/{ai.get('daily_cap')}")
+    warmer = h.get("warmer") or {}
+    alive = _c("alive", GREEN) if warmer.get("alive") else _c("down", RED)
+    age = warmer.get("last_cycle_age_s")
+    print(f"  Warmer:        {alive}" + (f" (last cycle {age}s ago)" if age is not None else ""))
+    cache = h.get("cache") or {}
+    print(f"  Cache:         {cache.get('in_memory')} in memory / {cache.get('on_disk')} on disk")
+    print(f"  Memory facts:  {h.get('memory_facts')}   insights (14d): {h.get('insights_14d')}")
+    print(f"  DB size:       {h.get('db_size_mb')} MB   uptime: {h.get('uptime_s')}s   version: {h.get('version')}")
+
+
 # ── Serve (start web UI) ─────────────────────────────────────────────────────
 
 def cmd_serve(args):
@@ -1705,6 +1769,9 @@ commands:
   reflexivity       Reflexivity detector
   liquidity         Liquidity regime monitor
   alt-data          Alt-data revenue nowcasting
+  ask               Ask Jarvis a question
+  briefing          Jarvis daily briefing
+  health            Jarvis health snapshot
   settings          View/update app settings
   serve             Start the web UI server
         """,
@@ -1947,6 +2014,16 @@ commands:
     psb = ps.add_parser("scan", help="Scan multiple symbols")
     psb.add_argument("symbols", nargs="*", help="Symbols (defaults to portfolio)")
 
+    # ask (Jarvis Q&A)
+    p = sub.add_parser("ask", help="Ask Jarvis a question")
+    p.add_argument("question", help="Natural-language question (quote it)")
+
+    # briefing (Jarvis daily briefing)
+    sub.add_parser("briefing", help="Jarvis daily briefing")
+
+    # health (Jarvis self-diagnostics)
+    sub.add_parser("health", help="Jarvis health snapshot")
+
     # serve
     p = sub.add_parser("serve", help="Start web UI server")
     p.add_argument("-p", "--port", type=int, default=5001, help="Port number")
@@ -1999,6 +2076,9 @@ def main():
         "reflexivity":      cmd_reflexivity,
         "liquidity":        cmd_liquidity,
         "alt-data":         cmd_alt_data,
+        "ask":          cmd_ask,
+        "briefing":     cmd_briefing,
+        "health":       cmd_health,
         "settings":     cmd_settings,
         "serve":        cmd_serve,
     }

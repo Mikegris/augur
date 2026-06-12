@@ -145,10 +145,28 @@ def _series_meta(series_id: str) -> dict:
 
 def snapshot() -> dict:
     """Return a quick-glance snapshot of every curated series — useful for
-    a macro dashboard panel. Latest value + delta vs. previous observation."""
+    a macro dashboard panel. Latest value + delta vs. previous observation.
+
+    Series fetch in parallel: serially, a cold cache paid up to
+    15s × len(catalog) and blew the page/e2e budget; the slowest single
+    series now bounds the whole snapshot."""
+    def _one(spec):
+        try:
+            return fetch_series(spec["id"], observations=4)
+        except Exception:
+            return {}
+
+    try:
+        import safe_executor
+        fetched = safe_executor.parallel_map(
+            _one, list(SERIES_CATALOG), max_workers=6,
+            thread_name_prefix="fred-snap")
+    except Exception:
+        fetched = [_one(s) for s in SERIES_CATALOG]
+
     out = []
-    for s in SERIES_CATALOG:
-        series = fetch_series(s["id"], observations=4)
+    for s, series in zip(SERIES_CATALOG, fetched):
+        series = series or {}
         pts = series.get("points") or []
         latest = pts[-1] if pts else None
         prev = pts[-2] if len(pts) >= 2 else None

@@ -1,18 +1,39 @@
 /* ================================================================
    AUGUR // WEALTH INTELLIGENCE SYSTEM
    Bloomberg Terminal × Bitcoin Explorer Design System
+   ================================================================
+   v2.0 UI OVERHAUL — token system quick reference
+   ----------------------------------------------------------------
+   SPACING   --sp-1..--sp-6        4 / 8 / 12 / 16 / 24 / 32 px
+   TYPE      --font-size-xs..-3xl  10..28px ramp (+ --font-size-4xl 36px)
+   ELEVATION --glow-soft|med|strong  3-tier green glow shadows
+             (cyan variants: --glow-soft-cyan|med-cyan)
+   SURFACES  --bg-primary → --bg-active  6 stepped dark layers
+             (warm-shifted, each step ≥ visibly distinct)
+   BORDERS   --border-subtle (hairline) < --border < --border-bright
+             --border-accent (green @ 20%alpha) for accent lines
+   TEXT      --text-primary > --text-secondary > --text-dim
+             (--text-dim is AA ≥4.5:1 on bg-secondary) > --text-muted
+   MOTION    --transition (120ms) / --transition-med (200ms ease-out)
+   All new decorative animation is disabled under
+   prefers-reduced-motion and @media print (see blocks at bottom).
+   Overhaul layer: in-place token edits + "v2.0 UI OVERHAUL LAYER"
+   appended at end of file (additive overrides only — no class was
+   renamed or removed; app.js depends on every pre-existing class).
    ================================================================ */
 
 @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,300;0,400;0,500;0,600;0,700;1,400&family=Share+Tech+Mono&display=swap');
 
 /* ── CSS Variables ─────────────────────────────────────────────── */
 :root {
-  --bg-primary:    #020b12;
-  --bg-secondary:  #040f18;
-  --bg-panel:      #061520;
-  --bg-elevated:   #0a2030;
-  --bg-hover:      #0d2535;
-  --bg-active:     #102d40;
+  /* Surfaces — warm-shifted a touch and re-stepped for clearer
+     layer separation (old values in comments for reference). */
+  --bg-primary:    #050b11;   /* was #020b12 */
+  --bg-secondary:  #081119;   /* was #040f18 */
+  --bg-panel:      #0b1823;   /* was #061520 */
+  --bg-elevated:   #102433;   /* was #0a2030 */
+  --bg-hover:      #142b3c;   /* was #0d2535 */
+  --bg-active:     #193445;   /* was #102d40 */
 
   --green:         #00ff9f;
   --green-dim:     #00cc7a;
@@ -36,14 +57,30 @@
   --cyan:          #00ffff;
   --purple:        #9945ff;
 
-  --text-primary:  #c8d8e8;
-  --text-secondary:#7a9ab0;
-  --text-dim:      #3a5a70;
-  --text-muted:    #2a4050;
+  --text-primary:  #d3e1ee;   /* was #c8d8e8 — crisper on warmer bgs */
+  --text-secondary:#86a6bd;   /* was #7a9ab0 — ~6.5:1 on bg-secondary */
+  --text-dim:      #6c8ba4;   /* was #3a5a70 — now AA ≥4.5:1 on bg-secondary */
+  --text-muted:    #45607a;   /* was #2a4050 — placeholders / de-emphasis */
 
-  --border:        #0f2a3a;
-  --border-bright: #1a4060;
+  --border-subtle: #0e2231;   /* hairline dividers inside surfaces */
+  --border:        #143348;   /* was #0f2a3a */
+  --border-bright: #235176;   /* was #1a4060 */
   --border-accent: #00ff9f33;
+
+  /* 3-tier elevation / glow system (green core identity + cyan accents) */
+  --glow-soft:      0 0 10px rgba(0, 255, 159, 0.07);
+  --glow-med:       0 0 2px  rgba(0, 255, 159, 0.25), 0 0 14px rgba(0, 255, 159, 0.12);
+  --glow-strong:    0 0 4px  rgba(0, 255, 159, 0.35), 0 0 24px rgba(0, 255, 159, 0.18), 0 8px 32px rgba(0, 0, 0, 0.5);
+  --glow-soft-cyan: 0 0 10px rgba(0, 200, 255, 0.08);
+  --glow-med-cyan:  0 0 2px  rgba(0, 200, 255, 0.25), 0 0 14px rgba(0, 200, 255, 0.14);
+
+  /* Spacing scale */
+  --sp-1: 4px;
+  --sp-2: 8px;
+  --sp-3: 12px;
+  --sp-4: 16px;
+  --sp-5: 24px;
+  --sp-6: 32px;
 
   --font-mono:     'JetBrains Mono', 'Share Tech Mono', 'Courier New', monospace;
   --font-size-xs:  10px;
@@ -54,11 +91,15 @@
   --font-size-xl:  16px;
   --font-size-2xl: 20px;
   --font-size-3xl: 28px;
+  --font-size-4xl: 36px;
 
   --radius:        2px;
   --radius-md:     4px;
+  --radius-lg:     6px;
+  --radius-pill:   999px;
 
-  --transition:    120ms ease;
+  --transition:     120ms ease;
+  --transition-med: 200ms cubic-bezier(0.33, 1, 0.68, 1);
 }
 
 /* ── Reset & Base ──────────────────────────────────────────────── */
@@ -2113,6 +2154,11 @@ body::before {
   .blink, .skeleton { animation: none !important; }
   .price-flash-up, .price-flash-down { animation: none !important; }
   .spinner { border-top-color: var(--green); animation: none !important; }
+  /* v2.0 overhaul additions */
+  .toast, .modal-overlay.open, .modal-overlay.open .modal { animation: none !important; }
+  .jarvis-pri.p1 { animation: none !important; }
+  .sub-nav-item.active::after { animation: none !important; }
+  .spinner::after { animation: none !important; }
 }
 
 /* ── High contrast preference (subtle bump) ─────────────────────── */
@@ -2132,6 +2178,11 @@ body::before {
   #app { display: block; height: auto; }
   #main { overflow: visible; }
   body { background: white; color: black; }
+  /* v2.0 overhaul: strip decorative effects on paper */
+  .panel::before, .panel::after { display: none !important; }
+  .panel, .kpi-card, .modal, .toast { box-shadow: none !important; background: white !important; }
+  .skeleton { animation: none !important; background: #eee !important; }
+  .kpi-value, .brand-name { text-shadow: none !important; }
 }
 
 /* ── JARVIS: briefing panel + command palette ───────────────────── */
@@ -2144,6 +2195,33 @@ body::before {
 .jarvis-hint { margin-left: auto; margin-right: 8px; font-size: 9px; color: var(--text-dim); letter-spacing: .08em; }
 .jarvis-greeting { font-size: var(--font-size-sm); color: var(--text-secondary); margin-bottom: 4px; }
 .jarvis-headline { font-size: var(--font-size-lg); color: var(--text-primary); font-weight: 600; margin-bottom: 10px; line-height: 1.5; }
+.jarvis-digest {
+  font-size: var(--font-size-sm); color: var(--text-secondary);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--cyan);
+  border-radius: var(--radius);
+  background: var(--bg-secondary);
+  padding: 6px 10px; margin: 2px 0 8px; line-height: 1.5;
+}
+.jarvis-digest-h { color: var(--cyan); font-weight: 600; letter-spacing: .08em; margin-right: 6px; font-size: 10px; }
+.jarvis-digest .btn { padding: 0 6px; font-size: 10px; vertical-align: baseline; }
+#jarvis-digest-items { margin-top: 6px; }
+#jarvis-digest-items .jv-obs { padding: 2px 0; font-size: var(--font-size-sm); }
+.jv-trail { color: var(--text-dim); font-size: var(--font-size-sm); opacity: .55; line-height: 1.6; }
+#jv-send.jv-stop { color: var(--red, #ff5370); border-color: var(--red, #ff5370); }
+.jap-health {
+  display: flex; flex-wrap: wrap; gap: 6px; align-items: center;
+  padding: 5px 10px; font-size: 10px; color: var(--text-secondary);
+  border-bottom: 1px solid var(--border);
+}
+.jap-health .jap-dot { color: var(--text-dim); }
+.jap-meter { display: inline-flex; align-items: center; gap: 5px; }
+.jap-meter-bar {
+  display: inline-block; width: 52px; height: 5px; border-radius: 3px;
+  background: var(--bg-secondary); border: 1px solid var(--border); overflow: hidden;
+}
+.jap-meter-bar > span { display: block; height: 100%; background: var(--cyan); }
+.jap-meter-bar > span.hot { background: var(--red, #ff5370); }
 .jarvis-cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(290px, 1fr)); gap: 8px; }
 .jarvis-card {
   background: var(--bg-secondary);
@@ -2501,3 +2579,443 @@ input:focus, select:focus, textarea:focus {
 }
 .jv-cite:hover { border-color: var(--blue); background: var(--blue-glow); }
 .jv-cite::before { content: "↗ "; opacity: .6; }
+
+/* ================================================================
+   v2.0 UI OVERHAUL LAYER
+   ----------------------------------------------------------------
+   Additive restyle pass. Later-in-file rules intentionally override
+   earlier component rules; NO selector above was renamed or removed.
+   Sections: scrollbars · panels · buttons · tables · forms · KPI ·
+   header/status · loading · empty · toasts · modals · chips ·
+   jarvis HUD · sub-nav · charts · typography utilities · guards.
+   ================================================================ */
+
+/* ── Scrollbars (thin, theme-matched) ───────────────────────────── */
+* { scrollbar-width: thin; scrollbar-color: var(--border-bright) transparent; }
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb {
+  background: linear-gradient(180deg, var(--border-bright), #1a3d57);
+  border-radius: 3px;
+}
+::-webkit-scrollbar-thumb:hover { background: var(--green-dim); }
+::-webkit-scrollbar-corner { background: transparent; }
+
+/* ── Panels: gradient surface, crisp border, accent header ─────── */
+.panel {
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.018), rgba(0, 0, 0, 0.14)), var(--bg-panel);
+  border: 1px solid var(--border);
+  transition: box-shadow var(--transition-med), border-color var(--transition-med);
+}
+.panel:hover {
+  border-color: #1d4862;
+  box-shadow: var(--glow-soft), 0 4px 18px rgba(0, 0, 0, 0.35);
+}
+/* Corner brackets — tighter, brighter on hover (polish of existing ::after) */
+.panel::after {
+  opacity: 0.35;
+  transition: opacity var(--transition-med);
+  background:
+    linear-gradient(var(--green-dim), var(--green-dim)) left   0 top    0 / 8px 1px,
+    linear-gradient(var(--green-dim), var(--green-dim)) left   0 top    0 / 1px 8px,
+    linear-gradient(var(--green-dim), var(--green-dim)) right  0 top    0 / 8px 1px,
+    linear-gradient(var(--green-dim), var(--green-dim)) right  0 top    0 / 1px 8px,
+    linear-gradient(var(--green-dim), var(--green-dim)) left   0 bottom 0 / 8px 1px,
+    linear-gradient(var(--green-dim), var(--green-dim)) left   0 bottom 0 / 1px 8px,
+    linear-gradient(var(--green-dim), var(--green-dim)) right  0 bottom 0 / 8px 1px,
+    linear-gradient(var(--green-dim), var(--green-dim)) right  0 bottom 0 / 1px 8px;
+  background-repeat: no-repeat;
+}
+.panel:hover::after { opacity: 0.85; }
+.panel-header {
+  position: relative;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.025), rgba(255, 255, 255, 0)), var(--bg-elevated);
+  border-bottom: 1px solid var(--border);
+}
+.panel-header::after {
+  content: '';
+  position: absolute;
+  left: 0; bottom: -1px;
+  width: 100%; height: 1px;
+  background: linear-gradient(90deg, var(--green-dim) 0, rgba(0, 255, 159, 0.16) 70px, transparent 180px);
+  opacity: 0.65;
+  pointer-events: none;
+}
+.panel-title { text-shadow: 0 0 12px rgba(0, 255, 159, 0.18); }
+
+/* ── Buttons: full state system ─────────────────────────────────── */
+.btn {
+  transition: background var(--transition), border-color var(--transition),
+              color var(--transition), box-shadow var(--transition),
+              transform 80ms ease, opacity var(--transition);
+}
+.btn:hover { box-shadow: var(--glow-soft); }
+.btn-green:hover { box-shadow: var(--glow-med); }
+.btn:active:not(:disabled),
+.jarvis-go:active:not(:disabled) { transform: translateY(1px); box-shadow: none; }
+.btn:focus-visible,
+.chart-btn:focus-visible,
+.jarvis-go:focus-visible,
+.jv-starter:focus-visible,
+.term-quick-btn:focus-visible {
+  outline: 2px solid var(--cyan);
+  outline-offset: 2px;
+  box-shadow: var(--glow-med-cyan);
+}
+.btn:disabled, .btn[disabled] {
+  opacity: 0.35;
+  cursor: not-allowed;
+  box-shadow: none;
+  transform: none;
+}
+.btn-ghost:hover { box-shadow: 0 0 8px rgba(0, 200, 255, 0.06); }
+.jarvis-go {
+  transition: background var(--transition), border-color var(--transition),
+              color var(--transition), box-shadow var(--transition), transform 80ms ease;
+}
+.jarvis-go:hover { box-shadow: var(--glow-soft-cyan); }
+.jarvis-go:disabled { opacity: 0.35; cursor: not-allowed; }
+
+/* ── Tables: zebra, hover wash, hairline rows, tabular digits ───── */
+.data-table th {
+  letter-spacing: 1.8px;
+  color: var(--text-dim);
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--border);
+}
+.data-table td {
+  border-bottom: 1px solid var(--border-subtle);
+  font-variant-numeric: tabular-nums;
+}
+.data-table tbody tr:nth-child(even) td { background: rgba(255, 255, 255, 0.014); }
+.data-table tbody tr:hover td { background: var(--bg-hover); }
+.data-table tbody tr.row-selected td { background: var(--bg-active); }
+/* Opt-in sticky header for scrollable wrappers */
+.table-sticky th {
+  position: sticky;
+  top: 0;
+  z-index: 6;
+  background: var(--bg-panel);
+  box-shadow: inset 0 -1px 0 var(--border-bright);
+}
+
+/* ── Inputs & selects: inset fields, cyan focus, custom arrow ───── */
+.form-input, .form-select, #jv-input {
+  background: linear-gradient(180deg, rgba(0, 0, 0, 0.22), rgba(0, 0, 0, 0.05)), var(--bg-primary);
+  box-shadow: inset 0 1px 3px rgba(0, 0, 0, 0.35);
+  transition: border-color var(--transition), box-shadow var(--transition);
+}
+.form-input::placeholder, #jv-input::placeholder, #jp-input::placeholder,
+#cmd-input::placeholder { color: var(--text-muted); }
+input:focus, select:focus, textarea:focus {
+  border-color: var(--blue-dim);
+  box-shadow: 0 0 0 1px var(--blue-dim), 0 0 12px var(--blue-glow),
+              inset 0 1px 3px rgba(0, 0, 0, 0.3) !important;
+  outline: none;
+}
+.form-select {
+  appearance: none;
+  -webkit-appearance: none;
+  background-image:
+    url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='8' height='5' viewBox='0 0 8 5'><path d='M0 0l4 5 4-5z' fill='%2300c8ff'/></svg>"),
+    linear-gradient(180deg, rgba(0, 0, 0, 0.22), rgba(0, 0, 0, 0.05));
+  background-repeat: no-repeat, no-repeat;
+  background-position: right 8px center, 0 0;
+  background-size: 8px 5px, 100% 100%;
+  padding-right: 24px;
+}
+
+/* ── KPI cards: stronger numerals, surface gradient ─────────────── */
+.kpi-card {
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.016), rgba(0, 0, 0, 0.12)), var(--bg-panel);
+  border-radius: var(--radius);
+}
+.kpi-card:hover { box-shadow: var(--glow-soft-cyan), 0 3px 14px rgba(0, 0, 0, 0.3); }
+.kpi-value {
+  font-size: 22px;
+  letter-spacing: -0.02em;
+  font-variant-numeric: tabular-nums;
+}
+.kpi-label { letter-spacing: 1.8px; }
+.kpi-sub { font-variant-numeric: tabular-nums; }
+/* Opt-in delta arrows for future markup (kpi-sub text is currently plain,
+   so arrows are NOT auto-injected anywhere — additive utility only). */
+.delta-up   { color: var(--green); }
+.delta-down { color: var(--red); }
+.delta-up::before   { content: '▲ '; font-size: 0.85em; }
+.delta-down::before { content: '▼ '; font-size: 0.85em; }
+
+/* ── Header: faint grid texture + refined brand glow ────────────── */
+#header {
+  background:
+    repeating-linear-gradient(90deg, rgba(0, 200, 255, 0.012) 0 1px, transparent 1px 26px),
+    repeating-linear-gradient(0deg, rgba(0, 255, 159, 0.01) 0 1px, transparent 1px 26px),
+    linear-gradient(180deg, #0a141e, var(--bg-secondary));
+}
+.brand-name {
+  text-shadow: 0 0 6px rgba(0, 255, 159, 0.5), 0 0 20px rgba(0, 255, 159, 0.25);
+}
+.brand-logo {
+  border-radius: var(--radius);
+  background: radial-gradient(circle at 50% 30%, rgba(0, 255, 159, 0.12), transparent 70%);
+  box-shadow: var(--glow-med), inset 0 0 8px var(--green-glow);
+}
+#clock { font-variant-numeric: tabular-nums; }
+.ticker-price { font-variant-numeric: tabular-nums; }
+.ticker-item { border-right-color: var(--border-subtle); }
+
+/* ── Status bar: segmented items ────────────────────────────────── */
+#statusbar {
+  background: linear-gradient(180deg, #0a141e, var(--bg-secondary));
+  border-top: 1px solid var(--border);
+}
+.status-item { border-right: 1px solid var(--border-subtle); transition: background var(--transition); }
+.status-item:hover { background: rgba(255, 255, 255, 0.02); }
+.status-key { letter-spacing: 1px; }
+.status-val { font-variant-numeric: tabular-nums; }
+
+/* ── Loading: sleeker dual-ring spinner ─────────────────────────── */
+.spinner {
+  position: relative;
+  width: 16px;
+  height: 16px;
+  border-width: 2px;
+}
+.spinner::after {
+  content: '';
+  position: absolute;
+  inset: 2px;
+  border: 1px solid transparent;
+  border-bottom-color: var(--cyan);
+  border-radius: 50%;
+  animation: spin 0.9s linear infinite reverse;
+  opacity: 0.7;
+}
+.loading { letter-spacing: 1.5px; text-transform: uppercase; gap: 10px; }
+/* Skeleton shimmer: slightly brighter sweep on the new surfaces */
+.skeleton {
+  background-image: linear-gradient(
+    90deg,
+    var(--bg-elevated) 0%,
+    #1a3346 50%,
+    var(--bg-elevated) 100%
+  );
+}
+
+/* ── Empty states ───────────────────────────────────────────────── */
+.empty-state {
+  gap: 10px;
+  padding: var(--sp-6) var(--sp-4);
+  letter-spacing: 0.5px;
+}
+.empty-state .empty-icon {
+  font-size: 28px;
+  opacity: 0.5;
+  text-shadow: 0 0 18px var(--green-glow);
+  margin-bottom: 2px;
+}
+
+/* ── Toasts: glass surface, tone rails, slide-in ────────────────── */
+.toast {
+  background: var(--bg-elevated);             /* solid fallback */
+  border: 1px solid var(--border-bright);
+  border-radius: var(--radius-md);
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.55), var(--glow-soft);
+  animation: toast-slide-in 220ms cubic-bezier(0.21, 1.02, 0.73, 1);
+}
+@keyframes toast-slide-in {
+  from { opacity: 0; transform: translateX(24px); }
+  to   { opacity: 1; transform: translateX(0); }
+}
+.toast.green { border-left: 3px solid var(--green); box-shadow: 0 8px 28px rgba(0, 0, 0, 0.55), -4px 0 14px -6px var(--green-glow); }
+.toast.red   { border-left: 3px solid var(--red);   box-shadow: 0 8px 28px rgba(0, 0, 0, 0.55), -4px 0 14px -6px var(--red-glow); }
+.toast.amber { border-left: 3px solid var(--amber); box-shadow: 0 8px 28px rgba(0, 0, 0, 0.55), -4px 0 14px -6px var(--amber-glow); }
+.toast.blue  { border-left: 3px solid var(--blue);  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.55), -4px 0 14px -6px var(--blue-glow); }
+
+/* ── Modals: backdrop blur, fade/scale-in, border glow ──────────── */
+.modal-overlay { background: rgba(3, 9, 14, 0.82); }
+.modal-overlay.open { animation: overlay-fade 150ms ease-out; }
+.modal-overlay.open .modal { animation: modal-pop 200ms cubic-bezier(0.21, 1.02, 0.73, 1); }
+@keyframes overlay-fade { from { opacity: 0; } to { opacity: 1; } }
+@keyframes modal-pop {
+  from { opacity: 0; transform: translateY(8px) scale(0.985); }
+  to   { opacity: 1; transform: none; }
+}
+.modal {
+  border-radius: var(--radius-md);
+  border-color: var(--border-bright);
+  box-shadow: 0 24px 70px rgba(0, 0, 0, 0.65), var(--glow-med);
+}
+.modal-header { border-bottom: 1px solid var(--border); }
+.modal-title { text-shadow: 0 0 12px rgba(0, 255, 159, 0.2); }
+
+/* Glass tier — applied only where backdrop-filter is supported */
+@supports ((backdrop-filter: blur(8px)) or (-webkit-backdrop-filter: blur(8px))) {
+  .toast {
+    background: rgba(16, 36, 51, 0.72);
+    -webkit-backdrop-filter: blur(10px);
+    backdrop-filter: blur(10px);
+  }
+  .modal-overlay {
+    -webkit-backdrop-filter: blur(5px);
+    backdrop-filter: blur(5px);
+  }
+  #jarvis-palette-overlay {
+    -webkit-backdrop-filter: blur(5px);
+    backdrop-filter: blur(5px);
+  }
+  #shortcut-help {
+    -webkit-backdrop-filter: blur(5px);
+    backdrop-filter: blur(5px);
+  }
+}
+
+/* ── Chips & badges: consistent pill system ─────────────────────── */
+.badge, .jv-chip, .filter-chip, .jarvis-pri, .signal-badge, .regime-badge {
+  border-radius: var(--radius-pill);
+  line-height: 1.6;
+}
+.jv-chip { background: rgba(0, 200, 255, 0.05); }
+.filter-chip { padding: 3px 10px; }
+.jarvis-pri { padding: 1px 7px; }
+.jarvis-pri.p1 { animation: pri-pulse 2.2s ease-in-out infinite; }
+@keyframes pri-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 var(--red-glow); }
+  50%      { box-shadow: 0 0 0 4px rgba(255, 51, 85, 0); }
+}
+
+/* ── Jarvis surfaces: strongest HUD treatment ───────────────────── */
+.jv-bubble {
+  border-radius: 10px;
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.25);
+}
+.jv-bubble.user {
+  border-radius: 10px 10px 3px 10px;          /* asymmetric: tail bottom-right */
+  background: linear-gradient(180deg, rgba(0, 200, 255, 0.05), rgba(0, 0, 0, 0.08)), var(--bg-active);
+  border-color: var(--border-bright);
+}
+.jv-bubble.assistant {
+  border-radius: 10px 10px 10px 3px;          /* asymmetric: tail bottom-left */
+  background: linear-gradient(180deg, rgba(0, 255, 159, 0.025), rgba(0, 0, 0, 0.1)), var(--bg-secondary);
+  border-left: 2px solid var(--green-dim);
+  box-shadow: -4px 0 16px -8px var(--green-glow), 0 2px 10px rgba(0, 0, 0, 0.25);
+}
+.jv-thinking { letter-spacing: 1px; }
+.jv-trail {
+  border-left: 1px solid var(--border);
+  padding-left: 10px;
+  margin-left: 2px;
+  opacity: 0.6;
+}
+/* Clarifying questions: Jarvis asking instead of guessing */
+.jv-clarify { border-left: 3px solid var(--amber) !important; }
+.jv-clarify-chips { margin-top: 6px; }
+/* Reasoning trace: collapsible "how I got here" under agent answers */
+.jv-reason { margin-top: 8px; border-top: 1px dashed var(--border); padding-top: 4px; }
+.jv-reason-toggle {
+  background: none; border: none; cursor: pointer; padding: 2px 0;
+  color: var(--text-dim); font-size: 10px; letter-spacing: .06em;
+  font-family: inherit;
+}
+.jv-reason-toggle:hover { color: var(--cyan); }
+.jv-reason-body { padding: 4px 0 2px 6px; }
+.jv-reason-h {
+  color: var(--text-dim); font-size: 9px; letter-spacing: .14em;
+  text-transform: uppercase; margin: 4px 0 2px;
+}
+.jv-reason-row { font-size: var(--font-size-sm); color: var(--text-secondary); line-height: 1.6; }
+.jv-reason-row span { color: var(--text-dim); }
+.jv-cite {
+  border-radius: var(--radius-pill);
+  background: rgba(0, 200, 255, 0.04);
+  padding: 2px 9px;
+  transition: border-color var(--transition), background var(--transition), color var(--transition);
+}
+.jv-cite:hover { color: var(--cyan); box-shadow: var(--glow-soft-cyan); }
+.jv-starter { border-radius: var(--radius-pill); padding: 4px 11px; }
+#jarvis-palette { box-shadow: 0 16px 56px rgba(0, 0, 0, 0.65), var(--glow-strong); }
+.jp-input-row {
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.02), transparent);
+}
+.jp-item { transition: background var(--transition), color var(--transition); }
+.jp-item:hover { background: var(--bg-hover); color: var(--text-primary); }
+.jp-item.sel { box-shadow: inset 2px 0 0 var(--green), inset 60px 0 30px -40px rgba(0, 255, 159, 0.05); }
+.jp-answer { border-left: 2px solid var(--green-dim); }
+#jarvis-strip {
+  background: linear-gradient(90deg, var(--bg-elevated), var(--bg-secondary) 60%);
+  box-shadow: inset 0 -1px 0 var(--border-subtle);
+}
+#jarvis-activity-panel { box-shadow: 0 16px 48px rgba(0, 0, 0, 0.6), var(--glow-med); }
+.jarvis-card {
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.012), rgba(0, 0, 0, 0.1)), var(--bg-secondary);
+  transition: border-color var(--transition), box-shadow var(--transition);
+}
+.jarvis-card:hover { border-color: var(--border-bright); box-shadow: var(--glow-soft-cyan); }
+.jarvis-digest { border-radius: var(--radius-md); }
+
+/* ── View transitions: rise-in, 200ms ───────────────────────────── */
+.view.active { animation: jarvis-view-in 200ms cubic-bezier(0.33, 1, 0.68, 1); }
+
+/* ── Sub-nav: animated active indicator + scroll affordance ─────── */
+.sub-nav-item { position: relative; border-radius: var(--radius) var(--radius) 0 0; }
+.sub-nav-item:hover { box-shadow: inset 0 -1px 0 var(--border-bright); }
+.sub-nav-item.active { border-bottom-color: transparent; }
+.sub-nav-item.active::after {
+  content: '';
+  position: absolute;
+  left: 8px; right: 8px; bottom: 0;
+  height: 2px;
+  background: linear-gradient(90deg, transparent, var(--green), transparent);
+  box-shadow: 0 0 8px var(--green-glow);
+  animation: subnav-indicator-in 220ms cubic-bezier(0.33, 1, 0.68, 1);
+  pointer-events: none;
+}
+@keyframes subnav-indicator-in {
+  from { transform: scaleX(0.4); opacity: 0; }
+  to   { transform: scaleX(1); opacity: 1; }
+}
+@media (max-width: 900px) {
+  /* fade right edge to hint horizontal overflow */
+  .sub-nav {
+    -webkit-mask-image: linear-gradient(90deg, #000 0, #000 calc(100% - 28px), transparent);
+    mask-image: linear-gradient(90deg, #000 0, #000 calc(100% - 28px), transparent);
+  }
+}
+
+/* ── Charts: consistent container treatment ─────────────────────── */
+.chart-wrap canvas, #lw-chart-container { border-radius: var(--radius); }
+.panel-body .chart-wrap { margin-top: var(--sp-1); }
+.chart-btn:hover, .chart-btn.active { box-shadow: var(--glow-soft); }
+
+/* ── Typography utilities ───────────────────────────────────────── */
+.tnum {
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: 'tnum' 1;
+}
+.nav-item { letter-spacing: 1px; }
+.form-label, .modal-title, .nav-label { letter-spacing: 1.5px; }
+
+/* ── Search results dropdown polish ─────────────────────────────── */
+#search-results {
+  box-shadow: 0 16px 40px rgba(0, 0, 0, 0.55), var(--glow-soft);
+  border-radius: 0 0 var(--radius-md) var(--radius-md);
+}
+
+/* ── Reduced-motion guard (overhaul-layer additions) ────────────── */
+@media (prefers-reduced-motion: reduce) {
+  .toast { animation: none; }
+  .modal-overlay.open, .modal-overlay.open .modal { animation: none; }
+  .view.active { animation: none; }
+  .sub-nav-item.active::after { animation: none; }
+  .jarvis-pri.p1 { animation: none; }
+  .spinner::after { animation: none; opacity: 0.4; }
+  .btn:active:not(:disabled), .jarvis-go:active:not(:disabled) { transform: none; }
+  .panel, .panel::after, .btn, .jarvis-go, .jp-item, .jv-cite, .jarvis-card { transition: none; }
+}
+
+/* ── Print guard (overhaul-layer additions) ─────────────────────── */
+@media print {
+  .panel-header::after, .sub-nav-item.active::after, .spinner::after { display: none !important; }
+  .jv-bubble, .jarvis-card, #search-results { box-shadow: none !important; }
+  .toast { -webkit-backdrop-filter: none; backdrop-filter: none; }
+}

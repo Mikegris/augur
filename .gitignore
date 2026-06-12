@@ -67,3 +67,4 @@ dist/
 htmlcov/
 .coverage
 .coverage.*
+node_modules/
