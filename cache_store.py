@@ -69,6 +69,12 @@ _inflight_lock = threading.Lock()
 # _sweep_inflight(). The longest legitimate upstream calls (full SEC EDGAR
 # 10-K fetch + AI summary) take 60-90s, so 5min is a comfortable buffer.
 _INFLIGHT_MAX_AGE_SEC = 300.0
+# Don't run the orphan sweep more than once per this many seconds. coalesce()
+# used to sweep on EVERY cache miss, which under a miss storm (warmer cycle +
+# UI fan-out) serialized all misses on _inflight_lock for a scan whose useful
+# work happens at most once per _INFLIGHT_MAX_AGE_SEC anyway.
+_SWEEP_MIN_INTERVAL_SEC = 5.0
+_last_sweep_ts = [0.0]  # mutable epoch; benign race — worst case one extra sweep
 
 # Thread-local sqlite connection so writes from the warmer thread don't
 # fight the request threads for the same connection object.
@@ -324,11 +330,22 @@ def init() -> None:
     # Hydrate, skipping rows that look like cached failures from a prior
     # broken session. Otherwise a transient upstream outage at one boot would
     # serve blank panels for the full TTL window across every subsequent boot.
+    #
+    # Only the newest _MEM_EVICT_TARGET rows are loaded eagerly. The map is
+    # capped at _MEM_SOFT_CAP anyway, so the old full-table hydrate (observed:
+    # ~8k rows / ~100 MB / 2.2s of json.loads at every reload) did work that
+    # the first cache_set() promptly threw away via the LRU sweep. Rows beyond
+    # the limit are NOT lost — cache_get/_load_from_disk lazily pulls any
+    # still-fresh row into memory on first miss.
     loaded = 0
     skipped = 0
     poisoned_keys = []
     try:
-        rows = c.execute("SELECT key, value, expiry FROM api_cache").fetchall()
+        rows = c.execute(
+            "SELECT key, value, expiry FROM api_cache "
+            "ORDER BY written_at DESC LIMIT ?",
+            (_MEM_EVICT_TARGET,),
+        ).fetchall()
         now = time.time()
         with _mem_lock:
             for key, raw, expiry in rows:
@@ -354,6 +371,42 @@ def init() -> None:
              loaded, skipped)
 
 
+def _load_from_disk(k: str):
+    """Lazily hydrate one row from SQLite into the in-memory map.
+
+    Boot-time hydration only eagerly loads the newest _MEM_EVICT_TARGET rows;
+    anything older (or LRU-evicted mid-session) is recovered here on first
+    miss. Returns the freshly-installed (value, expiry, last_access) tuple, or
+    None if the row is missing/expired/failure-shaped. A point lookup on the
+    PK costs ~10-50µs — three orders of magnitude cheaper than the upstream
+    refetch a miss would otherwise trigger."""
+    if not _table_ready:
+        return None
+    try:
+        c = _conn()
+        row = c.execute(
+            "SELECT value, expiry FROM api_cache WHERE key=?", (k,)
+        ).fetchone()
+    except Exception:
+        return None
+    if not row:
+        return None
+    raw, expiry = row
+    now = time.time()
+    if not expiry or expiry <= now:
+        return None
+    try:
+        val = json.loads(_maybe_decompress(raw))
+    except Exception:
+        return None
+    if _looks_like_failure(val):
+        return None
+    hit = (val, expiry, now)
+    with _mem_lock:
+        _mem[k] = hit
+    return hit
+
+
 def cache_get(key, ttl: Optional[float] = None):
     """Return value if fresh, else None. The `ttl` kwarg is decorative
     (kept for compat with the old helper) — the writer's expiry wins.
@@ -363,6 +416,8 @@ def cache_get(key, ttl: Optional[float] = None):
     miss and let the caller refetch."""
     k = _serialize_key(key)
     hit = _mem.get(k)
+    if hit is None:
+        hit = _load_from_disk(k)
     if hit is None:
         return None
     # Hydrate from legacy 2-tuple format if a prior version's _mem leaked in.

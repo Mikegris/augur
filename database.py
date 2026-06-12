@@ -2,6 +2,7 @@ import os
 import sqlite3
 import json
 import threading
+import time
 from datetime import datetime, timezone
 
 # Default to a relative path so existing CLI / dev workflows keep working;
@@ -261,6 +262,13 @@ def init_db():
     # variant pre-filters on triggered=0 then orders by created_at). Without
     # this index SQLite does a full table scan + filesort every alert refresh.
     c.execute("CREATE INDEX IF NOT EXISTS idx_price_alerts_created ON price_alerts(created_at)")
+    # Composite index for the alert-polling hot path: `WHERE triggered=0
+    # ORDER BY created_at DESC` (every 5 min from the frontend + trigger
+    # loop). The single-column indexes above force SQLite to pick one and
+    # then sort with a temp B-tree (verified via EXPLAIN QUERY PLAN); this
+    # composite serves both the filter and the ordering in one pass.
+    c.execute("CREATE INDEX IF NOT EXISTS idx_alerts_triggered_created "
+              "ON price_alerts(triggered, created_at)")
     c.execute("CREATE INDEX IF NOT EXISTS idx_filings_cache_ticker ON sec_filings_cache(ticker)")
     c.execute("CREATE INDEX IF NOT EXISTS idx_insider_cache_ticker ON insider_transactions_cache(ticker)")
     c.execute("CREATE INDEX IF NOT EXISTS idx_insider_cache_ticker_date ON insider_transactions_cache(ticker, cached_at)")
@@ -310,6 +318,9 @@ def init_db():
         # `dict.get(..., default)` so missing keys degrade gracefully.
         import logging as _logging
         _logging.getLogger("augur.db").warning("settings migration failed: %s", e)
+    # Defaults/migrations may have changed rows under a previously-cached
+    # (possibly empty) snapshot — drop it so the next read sees fresh data.
+    _invalidate_settings_cache()
     # connection reused (thread-local pool)
 
 
@@ -695,7 +706,24 @@ def jarvis_add_memory(fact, source="user"):
         return cur.lastrowid
 
 
+def jarvis_conversation_exists(conversation_id):
+    try:
+        conn = get_conn()
+        row = conn.execute(
+            "SELECT 1 FROM jarvis_conversations WHERE id=?", (int(conversation_id),)
+        ).fetchone()
+        return row is not None
+    except (OverflowError, ValueError, TypeError):
+        return False
+
+
 def jarvis_delete_memory(memory_id):
+    try:
+        memory_id = int(memory_id)
+        if not (0 < memory_id < 2**62):  # SQLite INTEGER bound — see OverflowError
+            return False
+    except (ValueError, TypeError):
+        return False
     with _write_lock:
         conn = get_conn()
         cur = conn.execute("DELETE FROM jarvis_memory WHERE id=?", (memory_id,))
@@ -704,15 +732,53 @@ def jarvis_delete_memory(memory_id):
 
 
 # ── Settings ───────────────────────────────────────────────────────────────────
+#
+# get_settings() sits on the per-request hot path: api_keys.get_api_key()
+# resolves credentials through it for nearly every API route, and several
+# views call it directly. Each call was a full-table SELECT on its own —
+# cheap individually, but it's the single most frequent query in the app.
+# A tiny in-process TTL cache (5s) collapses those reads to ~1 SQLite hit
+# per 5 seconds per process. Writes (set_setting / init_db migrations)
+# invalidate synchronously, so a set-then-get in the same process is always
+# coherent. Cross-process writers (a CLI poking the DB while the server
+# runs) are visible after at most _SETTINGS_CACHE_TTL — acceptable for
+# settings data. The cache is keyed on DB_PATH so tests or tools that
+# repoint the module at a different database never see stale rows.
+
+_SETTINGS_CACHE_TTL = 5.0
+_settings_cache = {"data": None, "ts": 0.0, "path": None}
+_settings_cache_lock = threading.Lock()
+
+
+def _invalidate_settings_cache():
+    with _settings_cache_lock:
+        _settings_cache["data"] = None
+        _settings_cache["ts"] = 0.0
+        _settings_cache["path"] = None
+
 
 def get_settings():
+    now = time.time()
+    with _settings_cache_lock:
+        cached = _settings_cache["data"]
+        if (cached is not None
+                and _settings_cache["path"] == DB_PATH
+                and now - _settings_cache["ts"] < _SETTINGS_CACHE_TTL):
+            # Shallow copy so callers mutating the dict (the /api/settings
+            # masking pass, for instance) can't poison the shared snapshot.
+            return dict(cached)
     conn = get_conn()
     rows = conn.execute("SELECT key, value FROM settings").fetchall()
     # connection reused (thread-local pool)
     # Hide internal metadata keys (anything starting with __) from callers —
     # the frontend settings form would otherwise round-trip them and a stray
     # JS handler could clobber the schema version on save.
-    return {r["key"]: r["value"] for r in rows if not r["key"].startswith("__")}
+    data = {r["key"]: r["value"] for r in rows if not r["key"].startswith("__")}
+    with _settings_cache_lock:
+        _settings_cache["data"] = dict(data)
+        _settings_cache["ts"] = now
+        _settings_cache["path"] = DB_PATH
+    return data
 
 
 def set_setting(key, value):
@@ -721,6 +787,9 @@ def set_setting(key, value):
         conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", (key, str(value)))
         conn.commit()
         # connection reused (thread-local pool)
+    # Invalidate AFTER the commit so no reader can re-prime the cache with
+    # pre-write rows between the invalidation and the data landing on disk.
+    _invalidate_settings_cache()
 
 
 # ── AI Call Log (daily counter) ───────────────────────────────────────────────
@@ -1142,6 +1211,37 @@ def prune_idea_pool(keep_n=500):
             return 0
 
 
+def prune_api_cache(grace_days=3):
+    """Drop api_cache rows whose TTL expired more than `grace_days` ago.
+
+    api_cache is cache_store's write-through table and is by far the
+    biggest thing in wealth.db (measured: 110 MB of a 116 MB file, ~95%
+    of it SEC EDGAR response bodies). cache_store only purges expired
+    rows inside its init() — i.e. at process boot — so on a long-running
+    server dead rows pile up until the next restart. This daily sweep
+    keeps the table at its true working set between restarts.
+
+    The grace window matters: cache_store.cache_get_stale() serves
+    recently-expired entries as a fallback when an upstream is down
+    (default max staleness 24h), and init() reloads disk rows into the
+    in-memory tier on boot. Deleting only rows expired >3 days keeps
+    both behaviors intact while still reclaiming everything genuinely
+    dead. The table is created by cache_store, not init_db, so tolerate
+    its absence on fresh databases.
+    """
+    with _write_lock:
+        conn = get_conn()
+        try:
+            cur = conn.execute(
+                "DELETE FROM api_cache WHERE expiry < strftime('%s','now') - ?",
+                (int(grace_days) * 86400,)
+            )
+            conn.commit()
+            return cur.rowcount or 0
+        except sqlite3.OperationalError:
+            return 0
+
+
 def prune_ai_call_log(days=90):
     """Drop ai_call_log rows older than `days`."""
     with _write_lock:
@@ -1211,4 +1311,8 @@ def run_daily_prune():
         out["ai_call_log"] = prune_ai_call_log(90)
     except Exception:
         out["ai_call_log"] = -1
+    try:
+        out["api_cache"] = prune_api_cache(3)
+    except Exception:
+        out["api_cache"] = -1
     return out

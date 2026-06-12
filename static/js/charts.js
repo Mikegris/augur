@@ -63,6 +63,15 @@ const ChartEngine = (() => {
     }
   }
 
+  // Register an externally-created Lightweight Charts instance so it
+  // participates in destroy-before-create. Attach the chart's
+  // ResizeObserver as chart._resizeObserver before registering and
+  // destroyChart() will disconnect it on teardown.
+  function registerChart(id, chart) {
+    destroyChart(id);
+    instances[id] = chart;
+  }
+
   // ── Candlestick / Line chart ──────────────────────────────────────
   function createPriceChart(containerId, data, opts = {}) {
     const container = document.getElementById(containerId);
@@ -310,5 +319,5 @@ const ChartEngine = (() => {
     ctx.fill();
   }
 
-  return { createPriceChart, createAllocationChart, createPnlChart, drawSparkline, addSMAOverlay, destroyChart };
+  return { createPriceChart, createAllocationChart, createPnlChart, drawSparkline, addSMAOverlay, destroyChart, registerChart };
 })();

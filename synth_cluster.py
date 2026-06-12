@@ -514,6 +514,21 @@ COMPONENTS: List[Tuple[str, Callable[[str, str], Tuple[bool, str, str]]]] = [
     ("reflexivity",       _component_reflexivity),
 ]
 
+# Early-exit split. The "cheap" components sit on self-caching upstreams
+# (EDGAR + congress via cache_store, fundamentals 24h, narrative 30min,
+# stocktwits/wiki = one HTTP each, options skew = two small HTTP calls).
+# The "expensive" three are the heavy engines: ml_forecast trains models on
+# a cold cache, smart_money fans out to ~6 upstreams, reflexivity runs the
+# loop detector. When the cheap phase leaves a symbol mathematically unable
+# to reach min_sources even if every expensive component fired, the
+# expensive phase is skipped — the symbol can never surface in `clusters`,
+# so its envelope (marked "skipped") is observably identical to the caller.
+_EXPENSIVE_COMPONENT_NAMES = ("ml_forecast", "smart_money", "reflexivity")
+_CHEAP_IDX: List[int] = [i for i, (n, _) in enumerate(COMPONENTS)
+                         if n not in _EXPENSIVE_COMPONENT_NAMES]
+_EXPENSIVE_IDX: List[int] = [i for i, (n, _) in enumerate(COMPONENTS)
+                             if n in _EXPENSIVE_COMPONENT_NAMES]
+
 
 # ---------------------------------------------------------------------------
 # Per-symbol scan
@@ -560,10 +575,18 @@ def _finalize_scan(symbol: str, sources: List[Optional[Dict[str, Any]]]) -> Dict
     }
 
 
-def _scan_symbol(symbol: str, direction: str) -> Dict[str, Any]:
+def _scan_symbol(symbol: str, direction: str,
+                 min_sources: Optional[int] = None) -> Dict[str, Any]:
     """Run all components for one symbol, in parallel, with a hard timeout
     per component. Returns the per-symbol cluster dict (no min_sources
-    filtering yet — caller decides whether to include)."""
+    filtering yet — caller decides whether to include).
+
+    When `min_sources` is given, the components run in two phases (cheap
+    then expensive — see _EXPENSIVE_COMPONENT_NAMES) and the expensive phase
+    is skipped when the cheap phase already proves the symbol can't reach
+    min_sources. Skipped symbols can never appear in the clusters output, so
+    callers observe identical results either way.
+    """
     symbol = symbol.upper().strip()
 
     # Per-symbol pool (small so we don't hammer upstreams). The outer
@@ -585,15 +608,58 @@ def _scan_symbol(symbol: str, direction: str) -> Dict[str, Any]:
             return {"name": name, "fired": False, "value": "error",
                     "note": f"{type(exc).__name__}: {exc}"}
 
-    # Slots still None after the deadline are marked as timed-out by
-    # _finalize_scan ("future not completed").
-    sources: List[Optional[Dict[str, Any]]] = safe_executor.parallel_map(
+    t0 = time.time()
+    sources: List[Optional[Dict[str, Any]]] = [None] * len(COMPONENTS)
+
+    # Phase 1 — cheap components. Slots still None after the deadline are
+    # marked as timed-out by _finalize_scan ("future not completed").
+    cheap_results = safe_executor.parallel_map(
         _eval_slot,
-        range(len(COMPONENTS)),
+        _CHEAP_IDX,
         max_workers=6,
         timeout_per_item=SYMBOL_TIMEOUT_S,
         thread_name_prefix=f"sc-{symbol}",
     )
+    for i, res in zip(_CHEAP_IDX, cheap_results):
+        sources[i] = res
+    cheap_fired = sum(1 for r in cheap_results if r and r.get("fired"))
+
+    # Early exit: even if EVERY expensive component fired, the symbol still
+    # couldn't reach min_sources — don't pay for ml/smart-money/reflexivity.
+    if min_sources is not None and cheap_fired + len(_EXPENSIVE_IDX) < min_sources:
+        for i in _EXPENSIVE_IDX:
+            sources[i] = {"name": COMPONENTS[i][0], "fired": False,
+                          "value": "skipped",
+                          "note": "early-exit: cheap sources below min_sources"}
+    else:
+        # Phase 2 — expensive components, on whatever remains of the
+        # per-symbol budget so the SYMBOL_TIMEOUT_S cap still holds overall.
+        # ml_forecast goes FIRST, alone: smart_money's internal ML part then
+        # hits ml_forecast's 1h module cache instead of racing a duplicate
+        # model training for the same symbol (ml_forecast has no in-flight
+        # coalescing, so two concurrent calls both pay the full training).
+        ml_idx = [i for i in _EXPENSIVE_IDX if COMPONENTS[i][0] == "ml_forecast"]
+        rest_idx = [i for i in _EXPENSIVE_IDX if COMPONENTS[i][0] != "ml_forecast"]
+        remaining = max(5.0, SYMBOL_TIMEOUT_S - (time.time() - t0))
+        ml_results = safe_executor.parallel_map(
+            _eval_slot,
+            ml_idx,
+            max_workers=1,
+            timeout_per_item=remaining,
+            thread_name_prefix=f"sc-{symbol}",
+        )
+        for i, res in zip(ml_idx, ml_results):
+            sources[i] = res
+        remaining = max(5.0, SYMBOL_TIMEOUT_S - (time.time() - t0))
+        exp_results = safe_executor.parallel_map(
+            _eval_slot,
+            rest_idx,
+            max_workers=2,
+            timeout_per_item=remaining,
+            thread_name_prefix=f"sc-{symbol}",
+        )
+        for i, res in zip(rest_idx, exp_results):
+            sources[i] = res
 
     # Composite score: weighted sum of fired flags / sum of all weights, plus
     # a nonlinear bonus for breadth of agreement. See _finalize_scan.
@@ -689,7 +755,7 @@ def cluster_scan(
         # result(timeout=SYMBOL_TIMEOUT_S + 5) intent without an extra cap.
         def _scan_or_placeholder(sym):
             try:
-                return _scan_symbol(sym, direction)
+                return _scan_symbol(sym, direction, min_sources)
             except Exception as e:
                 log.warning("synth_cluster: %s outer failed: %s", sym, e)
                 return None

@@ -336,7 +336,10 @@
           }
         }
         this._history = turns.slice(-6);
-        if (turns.length && this.isOpen() && !this.answer.innerHTML) {
+        // Don't paint the resume tail over anything the user already started:
+        // an in-flight ask, a rendered answer, or even typed input.
+        if (turns.length && this.isOpen() && !this.answer.innerHTML
+            && !this._asking && !this.input.value) {
           const tail = turns.slice(-2).map(t =>
             `<div class="jp-resume-turn"><span class="jp-resume-q">⟩ ${esc(t.q)}</span><br>${esc(t.a.slice(0, 180))}${t.a.length > 180 ? '…' : ''}</div>`).join('');
           this.answer.innerHTML = `<div class="jp-resume">${tail}<div class="jp-resume-hint">— continuing this thread; ⌫ NEW THREAD to reset —</div></div>`;
@@ -369,9 +372,20 @@
 
     // One conversational turn: listen → transcribe into the input → ask.
     // After a spoken answer, _ask() re-opens the mic so the exchange keeps
-    // flowing until silence, Esc, or close.
-    _listenTurn() {
+    // flowing until silence, Esc, close — or the auto-turn cap. The cap
+    // breaks speakerphone echo loops (TTS output re-captured by the mic
+    // would otherwise keep the exchange alive indefinitely).
+    _autoTurns: 0,
+    _AUTO_TURN_CAP: 6,
+
+    _listenTurn(auto) {
       if (!this.isOpen()) return;
+      if (!auto) this._autoTurns = 0;          // manual mic press resets the budget
+      else if (++this._autoTurns > this._AUTO_TURN_CAP) {
+        Toast.info('◉ JARVIS: pausing the conversation — tap the mic to continue.');
+        this._setListening(false);
+        return;
+      }
       this._setListening(true);
       Voice.listen(
         (transcript) => {
@@ -551,7 +565,7 @@
         // the follow-up — that's the back-and-forth loop.
         const spoken = opts && opts.spoken;
         Voice.speak(r.answer, () => {
-          if (spoken && Voice.enabled && this.isOpen()) this._listenTurn();
+          if (spoken && Voice.enabled && this.isOpen()) this._listenTurn(true);
         }, spoken);
       } catch (e) {
         this.answer.innerHTML = `<div class="jp-answer error">${esc(e.message)}</div>`;
@@ -569,6 +583,9 @@
 
     ensure() {
       if (this.el && document.body.contains(this.el)) return;
+      // Recreating after a DOM replacement — stop any typewriter still
+      // ticking against the detached node.
+      if (this._timer) { clearInterval(this._timer); this._timer = null; }
       const subNav = document.getElementById('sub-nav');
       if (!subNav || !subNav.parentNode) return;
       const bar = document.createElement('div');
