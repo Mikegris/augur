@@ -35,6 +35,11 @@ try:
 except Exception:  # pragma: no cover
     cache_store = None
 
+try:
+    import safe_executor
+except Exception:  # pragma: no cover
+    safe_executor = None
+
 import database as db
 import fetcher
 
@@ -49,9 +54,13 @@ _FLIPS_FLAG = 2            # quick flips in 90d that earn a card
 
 def _num(v: Any) -> Optional[float]:
     try:
-        return float(v)
+        f = float(v)
     except (TypeError, ValueError):
         return None
+    # Reject nan/inf — they propagate into formatted strings as "nan"/"inf".
+    if f != f or f in (float("inf"), float("-inf")):
+        return None
+    return f
 
 
 def _pct_ratio(v: Any) -> Optional[float]:
@@ -119,11 +128,13 @@ def _quality_score(f: Dict[str, Any]) -> Dict[str, Any]:
         elif de_ratio > 2.0:
             score -= 10; reasons.append("heavy leverage (D/E {:.1f})".format(de_ratio))
 
+    burns_cash = False
     fcf = f.get("free_cashflow")
     if isinstance(fcf, (int, float)):
         if fcf > 0:
             score += 7; reasons.append("generates free cash")
         else:
+            burns_cash = True
             score -= 10; reasons.append("burns cash (negative FCF)")
 
     rg = _pct_ratio(f.get("revenue_growth"))
@@ -134,6 +145,11 @@ def _quality_score(f: Dict[str, Any]) -> Dict[str, Any]:
             score -= 8; reasons.append("revenue shrinking ({:.0f}%)".format(rg))
 
     score = max(0, min(100, score))
+    # A cash-burner is not a "genuinely good business" no matter how good the
+    # other lines look — the Buffett lens is sold on cash generation. Cap the
+    # verdict below QUALITY when free cash flow is negative.
+    if burns_cash and score >= 70:
+        score = 69
     verdict = "QUALITY" if score >= 70 else ("MIXED" if score >= 45 else "WEAK")
     return {"score": round(score), "verdict": verdict, "reasons": reasons}
 
@@ -193,7 +209,11 @@ def _ownership(symbol: str, price: Optional[float], held: Optional[Dict[str, Any
             try:
                 days = (datetime.now(timezone.utc)
                         - datetime.fromisoformat(first[:10]).replace(tzinfo=timezone.utc)).days
-                out["holding_days"] = max(0, days)
+                # A future-dated buy (clock skew / bad import) yields negative
+                # days. Don't clamp to 0 — that falsely reads as "owned 0 days,
+                # too early to judge". Leave holding_days unset on bad data.
+                if days >= 0:
+                    out["holding_days"] = days
             except Exception:
                 pass
         out["n_transactions"] = len(txns)
@@ -242,17 +262,32 @@ def _position_review_uncached(symbol: str) -> Dict[str, Any]:
     # (an ETF or unrelated stock) — otherwise BTC reviews as a trust at -100%.
     quote_sym = symbol + "-USD" if is_crypto else symbol
 
+    # Fundamentals and the quote hit independent upstreams; for an equity we
+    # need both, so fetch them concurrently instead of one-then-the-other.
+    # parallel_map returns results in input order with None for any thunk that
+    # raised — same guarded contract the serial try/excepts gave (a dead feed
+    # leaves that dict empty, never crashes the review). Crypto skips
+    # fundamentals entirely, so the parallel hop earns nothing there.
     f = {}
-    if not is_crypto:
-        try:
-            f = fetcher.get_fundamentals(symbol) or {}
-        except Exception as e:
-            log.debug("fundamentals(%s) failed: %s", symbol, e)
     q = {}
-    try:
-        q = fetcher.get_quote(quote_sym) or {}
-    except Exception:
-        pass
+    if not is_crypto and safe_executor is not None:
+        f_res, q_res = safe_executor.parallel_map(
+            lambda thunk: thunk(),
+            [lambda: fetcher.get_fundamentals(symbol),
+             lambda: fetcher.get_quote(quote_sym)],
+            max_workers=2, thread_name_prefix="lens-review")
+        f = f_res or {}
+        q = q_res or {}
+    else:
+        if not is_crypto:
+            try:
+                f = fetcher.get_fundamentals(symbol) or {}
+            except Exception as e:
+                log.debug("fundamentals(%s) failed: %s", symbol, e)
+        try:
+            q = fetcher.get_quote(quote_sym) or {}
+        except Exception:
+            pass
     price = q.get("price")
     own = _ownership(symbol, price, held=held)
 
@@ -292,7 +327,16 @@ def _position_review_uncached(symbol: str) -> Dict[str, Any]:
         }
 
     desc = (f.get("description") or "").strip()
-    summary = desc.split(". ")[0][:280] + "." if desc else "No business description available."
+    if desc:
+        first = desc.split(". ")[0]
+        if len(first) > 280:
+            # Truncate at a word boundary with an ellipsis, not mid-token.
+            first = first[:280].rsplit(" ", 1)[0] + "…"
+        else:
+            first = first + "."
+        summary = first
+    else:
+        summary = "No business description available."
     quality = _quality_score(f)
     valuation = _valuation_flags(f)
     name = f.get("name") or symbol
@@ -353,6 +397,10 @@ def _temperament_uncached() -> Dict[str, Any]:
                 "verdict": "No transaction history yet — temperament unmeasured.",
                 "as_of": datetime.now(timezone.utc).isoformat()}
 
+    # Naive local "now" to match the naive transaction date parsing here
+    # (_ownership uses UTC against UTC-tagged dates — different lens, same
+    # day-count intent; this keeps the temperament window internally
+    # consistent rather than mixing a tz-aware now with naive dates).
     now = datetime.now()
     # Order by full timestamp so same-day BUY→SELL pairs resolve correctly.
     dated = [(t, _parse_day(t), _parse_ts(t)) for t in txns]
@@ -406,10 +454,12 @@ def _temperament_uncached() -> Dict[str, Any]:
                 cost_shares = max(0.0, cost_shares - sh)
                 cost_total = avg * cost_shares
     if chases:
-        sym, p, avg = chases[-1]
+        # Surface the WORST chase (largest premium over basis), not just the
+        # most recent — that's the one worth seeing, like quick_flips does.
+        sym, p, avg = max(chases, key=lambda c: (c[1] - c[2]) / c[2] if c[2] else 0)
         observations.append({
             "kind": "chasing", "tone": "warn",
-            "text": "{} add{} made >20% above your own average cost (latest: {} at ${:,.2f} "
+            "text": "{} add{} made >20% above your own average cost (worst: {} at ${:,.2f} "
                     "vs ${:,.2f} basis). Averaging UP needs a stronger thesis than averaging down.".format(
                         len(chases), "s" if len(chases) != 1 else "", sym, p, avg)})
 
@@ -458,45 +508,62 @@ def temperament_check() -> Dict[str, Any]:
 def _macro_brief_uncached() -> Dict[str, Any]:
     import jarvis  # late import to avoid cycles
 
-    regime = None
-    try:
-        regime = jarvis._market_regime()
-    except Exception:
-        pass
+    # The four reads (regime, sectors, liquidity, crypto) hit independent
+    # upstreams, so run them concurrently. Each thunk keeps its own guard and
+    # returns the exact value the serial block produced (or its empty default
+    # on failure), so parallelism changes timing only, never the output.
+    def _regime_thunk():
+        try:
+            return jarvis._market_regime()
+        except Exception:
+            return None
+
+    def _sectors_thunk():
+        try:
+            sectors = fetcher.get_sector_performance() or []
+            ranked = sorted([s for s in sectors if s.get("change_pct") is not None],
+                            key=lambda s: -s["change_pct"])
+            # Disjoint top/bottom slices — with <6 sectors reporting, ranked[:3]
+            # and ranked[-3:] would overlap and produce "X over X".
+            half = len(ranked) // 2
+            top_n = min(3, half) if len(ranked) >= 2 else 0
+            top = [{"sector": s.get("sector") or s.get("name"),
+                    "change_pct": s["change_pct"]} for s in ranked[:top_n]]
+            bottom = [{"sector": s.get("sector") or s.get("name"),
+                       "change_pct": s["change_pct"]} for s in ranked[len(ranked) - top_n:]]
+            return (top, bottom)
+        except Exception:
+            return None
+
+    def _liquidity_thunk():
+        try:
+            import liquidity_monitor
+            ls = liquidity_monitor.compute_stress_score() or {}
+            return {"score": ls.get("composite_score"), "regime": ls.get("regime")}
+        except Exception:
+            return None
+
+    def _crypto_thunk():
+        try:
+            cg = fetcher.get_crypto_global() or {}
+            return {"mcap": cg.get("total_market_cap_usd"),
+                    "btc_dominance": cg.get("btc_dominance"),
+                    "mcap_change_24h": cg.get("market_cap_change_24h")}
+        except Exception:
+            return None
+
+    thunks = [_regime_thunk, _sectors_thunk, _liquidity_thunk, _crypto_thunk]
+    if safe_executor is not None:
+        regime, sectors_res, liquidity, crypto = safe_executor.parallel_map(
+            lambda thunk: thunk(), thunks, max_workers=len(thunks),
+            thread_name_prefix="lens-macro")
+    else:  # fail-open: serial with the same per-thunk guards
+        regime, sectors_res, liquidity, crypto = (t() for t in thunks)
 
     sectors_top: List[Dict[str, Any]] = []
     sectors_bottom: List[Dict[str, Any]] = []
-    try:
-        sectors = fetcher.get_sector_performance() or []
-        ranked = sorted([s for s in sectors if s.get("change_pct") is not None],
-                        key=lambda s: -s["change_pct"])
-        # Disjoint top/bottom slices — with <6 sectors reporting, ranked[:3]
-        # and ranked[-3:] would overlap and produce "X over X".
-        half = len(ranked) // 2
-        top_n = min(3, half) if len(ranked) >= 2 else 0
-        sectors_top = [{"sector": s.get("sector") or s.get("name"),
-                        "change_pct": s["change_pct"]} for s in ranked[:top_n]]
-        sectors_bottom = [{"sector": s.get("sector") or s.get("name"),
-                           "change_pct": s["change_pct"]} for s in ranked[len(ranked) - top_n:]]
-    except Exception:
-        pass
-
-    liquidity = None
-    try:
-        import liquidity_monitor
-        ls = liquidity_monitor.compute_stress_score() or {}
-        liquidity = {"score": ls.get("composite_score"), "regime": ls.get("regime")}
-    except Exception:
-        pass
-
-    crypto = None
-    try:
-        cg = fetcher.get_crypto_global() or {}
-        crypto = {"mcap": cg.get("total_market_cap_usd"),
-                  "btc_dominance": cg.get("btc_dominance"),
-                  "mcap_change_24h": cg.get("market_cap_change_24h")}
-    except Exception:
-        pass
+    if sectors_res:
+        sectors_top, sectors_bottom = sectors_res
 
     # Rule-based strategist paragraph — every clause guarded.
     bits: List[str] = []
@@ -511,8 +578,13 @@ def _macro_brief_uncached() -> Dict[str, Any]:
         bits.append("rotation favors {} over {}".format(
             sectors_top[0]["sector"], sectors_bottom[-1]["sector"]))
     if liquidity and liquidity.get("regime"):
-        bits.append("liquidity conditions read {} ({}/100)".format(
-            str(liquidity["regime"]).lower(), liquidity.get("score")))
+        score = liquidity.get("score")
+        if score is not None:
+            bits.append("liquidity conditions read {} ({:.0f}/100)".format(
+                str(liquidity["regime"]).lower(), score))
+        else:
+            bits.append("liquidity conditions read {}".format(
+                str(liquidity["regime"]).lower()))
     if crypto and crypto.get("btc_dominance") is not None:
         chg = crypto.get("mcap_change_24h")
         bits.append("crypto risk appetite is {} (BTC dominance {:.0f}%{})".format(

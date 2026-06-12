@@ -188,9 +188,12 @@ def tts_speech(text, voice="onyx"):
         return None
     text = text[:600]  # hard bound — TTS is priced per character
     key = get_openai_key()
-    if not key or _cap_exceeded():
+    if not key:
         return None
     ck = (MODEL_TTS, voice, text)
+    # Serve a cache HIT even when the cap is exhausted — replaying already-paid
+    # audio costs nothing, so refusing it (forcing browser fallback) helps no
+    # one. Only NEW synthesis is gated by the cap, below.
     with _tts_lock:
         hit = _tts_cache.get(ck)
         if hit is not None:
@@ -199,6 +202,9 @@ def tts_speech(text, voice="onyx"):
             _tts_cache.pop(ck, None)
             _tts_cache[ck] = hit
             return hit
+    # Cache miss → real synthesis, which the cap DOES gate.
+    if _cap_exceeded():
+        return None
     try:
         from openai import OpenAI
         client = OpenAI(api_key=key, timeout=20)
