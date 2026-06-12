@@ -965,6 +965,25 @@ def test_jarvis_research():
     jjs = open(os.path.join(os.path.dirname(__file__), "static/js/jarvis.js")).read()
     check("research: UI renders citation links", "jv-cite" in jjs and 'rel="noopener' in jjs)
 
+    # Reliability: when the multi-round agent fails, ask() falls back to a
+    # DIRECT web_research call — NOT the local-only snapshot that wrongly says
+    # "no data" for outside-world questions. (This is the "still not working"
+    # fix: the agent path is flaky under OpenAI rate-limiting.)
+    orig_avail2, orig_agent2 = jarvis._llm_available, jarvis._agent_ask
+    orig_web = jr.web_research
+    jarvis._llm_available = lambda: True
+    jarvis._agent_ask = lambda q, t=None: None  # simulate agent failure
+    jr.web_research = lambda q: {"answer": "SpaceX priced its IPO at $135.",
+                                 "citations": [{"title": "Reuters", "url": "http://r"}]}
+    try:
+        r = jarvis.ask("insights on the spacex ipo", persist=False)
+        check("research: agent-failure falls back to direct web_research",
+              r.get("used") == ["web_research"] and "SpaceX" in r["answer"]
+              and r.get("citations"), repr(r.get("used")))
+    finally:
+        jarvis._llm_available, jarvis._agent_ask = orig_avail2, orig_agent2
+        jr.web_research = orig_web
+
 
 # ── 12. database add_position: offsetting to zero shares must not crash ──────
 def test_database_zero_shares():
