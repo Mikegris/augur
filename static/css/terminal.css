@@ -2144,6 +2144,15 @@ body::before {
 .jarvis-hint { margin-left: auto; margin-right: 8px; font-size: 9px; color: var(--text-dim); letter-spacing: .08em; }
 .jarvis-greeting { font-size: var(--font-size-sm); color: var(--text-secondary); margin-bottom: 4px; }
 .jarvis-headline { font-size: var(--font-size-lg); color: var(--text-primary); font-weight: 600; margin-bottom: 10px; line-height: 1.5; }
+.jarvis-digest {
+  font-size: var(--font-size-sm); color: var(--text-secondary);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--cyan);
+  border-radius: var(--radius);
+  background: var(--bg-secondary);
+  padding: 6px 10px; margin: 2px 0 8px; line-height: 1.5;
+}
+.jarvis-digest-h { color: var(--cyan); font-weight: 600; letter-spacing: .08em; margin-right: 6px; font-size: 10px; }
 .jarvis-cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(290px, 1fr)); gap: 8px; }
 .jarvis-card {
   background: var(--bg-secondary);

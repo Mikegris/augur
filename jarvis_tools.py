@@ -89,6 +89,12 @@ def _t_get_portfolio(args):
     return out
 
 
+def _t_portfolio_attribution(args):
+    import jarvis
+    return jarvis.portfolio_attribution() or {
+        "note": "no priced positions with day-change data right now"}
+
+
 def _t_market_regime(args):
     import jarvis
     return jarvis._market_regime() or {"note": "market data unavailable"}
@@ -576,6 +582,11 @@ TOOLS: Dict[str, Dict[str, Any]] = {
         "fn": _t_get_quote, "mutating": False,
         "description": "Use for 'price of X' / 'how is X doing today': live quote with price, day change, volume, 52-week range.",
         "parameters": _p(dict(_SYM_PROP), ["symbol"]),
+    },
+    "portfolio_attribution": {
+        "fn": _t_portfolio_attribution, "mutating": False,
+        "description": "Use for 'why am I up/down today' or 'what's driving my portfolio': per-holding contribution to TODAY's P&L — top contributors, top detractors, each position's share of the net move, plus S&P context to separate tape from positioning.",
+        "parameters": _p({}),
     },
     "get_portfolio": {
         "fn": _t_get_portfolio, "mutating": False,

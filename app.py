@@ -3182,6 +3182,21 @@ def jarvis_briefing_route():
         return jsonify({"error": str(e)}), 500
 
 
+@app.route("/api/jarvis/digest", methods=["GET"])
+def jarvis_digest_route():
+    """'While you were away' — insights logged since the last visit.
+    ?mark_seen=0 peeks without advancing the watermark."""
+    try:
+        import jarvis
+    except Exception as e:
+        return jsonify({"error": "jarvis unavailable: {}".format(e)}), 500
+    mark = request.args.get("mark_seen", "1") != "0"
+    try:
+        return jsonify(jarvis.away_digest(mark_seen=mark))
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
 @app.route("/api/jarvis/activity", methods=["GET"])
 def jarvis_activity_route():
     """In-memory snapshot of background machinery for the activity panel."""
@@ -3289,6 +3304,47 @@ def jarvis_ask_route():
                                   conversation_id=conversation_id))
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/jarvis/ask/stream", methods=["POST"])
+def jarvis_ask_stream_route():
+    """Streaming ask: SSE-formatted frames over a POST fetch-stream. Emits
+    `data: {"type":"status","text":…}` lines while Jarvis works, comment
+    heartbeats on quiet stretches, and one terminal
+    `data: {"type":"answer","payload":…}` frame. The generator is bounded
+    (jarvis.ask_stream hard-deadlines), so no immortal response threads."""
+    try:
+        import jarvis
+    except Exception as e:
+        return jsonify({"error": "jarvis unavailable: {}".format(e)}), 500
+    data = request.get_json(silent=True) or {}
+    query = data.get("query") if isinstance(data, dict) else None
+    if not query or not isinstance(query, str):
+        return jsonify({"error": "expected JSON body with a 'query' string"}), 400
+    if len(query) > 500:
+        return jsonify({"error": "query too long (max 500 chars)"}), 400
+    history = data.get("history")
+    conversation_id = data.get("conversation_id")
+
+    def generate():
+        import json as _json
+        try:
+            for ev in jarvis.ask_stream(query, history=history,
+                                        conversation_id=conversation_id):
+                if ev.get("type") == "hb":
+                    yield ": hb\n\n"
+                else:
+                    yield "data: {}\n\n".format(_json.dumps(ev, default=str))
+        except Exception as e:
+            # Terminal error frame so the client always gets an answer event.
+            yield "data: {}\n\n".format(_json.dumps(
+                {"type": "answer",
+                 "payload": {"intent": "error", "answer": str(e)}}))
+
+    resp = Response(generate(), mimetype="text/event-stream")
+    resp.headers["Cache-Control"] = "no-cache"
+    resp.headers["X-Accel-Buffering"] = "no"
+    return resp
 
 
 @app.route("/api/jarvis/conversation", methods=["GET"])

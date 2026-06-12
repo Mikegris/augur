@@ -565,7 +565,7 @@ def test_defect_sweep_c():
     # P2: "set an alert for X above N" was swallowed by the read-only alerts intent.
     orig_avail, orig_agent = jarvis._llm_available, jarvis._agent_ask
     jarvis._llm_available = lambda: True
-    jarvis._agent_ask = lambda q, t=None: {
+    jarvis._agent_ask = lambda q, t=None, **kw: {
         "answer": "proposing", "used": [],
         "proposal": {"tool": "add_price_alert", "args": {}, "label": "x"}}
     try:
@@ -953,7 +953,7 @@ def test_jarvis_research():
             "citations": [{"title": "T", "url": "http://x"}]}
     orig_avail, orig_agent = jarvis._llm_available, jarvis._agent_ask
     jarvis._llm_available = lambda: True
-    jarvis._agent_ask = lambda q, t=None: fake
+    jarvis._agent_ask = lambda q, t=None, **kw: fake
     try:
         r = jarvis.ask("what's the latest on the spacex ipo", persist=False)
         check("research: ask surfaces citations from web_research",
@@ -972,7 +972,7 @@ def test_jarvis_research():
     orig_avail2, orig_agent2 = jarvis._llm_available, jarvis._agent_ask
     orig_web = jr.web_research
     jarvis._llm_available = lambda: True
-    jarvis._agent_ask = lambda q, t=None: None  # simulate agent failure
+    jarvis._agent_ask = lambda q, t=None, **kw: None  # simulate agent failure
     jr.web_research = lambda q: {"answer": "SpaceX priced its IPO at $135.",
                                  "citations": [{"title": "Reuters", "url": "http://r"}]}
     try:
@@ -986,6 +986,188 @@ def test_jarvis_research():
 
 
 # ── 12. database add_position: offsetting to zero shares must not crash ──────
+def test_jarvis_v2_live():
+    """v2.0: streaming ask, portfolio attribution, auto-memory, away digest."""
+    import jarvis
+    import jarvis_tools
+    import database as db_
+    import app
+
+    # ── streaming ask: status frames then exactly one terminal answer ──
+    orig_ask = jarvis.ask
+
+    def fake_ask(query, history=None, conversation_id=None, persist=True, progress=None):
+        progress("Reading your portfolio…")
+        progress("Synthesizing what I found…")
+        return {"intent": "llm", "answer": "done", "symbol": None}
+
+    jarvis.ask = fake_ask
+    try:
+        evs = list(jarvis.ask_stream("test"))
+    finally:
+        jarvis.ask = orig_ask
+    check("stream: status frames then answer",
+          [e["type"] for e in evs] == ["status", "status", "answer"], repr(evs)[:120])
+    check("stream: terminal payload preserved",
+          evs[-1]["payload"].get("answer") == "done")
+
+    def boom_ask(query, **kw):
+        raise RuntimeError("boom")
+
+    jarvis.ask = boom_ask
+    try:
+        evs = list(jarvis.ask_stream("test"))
+    finally:
+        jarvis.ask = orig_ask
+    check("stream: worker crash still yields a terminal error answer",
+          evs and evs[-1]["type"] == "answer"
+          and evs[-1]["payload"].get("intent") == "error")
+
+    # ── streaming route: validation + SSE framing ──
+    c = app.app.test_client()
+    check("stream route: missing query is 400",
+          c.post("/api/jarvis/ask/stream", json={}).status_code == 400)
+    check("stream route: oversize query is 400",
+          c.post("/api/jarvis/ask/stream", json={"query": "x" * 501}).status_code == 400)
+    jarvis.ask = fake_ask
+    try:
+        r = c.post("/api/jarvis/ask/stream", json={"query": "hi"})
+        body = r.get_data(as_text=True)
+    finally:
+        jarvis.ask = orig_ask
+    check("stream route: event-stream mimetype", r.mimetype == "text/event-stream")
+    check("stream route: SSE data frames incl. terminal answer",
+          body.count("data: ") >= 3 and '"type": "answer"' in body, body[:160])
+
+    # ── attribution ──
+    orig_pulse, orig_regime = jarvis._portfolio_pulse, jarvis._market_regime
+    fake_rows = [
+        {"symbol": "NVDA", "market_value": 50000.0, "day_pnl": -900.0,
+         "day_change_pct": -1.8, "weight_pct": 50.0, "unrealized_pnl": 0, "unrealized_pct": 0},
+        {"symbol": "AAPL", "market_value": 30000.0, "day_pnl": 150.0,
+         "day_change_pct": 0.5, "weight_pct": 30.0, "unrealized_pnl": 0, "unrealized_pct": 0},
+        {"symbol": "MSFT", "market_value": 20000.0, "day_pnl": -50.0,
+         "day_change_pct": -0.2, "weight_pct": 20.0, "unrealized_pnl": 0, "unrealized_pct": 0},
+    ]
+    jarvis._portfolio_pulse = lambda: {
+        "total_value": 100000.0, "total_pnl": 1000.0, "total_pnl_pct": 1.0,
+        "day_pnl": -800.0, "day_pnl_pct": -0.8, "num_positions": 3,
+        "holdings": fake_rows, "best": fake_rows[1], "worst": fake_rows[0]}
+    jarvis._market_regime = lambda: {"spx_pct": 0.5, "vix": 15.0}
+    try:
+        a = jarvis.portfolio_attribution()
+        check("attrib: top detractor first", a["detractors"][0]["symbol"] == "NVDA")
+        check("attrib: share of move computed",
+              abs(a["detractors"][0]["share_of_move_pct"] - 112.5) < 0.1,
+              repr(a["detractors"][0]))
+        check("attrib: contributors on the other side",
+              a["contributors"] and a["contributors"][0]["symbol"] == "AAPL")
+        why = jarvis._answer_why()
+        check("attrib: against-the-tape callout", "AGAINST" in why["answer"])
+        r1 = jarvis.ask("why am i down today", persist=False)
+        check("attrib: 'why am i down' routes to attribution",
+              r1["intent"] == "attribution", r1["intent"])
+        r2 = jarvis.ask("what is driving my portfolio today", persist=False)
+        check("attrib: 'what's driving my portfolio' routes too",
+              r2["intent"] == "attribution", r2["intent"])
+        r3 = jarvis.ask("why is the market down", persist=False)
+        check("attrib: market question NOT swallowed",
+              r3["intent"] != "attribution", r3["intent"])
+    finally:
+        jarvis._portfolio_pulse, jarvis._market_regime = orig_pulse, orig_regime
+    check("attrib: tool registered read-only",
+          "portfolio_attribution" in jarvis_tools.TOOLS
+          and not jarvis_tools.is_mutating("portfolio_attribution"))
+
+    # ── auto-memory ──
+    import threading as _th
+
+    def _join_learners():
+        for t in _th.enumerate():
+            if t.name == "jarvis-learn":
+                t.join(timeout=5)
+
+    llm_calls = []
+    orig_avail, orig_complete = jarvis._llm_available, jarvis._llm_complete
+    jarvis._llm_available = lambda: True
+
+    def fake_complete(messages, max_tokens=200, temperature=0.4):
+        llm_calls.append(messages)
+        return '{"fact": "Wants lower risk heading into a 2030 retirement"}'
+
+    jarvis._llm_complete = fake_complete
+    try:
+        jarvis._maybe_learn("i want to retire in 2030 so please keep my risk lower")
+        _join_learners()
+        facts = db_.jarvis_list_memories()
+        check("auto-memory: durable fact stored with source=auto",
+              any(f["source"] == "auto" and "2030" in f["fact"] for f in facts),
+              repr(facts)[:120])
+        before = len(llm_calls)
+        jarvis._maybe_learn("what is the price of NVDA right now")  # no first-person cue
+        jarvis._maybe_learn("hi")  # too short
+        _join_learners()
+        check("auto-memory: cue/length gates skip the LLM entirely",
+              len(llm_calls) == before)
+        # Idempotent: same fact again must not duplicate.
+        n_before = len(db_.jarvis_list_memories())
+        jarvis._maybe_learn("i want to retire in 2030 so please keep my risk lower")
+        _join_learners()
+        check("auto-memory: exact dupe not re-stored",
+              len(db_.jarvis_list_memories()) == n_before)
+        check("auto-memory: listing marks learned facts",
+              "picked up in conversation" in jarvis.ask("what do you remember",
+                                                        persist=False)["answer"])
+    finally:
+        jarvis._llm_available, jarvis._llm_complete = orig_avail, orig_complete
+        for f in db_.jarvis_list_memories():
+            if f["source"] == "auto":
+                db_.jarvis_delete_memory(f["id"])
+
+    # ── away digest ──
+    card = {"kind": "alert", "tone": "warn", "priority": 1,
+            "title": "NVDA alert triggered", "detail": "crossed level",
+            "action": {"view": "alerts"}}
+    n1 = db_.jarvis_log_insights([card])
+    n2 = db_.jarvis_log_insights([card])
+    check("digest: insight log dedups per (day, kind, title)", n1 == 1 and n2 == 0,
+          "n1=%s n2=%s" % (n1, n2))
+    orig_settings, orig_set = db_.get_settings, db_.set_setting
+    seen = {}
+    db_.get_settings = lambda: {"jarvis_last_seen": "2020-01-01 00:00:00"}
+    db_.set_setting = lambda k, v: seen.update({k: v})
+    try:
+        d = jarvis.away_digest()
+        check("digest: replays insights since watermark",
+              d["count"] >= 1 and "NVDA alert triggered" in (d["line"] or ""),
+              repr(d)[:160])
+        check("digest: watermark advanced on mark_seen", "jarvis_last_seen" in seen)
+        from datetime import datetime, timezone, timedelta
+        recent = (datetime.now(timezone.utc) - timedelta(minutes=10)).strftime("%Y-%m-%d %H:%M:%S")
+        db_.get_settings = lambda: {"jarvis_last_seen": recent}
+        d2 = jarvis.away_digest(mark_seen=False)
+        check("digest: a 10-minute gap is a tab switch, not an absence",
+              d2["count"] == 0)
+        db_.get_settings = lambda: {}
+        d3 = jarvis.away_digest(mark_seen=False)
+        check("digest: first visit is empty", d3["count"] == 0 and d3["since"] is None)
+    finally:
+        db_.get_settings, db_.set_setting = orig_settings, orig_set
+    rr = c.get("/api/jarvis/digest?mark_seen=0")
+    check("digest: route responds", rr.status_code == 200 and "count" in rr.get_json())
+
+    # ── frontend wiring pinned by source grep (sweep convention) ──
+    src = open("static/js/jarvis.js").read()
+    check("frontend: askStream helper targets the stream route",
+          "function askStream" in src and "/api/jarvis/ask/stream" in src)
+    check("frontend: stream failure falls back to plain ask",
+          src.count("API.post('/api/jarvis/ask'") >= 2)
+    check("frontend: digest fetched once per page load", "_digestFetched" in src)
+    html = open("templates/index.html").read()
+    check("assets: jarvis.js cache-busted to v17", "jarvis.js?v=17" in html)
+    check("assets: terminal.css cache-busted to v14", "terminal.css?v=14" in html)
+
+
 def test_database_zero_shares():
     import database
     database.init_db()
@@ -1222,6 +1404,7 @@ def main():
         ("defect sweep D pins", test_defect_sweep_d),
         ("defect sweep E pins", test_defect_sweep_e),
         ("jarvis open-world research", test_jarvis_research),
+        ("jarvis v2.0 live features", test_jarvis_v2_live),
         ("jarvis lens + premium TTS", test_jarvis_lens),
         ("database zero-shares guard", test_database_zero_shares),
         ("cli quote None fields", test_cli_quote_none_fields),

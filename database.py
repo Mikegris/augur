@@ -250,6 +250,19 @@ def init_db():
         source TEXT,
         created_at TEXT DEFAULT CURRENT_TIMESTAMP
     )""")
+    c.execute("""CREATE TABLE IF NOT EXISTS jarvis_insights (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        day TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        tone TEXT,
+        priority INTEGER,
+        title TEXT NOT NULL,
+        detail TEXT,
+        view TEXT,
+        symbol TEXT,
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(day, kind, title)
+    )""")
 
     # ── Indexes for performance ──
     c.execute("CREATE INDEX IF NOT EXISTS idx_jarvis_messages_conv ON jarvis_messages(conversation_id, id)")
@@ -730,6 +743,51 @@ def jarvis_add_memory(fact, source="user"):
             "INSERT INTO jarvis_memory (fact, source) VALUES (?,?)", (fact, source))
         conn.commit()
         return cur.lastrowid
+
+
+def jarvis_log_insights(cards):
+    """Persist briefing insight cards as the day's history. UNIQUE(day, kind,
+    title) makes re-logging the same card a no-op, so this can run on every
+    briefing cache-miss without duplicating. Returns the number of NEW rows.
+    Prunes anything older than 14 days while it's here."""
+    if not cards:
+        return 0
+    from datetime import datetime, timezone
+    day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    new = 0
+    with _write_lock:
+        conn = get_conn()
+        for card in cards:
+            title = (card.get("title") or "").strip()[:200]
+            if not title:
+                continue
+            action = card.get("action") or {}
+            cur = conn.execute(
+                "INSERT OR IGNORE INTO jarvis_insights "
+                "(day, kind, tone, priority, title, detail, view, symbol) "
+                "VALUES (?,?,?,?,?,?,?,?)",
+                (day, str(card.get("kind") or "info")[:40],
+                 str(card.get("tone") or "info")[:10],
+                 int(card.get("priority") or 3), title,
+                 (card.get("detail") or "")[:500],
+                 (action.get("view") or None), (action.get("symbol") or None)))
+            new += cur.rowcount
+        conn.execute("DELETE FROM jarvis_insights WHERE created_at < datetime('now', '-14 days')")
+        conn.commit()
+    return new
+
+
+def jarvis_insights_since(since_iso, limit=20):
+    """Insights logged strictly after `since_iso` (UTC 'YYYY-MM-DD HH:MM:SS'
+    or ISO — SQLite compares lexicographically, both work). None → empty."""
+    if not since_iso:
+        return []
+    conn = get_conn()
+    rows = conn.execute(
+        "SELECT * FROM jarvis_insights WHERE created_at > ? "
+        "ORDER BY priority ASC, id DESC LIMIT ?",
+        (str(since_iso)[:32], max(1, min(int(limit), 50)))).fetchall()
+    return [dict(r) for r in rows]
 
 
 def jarvis_conversation_exists(conversation_id):

@@ -58,9 +58,60 @@
 
   const TONE_COLOR = { pos: 'var(--green)', neg: 'var(--red)', warn: 'var(--amber)', info: 'var(--blue)' };
 
+  // ── Streaming ask ───────────────────────────────────────────────────────────
+  // POST /api/jarvis/ask/stream over a fetch ReadableStream: SSE-formatted
+  // frames, `status` events narrate what Jarvis is doing (tool consults,
+  // research, synthesis), one terminal `answer` frame carries the same
+  // payload /api/jarvis/ask returns. Throws on any transport/parse trouble so
+  // callers fall back to the plain POST — streaming is strictly an upgrade.
+  async function askStream(body, onStatus) {
+    const resp = await fetch('/api/jarvis/ask/stream', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    if (!resp.ok || !resp.body) throw new Error('stream unavailable (' + resp.status + ')');
+    const reader = resp.body.getReader();
+    const dec = new TextDecoder();
+    let buf = '';
+    try {
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buf += dec.decode(value, { stream: true });
+        let idx;
+        while ((idx = buf.indexOf('\n\n')) >= 0) {
+          const frame = buf.slice(0, idx).trim();
+          buf = buf.slice(idx + 2);
+          if (!frame.startsWith('data:')) continue; // comment heartbeat
+          let ev;
+          try { ev = JSON.parse(frame.slice(5)); } catch (e) { continue; }
+          if (ev.type === 'status') {
+            if (onStatus) { try { onStatus(ev.text || ''); } catch (e) {} }
+          } else if (ev.type === 'answer') {
+            return ev.payload || {};
+          }
+        }
+      }
+    } finally {
+      try { reader.cancel(); } catch (e) {}
+    }
+    throw new Error('stream ended without an answer');
+  }
+
   // ── Briefing panel ──────────────────────────────────────────────────────────
   const Briefing = {
     _last: null,
+    _digest: null, _digestFetched: false,
+
+    // "While you were away" — fetched ONCE per page load (the fetch advances
+    // the server-side last-seen watermark, so SPA re-navigations must not
+    // re-mark or the recap would self-erase between views).
+    async _fetchDigest() {
+      if (this._digestFetched) return;
+      this._digestFetched = true;
+      try { this._digest = await API.get('/api/jarvis/digest'); } catch (e) { this._digest = null; }
+    },
 
     async render(containerId, force) {
       const el = document.getElementById(containerId);
@@ -88,7 +139,10 @@
         });
       }
       try {
-        const b = await API.get('/api/jarvis/briefing' + (force ? '?refresh=1' : ''));
+        const [b] = await Promise.all([
+          API.get('/api/jarvis/briefing' + (force ? '?refresh=1' : '')),
+          this._fetchDigest(),
+        ]);
         this._last = b;
         this._renderBody(b);
       } catch (e) {
@@ -116,8 +170,13 @@
       const headline = b.voice
         ? `<div class="jarvis-headline jarvis-voice">${esc(b.voice)}</div>`
         : `<div class="jarvis-headline">${esc(b.headline || '')}</div>`;
+      const d = this._digest;
+      const digest = (d && d.count && d.line)
+        ? `<div class="jarvis-digest"><span class="jarvis-digest-h">◉ WHILE YOU WERE OUT</span> ${esc(d.line)}</div>`
+        : '';
       body.innerHTML = `
         <div class="jarvis-greeting">${esc(b.greeting || '')}</div>
+        ${digest}
         ${headline}
         ${cards ? `<div class="jarvis-cards">${cards}</div>`
                 : '<div class="jarvis-allclear">All clear — nothing needs your attention right now.</div>'}`;
@@ -608,7 +667,16 @@
         const body = this._convId
           ? { query, conversation_id: this._convId }
           : { query, history: this._history.slice(-6) };
-        const r = await API.post('/api/jarvis/ask', body);
+        let r;
+        try {
+          r = await askStream(body, (t) => {
+            if (this.answer) {
+              this.answer.innerHTML = `<div class="jp-answer thinking"><div class="spinner"></div> ${esc(t)}</div>`;
+            }
+          });
+        } catch (streamErr) {
+          r = await API.post('/api/jarvis/ask', body);
+        }
         if (r.conversation_id) this._convId = r.conversation_id;
         this._history.push({ q: query, a: r.answer, symbol: r.symbol || null });
         if (this._history.length > 8) this._history.shift();
@@ -1217,7 +1285,21 @@
       if (chatEl) chatEl.setAttribute('aria-busy', 'true');
       const thinking = this._append('assistant', '<span class="jv-thinking" aria-label="Jarvis is working">◉ working…</span>');
       try {
-        const r = await API.post('/api/jarvis/ask', { query: q, conversation_id: this._convId });
+        const body = { query: q, conversation_id: this._convId };
+        let r;
+        try {
+          // Live narration: each status frame repaints the thinking bubble
+          // ("Reading your portfolio…", "Researching the open web…").
+          r = await askStream(body, (t) => {
+            if (thinking && document.body.contains(thinking)) {
+              thinking.innerHTML = `<span class="jv-thinking">◉ ${esc(t)}</span>`;
+            }
+          });
+        } catch (streamErr) {
+          // Stream path failed (old server, proxy buffering, abort) — the
+          // plain POST is the answer of record.
+          r = await API.post('/api/jarvis/ask', body);
+        }
         if (r.conversation_id) this._convId = r.conversation_id;
         let html = esc(r.answer);
         if (r.citations && r.citations.length) {

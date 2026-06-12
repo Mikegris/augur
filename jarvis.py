@@ -284,17 +284,54 @@ _AGENT_SYSTEM = (
 
 _AGENT_MAX_ROUNDS = 5  # +1 round headroom for a research call + synthesis
 
+# Human-voiced progress lines for the streaming UI, keyed by tool name.
+# Anything not listed falls back to "Consulting <tool name>…".
+_TOOL_PROGRESS = {
+    "get_portfolio":        "Reading your portfolio…",
+    "get_quote":            "Pulling the live quote…",
+    "forecast":             "Running the forecast ensemble…",
+    "smart_money_score":    "Scoring the smart-money trail…",
+    "position_review":      "Reviewing the position like an owner…",
+    "temperament_check":    "Auditing your own trading record…",
+    "macro_brief":          "Reading the macro weather…",
+    "what_if":              "Simulating the trade…",
+    "compare_positions":    "Comparing the two side by side…",
+    "web_research":         "Researching the open web…",
+    "search_news":          "Scanning the wires…",
+    "news_sentiment":       "Measuring news tone…",
+    "search_sec_filings":   "Digging through SEC filings…",
+    "search_hacker_news":   "Listening to Hacker News…",
+    "get_earnings_calendar": "Checking the earnings calendar…",
+    "portfolio_attribution": "Attributing today's P&L…",
+}
 
-def _agent_ask(query: str, history: Optional[List[Dict[str, Any]]] = None) -> Optional[Dict[str, Any]]:
+
+def _progress_label(tool_name: str) -> str:
+    return _TOOL_PROGRESS.get(
+        tool_name, "Consulting {}…".format(tool_name.replace("_", " ")))
+
+
+def _agent_ask(query: str, history: Optional[List[Dict[str, Any]]] = None,
+               progress: Any = None) -> Optional[Dict[str, Any]]:
     """Tool-calling agent over the full engine registry. Returns
     {"answer", "used": [tool names]} or {"answer", "proposal": {...}} for a
     mutating request awaiting user confirmation. Raises on transport errors;
-    the caller fails open to the plain-context path."""
+    the caller fails open to the plain-context path. `progress` is an optional
+    callable(str) fed human-readable status lines for the streaming UI — it
+    must never raise into the loop, so every call is guarded."""
     import ai_summarizer
     import jarvis_tools
     key = ai_summarizer.get_openai_key()
     if not key:
         return None
+
+    def notify(text: str) -> None:
+        if progress is None:
+            return
+        try:
+            progress(text)
+        except Exception:
+            pass
     from openai import OpenAI
     # gpt-5.x reasoning models with tool schemas can take 20-40s per round;
     # a 25s timeout cut them off under load and dropped the whole agent path
@@ -315,12 +352,13 @@ def _agent_ask(query: str, history: Optional[List[Dict[str, Any]]] = None) -> Op
     tool_cache: Dict[str, str] = {}  # (name+args) -> result, dedup across rounds
     citations: List[Dict[str, Any]] = []  # web_research sources, for the UI
 
-    for _ in range(_AGENT_MAX_ROUNDS):
+    for round_i in range(_AGENT_MAX_ROUNDS):
         # The daily cap is a hard money ceiling — re-check it EACH round, not
         # just at entry, so a multi-round answer (or a runaway tool loop)
         # can't overshoot the budget 4-5x. Bail to the plain-context fallback.
         if ai_summarizer._cap_exceeded():
             break
+        notify("Thinking…" if round_i == 0 else "Synthesizing what I found…")
         # MODEL_HEAVY synthesis once >2 DISTINCT tools have run (duplicates
         # mustn't inflate the count and force the expensive model).
         model = (ai_summarizer.MODEL_HEAVY if len(set(used)) > 2
@@ -379,6 +417,7 @@ def _agent_ask(query: str, history: Optional[List[Dict[str, Any]]] = None) -> Op
             mkey = tc.function.name + "|" + raw_args
             result = tool_cache.get(mkey)
             if result is None:
+                notify(_progress_label(tc.function.name))
                 result = jarvis_tools.execute_read(tc.function.name, args)
                 tool_cache[mkey] = result
             # Harvest web_research source citations to surface in the UI.
@@ -395,6 +434,7 @@ def _agent_ask(query: str, history: Optional[List[Dict[str, Any]]] = None) -> Op
     if ai_summarizer._cap_exceeded():
         return None  # budget gone mid-loop — fail open to the cheaper paths
     # Round budget exhausted — ask for a final synthesis without tools.
+    notify("Wrapping up…")
     model = (ai_summarizer.MODEL_HEAVY if len(set(used)) > 2
              else ai_summarizer.MODEL_LIGHT)
     resp = ai_summarizer._chat_completion(
@@ -742,6 +782,14 @@ def _run_briefing_uncached() -> Dict[str, Any]:
     cards.sort(key=lambda c: c["priority"])
     n_urgent = sum(1 for c in cards if c["priority"] == 1)
 
+    # History: persist today's cards so "while you were away" can replay what
+    # surfaced between visits. Idempotent per (day, kind, title); cache-miss
+    # only, so this runs at most ~once per TTL window.
+    try:
+        db.jarvis_log_insights(cards)
+    except Exception as e:
+        log.debug("briefing: insight log failed: %s", e)
+
     out = {
         "greeting": "{}. Markets are {}.".format(_greeting(), _market_phase(now_et)),
         "headline": _build_headline(pulse, regime, n_urgent),
@@ -780,6 +828,67 @@ def get_briefing(force_refresh: bool = False) -> Dict[str, Any]:
             pass
         return result
     return cache_store.coalesce(("jarvis_briefing",), _BRIEFING_TTL, _run_briefing_uncached)
+
+
+# ─── away digest: what happened since you last looked ───────────────────────
+
+_AWAY_MIN_GAP_MIN = 30  # visits closer together than this aren't "away"
+
+
+def away_digest(mark_seen: bool = True) -> Dict[str, Any]:
+    """Insights that surfaced since the user's last visit. `jarvis_last_seen`
+    (a settings row, UTC 'YYYY-MM-DD HH:MM:SS') is the watermark; mark_seen
+    advances it. Gaps under ~30 minutes return an empty digest — tab switches
+    aren't absences."""
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+    last_seen = None
+    try:
+        last_seen = (db.get_settings() or {}).get("jarvis_last_seen") or None
+    except Exception:
+        pass
+    if mark_seen:
+        try:
+            db.set_setting("jarvis_last_seen", now)
+        except Exception as e:
+            log.debug("away_digest: mark seen failed: %s", e)
+
+    out: Dict[str, Any] = {"since": last_seen, "insights": [], "count": 0,
+                           "away_minutes": None, "line": None}
+    if not last_seen:
+        return out  # first visit ever — nothing to recap
+    try:
+        gap_min = max(0, (datetime.strptime(now, "%Y-%m-%d %H:%M:%S")
+                          - datetime.strptime(str(last_seen)[:19], "%Y-%m-%d %H:%M:%S")
+                          ).total_seconds() / 60.0)
+    except Exception:
+        gap_min = None
+    out["away_minutes"] = round(gap_min) if gap_min is not None else None
+    if gap_min is not None and gap_min < _AWAY_MIN_GAP_MIN:
+        return out
+
+    try:
+        rows = db.jarvis_insights_since(last_seen, limit=10)
+    except Exception as e:
+        log.debug("away_digest: query failed: %s", e)
+        rows = []
+    if not rows:
+        return out
+    out["insights"] = rows
+    out["count"] = len(rows)
+
+    if gap_min is None:
+        away = "you were away"
+    elif gap_min >= 2880:
+        away = "the last {} days".format(int(gap_min // 1440))
+    elif gap_min >= 120:
+        away = "the last {} hours".format(int(gap_min // 60))
+    else:
+        away = "the last {} minutes".format(int(gap_min))
+    titles = [r["title"] for r in rows[:3]]
+    out["line"] = "While you were out ({}): {}{}".format(
+        away, "; ".join(titles),
+        " — and {} more.".format(len(rows) - 3) if len(rows) > 3 else ".")
+    return out
 
 
 # ─── view context: Jarvis speaks on every view ───────────────────────────────
@@ -1234,6 +1343,90 @@ def _answer_exposure() -> Dict[str, Any]:
             "action": {"view": "analytics"}}
 
 
+def portfolio_attribution() -> Optional[Dict[str, Any]]:
+    """Per-holding contribution to TODAY's portfolio move — the data behind
+    'why am I up/down'. Returns None when there are no priced positions or
+    no day-change data (e.g. crypto-only book with a dead feed)."""
+    pulse = _portfolio_pulse()
+    if not pulse:
+        return None
+    rows = [r for r in pulse["holdings"] if _finite(r.get("day_pnl")) is not None]
+    if not rows:
+        return None
+    total = _finite(pulse.get("day_pnl"))
+
+    def _entry(r: Dict[str, Any]) -> Dict[str, Any]:
+        e = {"symbol": r["symbol"], "day_pnl": r["day_pnl"],
+             "day_change_pct": r.get("day_change_pct"),
+             "weight_pct": r.get("weight_pct")}
+        # Share of the net move — only meaningful when the net isn't ~flat
+        # (dividing by a near-zero net turns tiny moves into 4000% shares).
+        if total is not None and abs(total) >= 1.0:
+            e["share_of_move_pct"] = round(r["day_pnl"] / total * 100, 1)
+        return e
+
+    rows.sort(key=lambda r: r["day_pnl"])
+    detractors = [_entry(r) for r in rows[:3] if r["day_pnl"] < 0]
+    contributors = [_entry(r) for r in rows[::-1][:3] if r["day_pnl"] > 0]
+
+    out = {
+        "day_pnl": pulse.get("day_pnl"),
+        "day_pnl_pct": pulse.get("day_pnl_pct"),
+        "total_value": pulse.get("total_value"),
+        "contributors": contributors,
+        "detractors": detractors,
+    }
+    try:
+        regime = _market_regime()
+        if regime:
+            out["spx_pct"] = regime.get("spx_pct")
+            out["vix"] = regime.get("vix")
+    except Exception:
+        pass
+    return out
+
+
+def _answer_why() -> Dict[str, Any]:
+    a = portfolio_attribution()
+    if not a:
+        return {"answer": "I don't have day-move data for your positions right "
+                          "now — either the book is empty or the quote feed is "
+                          "still warming.",
+                "action": {"view": "portfolio"}}
+    total = _finite(a.get("day_pnl")) or 0.0
+    head = "You're {} {} ({}) today".format(
+        "up" if total >= 0 else "down", _fmt_usd(abs(total)),
+        _fmt_pct(a.get("day_pnl_pct")))
+
+    def _phrase(e: Dict[str, Any]) -> str:
+        s = "{} ({}, {})".format(e["symbol"], _fmt_usd(e["day_pnl"]),
+                                 _fmt_pct(e.get("day_change_pct")))
+        if e.get("share_of_move_pct") is not None and e["share_of_move_pct"] > 0:
+            s += " — {:.0f}% of the move".format(min(e["share_of_move_pct"], 999))
+        return s
+
+    bits = [head + "."]
+    main = a["detractors"] if total < 0 else a["contributors"]
+    other = a["contributors"] if total < 0 else a["detractors"]
+    if main:
+        bits.append("{} of it: {}.".format(
+            "Most" if len(main) > 1 else "All", "; ".join(_phrase(e) for e in main)))
+    if other:
+        bits.append("Fighting the tide: {}.".format(
+            "; ".join("{} ({})".format(e["symbol"], _fmt_usd(e["day_pnl"]))
+                      for e in other[:2])))
+    spx = _finite(a.get("spx_pct"))
+    mine = _finite(a.get("day_pnl_pct"))
+    if spx is not None and mine is not None:
+        if abs(spx) >= 0.3 and (spx >= 0) == (mine >= 0) and abs(mine) <= abs(spx) * 2:
+            bits.append("Context: the S&P is {} too — a chunk of this is just "
+                        "the tape.".format(_fmt_pct(spx)))
+        elif (spx >= 0) != (mine >= 0):
+            bits.append("Notably, you're moving AGAINST the tape (S&P {}) — "
+                        "this one is your positioning, not the market.".format(_fmt_pct(spx)))
+    return {"answer": " ".join(bits), "data": a, "action": {"view": "portfolio"}}
+
+
 def _answer_earnings(symbol: Optional[str]) -> Dict[str, Any]:
     import earnings
     if symbol:
@@ -1347,6 +1540,16 @@ def _sanitize_history(history: Any) -> List[Dict[str, Any]]:
 
 _FOLLOW_UP_RE = re.compile(r"\b(it|its|that|this|same|again)\b", re.IGNORECASE)
 
+# "Why am I down today" / "what's driving my book" → per-holding attribution.
+# Deliberately anchored on MY portfolio/book phrasing so "why is the market
+# down" still reaches the market intent and "why is NVDA down" the agent.
+_ATTRIB_RE = re.compile(
+    r"why\s+(am\s+i|is\s+my\s+(portfolio|book))"
+    r"|what(?:'s|\s+is)?\s+(driving|moving|hurting)\s+(my|the\s+(book|portfolio))"
+    r"|what\s+(moved|drove|hit)\s+(my|the\s+(book|portfolio))"
+    r"|\battribution\b",
+    re.IGNORECASE)
+
 # Action-phrased queries ("keep an eye on PLTR", "add X", "track Y") must
 # reach the tool agent, not short-circuit into the bare-ticker quote path.
 _ACTIONISH_RE = re.compile(
@@ -1371,6 +1574,73 @@ _LIST_MEMORY_RE = re.compile(
     re.IGNORECASE)
 
 
+# Implicit learning: a message must carry a first-person durable cue before
+# we spend an LLM call deciding whether it holds a fact worth keeping.
+_LEARN_CUE_RE = re.compile(
+    r"\b(i'?m|i am|i have|i've|i will|i'?ll|call me|i work|i invest|i retire|"
+    r"my (goal|plan|strategy|style|risk|horizon|timeline|wife|husband|kids?|"
+    r"family|job|salary|income|age|retirement|broker|account|name)|"
+    r"i (want|need|prefer|plan|hate|dislike|like|love|avoid|never|always|aim|"
+    r"tend|focus|care))\b",
+    re.IGNORECASE)
+
+_AUTO_MEMORY_CAP = 30  # auto-learned facts; explicit "remember:" is uncapped
+
+_LEARN_SYSTEM = (
+    "You decide if a user message contains ONE durable personal fact worth "
+    "remembering across sessions: a goal, preference, constraint, or life "
+    "circumstance relevant to an investing copilot (e.g. 'retiring in 2030', "
+    "'prefers ETFs over single names', 'risk-averse', 'saving for a house'). "
+    "NOT questions, NOT market opinions about a stock, NOT one-time requests. "
+    'Reply with ONLY JSON: {"fact": "third-person fact, max 25 words"} or '
+    '{"fact": null} if there is nothing durable.'
+)
+
+
+def _maybe_learn(query: str) -> None:
+    """Fire-and-forget implicit memory: when the user reveals something
+    durable mid-conversation ('I'm retiring in 2030 so I want less risk'),
+    keep it without requiring the 'remember:' incantation. Regex cheap-gate
+    first, then one MODEL_LIGHT call on a daemon thread; every failure is
+    silent and nothing here can touch the request path's latency."""
+    try:
+        if len(query) < 12 or not _LEARN_CUE_RE.search(query):
+            return
+        if not _llm_available():
+            return
+    except Exception:
+        return
+
+    def _run() -> None:
+        try:
+            facts = db.jarvis_list_memories()
+            autos = [f for f in facts if f.get("source") == "auto"]
+            if len(autos) >= _AUTO_MEMORY_CAP:
+                return
+            text = _llm_complete(
+                [{"role": "system", "content": _LEARN_SYSTEM},
+                 {"role": "user", "content": query[:500]}],
+                max_tokens=80, temperature=0.0)
+            if not text:
+                return
+            m = re.search(r"\{.*\}", text, re.DOTALL)
+            if not m:
+                return
+            data = json.loads(m.group(0))
+            fact = data.get("fact")
+            if not isinstance(fact, str):
+                return
+            fact = fact.strip().rstrip(".")
+            if not (8 <= len(fact) <= 300):
+                return
+            db.jarvis_add_memory(fact, source="auto")  # idempotent on dupes
+        except Exception as e:
+            log.debug("auto-memory skipped: %s", e)
+
+    import threading
+    threading.Thread(target=_run, daemon=True, name="jarvis-learn").start()
+
+
 def _answer_memory(q: str) -> Optional[Dict[str, Any]]:
     """Rule-based memory management — free, instant, no LLM required."""
     m = _REMEMBER_RE.match(q)
@@ -1388,18 +1658,30 @@ def _answer_memory(q: str) -> Optional[Dict[str, Any]]:
         facts = db.jarvis_list_memories()
         if not facts:
             return {"answer": "Nothing yet. Tell me “remember: …” and it sticks across sessions."}
-        listing = " ".join("#{} {}.".format(f["id"], f["fact"]) for f in facts[-12:])
+        listing = " ".join(
+            "#{} {}{}.".format(f["id"], f["fact"],
+                               " (picked up in conversation)" if f.get("source") == "auto" else "")
+            for f in facts[-12:])
         return {"answer": "Here's what I'm holding onto: {} Say “forget <number>” to drop one.".format(listing)}
     return None
 
 
 def ask(query: str, history: Any = None, conversation_id: Any = None,
-        persist: bool = True) -> Dict[str, Any]:
+        persist: bool = True, progress: Any = None) -> Dict[str, Any]:
     """Route a natural-language question to the right engine. Local-only,
-    with server-persisted conversation state for follow-up resolution."""
+    with server-persisted conversation state for follow-up resolution.
+    `progress` is an optional callable(str) for streaming status lines."""
     q = (query or "").strip()
     if not q:
         return {"intent": "help", "answer": _HELP_ANSWER}
+
+    def notify(text: str) -> None:
+        if progress is None:
+            return
+        try:
+            progress(text)
+        except Exception:
+            pass
     ql = q.lower()
     symbol = _extract_symbol(q)
     turns = _sanitize_history(history)
@@ -1439,6 +1721,10 @@ def ask(query: str, history: Any = None, conversation_id: Any = None,
                                        payload.get("symbol"))
             except Exception as e:
                 log.debug("ask: persist failed: %s", e)
+        # Implicit learning — skip the explicit memory intent (it already
+        # stored or deleted exactly what the user asked for).
+        if payload.get("intent") != "memory":
+            _maybe_learn(q)
         return payload
 
     # Durable memory management — checked first, never needs a key.
@@ -1477,6 +1763,10 @@ def ask(query: str, history: Any = None, conversation_id: Any = None,
         "temperament", "behavior", "behaviour", "what if", "macro"))
 
     try:
+        # Attribution first: "why am i down" contains "am i down", which the
+        # broader portfolio intent below would swallow into a value line.
+        if _ATTRIB_RE.search(ql) and not symbol:
+            return done("attribution", _answer_why())
         # "prob" matched "problem"/"probably" — require a forecasting verb or
         # a whole "prob"/"probability" word, plus a symbol.
         if symbol and (any(w in ql for w in ("forecast", "predict", "outlook", "go up", "go down"))
@@ -1517,7 +1807,7 @@ def ask(query: str, history: Any = None, conversation_id: Any = None,
         # Tool-calling agent first — it can reach every engine. Fall back to
         # the plain context-snapshot answer if the agent path errors out.
         try:
-            r = _agent_ask(q, turns)
+            r = _agent_ask(q, turns, progress=progress)
             if r and r.get("answer"):
                 payload = {"answer": r["answer"], "used": r.get("used") or []}
                 if r.get("citations"):
@@ -1534,12 +1824,14 @@ def ask(query: str, history: Any = None, conversation_id: Any = None,
         # try ONE direct web_research call — far more reliable than the agent
         # dance, and it answers the SpaceX-IPO class of question every time.
         try:
+            notify("Researching the open web…")
             r2 = _direct_research(q)
             if r2 and r2.get("answer"):
                 return done("llm", r2)
         except Exception as e:
             log.debug("jarvis.ask direct research failed for %r: %s", q, e)
         try:
+            notify("Answering from the local snapshot…")
             answer = _llm_ask(q, turns)
             if answer:
                 return done("llm", {"answer": answer})
@@ -1564,3 +1856,68 @@ def _direct_research(query: str) -> Optional[Dict[str, Any]]:
     if r.get("citations"):
         out["citations"] = r["citations"]
     return out
+
+
+# ─── streaming ask: live status narration while the answer is computed ───────
+
+_ASK_STREAM_DEADLINE = 300  # s — agent worst case is ~5 rounds × 55s client timeout
+
+
+def ask_stream(query: str, history: Any = None, conversation_id: Any = None):
+    """Generator wrapping ask() for the streaming route. Yields dict events:
+    {"type": "status", "text": …} as the answer is worked on, {"type": "hb"}
+    roughly every 10 quiet seconds (the route maps it to an SSE comment so
+    proxies don't reap the connection), and exactly one terminal
+    {"type": "answer", "payload": <ask() result>}.
+
+    ask() runs on a DAEMON worker thread feeding a queue — the generator
+    never block-acquires anything (the post-sweep-C thread rule), and a hard
+    deadline abandons the worker rather than waiting forever. The worker is
+    daemonized so an abandoned straggler can't wedge interpreter exit."""
+    import queue as _queue
+    import threading
+    import time as _time
+
+    events: "_queue.Queue" = _queue.Queue()
+
+    def _progress(text: str) -> None:
+        try:
+            events.put({"type": "status", "text": str(text)[:140]})
+        except Exception:
+            pass
+
+    def _run() -> None:
+        try:
+            payload = ask(query, history=history,
+                          conversation_id=conversation_id, progress=_progress)
+        except Exception as e:
+            log.warning("ask_stream worker failed for %r: %s", query, e)
+            payload = {"intent": "error",
+                       "answer": "Something went wrong answering that — the "
+                                 "data source may be rate-limited. Try again "
+                                 "in a moment."}
+        events.put({"type": "answer", "payload": payload})
+
+    threading.Thread(target=_run, daemon=True, name="jarvis-ask-stream").start()
+
+    deadline = _time.time() + _ASK_STREAM_DEADLINE
+    last_emit = _time.time()
+    while True:
+        try:
+            ev = events.get(timeout=1.0)
+        except _queue.Empty:
+            if _time.time() > deadline:
+                yield {"type": "answer",
+                       "payload": {"intent": "error",
+                                   "answer": "That one ran long and I cut it "
+                                             "off — ask again and I'll take a "
+                                             "faster route."}}
+                return
+            if _time.time() - last_emit >= 10:
+                last_emit = _time.time()
+                yield {"type": "hb"}
+            continue
+        last_emit = _time.time()
+        yield ev
+        if ev.get("type") == "answer":
+            return
