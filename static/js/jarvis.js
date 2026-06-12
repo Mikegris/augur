@@ -68,6 +68,98 @@
       `<button class="jv-starter jv-chip-reply" type="button" data-q="${esc(c)}">${esc(c)}</button>`).join('')}</div>`;
   }
 
+  // ── answer decorations (shared by palette + command center) ───────────────
+  // confidence: {level: "high"|"moderate"|"low", note} → small tinted chip
+  // next to the answer text; the note rides in the title attribute.
+  function confidenceChipHtml(r) {
+    const c = r && r.confidence;
+    if (!c || !c.level) return '';
+    const lv = String(c.level).toLowerCase();
+    const color = lv === 'high' ? 'var(--green, #3fb950)'
+      : lv === 'low' ? 'var(--red, #f85149)'
+      : 'var(--amber, #d29922)';
+    return ` <span class="jv-chip jv-confidence" title="${esc(c.note || '')}"`
+      + ` style="color:${color};border:1px solid ${color};background:transparent;`
+      + `font-size:9px;vertical-align:middle;white-space:nowrap">`
+      + `${esc(lv.toUpperCase())} CONFIDENCE</span>`;
+  }
+
+  // debate: {bull, bear, verdict} → stacked bull/bear blocks + verdict line,
+  // under the main answer.
+  function debateHtml(r) {
+    const d = r && r.debate;
+    if (!d || (!d.bull && !d.bear && !d.verdict)) return '';
+    let h = '<div class="jv-debate" style="margin-top:8px">';
+    if (d.bull) h += `<div class="jv-obs pos" style="border-left:2px solid var(--green, #3fb950);padding-left:6px;margin:4px 0"><b>▲ BULL CASE</b> — ${esc(d.bull)}</div>`;
+    if (d.bear) h += `<div class="jv-obs warn" style="border-left:2px solid var(--red, #f85149);padding-left:6px;margin:4px 0"><b>▼ BEAR CASE</b> — ${esc(d.bear)}</div>`;
+    if (d.verdict) h += `<div class="jv-obs info" style="margin:4px 0"><b>⚖ VERDICT</b> — ${esc(d.verdict)}</div>`;
+    return h + '</div>';
+  }
+
+  // salvaged: true → dim notice that the stream died but the answer was
+  // assembled from what had already been gathered.
+  function salvagedHtml(r) {
+    return (r && r.salvaged)
+      ? '<div class="jv-salvaged" style="opacity:.55;font-size:10px;margin-top:6px">'
+        + '⚠ the line dropped mid-analysis — answered from what I’d already gathered</div>'
+      : '';
+  }
+
+  // Batch proposals: payload.proposals = [{tool, args, label}…] (distinct
+  // from the singular payload.proposal, which keeps its own CONFIRM flow).
+  // Renders a checklist (all checked by default) with one CONFIRM (n) button;
+  // wireProposals() attaches the toggle/confirm behavior after innerHTML.
+  function proposalsChecklistHtml(r) {
+    const list = (r && Array.isArray(r.proposals)) ? r.proposals : [];
+    if (!list.length) return '';
+    const rows = list.map((p, i) =>
+      `<label class="jv-batch-row" style="display:flex;gap:6px;align-items:center;margin:3px 0;cursor:pointer">
+         <input type="checkbox" class="jv-batch-ck" data-i="${i}" checked>
+         <span>⚡ ${esc(p.label || p.tool || '')}</span>
+       </label>`).join('');
+    return `<div class="jp-proposal jv-batch" style="display:block">${rows}
+      <button class="jarvis-go jv-batch-confirm" type="button">⚡ CONFIRM (${list.length})</button>
+    </div>`;
+  }
+
+  function wireProposals(rootEl, r) {
+    if (!rootEl || !r || !Array.isArray(r.proposals) || !r.proposals.length) return;
+    const box = rootEl.querySelector('.jv-batch');
+    if (!box) return;
+    const btn = box.querySelector('.jv-batch-confirm');
+    if (!btn) return;
+    const sync = () => {
+      const n = box.querySelectorAll('.jv-batch-ck:checked').length;
+      btn.textContent = `⚡ CONFIRM (${n})`;
+      btn.disabled = n === 0;
+    };
+    box.querySelectorAll('.jv-batch-ck').forEach(ck => ck.addEventListener('change', sync));
+    btn.addEventListener('click', async () => {
+      const actions = [];
+      box.querySelectorAll('.jv-batch-ck:checked').forEach(ck => {
+        const p = r.proposals[Number(ck.dataset.i)];
+        if (p) actions.push({ tool: p.tool, args: p.args });
+      });
+      if (!actions.length) return;
+      btn.disabled = true;
+      btn.textContent = '⚡ WORKING…';
+      try {
+        // {actions: [{tool, args}…]} → {results: [{tool, ok, label|error}…], n_ok}
+        const out = await API.post('/api/jarvis/act', { actions });
+        const results = (out && out.results) || [];
+        box.innerHTML = results.length
+          ? results.map(res =>
+              `<div class="jv-obs ${res.ok ? 'pos' : 'warn'}">${res.ok ? '✓' : '✗'} ${esc(res.ok ? (res.label || res.tool || '') : ((res.error || 'failed') + (res.tool ? ' — ' + res.tool : '')))}</div>`).join('')
+          : `<div class="jv-obs pos">✓ ${out && out.n_ok != null ? out.n_ok : actions.length} done.</div>`;
+        if (typeof Toast === 'object' && Toast.success && out && out.n_ok != null) {
+          Toast.success('◉ JARVIS: ' + out.n_ok + ' of ' + actions.length + ' done.');
+        }
+      } catch (e) {
+        box.innerHTML = `<div class="jv-obs warn">✗ ${esc(e.message)}</div>`;
+      }
+    });
+  }
+
   // True when the keystroke belongs to a text field — global shortcuts must
   // never hijack typing.
   function isTypingTarget(t) {
@@ -332,6 +424,7 @@
   const STRESS_CMD = /^stress\s*test$/i;
   const RECAP_CMD = /^(recap|digest|what did i miss\??)$/i;
   const EXPORT_CMD = /^export( conversation| chat)?$/i;
+  const WATCHES_CMD = /^(watches|my watches|list watches)$/i;
 
   // ── Voice — speech out (TTS) and speech in (STT), browser-native ────────────
   // speechSynthesis works everywhere; SpeechRecognition is webkit-prefixed
@@ -525,6 +618,8 @@
       'am I beating the market',
       'any earnings coming up',
       'any ideas',
+      'set a policy: max 25% per name',
+      "what if i hadn't sold my last sale",
     ],
 
     init() {
@@ -756,6 +851,9 @@
         if (EXPORT_CMD.test(q)) {
           items.push({ kind: 'export', label: 'Export conversation as Markdown' });
         }
+        if (WATCHES_CMD.test(q)) {
+          items.push({ kind: 'watches', label: 'Standing watches — list & manage' });
+        }
         // View navigation matches
         for (const v of this._views()) {
           if (v.label.toLowerCase().includes(ql) || v.view.includes(ql)) {
@@ -778,7 +876,7 @@
 
     _renderList() {
       const ICON = { nav: '→', symbol: '◇', ask: '◉', alert: '⚡', stress: '⚡',
-                     recap: '◉', export: '⇩' };
+                     recap: '◉', export: '⇩', watches: '◎' };
       const CMD = { alert: 1, stress: 1 };
       this.list.innerHTML = this._items.map((it, i) =>
         `<div class="jp-item${CMD[it.kind] ? ' jp-cmd' : ''}${i === this._sel ? ' sel' : ''}" data-i="${i}" role="option" aria-selected="${i === this._sel}">
@@ -822,6 +920,7 @@
       else if (it.kind === 'alert') { this._setAlert(it); }
       else if (it.kind === 'stress') { this.close(); if (typeof runStressCommand === 'function') runStressCommand(); }
       else if (it.kind === 'recap') { this._recap(); }
+      else if (it.kind === 'watches') { this._watches(); }
       else if (it.kind === 'export') { this.close(); window.open('/api/jarvis/conversation/export', '_blank'); }
       else if (it.kind === 'ask') { this._ask(it.query); }
     },
@@ -842,6 +941,46 @@
       } catch (e) {
         this.answer.innerHTML = `<div class="jp-answer error">${esc(e.message)}</div>`;
       }
+    },
+
+    // "watches" palette command — list standing watches with delete / re-arm.
+    // GET /api/jarvis/watches → rows; DELETE /api/jarvis/watches/<id>;
+    // POST /api/jarvis/watches/<id>/rearm when a watch has triggered.
+    async _watches() {
+      this.answer.innerHTML = '<div class="jp-answer thinking"><div class="spinner"></div> Checking the watch floor...</div>';
+      let rows;
+      try {
+        const d = await API.get('/api/jarvis/watches');
+        rows = Array.isArray(d) ? d : ((d && (d.watches || d.items)) || []);
+      } catch (e) {
+        this.answer.innerHTML = `<div class="jp-answer error">${esc(e.message)}</div>`;
+        return;
+      }
+      if (!rows.length) {
+        this.answer.innerHTML = '<div class="jp-answer"><div class="jp-answer-text">No standing watches. Ask me to watch something — “tell me if NVDA drops below 150” — and I’ll keep an eye out.</div></div>';
+        return;
+      }
+      const html = rows.map(w => {
+        const state = String(w.state || (w.triggered ? 'triggered' : 'armed')).toLowerCase();
+        const triggered = state === 'triggered';
+        return `<div class="jv-obs ${triggered ? 'warn' : 'info'}" style="display:flex;align-items:center;gap:6px">
+          <span style="flex:1">${triggered ? '◆' : '◉'} ${esc(w.description || w.label || ('watch #' + w.id))}
+            <span class="jv-chip" style="margin-left:6px">${triggered ? 'TRIGGERED' : 'ARMED'}</span></span>
+          ${triggered ? `<button class="jarvis-go jv-watch-rearm" type="button" data-id="${esc(String(w.id))}">RE-ARM</button>` : ''}
+          <button class="jarvis-go jp-dismiss jv-watch-del" type="button" data-id="${esc(String(w.id))}" title="Delete watch" aria-label="Delete watch">✕</button>
+        </div>`;
+      }).join('');
+      this.answer.innerHTML = `<div class="jp-answer"><div class="jp-answer-detail">◎ standing watches — ${rows.length}</div>${html}</div>`;
+      this.answer.querySelectorAll('.jv-watch-del').forEach(b => b.addEventListener('click', async () => {
+        b.disabled = true;
+        try { await API.del('/api/jarvis/watches/' + encodeURIComponent(b.dataset.id)); this._watches(); }
+        catch (e) { if (typeof Toast === 'object' && Toast.error) Toast.error(e.message); b.disabled = false; }
+      }));
+      this.answer.querySelectorAll('.jv-watch-rearm').forEach(b => b.addEventListener('click', async () => {
+        b.disabled = true;
+        try { await API.post('/api/jarvis/watches/' + encodeURIComponent(b.dataset.id) + '/rearm', {}); this._watches(); }
+        catch (e) { if (typeof Toast === 'object' && Toast.error) Toast.error(e.message); b.disabled = false; }
+      }));
     },
 
     async _setAlert(it) {
@@ -896,16 +1035,20 @@
                 `<a class="jv-cite" href="${esc(c.url)}" target="_blank" rel="noopener noreferrer">${esc(c.title || c.url)}</a>`).join('')}</div>` : '';
         this.answer.innerHTML = `
           <div class="jp-answer${r.intent === 'clarify' ? ' jv-clarify' : ''}">
-            <div class="jp-answer-text">${mdLite(esc(r.answer))}</div>
+            <div class="jp-answer-text">${mdLite(esc(r.answer))}${confidenceChipHtml(r)}</div>
             ${clarifyChipsHtml(r)}
+            ${debateHtml(r)}
+            ${salvagedHtml(r)}
             ${r.detail ? `<div class="jp-answer-detail">${esc(r.detail)}</div>` : ''}
             ${citesLine}
             ${reasoningHtml(r)}
             ${usedLine}
             ${proposal}
+            ${proposalsChecklistHtml(r)}
             ${action}
           </div>`;
         wireReasoning(this.answer);
+        wireProposals(this.answer, r);
         this.answer.querySelectorAll('.jv-chip-reply').forEach(b =>
           b.addEventListener('click', () => this._ask(b.dataset.q)));
         const go = document.getElementById('jp-answer-go');
@@ -1598,7 +1741,7 @@
           // discoverable instead of a blank prompt.
           const starters = ["Why am I down today?", "What did I miss?",
                             "How risky is my book?", "Is AAPL a good business to own?",
-                            "Am I beating the market?", "How's my trading behavior?"];
+                            "Am I beating the market?", "What would you check before earnings?"];
           el.innerHTML = '<div class="jv-bubble assistant">At your service. Ask about your book, a '
             + 'business, or the macro picture — or try one of these:'
             + '<div class="jv-starters">'
@@ -1668,8 +1811,10 @@
           r = await API.post('/api/jarvis/ask', body);
         }
         if (r.conversation_id) this._convId = r.conversation_id;
-        let html = mdLite(esc(r.answer));
+        let html = mdLite(esc(r.answer)) + confidenceChipHtml(r);
         html += clarifyChipsHtml(r);
+        html += debateHtml(r);
+        html += salvagedHtml(r);
         if (r.citations && r.citations.length) {
           html += '<div class="jv-cites"><span class="jv-cites-h">sources</span>'
             + r.citations.slice(0, 6).map(c =>
@@ -1680,10 +1825,12 @@
         if (r.used && r.used.length) {
           html += `<div class="jv-used">◉ consulted: ${esc([...new Set(r.used)].join(', ').replace(/_/g, ' '))}</div>`;
         }
+        html += proposalsChecklistHtml(r);
         if (thinking) {
           thinking.innerHTML = html;
           if (r.intent === 'clarify') thinking.classList.add('jv-clarify');
           wireReasoning(thinking);
+          wireProposals(thinking, r);
           thinking.querySelectorAll('.jv-chip-reply').forEach(b =>
             b.addEventListener('click', () => {
               const inp = document.getElementById('jv-input');

@@ -168,6 +168,46 @@ else:
 
 # ─── Portfolio Snapshot Background Thread ─────────────────────────────────────
 
+# Jarvis watch evaluation rides the snapshot loop's tick but is gated by this
+# module-level timestamp so the cadence stays ≥5 minutes even if the loop's
+# sleep is ever shortened.
+_JARVIS_WATCH_EVAL_LAST = 0.0
+_JARVIS_WATCH_EVAL_INTERVAL = 300  # seconds
+
+
+def _evaluate_jarvis_watches():
+    """Run jarvis_watches.evaluate_all() and log an insight card per newly
+    triggered watch so the briefing/digest surface it. Fully guarded — the
+    module may not exist yet, and nothing here may kill the worker loop."""
+    global _JARVIS_WATCH_EVAL_LAST
+    now = time.time()
+    if now - _JARVIS_WATCH_EVAL_LAST < _JARVIS_WATCH_EVAL_INTERVAL:
+        return
+    _JARVIS_WATCH_EVAL_LAST = now
+    try:
+        import jarvis_watches
+    except Exception:
+        return  # module in flight — quietly skip until it lands
+    try:
+        triggered = jarvis_watches.evaluate_all() or []
+        cards = []
+        for w in triggered:
+            if not isinstance(w, dict):
+                continue
+            cards.append({
+                "kind": "watch",
+                "tone": "warn",
+                "priority": 1,
+                "title": "Watch triggered: {}".format(w.get("name") or "unnamed"),
+                "detail": w.get("description") or "",
+                "action": {"view": "alerts"},
+            })
+        if cards:
+            db.jarvis_log_insights(cards)
+    except Exception:
+        log.exception("snapshot worker: jarvis watch evaluation failed")
+
+
 def _snapshot_worker():
     """Takes a portfolio snapshot every 5 minutes but only writes once per day."""
     while True:
@@ -229,6 +269,9 @@ def _snapshot_worker():
                         db.mark_alert_triggered(alert["id"])
         except Exception:
             log.exception("snapshot worker: alert check failed")
+
+        # ── Evaluate Jarvis watches (≥5-min cadence, timestamp-gated) ──────
+        _evaluate_jarvis_watches()
 
         time.sleep(300)  # 5 minutes
 
@@ -3173,6 +3216,40 @@ def jarvis_act_route():
     except Exception as e:
         return jsonify({"error": "jarvis_tools unavailable: {}".format(e)}), 500
     data = request.get_json(silent=True) or {}
+    # ── Batch form: {"actions": [{tool, args}, …]} (≤10) ───────────────────
+    # Validated for shape here; per-action whitelisting/validation happens in
+    # jarvis_tools.execute_mutating_batch so each result carries its own
+    # ok/error. The rolling rate limiter charges ONE SLOT PER ACTION — if the
+    # whole batch wouldn't fit, 429 before executing anything.
+    if "actions" in data:
+        actions = data.get("actions")
+        if not isinstance(actions, list) or not actions or len(actions) > 10:
+            return jsonify(
+                {"error": "expected actions: non-empty list of at most "
+                          "10 {tool, args} objects"}), 400
+        for a in actions:
+            if (not isinstance(a, dict) or not isinstance(a.get("tool"), str)
+                    or not isinstance(a.get("args"), dict)):
+                return jsonify(
+                    {"error": "each action must be {tool: str, args: object}"}), 400
+        batch_fn = getattr(jarvis_tools, "execute_mutating_batch", None)
+        if batch_fn is None:
+            return jsonify({"error": "batch execution unavailable"}), 500
+        now = time.time()
+        while _JARVIS_ACT_TIMES and now - _JARVIS_ACT_TIMES[0] > _JARVIS_ACT_WINDOW:
+            _JARVIS_ACT_TIMES.popleft()
+        if len(_JARVIS_ACT_TIMES) + len(actions) > _JARVIS_ACT_MAX:
+            return jsonify({"error": "rate limited"}), 429
+        for _ in actions:
+            _JARVIS_ACT_TIMES.append(now)
+        try:
+            r = batch_fn(actions)
+        except Exception as e:
+            return jsonify({"error": str(e)}), 500
+        if not isinstance(r, dict):
+            return jsonify({"error": "batch executor returned invalid result"}), 500
+        return (jsonify(r), 400) if r.get("error") else jsonify(r)
+    # ── Single-action form (unchanged) ─────────────────────────────────────
     tool = data.get("tool")
     args = data.get("args")
     if not isinstance(tool, str) or not isinstance(args, dict):
@@ -3420,7 +3497,26 @@ def jarvis_conversation_route():
 @app.route("/api/jarvis/conversation/new", methods=["POST"])
 def jarvis_new_conversation_route():
     try:
-        return jsonify({"conversation_id": db.jarvis_new_conversation()})
+        # Capture the outgoing thread BEFORE rotating so it can be summarized
+        # in the background. summarize_thread may not exist yet (in-flight
+        # module) — resolved via getattr inside the daemon thread, so the
+        # response is never blocked and never fails on its account.
+        try:
+            old_id = db.jarvis_active_conversation()
+        except Exception:
+            old_id = None
+        new_id = db.jarvis_new_conversation()
+        if old_id is not None and old_id != new_id:
+            def _summarize_old_thread(cid=old_id):
+                try:
+                    import jarvis
+                    fn = getattr(jarvis, "summarize_thread", None)
+                    if callable(fn):
+                        fn(cid)
+                except Exception:
+                    log.exception("jarvis thread summarization failed")
+            threading.Thread(target=_summarize_old_thread, daemon=True).start()
+        return jsonify({"conversation_id": new_id})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
@@ -3440,6 +3536,149 @@ def jarvis_memory_delete_route(memory_id):
         return jsonify({"status": "deleted" if ok else "not found"})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
+
+# ─── Jarvis Watches (standing conditions, evaluated by the snapshot loop) ────
+
+@app.route("/api/jarvis/watches", methods=["GET"])
+def jarvis_watches_list_route():
+    """All standing watches with their armed/triggered state."""
+    try:
+        import jarvis_watches
+    except Exception as e:
+        return jsonify({"error": "jarvis_watches unavailable: {}".format(e)}), 500
+    try:
+        return jsonify({"watches": jarvis_watches.list_watches()})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/jarvis/watches", methods=["POST"])
+def jarvis_watches_add_route():
+    """Create a watch: {name: str, conditions: …} — shape of conditions is
+    owned by jarvis_watches; we only insist both fields are present."""
+    try:
+        import jarvis_watches
+    except Exception as e:
+        return jsonify({"error": "jarvis_watches unavailable: {}".format(e)}), 500
+    data = request.get_json(silent=True) or {}
+    name = data.get("name")
+    conditions = data.get("conditions")
+    if not isinstance(name, str) or not name.strip():
+        return jsonify({"error": "expected a non-empty 'name' string"}), 400
+    if conditions is None:
+        return jsonify({"error": "expected 'conditions'"}), 400
+    try:
+        r = jarvis_watches.add_watch(name.strip(), conditions)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+    if not isinstance(r, dict):
+        return jsonify({"error": "add_watch returned invalid result"}), 500
+    return (jsonify(r), 400) if r.get("error") else jsonify(r)
+
+
+@app.route("/api/jarvis/watches/<int:watch_id>", methods=["DELETE"])
+def jarvis_watches_delete_route(watch_id):
+    try:
+        import jarvis_watches
+    except Exception as e:
+        return jsonify({"error": "jarvis_watches unavailable: {}".format(e)}), 500
+    try:
+        ok = jarvis_watches.delete_watch(watch_id)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+    if not ok:
+        return jsonify({"error": "watch not found"}), 404
+    return jsonify({"status": "deleted"})
+
+
+@app.route("/api/jarvis/watches/<int:watch_id>/rearm", methods=["POST"])
+def jarvis_watches_rearm_route(watch_id):
+    try:
+        import jarvis_watches
+    except Exception as e:
+        return jsonify({"error": "jarvis_watches unavailable: {}".format(e)}), 500
+    try:
+        ok = jarvis_watches.rearm_watch(watch_id)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+    if not ok:
+        return jsonify({"error": "watch not found"}), 404
+    return jsonify({"status": "rearmed"})
+
+
+# ─── Jarvis Policy (portfolio guardrail rules) ───────────────────────────────
+
+@app.route("/api/jarvis/policy", methods=["GET"])
+def jarvis_policy_get_route():
+    """Current rules + human description + live violations. Violations are
+    individually guarded — a broken portfolio check must not hide the rules."""
+    try:
+        import jarvis_policy
+    except Exception as e:
+        return jsonify({"error": "jarvis_policy unavailable: {}".format(e)}), 500
+    try:
+        rules = jarvis_policy.get_rules()
+        description = jarvis_policy.describe_rules()
+        try:
+            violations = jarvis_policy.check_portfolio()
+        except Exception:
+            log.exception("jarvis_policy.check_portfolio failed")
+            violations = []
+        return jsonify({"rules": rules, "description": description,
+                        "violations": violations})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/jarvis/policy", methods=["POST"])
+def jarvis_policy_set_route():
+    """Set a rule — either structured {kind, value} or a natural phrase
+    {text: …} routed through parse_rule (unparseable → 400)."""
+    try:
+        import jarvis_policy
+    except Exception as e:
+        return jsonify({"error": "jarvis_policy unavailable: {}".format(e)}), 500
+    data = request.get_json(silent=True) or {}
+    kind = data.get("kind")
+    value = data.get("value")
+    text = data.get("text")
+    if isinstance(text, str) and text.strip():
+        try:
+            parsed = jarvis_policy.parse_rule(text.strip())
+        except Exception as e:
+            return jsonify({"error": str(e)}), 500
+        if not isinstance(parsed, dict) or parsed.get("error") \
+                or not parsed.get("kind"):
+            return jsonify({"error": "could not parse rule from text"}), 400
+        kind, value = parsed.get("kind"), parsed.get("value")
+    if not isinstance(kind, str) or not kind.strip() or value is None:
+        return jsonify(
+            {"error": "expected {kind, value} or {text: natural phrase}"}), 400
+    try:
+        r = jarvis_policy.set_rule(kind.strip(), value)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+    if not isinstance(r, dict):
+        return jsonify({"error": "set_rule returned invalid result"}), 500
+    return (jsonify(r), 400) if r.get("error") else jsonify(r)
+
+
+@app.route("/api/jarvis/policy/<kind>", methods=["DELETE"])
+def jarvis_policy_delete_route(kind):
+    try:
+        import jarvis_policy
+    except Exception as e:
+        return jsonify({"error": "jarvis_policy unavailable: {}".format(e)}), 500
+    if not kind or len(kind) > 60:
+        return jsonify({"error": "invalid rule kind"}), 400
+    try:
+        r = jarvis_policy.remove_rule(kind)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+    if r is False:
+        return jsonify({"error": "rule not found"}), 404
+    return jsonify({"status": "removed"})
 
 
 # ── 10. Signal Tracker ─────────────────────────────────────────────

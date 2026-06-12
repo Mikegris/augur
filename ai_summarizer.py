@@ -240,6 +240,157 @@ def get_openai_key():
         return key.strip()
 
 
+# ── Local-model fallback (Ollama) ────────────────────────────────────────────
+# When no OpenAI key is configured, plain-text LLM features can degrade to a
+# local Ollama server ("slower but private") instead of switching off.
+# Entirely dormant unless a URL is configured (env AUGUR_OLLAMA_URL beats the
+# DB setting "ollama_url"). Tool-calling completions stay OpenAI-only — llama
+# tool support is unreliable — so _chat_completion is untouched.
+_OLLAMA_DEFAULT_MODEL = "llama3.1"
+_OLLAMA_PROBE_TTL = 60.0   # seconds to trust the last reachability probe
+_OLLAMA_PROBE_TIMEOUT = 1.5
+_OLLAMA_CHAT_TIMEOUT = 60.0
+_ollama_probe_ok = False
+_ollama_probe_at = 0.0     # module-level timestamp of the last probe
+_ollama_probe_url = None   # URL the cached probe result belongs to
+
+
+def _ollama_url():
+    """Configured Ollama base URL: env AUGUR_OLLAMA_URL > DB setting
+    "ollama_url". Empty string means the feature is dormant."""
+    url = (os.environ.get("AUGUR_OLLAMA_URL") or "").strip()
+    if not url:
+        try:
+            import database as db
+            url = (db.get_settings().get("ollama_url") or "").strip()
+        except Exception:
+            url = ""
+    return url.rstrip("/")
+
+
+def _ollama_model():
+    """Model name: DB setting "ollama_model" > default llama3.1."""
+    try:
+        import database as db
+        m = (db.get_settings().get("ollama_model") or "").strip()
+        if m:
+            return m
+    except Exception:
+        pass
+    return _OLLAMA_DEFAULT_MODEL
+
+
+def _ollama_ready():
+    """True when an Ollama URL is configured AND the server answers
+    GET {url}/api/tags within 1.5s. The probe result is cached for 60s
+    (module-level timestamp) so hot paths never block on a dead or slow
+    local server. Never raises."""
+    global _ollama_probe_ok, _ollama_probe_at, _ollama_probe_url
+    url = _ollama_url()
+    if not url:
+        return False
+    import time
+    now = time.time()
+    if url == _ollama_probe_url and (now - _ollama_probe_at) < _OLLAMA_PROBE_TTL:
+        return _ollama_probe_ok
+    ok = False
+    try:
+        import requests
+        ok = requests.get(url + "/api/tags", timeout=_OLLAMA_PROBE_TIMEOUT).status_code == 200
+    except Exception:
+        ok = False
+    _ollama_probe_url = url
+    _ollama_probe_at = now
+    _ollama_probe_ok = ok
+    return ok
+
+
+def _ollama_chat(messages, max_tokens=None, temperature=None, json_mode=False):
+    """Non-streaming POST {url}/api/chat. Returns message content str or None.
+
+    NO cap accounting (_record_ai_call/_cap_exceeded): local inference is
+    free — the daily cap exists only to bound paid OpenAI spend. Never raises.
+    """
+    url = _ollama_url()
+    if not url:
+        return None
+    payload = {"model": _ollama_model(), "messages": messages, "stream": False}
+    options = {}
+    if max_tokens is not None:
+        options["num_predict"] = max_tokens
+    if temperature is not None:
+        options["temperature"] = temperature
+    if options:
+        payload["options"] = options
+    if json_mode:
+        payload["format"] = "json"
+    try:
+        import requests
+        r = requests.post(url + "/api/chat", json=payload, timeout=_OLLAMA_CHAT_TIMEOUT)
+        r.raise_for_status()
+        content = ((r.json().get("message") or {}).get("content") or "").strip()
+        return content or None
+    except Exception as e:
+        log.debug("_ollama_chat failed: %s", e)
+        return None
+
+
+def llm_ready():
+    """PUBLIC: True when ANY chat backend is usable — an OpenAI key is
+    configured, or a local Ollama server is reachable. Callers (jarvis)
+    should gate LLM features on this instead of get_openai_key()."""
+    try:
+        return bool(get_openai_key()) or _ollama_ready()
+    except Exception:
+        return False
+
+
+def chat_any(messages, max_tokens=None, temperature=None, json_mode=False):
+    """PUBLIC unified plain-text completion. Returns content str or None.
+
+    Routing: OpenAI when a key exists (cap-gated, counted), falling to local
+    Ollama when the daily cap is exhausted or the OpenAI call fails; Ollama
+    alone when keyless; None when neither backend is usable. Tool-schema
+    completions must NOT go through here — use _chat_completion directly.
+    Never raises.
+    """
+    try:
+        key = get_openai_key()
+        if key:
+            if _cap_exceeded():
+                # Paid budget spent — free local inference if available.
+                if _ollama_ready():
+                    return _ollama_chat(messages, max_tokens=max_tokens,
+                                        temperature=temperature, json_mode=json_mode)
+                return None
+            try:
+                from openai import OpenAI
+                client = OpenAI(api_key=key, timeout=30.0)
+                resp = _chat_completion(
+                    client, MODEL_LIGHT, messages,
+                    max_tokens=max_tokens, temperature=temperature,
+                    json_mode=json_mode,
+                )
+                _record_ai_call()
+                content = resp.choices[0].message.content
+                if content:
+                    return content
+            except Exception as e:
+                log.debug("chat_any OpenAI path failed: %s", e)
+            # OpenAI returned nothing usable — degrade to local if possible.
+            if _ollama_ready():
+                return _ollama_chat(messages, max_tokens=max_tokens,
+                                    temperature=temperature, json_mode=json_mode)
+            return None
+        if _ollama_ready():
+            return _ollama_chat(messages, max_tokens=max_tokens,
+                                temperature=temperature, json_mode=json_mode)
+        return None
+    except Exception as e:  # belt-and-braces: contract says never raise
+        log.debug("chat_any failed: %s", e)
+        return None
+
+
 def summarize_filing(filing_text, form_type, ticker, description=""):
     """
     Returns structured analysis dict:
