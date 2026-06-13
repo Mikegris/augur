@@ -68,6 +68,98 @@
       `<button class="jv-starter jv-chip-reply" type="button" data-q="${esc(c)}">${esc(c)}</button>`).join('')}</div>`;
   }
 
+  // ── answer decorations (shared by palette + command center) ───────────────
+  // confidence: {level: "high"|"moderate"|"low", note} → small tinted chip
+  // next to the answer text; the note rides in the title attribute.
+  function confidenceChipHtml(r) {
+    const c = r && r.confidence;
+    if (!c || !c.level) return '';
+    const lv = String(c.level).toLowerCase();
+    const color = lv === 'high' ? 'var(--green, #3fb950)'
+      : lv === 'low' ? 'var(--red, #f85149)'
+      : 'var(--amber, #d29922)';
+    return ` <span class="jv-chip jv-confidence" title="${esc(c.note || '')}"`
+      + ` style="color:${color};border:1px solid ${color};background:transparent;`
+      + `font-size:9px;vertical-align:middle;white-space:nowrap">`
+      + `${esc(lv.toUpperCase())} CONFIDENCE</span>`;
+  }
+
+  // debate: {bull, bear, verdict} → stacked bull/bear blocks + verdict line,
+  // under the main answer.
+  function debateHtml(r) {
+    const d = r && r.debate;
+    if (!d || (!d.bull && !d.bear && !d.verdict)) return '';
+    let h = '<div class="jv-debate" style="margin-top:8px">';
+    if (d.bull) h += `<div class="jv-obs pos" style="border-left:2px solid var(--green, #3fb950);padding-left:6px;margin:4px 0"><b>▲ BULL CASE</b> — ${esc(d.bull)}</div>`;
+    if (d.bear) h += `<div class="jv-obs warn" style="border-left:2px solid var(--red, #f85149);padding-left:6px;margin:4px 0"><b>▼ BEAR CASE</b> — ${esc(d.bear)}</div>`;
+    if (d.verdict) h += `<div class="jv-obs info" style="margin:4px 0"><b>⚖ VERDICT</b> — ${esc(d.verdict)}</div>`;
+    return h + '</div>';
+  }
+
+  // salvaged: true → dim notice that the stream died but the answer was
+  // assembled from what had already been gathered.
+  function salvagedHtml(r) {
+    return (r && r.salvaged)
+      ? '<div class="jv-salvaged" style="opacity:.55;font-size:10px;margin-top:6px">'
+        + '⚠ the line dropped mid-analysis — answered from what I’d already gathered</div>'
+      : '';
+  }
+
+  // Batch proposals: payload.proposals = [{tool, args, label}…] (distinct
+  // from the singular payload.proposal, which keeps its own CONFIRM flow).
+  // Renders a checklist (all checked by default) with one CONFIRM (n) button;
+  // wireProposals() attaches the toggle/confirm behavior after innerHTML.
+  function proposalsChecklistHtml(r) {
+    const list = (r && Array.isArray(r.proposals)) ? r.proposals : [];
+    if (!list.length) return '';
+    const rows = list.map((p, i) =>
+      `<label class="jv-batch-row" style="display:flex;gap:6px;align-items:center;margin:3px 0;cursor:pointer">
+         <input type="checkbox" class="jv-batch-ck" data-i="${i}" checked>
+         <span>⚡ ${esc(p.label || p.tool || '')}</span>
+       </label>`).join('');
+    return `<div class="jp-proposal jv-batch" style="display:block">${rows}
+      <button class="jarvis-go jv-batch-confirm" type="button">⚡ CONFIRM (${list.length})</button>
+    </div>`;
+  }
+
+  function wireProposals(rootEl, r) {
+    if (!rootEl || !r || !Array.isArray(r.proposals) || !r.proposals.length) return;
+    const box = rootEl.querySelector('.jv-batch');
+    if (!box) return;
+    const btn = box.querySelector('.jv-batch-confirm');
+    if (!btn) return;
+    const sync = () => {
+      const n = box.querySelectorAll('.jv-batch-ck:checked').length;
+      btn.textContent = `⚡ CONFIRM (${n})`;
+      btn.disabled = n === 0;
+    };
+    box.querySelectorAll('.jv-batch-ck').forEach(ck => ck.addEventListener('change', sync));
+    btn.addEventListener('click', async () => {
+      const actions = [];
+      box.querySelectorAll('.jv-batch-ck:checked').forEach(ck => {
+        const p = r.proposals[Number(ck.dataset.i)];
+        if (p) actions.push({ tool: p.tool, args: p.args });
+      });
+      if (!actions.length) return;
+      btn.disabled = true;
+      btn.textContent = '⚡ WORKING…';
+      try {
+        // {actions: [{tool, args}…]} → {results: [{tool, ok, label|error}…], n_ok}
+        const out = await API.post('/api/jarvis/act', { actions });
+        const results = (out && out.results) || [];
+        box.innerHTML = results.length
+          ? results.map(res =>
+              `<div class="jv-obs ${res.ok ? 'pos' : 'warn'}">${res.ok ? '✓' : '✗'} ${esc(res.ok ? (res.label || res.tool || '') : ((res.error || 'failed') + (res.tool ? ' — ' + res.tool : '')))}</div>`).join('')
+          : `<div class="jv-obs pos">✓ ${out && out.n_ok != null ? out.n_ok : actions.length} done.</div>`;
+        if (typeof Toast === 'object' && Toast.success && out && out.n_ok != null) {
+          Toast.success('◉ JARVIS: ' + out.n_ok + ' of ' + actions.length + ' done.');
+        }
+      } catch (e) {
+        box.innerHTML = `<div class="jv-obs warn">✗ ${esc(e.message)}</div>`;
+      }
+    });
+  }
+
   // True when the keystroke belongs to a text field — global shortcuts must
   // never hijack typing.
   function isTypingTarget(t) {
@@ -197,7 +289,8 @@
     async _fetchDigest() {
       if (this._digestFetched) return;
       this._digestFetched = true;
-      try { this._digest = await API.get('/api/jarvis/digest'); } catch (e) { this._digest = null; }
+      try { this._digest = await API.get('/api/jarvis/digest'); }
+      catch (e) { this._digest = null; this._digestFetched = false; } // allow a retry after a failed fetch
     },
 
     async render(containerId, force) {
@@ -332,6 +425,7 @@
   const STRESS_CMD = /^stress\s*test$/i;
   const RECAP_CMD = /^(recap|digest|what did i miss\??)$/i;
   const EXPORT_CMD = /^export( conversation| chat)?$/i;
+  const WATCHES_CMD = /^(watches|my watches|list watches)$/i;
 
   // ── Voice — speech out (TTS) and speech in (STT), browser-native ────────────
   // speechSynthesis works everywhere; SpeechRecognition is webkit-prefixed
@@ -433,6 +527,12 @@
           if (this._audio === a) this._audio = null;
           done();
         };
+        // Cleanup that does NOT fire done — used on the play()-rejection path so
+        // the real done can be handed to the browser-TTS fallback instead.
+        const cleanup = () => {
+          if (!revoked) { revoked = true; URL.revokeObjectURL(url); }
+          if (this._audio === a) this._audio = null;
+        };
         a.onended = finish;
         a.onerror = finish;
         a.play().catch(() => {
@@ -440,8 +540,8 @@
           // otherwise the server clip is already audible and a second
           // utterance would talk over it.
           if (a.currentTime > 0 && !a.paused) return;  // already playing; let it finish
-          finish();
-          this._speakBrowser(text, done);
+          cleanup();                       // revoke/clear WITHOUT firing done
+          this._speakBrowser(text, done);  // hand the real (unfired) done to fallback
         });
       } catch (e) {
         if (e && e.name === 'AbortError') { done(); return; }  // superseded — don't double-speak
@@ -483,11 +583,13 @@
       r.maxAlternatives = 1;
       let got = false;
       r.onresult = (ev) => {
+        if (this._recog !== r) return; // superseded by a newer listen()
         got = true;
         const t = ev.results[0] && ev.results[0][0] ? ev.results[0][0].transcript.trim() : '';
         if (t) onResult(t); else if (onNoSpeech) onNoSpeech();
       };
       r.onerror = (ev) => {
+        if (this._recog !== r) return; // superseded by a newer listen()
         if (ev.error === 'not-allowed' && !this._warned) {
           this._warned = true;
           Toast.warn('Microphone access denied — allow it in your browser to talk to Jarvis.');
@@ -495,8 +597,13 @@
         if (!got && onNoSpeech) onNoSpeech();
         got = true;
       };
-      r.onend = () => { this._recog = null; if (!got && onNoSpeech) onNoSpeech(); got = true; };
-      try { r.start(); } catch (e) { this._recog = null; if (onNoSpeech) onNoSpeech(); }
+      r.onend = () => {
+        if (this._recog !== r) return; // a newer session owns _recog — don't clobber it
+        this._recog = null;
+        if (!got && onNoSpeech) onNoSpeech();
+        got = true;
+      };
+      try { r.start(); } catch (e) { if (this._recog === r) this._recog = null; if (onNoSpeech) onNoSpeech(); }
     },
 
     stopListening() {
@@ -515,6 +622,8 @@
     _items: [], _sel: 0, _asking: false, _recent: [], _prevFocus: null,
     _history: [],   // fallback turns {q, a, symbol} if the server thread is unavailable
     _convId: null,  // server-persisted conversation id (v1.4 statefulness)
+    _resumeSeq: 0,  // guards _resumeConversation against stale overwrites (F6)
+    _askAbort: null, // AbortController for the in-flight _ask stream (F7)
 
     SUGGESTIONS: [
       'why am I down today',
@@ -525,6 +634,8 @@
       'am I beating the market',
       'any earnings coming up',
       'any ideas',
+      'set a policy: max 25% per name',
+      "what if i hadn't sold my last sale",
     ],
 
     init() {
@@ -572,6 +683,7 @@
       });
       document.getElementById('jp-new-thread').addEventListener('click', async () => {
         try {
+          this._resumeSeq++; // invalidate any in-flight resume so it can't repaint the old thread
           const r = await API.post('/api/jarvis/conversation/new', {});
           this._convId = r.conversation_id;
           this._history = [];
@@ -616,8 +728,13 @@
     // v1.4 statefulness: pick up the server-persisted thread so the palette
     // reopens mid-conversation, even across page reloads and app restarts.
     async _resumeConversation() {
+      const seq = ++this._resumeSeq;
+      const convAtStart = this._convId;
       try {
         const c = await API.get('/api/jarvis/conversation');
+        // A NEW THREAD (or a newer resume/ask) ran while we awaited — discard
+        // this stale response so it can't repaint the old conversation.
+        if (seq !== this._resumeSeq || this._convId !== convAtStart) return;
         this._convId = c.conversation_id;
         const msgs = c.messages || [];
         // Rebuild fallback turns and show the tail of the thread, dimmed.
@@ -640,6 +757,7 @@
     },
     close() {
       this.el.classList.remove('open');
+      if (this._askAbort) { try { this._askAbort.abort(); } catch (e) {} this._askAbort = null; }
       Voice.stopAll();
       this._setListening(false);
       const prev = this._prevFocus;
@@ -756,6 +874,9 @@
         if (EXPORT_CMD.test(q)) {
           items.push({ kind: 'export', label: 'Export conversation as Markdown' });
         }
+        if (WATCHES_CMD.test(q)) {
+          items.push({ kind: 'watches', label: 'Standing watches — list & manage' });
+        }
         // View navigation matches
         for (const v of this._views()) {
           if (v.label.toLowerCase().includes(ql) || v.view.includes(ql)) {
@@ -778,7 +899,7 @@
 
     _renderList() {
       const ICON = { nav: '→', symbol: '◇', ask: '◉', alert: '⚡', stress: '⚡',
-                     recap: '◉', export: '⇩' };
+                     recap: '◉', export: '⇩', watches: '◎' };
       const CMD = { alert: 1, stress: 1 };
       this.list.innerHTML = this._items.map((it, i) =>
         `<div class="jp-item${CMD[it.kind] ? ' jp-cmd' : ''}${i === this._sel ? ' sel' : ''}" data-i="${i}" role="option" aria-selected="${i === this._sel}">
@@ -798,9 +919,10 @@
       if (e.key === 'ArrowDown') { e.preventDefault(); if (n) { this._sel = (this._sel + 1) % n; this._renderList(); } }
       else if (e.key === 'ArrowUp') { e.preventDefault(); if (n) { this._sel = (this._sel - 1 + n) % n; this._renderList(); } }
       else if (e.key === 'Enter') { e.preventDefault(); this._run(); }
-      else if ((e.metaKey || e.ctrlKey) && /^[1-9]$/.test(e.key)) {
-        // Cmd/Ctrl+1..9 quick-select — modifier required so typing plain
-        // digits into a query is never hijacked.
+      else if (e.altKey && !e.metaKey && !e.ctrlKey && /^[1-9]$/.test(e.key)) {
+        // Alt+1..9 quick-select. Cmd/Ctrl+1..9 is the browser's tab-switch
+        // shortcut, so we bind Alt instead; the modifier still keeps plain
+        // digits typed into a query from being hijacked.
         const idx = Number(e.key) - 1;
         if ((this.input.value.trim() !== '' || n > 0) && idx < n) {
           e.preventDefault();
@@ -822,6 +944,7 @@
       else if (it.kind === 'alert') { this._setAlert(it); }
       else if (it.kind === 'stress') { this.close(); if (typeof runStressCommand === 'function') runStressCommand(); }
       else if (it.kind === 'recap') { this._recap(); }
+      else if (it.kind === 'watches') { this._watches(); }
       else if (it.kind === 'export') { this.close(); window.open('/api/jarvis/conversation/export', '_blank'); }
       else if (it.kind === 'ask') { this._ask(it.query); }
     },
@@ -844,6 +967,46 @@
       }
     },
 
+    // "watches" palette command — list standing watches with delete / re-arm.
+    // GET /api/jarvis/watches → rows; DELETE /api/jarvis/watches/<id>;
+    // POST /api/jarvis/watches/<id>/rearm when a watch has triggered.
+    async _watches() {
+      this.answer.innerHTML = '<div class="jp-answer thinking"><div class="spinner"></div> Checking the watch floor...</div>';
+      let rows;
+      try {
+        const d = await API.get('/api/jarvis/watches');
+        rows = Array.isArray(d) ? d : ((d && (d.watches || d.items)) || []);
+      } catch (e) {
+        this.answer.innerHTML = `<div class="jp-answer error">${esc(e.message)}</div>`;
+        return;
+      }
+      if (!rows.length) {
+        this.answer.innerHTML = '<div class="jp-answer"><div class="jp-answer-text">No standing watches. Ask me to watch something — “tell me if NVDA drops below 150” — and I’ll keep an eye out.</div></div>';
+        return;
+      }
+      const html = rows.map(w => {
+        // Backend emits armed(0/1) + triggered_at; w.state/w.triggered don't exist.
+        const triggered = !w.armed || !!w.triggered_at;
+        return `<div class="jv-obs ${triggered ? 'warn' : 'info'}" style="display:flex;align-items:center;gap:6px">
+          <span style="flex:1">${triggered ? '◆' : '◉'} ${esc(w.description || w.label || ('watch #' + w.id))}
+            <span class="jv-chip" style="margin-left:6px">${triggered ? 'TRIGGERED' : 'ARMED'}</span></span>
+          ${triggered ? `<button class="jarvis-go jv-watch-rearm" type="button" data-id="${esc(String(w.id))}">RE-ARM</button>` : ''}
+          <button class="jarvis-go jp-dismiss jv-watch-del" type="button" data-id="${esc(String(w.id))}" title="Delete watch" aria-label="Delete watch">✕</button>
+        </div>`;
+      }).join('');
+      this.answer.innerHTML = `<div class="jp-answer"><div class="jp-answer-detail">◎ standing watches — ${rows.length}</div>${html}</div>`;
+      this.answer.querySelectorAll('.jv-watch-del').forEach(b => b.addEventListener('click', async () => {
+        b.disabled = true;
+        try { await API.del('/api/jarvis/watches/' + encodeURIComponent(b.dataset.id)); this._watches(); }
+        catch (e) { if (typeof Toast === 'object' && Toast.error) Toast.error(e.message); b.disabled = false; }
+      }));
+      this.answer.querySelectorAll('.jv-watch-rearm').forEach(b => b.addEventListener('click', async () => {
+        b.disabled = true;
+        try { await API.post('/api/jarvis/watches/' + encodeURIComponent(b.dataset.id) + '/rearm', {}); this._watches(); }
+        catch (e) { if (typeof Toast === 'object' && Toast.error) Toast.error(e.message); b.disabled = false; }
+      }));
+    },
+
     async _setAlert(it) {
       try {
         // Body shape matches app.js submitAddAlert(): POST /api/alerts
@@ -858,6 +1021,11 @@
     async _ask(query, opts) {
       if (this._asking) return;
       this._asking = true;
+      // Abortable: close() aborts the in-flight stream so a late resolve can't
+      // speak/paint after the palette is dismissed.
+      if (this._askAbort) { try { this._askAbort.abort(); } catch (e) {} }
+      const abort = ('AbortController' in window) ? new AbortController() : null;
+      this._askAbort = abort;
       this._recent = [query].concat(this._recent.filter(s => s !== query)).slice(0, 4);
       this.answer.innerHTML = '<div class="jp-answer thinking"><div class="spinner"></div> Working on it...</div>';
       try {
@@ -873,8 +1041,9 @@
             if (this.answer) {
               this.answer.innerHTML = `<div class="jp-answer thinking"><div class="spinner"></div> ${esc(t)}</div>`;
             }
-          });
+          }, abort ? abort.signal : undefined);
         } catch (streamErr) {
+          if (streamErr && streamErr.name === 'AbortError') return; // palette closed mid-ask
           r = await API.post('/api/jarvis/ask', body);
         }
         if (r.conversation_id) this._convId = r.conversation_id;
@@ -893,19 +1062,25 @@
           ? `<div class="jp-answer-detail">◉ consulted: ${esc([...new Set(r.used)].join(', ').replace(/_/g, ' '))}</div>` : '';
         const citesLine = (r.citations && r.citations.length)
           ? `<div class="jv-cites"><span class="jv-cites-h">sources</span>${r.citations.slice(0,6).map(c =>
-                `<a class="jv-cite" href="${esc(c.url)}" target="_blank" rel="noopener noreferrer">${esc(c.title || c.url)}</a>`).join('')}</div>` : '';
+                (/^https?:\/\//i.test(c.url || '')
+                  ? `<a class="jv-cite" href="${esc(c.url)}" target="_blank" rel="noopener noreferrer">${esc(c.title || c.url)}</a>`
+                  : `<span class="jv-cite">${esc(c.title || c.url || '')}</span>`)).join('')}</div>` : '';
         this.answer.innerHTML = `
           <div class="jp-answer${r.intent === 'clarify' ? ' jv-clarify' : ''}">
-            <div class="jp-answer-text">${mdLite(esc(r.answer))}</div>
+            <div class="jp-answer-text">${mdLite(esc(r.answer))}${confidenceChipHtml(r)}</div>
             ${clarifyChipsHtml(r)}
+            ${debateHtml(r)}
+            ${salvagedHtml(r)}
             ${r.detail ? `<div class="jp-answer-detail">${esc(r.detail)}</div>` : ''}
             ${citesLine}
             ${reasoningHtml(r)}
             ${usedLine}
             ${proposal}
+            ${proposalsChecklistHtml(r)}
             ${action}
           </div>`;
         wireReasoning(this.answer);
+        wireProposals(this.answer, r);
         this.answer.querySelectorAll('.jv-chip-reply').forEach(b =>
           b.addEventListener('click', () => this._ask(b.dataset.q)));
         const go = document.getElementById('jp-answer-go');
@@ -925,12 +1100,17 @@
         // Speak the reply; after a spoken question, hand the mic back for
         // the follow-up — that's the back-and-forth loop.
         const spoken = opts && opts.spoken;
-        Voice.speak(r.answer, () => {
-          if (spoken && Voice.enabled && this.isOpen()) this._listenTurn(true);
-        }, spoken);
+        // Don't speak into a closed palette (the ask may have resolved after close()).
+        if (this.isOpen()) {
+          Voice.speak(r.answer, () => {
+            if (spoken && Voice.enabled && this.isOpen()) this._listenTurn(true);
+          }, spoken);
+        }
       } catch (e) {
+        if (e && e.name === 'AbortError') return; // palette closed mid-ask
         this.answer.innerHTML = `<div class="jp-answer error">${esc(e.message)}</div>`;
       } finally {
+        if (this._askAbort === abort) this._askAbort = null;
         this._asking = false;
       }
     },
@@ -984,6 +1164,15 @@
       const sr = document.getElementById('jarvis-strip-sr');
       if (sr) sr.textContent = '';
       this.el.dataset.tone = tone;
+      // Respect prefers-reduced-motion: skip the typewriter reveal and set the
+      // full line immediately (no rAF loop / no "typing" animation state).
+      if (window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
+        out.textContent = text;
+        this.el.classList.remove('typing');
+        if (sr) sr.textContent = text;
+        this._timer = null;
+        return;
+      }
       this.el.classList.add('typing');
       let i = 0;
       out.textContent = '';
@@ -1006,13 +1195,12 @@
       this._timer = requestAnimationFrame(step);
     },
 
-    // Cancel an in-flight typewriter, whichever timer primitive holds it.
-    // (Defensive: handles both the rAF handle used now and any legacy
-    // interval id, so a stale node never keeps ticking.)
+    // Cancel an in-flight typewriter. _timer only ever holds a rAF handle, so
+    // cancel solely via cancelAnimationFrame — calling clearInterval on a rAF
+    // id could clear an unrelated app interval that shares the numeric id.
     _stop() {
       if (this._timer == null) return;
       cancelAnimationFrame(this._timer);
-      clearInterval(this._timer);
       this._timer = null;
     },
   };
@@ -1429,6 +1617,9 @@
       // visit can't overwrite the fresh chat, and clear any stranded send
       // lock (a send awaiting when the user navigated away leaves _busy true).
       this._chatGen++;
+      // Abort a still-streaming ask from a prior visit before clearing the lock,
+      // otherwise its late resolve would paint into the rebuilt DOM / break STOP.
+      if (this._abort) { try { this._abort.abort(); } catch (e) {} this._abort = null; }
       this._busy = false;
       view.innerHTML = `
         <div class="jv-grid">
@@ -1533,6 +1724,12 @@
     // ⧉ copy button for an assistant bubble — JS-created, shown on hover,
     // copies the bubble's textContent (minus the button itself).
     _attachCopy(bubble) {
+      // The button lives inside the bubble and is wiped whenever the bubble's
+      // innerHTML is rewritten (e.g. a streaming answer replacing the spinner),
+      // so create it unconditionally here. But the bubble-level hover listeners
+      // must attach ONCE — guard with dataset.copyWired so repeated re-attaches
+      // (after each rewrite) don't pile listeners onto the bubble.
+      if (bubble.querySelector('.jv-copy-btn')) return;
       const btn = document.createElement('button');
       btn.className = 'jv-copy-btn';
       btn.type = 'button';
@@ -1547,10 +1744,19 @@
       bubble.appendChild(btn);
       const show = () => { btn.style.opacity = '1'; };
       const hide = () => { btn.style.opacity = '0'; };
-      bubble.addEventListener('mouseenter', show);
-      bubble.addEventListener('mouseleave', hide);
+      // Focus/blur on the (always-created, focusable) button so it's reachable
+      // by keyboard — Tab into it reveals it even without a mouse.
       btn.addEventListener('focus', show);
       btn.addEventListener('blur', hide);
+      if (!bubble.dataset.copyWired) {
+        bubble.dataset.copyWired = '1';
+        bubble.addEventListener('mouseenter', () => {
+          const b = bubble.querySelector('.jv-copy-btn'); if (b) b.style.opacity = '1';
+        });
+        bubble.addEventListener('mouseleave', () => {
+          const b = bubble.querySelector('.jv-copy-btn'); if (b) b.style.opacity = '0';
+        });
+      }
       show();  // attached mid-hover — make it visible right away
       btn.addEventListener('click', () => {
         const clone = bubble.cloneNode(true);
@@ -1598,7 +1804,7 @@
           // discoverable instead of a blank prompt.
           const starters = ["Why am I down today?", "What did I miss?",
                             "How risky is my book?", "Is AAPL a good business to own?",
-                            "Am I beating the market?", "How's my trading behavior?"];
+                            "Am I beating the market?", "What would you check before earnings?"];
           el.innerHTML = '<div class="jv-bubble assistant">At your service. Ask about your book, a '
             + 'business, or the macro picture — or try one of these:'
             + '<div class="jv-starters">'
@@ -1610,7 +1816,13 @@
           }));
         }
         el.scrollTop = el.scrollHeight;
-      } catch (e) { /* chat stays on spinner-replacement below */ }
+      } catch (e) {
+        // Don't leave the spinner spinning forever — show an error bubble so the
+        // surface is usable (the user can still type/send).
+        if (gen !== this._chatGen) return;
+        const el = document.getElementById('jv-chat');
+        if (el) el.innerHTML = `<div class="jv-bubble assistant"><span class="col-negative">Couldn’t load the conversation — ${esc(e.message)}.</span> Ask me something to start a fresh thread.</div>`;
+      }
     },
 
     _append(role, html) {
@@ -1633,6 +1845,9 @@
       // Invalidate any in-flight _loadChat so its late resolve can't paint
       // the old thread over the message we're about to send.
       this._chatGen++;
+      // Capture our own generation: a later load()/send() bumps _chatGen, and a
+      // stale continuation here must not overwrite _convId, speak, or break STOP.
+      const gen = this._chatGen;
       this._append('user', esc(q));
       const chatEl = document.getElementById('jv-chat');
       if (chatEl) chatEl.setAttribute('aria-busy', 'true');
@@ -1667,23 +1882,33 @@
           // POST is the answer of record.
           r = await API.post('/api/jarvis/ask', body);
         }
+        // Superseded by a newer load()/send() while we awaited — don't touch
+        // _convId, don't paint, don't speak. The finally also skips cleanup.
+        if (gen !== this._chatGen) return;
         if (r.conversation_id) this._convId = r.conversation_id;
-        let html = mdLite(esc(r.answer));
+        let html = mdLite(esc(r.answer)) + confidenceChipHtml(r);
         html += clarifyChipsHtml(r);
+        html += debateHtml(r);
+        html += salvagedHtml(r);
         if (r.citations && r.citations.length) {
           html += '<div class="jv-cites"><span class="jv-cites-h">sources</span>'
             + r.citations.slice(0, 6).map(c =>
-                `<a class="jv-cite" href="${esc(c.url)}" target="_blank" rel="noopener noreferrer">${esc(c.title || c.url)}</a>`).join('')
+                (/^https?:\/\//i.test(c.url || '')
+                  ? `<a class="jv-cite" href="${esc(c.url)}" target="_blank" rel="noopener noreferrer">${esc(c.title || c.url)}</a>`
+                  : `<span class="jv-cite">${esc(c.title || c.url || '')}</span>`)).join('')
             + '</div>';
         }
         html += reasoningHtml(r);
         if (r.used && r.used.length) {
           html += `<div class="jv-used">◉ consulted: ${esc([...new Set(r.used)].join(', ').replace(/_/g, ' '))}</div>`;
         }
+        html += proposalsChecklistHtml(r);
         if (thinking) {
           thinking.innerHTML = html;
           if (r.intent === 'clarify') thinking.classList.add('jv-clarify');
+          this._attachCopy(thinking); // re-create the copy button the innerHTML rewrite wiped
           wireReasoning(thinking);
+          wireProposals(thinking, r);
           thinking.querySelectorAll('.jv-chip-reply').forEach(b =>
             b.addEventListener('click', () => {
               const inp = document.getElementById('jv-input');
@@ -1707,13 +1932,17 @@
         }
         Voice.speak(r.answer, null, spoken);
       } catch (e) {
-        if (thinking) thinking.innerHTML = `<span class="col-negative">${esc(e.message)}</span>`;
+        if (gen === this._chatGen && thinking) thinking.innerHTML = `<span class="col-negative">${esc(e.message)}</span>`;
       } finally {
-        this._busy = false;
-        this._abort = null;
-        const sb = document.getElementById('jv-send');
-        if (sb) { sb.textContent = 'ASK'; sb.classList.remove('jv-stop'); }
-        if (chatEl) chatEl.setAttribute('aria-busy', 'false');
+        // Only the current send owns the lock/button — a superseded send must
+        // not clear the newer send's _busy/_abort or reset its STOP button.
+        if (gen === this._chatGen) {
+          this._busy = false;
+          this._abort = null;
+          const sb = document.getElementById('jv-send');
+          if (sb) { sb.textContent = 'ASK'; sb.classList.remove('jv-stop'); }
+          if (chatEl) chatEl.setAttribute('aria-busy', 'false');
+        }
       }
     },
 

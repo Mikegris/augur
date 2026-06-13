@@ -40,6 +40,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import math
 import time
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional, Tuple
@@ -306,8 +307,13 @@ def _narrative_direction(symbol: str) -> Optional[Dict[str, Any]]:
         else:
             return None
     # Velocity damps or amplifies (cap effect to keep within axis).
+    # WHY (S7): velocity is the ACCELERATION of news volume, not a directional
+    # bullishness. Adding it raw made accelerating BAD news (base<0, velocity>0)
+    # read LESS bearish — exactly backwards. Acceleration should intensify the
+    # narrative in whatever direction it already points, so push it along the
+    # sign of `base`.
     if velocity is not None:
-        base = _clamp(base + (velocity / 200.0))
+        base = _clamp(base + math.copysign(abs(velocity) / 200.0, base))
     label = f"Narrative {direction} ({dom}, vel={velocity})"
     return {"norm": base, "raw": direction, "label": label}
 

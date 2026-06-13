@@ -417,7 +417,12 @@ def _implied_skew(symbol: str, event_date: datetime.date) -> Optional[float]:
             expiries = []
         chosen = None
         ev_iso = event_date.isoformat()
-        for exp in expiries:
+        # WHY (S12): _implied_move_pct picks the nearest on/after expiry via
+        # sorted(expiries), but this skew path iterated the RAW provider order.
+        # If the provider returns expiries unsorted, skew and move could anchor
+        # to DIFFERENT expiries — a silent mismatch. Sort here too so both
+        # quantities describe the same option strip.
+        for exp in sorted(expiries):
             if exp >= ev_iso:
                 chosen = exp
                 break
@@ -465,20 +470,23 @@ def _historical_overlay(symbol: str, event_type: str) -> Dict[str, Any]:
                 "n_events": n_events if isinstance(n_events, int) else None}
 
     s = r["summary"]
-    # Historical *implied* comparison: we want the typical absolute
-    # cumulative move around the event, not the signed one. avg_T0_return
-    # carries the run-up; absolute value gives a magnitude comparable to
-    # the implied σ%. (Sign is captured separately by hit_rate.)
-    avg_t0 = s.get("avg_T0_return_pct")
-    avg_post = s.get("avg_post_event_5d_pct")
-    # Combine pre + post magnitudes for a "total ±5d move" feel.
-    move_magnitude = None
-    if isinstance(avg_t0, (int, float)) and isinstance(avg_post, (int, float)):
-        move_magnitude = abs(float(avg_t0)) + abs(float(avg_post))
-    elif isinstance(avg_t0, (int, float)):
-        move_magnitude = abs(float(avg_t0))
-    elif isinstance(avg_post, (int, float)):
-        move_magnitude = abs(float(avg_post))
+    # WHY (S13): we want the typical ABSOLUTE move around the event to compare
+    # against implied σ%. The old `abs(mean(T0)) + abs(mean(post5))` averaged
+    # SIGNED returns first, so a symmetric history (big moves both ways that
+    # cancel in the mean) collapsed toward ~0 and made the premium look cheap.
+    # Prefer the event-study's mean-of-absolute-per-episode move; only fall
+    # back to the old signed-then-abs combination if it isn't available.
+    move_magnitude = s.get("avg_abs_event_move_pct")
+    if not isinstance(move_magnitude, (int, float)):
+        avg_t0 = s.get("avg_T0_return_pct")
+        avg_post = s.get("avg_post_event_5d_pct")
+        move_magnitude = None
+        if isinstance(avg_t0, (int, float)) and isinstance(avg_post, (int, float)):
+            move_magnitude = abs(float(avg_t0)) + abs(float(avg_post))
+        elif isinstance(avg_t0, (int, float)):
+            move_magnitude = abs(float(avg_t0))
+        elif isinstance(avg_post, (int, float)):
+            move_magnitude = abs(float(avg_post))
 
     return {
         "avg_move": _safe_round(move_magnitude, 3),
@@ -489,15 +497,23 @@ def _historical_overlay(symbol: str, event_type: str) -> Dict[str, Any]:
 
 def _current_signals(symbol: str,
                      event_date: datetime.date,
-                     signal_cache: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
+                     signal_cache: Dict[str, Dict[str, Any]],
+                     skew_symbol: Optional[str] = None) -> Dict[str, Any]:
     """Memoized per-symbol bundle of current signal stack. Each symbol
     appears multiple times across event types (earnings + FOMC + OPEX),
-    so this is cached at the request scope."""
+    so this is cached at the request scope.
+
+    WHY (S11): `skew_symbol` lets the caller pick the underlying whose chain
+    drives iv_skew (defaults to `symbol`). Previously the caller would let this
+    compute _implied_skew(symbol) and then immediately overwrite it for FOMC,
+    paying for the chain pull twice. Passing the right symbol in computes it
+    once."""
+    skew_symbol = skew_symbol or symbol
     cached = signal_cache.get(symbol)
     if cached is not None:
         # Re-derive iv_skew from the event date (skew varies by expiry).
         out = dict(cached)
-        skew = _implied_skew(symbol, event_date)
+        skew = _implied_skew(skew_symbol, event_date)
         out["iv_skew"] = _format_skew(skew)
         return out
 
@@ -547,7 +563,7 @@ def _current_signals(symbol: str,
     signal_cache[symbol] = bundle
 
     out = dict(bundle)
-    out["iv_skew"] = _format_skew(_implied_skew(symbol, event_date))
+    out["iv_skew"] = _format_skew(_implied_skew(skew_symbol, event_date))
     return out
 
 
@@ -620,28 +636,28 @@ def _make_event(symbol: str, event_type: str, event_date: datetime.date,
                 today: datetime.date) -> Dict[str, Any]:
     """Build the dict for a single event row."""
 
-    # FOMC affects everything — we price the implied move off SPY rather
-    # than the individual symbol (it's the policy-rate event, the broad-
-    # market dispersion is the meaningful number). For everything else
-    # we use the symbol's own chain.
-    if event_type == "fed_fomc":
-        implied = _implied_move_pct(_FOMC_TICKER_FOR_BARS, event_date)
-        skew_sym = _FOMC_TICKER_FOR_BARS
-    else:
-        implied = _implied_move_pct(symbol, event_date)
-        skew_sym = symbol
+    # WHY (S10): FOMC is a market-wide event, but the historical overlay below
+    # is always built from THIS symbol's own past reactions. Pricing the
+    # implied move off SPY while comparing it to the symbol's historical moves
+    # injected a pure beta artifact into edge_score (a high-beta name looks
+    # "cheap" and a low-beta name "expensive" purely from its beta, not any
+    # real mispricing). Use the symbol's OWN chain for the implied move so both
+    # sides of the comparison describe the same underlying.
+    implied = _implied_move_pct(symbol, event_date)
+    skew_sym = symbol
 
     hist = _historical_overlay(symbol, event_type)
     historical = hist["avg_move"]
     n_events = hist["n_events"]
     hit_rate = hist["hit_rate"]
 
-    # IV-skew proxy is computed inside _current_signals using the right
-    # underlying for FOMC.
-    signals = _current_signals(symbol, event_date, signal_cache)
-    if event_type == "fed_fomc":
-        # Override the iv_skew field with SPY's skew at this expiry.
-        signals["iv_skew"] = _format_skew(_implied_skew(skew_sym, event_date))
+    # WHY (S11): pass the skew underlying straight into _current_signals so it
+    # computes _implied_skew once on the correct symbol. The old code computed
+    # _implied_skew(symbol) inside _current_signals and then, for FOMC, threw
+    # it away and recomputed _implied_skew(SPY) here — two full chain pulls per
+    # symbol per FOMC date. With skew_sym == symbol for every event type now,
+    # there's nothing to override.
+    signals = _current_signals(symbol, event_date, signal_cache, skew_symbol=skew_sym)
 
     return {
         "date": event_date.isoformat(),

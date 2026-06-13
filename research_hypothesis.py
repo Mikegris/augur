@@ -610,7 +610,24 @@ def score_hypothesis(hypothesis_id: int) -> Dict[str, Any]:
             c.commit()
         return {"id": hypothesis_id, "status": "INVALIDATED", "reason": "zero issued price"}
 
-    current = _current_price(h["symbol"])
+    # WHY (Q15): score against the daily CLOSE at the horizon-end (`due`), not
+    # the live "now" quote. The scorer may run hours or days late (it's a
+    # daily batch job), and using the current quote let post-horizon drift leak
+    # into the result — two runs of the same hypothesis could resolve
+    # differently. Looking up the close on/just-after the due date makes the
+    # resolution deterministic and reproducible. Fall back to the live quote
+    # only if the historical close is unavailable.
+    horizon_close: Optional[float] = None
+    try:
+        import research_tracker
+        # Close on-or-before due; if the scorer runs the same day the bar may
+        # not be in yet, _close_price_on_or_before returns the prior close,
+        # which is the correct "as of due date" value.
+        horizon_close = research_tracker._close_price_on_or_before(h["symbol"], due)
+    except Exception as e:
+        log.debug("horizon close lookup failed for %s: %s", h.get("symbol"), e)
+
+    current = horizon_close if horizon_close is not None else _current_price(h["symbol"])
     if current is None:
         return {"id": hypothesis_id, "status": "OPEN", "reason": "no current price"}
 

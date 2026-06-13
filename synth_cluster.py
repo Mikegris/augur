@@ -196,22 +196,24 @@ def _component_congress_60d(symbol: str, direction: str) -> Tuple[bool, str, str
                     dt = None
         if dt is None or dt < cutoff:
             continue
-        # amount may be {min, max} dict or a raw number, depending on the
-        # parser version. Use the midpoint when we have a range.
-        amt = t.get("amount") or t.get("amount_mid") or 0
-        if isinstance(amt, dict):
-            lo = float(amt.get("min") or 0)
-            hi = float(amt.get("max") or 0)
-            amt = (lo + hi) / 2.0 if (lo or hi) else 0
+        # WHY (S1): congress.py emits `amount_val` (a numeric estimate) and
+        # `txn_type` / `txn_type_raw` ("P"/"S") — it does NOT emit `amount`,
+        # `amount_mid`, or `transaction_type`. The old keys were always absent,
+        # so amt was always 0 and ttype always "", meaning this congress source
+        # could literally never fire. Read amount_val + txn_type[_raw] like
+        # synth_consensus / synth_divmap do.
         try:
-            amt = float(amt)
+            amt = float(t.get("amount_val") or 0)
         except Exception:
-            amt = 0
-        ttype = (t.get("transaction_type") or t.get("txn_type") or "").lower()
-        if "purchase" in ttype or "buy" in ttype:
+            amt = 0.0
+        # txn_type label is "Buy"/"Sell"/"Exchange"; txn_type_raw is "P"/"S"/...
+        ttype = "{} {}".format(
+            t.get("txn_type") or "", t.get("txn_type_raw") or "").lower().strip()
+        raw = (t.get("txn_type_raw") or "").upper().strip()
+        if "purchase" in ttype or "buy" in ttype or raw.startswith("P"):
             buys += 1
             buy_val += amt
-        elif "sale" in ttype or "sell" in ttype:
+        elif "sale" in ttype or "sell" in ttype or raw.startswith("S"):
             sells += 1
             sell_val += amt
     net = buy_val - sell_val

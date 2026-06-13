@@ -32,6 +32,10 @@ HEADERS = {"User-Agent": "AUGUR/1.0 wealth-tracker (research)"}
 
 # Tickers whose plain symbol isn't a useful Wikipedia title.
 # Mostly single-letter tickers + brands that don't match the corp name.
+# Store titles RAW (real "&", not "%26"): fetch_pageviews runs each title
+# through urllib.parse.quote(..., safe=''), which encodes "&" → "%26" exactly
+# once. Pre-encoding here made quote() double-encode the "%" into "%2526",
+# which 404'd PG / JNJ for the full 12h cache TTL.
 TICKER_OVERRIDES = {
     "T":    "AT&T",
     "F":    "Ford_Motor_Company",
@@ -56,10 +60,10 @@ TICKER_OVERRIDES = {
     "DIS":  "The_Walt_Disney_Company",
     "WMT":  "Walmart",
     "COST": "Costco",
-    "PG":   "Procter_%26_Gamble",
+    "PG":   "Procter_&_Gamble",
     "KO":   "The_Coca-Cola_Company",
     "PEP":  "PepsiCo",
-    "JNJ":  "Johnson_%26_Johnson",
+    "JNJ":  "Johnson_&_Johnson",
     "PFE":  "Pfizer",
     "XOM":  "ExxonMobil",
     "CVX":  "Chevron_Corporation",

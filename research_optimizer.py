@@ -53,7 +53,22 @@ EPS = 1e-10
 
 def _daily_log_returns(symbol: str, period: str = "2y") -> Optional[np.ndarray]:
     """Return a 1-D numpy array of daily log-returns (length N-1), or None
-    if the chart endpoint can't give us enough history."""
+    if the chart endpoint can't give us enough history.
+
+    Kept for backward compat / single-asset callers; the portfolio estimator
+    now uses `_dated_log_returns` so the covariance correlates returns from
+    the SAME calendar dates, not merely the same trailing index."""
+    dated = _dated_log_returns(symbol, period=period)
+    if dated is None:
+        return None
+    return dated[1]
+
+
+def _dated_log_returns(symbol: str, period: str = "2y"):
+    """Return (dates, returns) where dates[i] is the bar date of returns[i],
+    or None. Dates let the estimator inner-join on common trading days — a
+    single missing/halted bar in one name otherwise shifts every later return
+    relative to its peers, silently corrupting the covariance."""
     if fetcher is None:
         return None
     try:
@@ -61,17 +76,20 @@ def _daily_log_returns(symbol: str, period: str = "2y") -> Optional[np.ndarray]:
     except Exception as e:
         log.warning("get_chart_data(%s) failed: %s", symbol, e)
         return None
-    closes = [b.get("close") for b in bars if b and b.get("close") is not None]
-    if len(closes) < MIN_HISTORY_DAYS:
+    rows = [(b.get("date") or b.get("time") or b.get("timestamp"), b.get("close"))
+            for b in bars if b and b.get("close") is not None]
+    if len(rows) < MIN_HISTORY_DAYS:
         return None
-    arr = np.asarray(closes, dtype=float)
-    # Clip non-positive prices defensively to avoid log() blowups.
+    dates = [str(d) for d, _ in rows]
+    arr = np.asarray([c for _, c in rows], dtype=float)
     arr = np.where(arr > 0, arr, np.nan)
-    rets = np.diff(np.log(arr))
-    rets = rets[np.isfinite(rets)]
+    rets = np.diff(np.log(arr))                      # return[i] spans dates[i]→dates[i+1]
+    ret_dates = np.asarray(dates[1:], dtype=object)  # label each return by its END bar
+    finite = np.isfinite(rets)
+    rets, ret_dates = rets[finite], ret_dates[finite]
     if rets.size < MIN_HISTORY_DAYS - 1:
         return None
-    return rets
+    return ret_dates, rets
 
 
 def _estimate_cov_and_mean(
@@ -84,23 +102,29 @@ def _estimate_cov_and_mean(
     Symbols whose history is too short or whose fetch failed are silently
     dropped — callers should check the returned symbol list."""
     usable: List[str] = []
-    series: List[np.ndarray] = []
+    maps: List[Dict[str, float]] = []  # date -> return, per asset
     for s in symbols:
-        r = _daily_log_returns(s, period=period)
-        if r is None:
+        dr = _dated_log_returns(s, period=period)
+        if dr is None:
             continue
+        dates, rets = dr
         usable.append(s.upper())
-        series.append(r)
+        maps.append({d: float(v) for d, v in zip(dates, rets)})
 
-    if not series:
+    if not maps:
         return np.zeros(0), np.zeros((0, 0)), []
 
-    # Align on the shortest series length (use trailing window so the most
-    # recent bars line up — that's the regime we actually care about).
-    min_len = min(s.size for s in series)
-    if min_len < MIN_HISTORY_DAYS - 1:
+    # Inner-join on the dates ALL usable assets share, then take the most
+    # recent window. This guarantees column t of every row is the same
+    # trading day — the precondition np.cov assumes and the old trailing-index
+    # stack silently violated whenever one name had a missing/halted bar.
+    common = set(maps[0])
+    for m in maps[1:]:
+        common &= set(m)
+    if len(common) < MIN_HISTORY_DAYS - 1:
         return np.zeros(0), np.zeros((0, 0)), []
-    matrix = np.vstack([s[-min_len:] for s in series])  # shape (n_assets, T)
+    common_dates = sorted(common)
+    matrix = np.vstack([[m[d] for d in common_dates] for m in maps])  # (n_assets, T)
 
     mean_daily = matrix.mean(axis=1)
     cov_daily = np.cov(matrix, ddof=1)

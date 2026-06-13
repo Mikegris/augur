@@ -206,7 +206,14 @@ def compare_to_point(symbol: str, horizon_days: int = 20) -> Dict[str, Any]:
             and not prob.get("error")):
         try:
             med = prob["distribution"]["median"]
-            spread = round(float(point["forecast_pct"]) - float(med), 2)
+            # WHY (Q13): point["forecast_pct"] is a 30-TRADING-DAY trend
+            # forecast (ml_forecast calls _trend_forecast with days_ahead=30),
+            # but the bootstrap median is over `horizon_days`. Subtracting them
+            # raw compared mismatched horizons. Linearly rescale the point
+            # estimate to the requested horizon (×h/30) before differencing —
+            # a first-order approximation of the matching-horizon point return.
+            point_scaled = float(point["forecast_pct"]) * (float(horizon_days) / 30.0)
+            spread = round(point_scaled - float(med), 2)
         except (KeyError, TypeError, ValueError):
             spread = None
 

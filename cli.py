@@ -773,7 +773,9 @@ def cmd_earnings(args):
             date = e.get("earnings_date", "")
             eps_est = e.get("eps_estimate", "N/A")
             beat_rate = e.get("beat_rate")
-            br = f"{beat_rate:.0%}" if beat_rate is not None else "N/A"
+            # beat_rate is already a 0-100 percentage (e.g. 75), so :.0% would
+            # multiply by 100 again and print "7500%". Format as a plain int %.
+            br = f"{beat_rate:.0f}%" if beat_rate is not None else "N/A"
             urgency = _c("SOON", YELLOW) if isinstance(days, (int, float)) and days <= 7 else ""
             rows.append((sym, date, f"{days}d", str(eps_est), br, urgency))
         table(rows, ["Symbol", "Date", "Days", "EPS Est", "Beat%", ""], [10, 14, 7, 10, 8, 8])
@@ -798,10 +800,14 @@ def cmd_earnings(args):
             header("EARNINGS HISTORY")
             rows = []
             for h in history[:8]:
-                surprise = h.get("surprise_pct", 0)
+                # surprise_pct can be present-but-None (_safe_float returns
+                # None on a NaN quarter); .get(...,0) only defaults on a MISSING
+                # key, so coalesce explicitly or `surprise > 0` is a TypeError.
+                surprise = h.get("surprise_pct")
+                surprise = surprise if surprise is not None else 0
                 col = _pnl_color(surprise)
                 rows.append((
-                    h.get("quarter", ""), str(h.get("estimate", "")),
+                    h.get("date", ""), str(h.get("estimate", "")),
                     str(h.get("actual", "")),
                     _c(fmt_pct(surprise), col),
                     _c("BEAT" if surprise > 0 else "MISS", col)
@@ -815,7 +821,7 @@ def cmd_earnings(args):
 # ── SEC Intelligence ──────────────────────────────────────────────────────────
 
 def cmd_intel(args):
-    import edgar
+    import sec_edgar as edgar
     sub = args.intel_sub
 
     if sub == "filings":
@@ -843,20 +849,26 @@ def cmd_intel(args):
         rows = []
         for t in txns[:20]:
             ttype = t.get("transaction_type", "")
-            col = GREEN if ttype.upper() in ("P", "A", "BUY") else RED
+            # Color on the raw SEC action code, not the derived label:
+            # P (open-market purchase) / A (award) are acquisitions → green,
+            # everything else red. The old test compared transaction_TYPE
+            # ("BUY"/"SELL"/"OTHER:x") against the codes "P"/"A", so nothing
+            # ever matched and every row rendered red.
+            tcode = (t.get("transaction_code", "") or "").upper()
+            col = GREEN if tcode in ("P", "A") else RED
             rows.append((
                 t.get("date", "")[:10],
                 (t.get("insider_name", "") or "")[:22],
-                (t.get("insider_title", "") or "")[:16],
+                (t.get("title", "") or "")[:16],
                 _c(ttype, col),
                 f"{t.get('shares', 0):,.0f}",
-                fmt_price(t.get("price_per_share", 0)),
+                fmt_price(t.get("price", 0)),
             ))
         table(rows, ["Date", "Insider", "Title", "Type", "Shares", "Price"],
               [12, 24, 18, 6, 12, 12])
 
     elif sub == "institutional":
-        import edgar
+        import sec_edgar as edgar
         banner("INSTITUTIONAL HOLDINGS — TRACKED FUNDS")
         funds = getattr(edgar, "TRACKED_FUNDS", {})
         if not funds:
@@ -874,8 +886,8 @@ def cmd_intel(args):
                 rows.append((
                     (h.get("name", "") or "")[:30],
                     f"{h.get('shares', 0):,.0f}",
-                    fmt_number(h.get("value", 0)),
-                    f"{h.get('pct_portfolio', 0):.1f}%"
+                    fmt_number(h.get("value_usd", 0)),
+                    f"{h.get('pct_of_portfolio', 0):.1f}%"
                 ))
             table(rows, ["Company", "Shares", "Value", "% Port"], [32, 14, 14, 8])
 
@@ -1237,33 +1249,77 @@ def cmd_ai(args):
             return
         banner("AI PORTFOLIO ANALYSIS")
         print(_c("  Generating analysis with GPT-4o...", DIM))
-        # Build summary
+        # Build the EXACT position/summary shape _analyze_portfolio_uncached
+        # consumes. The old code passed {value, positions:<int>} and per-row
+        # {value, current_price}, but the analyzer reads market_value /
+        # weight_pct / unrealized_pnl / unrealized_pct per position and
+        # total_pnl / total_pnl_pct / total_cost / num_positions on the
+        # summary — so every call KeyError'd into the rule-based fallback, and
+        # the caller then read result["analysis"] (a key NEITHER path emits),
+        # printing nothing. Build the full shape and read the real output keys.
         stock_syms = [h["symbol"] for h in holdings if h["asset_type"] != "crypto"]
         prices = fetcher.get_quotes_batch(stock_syms) if stock_syms else {}
-        total_val = 0
+        total_val = 0.0
+        total_cost = 0.0
         positions = []
         for h in holdings:
             q = prices.get(h["symbol"].upper(), {})
-            price = q.get("price", h["avg_cost"])
-            val = h["shares"] * price
-            total_val += val
-            positions.append({**h, "current_price": price, "value": val})
+            price = q.get("price") or h["avg_cost"]
+            mkt_val = h["shares"] * price
+            cost = h["shares"] * h["avg_cost"]
+            pnl = mkt_val - cost
+            pnl_pct = (pnl / cost * 100) if cost else 0.0
+            total_val += mkt_val
+            total_cost += cost
+            positions.append({
+                "symbol": h["symbol"],
+                "name": h.get("name", h["symbol"]),
+                "asset_type": h["asset_type"],
+                "shares": h["shares"],
+                "avg_cost": h["avg_cost"],
+                "current_price": price,
+                "market_value": mkt_val,
+                "unrealized_pnl": pnl,
+                "unrealized_pct": pnl_pct,
+            })
+        # weight_pct needs the portfolio total, so fill it in a second pass.
+        for p in positions:
+            p["weight_pct"] = (p["market_value"] / total_val * 100) if total_val else 0.0
 
+        total_pnl = total_val - total_cost
         summary = {
             "total_value": total_val,
-            "positions": len(holdings),
+            "total_cost": total_cost,
+            "total_pnl": total_pnl,
+            "total_pnl_pct": (total_pnl / total_cost * 100) if total_cost else 0.0,
+            "num_positions": len(holdings),
         }
         result = ai_summarizer.analyze_portfolio(positions, summary, model=args.model or "gpt-4o")
         if isinstance(result, dict):
-            if result.get("analysis"):
-                print(f"\n{result['analysis']}")
-            elif result.get("error"):
+            if result.get("error") and not result.get("executive_summary"):
                 print(_c(f"  Error: {result['error']}", RED))
+            else:
+                signal = result.get("overall_signal", "")
+                score = result.get("overall_score", "")
+                if signal:
+                    print(f"\n  Signal: {_c(signal, WHITE + BOLD)}   Health: {score}/10")
+                if result.get("executive_summary"):
+                    print(f"\n{result['executive_summary']}")
+                for label, key in (("Strengths", "strengths"),
+                                   ("Risks", "risks"),
+                                   ("Opportunities", "opportunities")):
+                    items = result.get(key) or []
+                    if items:
+                        header(label.upper())
+                        for it in items:
+                            print(f"  - {it}")
+                if not result.get("ai_powered"):
+                    print(_c("\n  (rule-based fallback — no OpenAI key)", DIM))
         else:
             print(f"\n{result}")
 
     elif sub == "filing":
-        import edgar
+        import sec_edgar as edgar
         sym = args.symbol.upper()
         banner(f"AI FILING ANALYSIS — {sym}")
         print(_c("  Fetching recent filings...", DIM))

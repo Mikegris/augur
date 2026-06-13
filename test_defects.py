@@ -569,6 +569,7 @@ def test_defect_sweep_c():
     # P2: "set an alert for X above N" was swallowed by the read-only alerts intent.
     orig_avail, orig_agent = jarvis._llm_available, jarvis._agent_ask
     jarvis._llm_available = lambda: True
+    jarvis._agent_ready = lambda: True
     jarvis._agent_ask = lambda q, t=None, **kw: {
         "answer": "proposing", "used": [],
         "proposal": {"tool": "add_price_alert", "args": {}, "label": "x"}}
@@ -774,6 +775,7 @@ def test_defect_sweep_d():
 
     # Routing: common-word tickers don't hijack ordinary sentences.
     jarvis._llm_available = lambda: True
+    jarvis._agent_ready = lambda: True
     check("sweepD: 'is a recession coming' doesn't quote ticker A",
           jarvis._extract_symbol("is a recession coming") is None)
     check("sweepD: 'should i sell now' doesn't quote ticker NOW",
@@ -957,6 +959,7 @@ def test_jarvis_research():
             "citations": [{"title": "T", "url": "http://x"}]}
     orig_avail, orig_agent = jarvis._llm_available, jarvis._agent_ask
     jarvis._llm_available = lambda: True
+    jarvis._agent_ready = lambda: True
     jarvis._agent_ask = lambda q, t=None, **kw: fake
     try:
         r = jarvis.ask("what's the latest on the spacex ipo", persist=False)
@@ -976,6 +979,7 @@ def test_jarvis_research():
     orig_avail2, orig_agent2 = jarvis._llm_available, jarvis._agent_ask
     orig_web = jr.web_research
     jarvis._llm_available = lambda: True
+    jarvis._agent_ready = lambda: True
     jarvis._agent_ask = lambda q, t=None, **kw: None  # simulate agent failure
     jr.web_research = lambda q: {"answer": "SpaceX priced its IPO at $135.",
                                  "citations": [{"title": "Reuters", "url": "http://r"}]}
@@ -1094,6 +1098,7 @@ def test_jarvis_v2_live():
     llm_calls = []
     orig_avail, orig_complete = jarvis._llm_available, jarvis._llm_complete
     jarvis._llm_available = lambda: True
+    jarvis._agent_ready = lambda: True
 
     def fake_complete(messages, max_tokens=200, temperature=0.4):
         llm_calls.append(messages)
@@ -1683,6 +1688,11 @@ def main():
         ("perf fixes present", test_perf_fixes_present),
         ("no abandoned TPE workers", test_no_abandoned_tpe_workers),
     ]
+    # The LLM-gate attrs get monkeypatched by several tests; restore them
+    # after EVERY test so a forgotten restore can't leak into later tests
+    # (that exact leakage class broke the suite once before).
+    import jarvis as _jv
+    _gate_orig = (_jv._llm_available, getattr(_jv, "_agent_ready", None))
     for title, fn in tests:
         print("── %s" % title)
         try:
@@ -1691,6 +1701,10 @@ def main():
             global _failed
             _failed += 1
             print("  ✗ %s raised %s: %s" % (title, type(e).__name__, e))
+        finally:
+            _jv._llm_available = _gate_orig[0]
+            if _gate_orig[1] is not None:
+                _jv._agent_ready = _gate_orig[1]
 
     print("\n" + "=" * 56)
     print("  Defect-regression results: %d passed, %d failed" % (_passed, _failed))

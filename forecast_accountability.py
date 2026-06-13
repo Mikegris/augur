@@ -282,7 +282,9 @@ def adaptive_weights(base_weights: Dict[str, float],
     except Exception:
         return dict(base_weights)
 
-    key = ("adaptive", tuple(sorted(base_weights.items())))
+    # WHY (Q9): skill is horizon-specific, so a horizon-5 adaptation must not
+    # reuse a cached horizon-60 result — fold horizon_days into the cache key.
+    key = ("adaptive", horizon_days, tuple(sorted(base_weights.items())))
     hit = _weights_cache.get(key)
     if hit is not None and (time.time() - hit[0]) < _WEIGHTS_TTL:
         return dict(hit[1])
@@ -293,7 +295,11 @@ def adaptive_weights(base_weights: Dict[str, float],
         for k, w in base_weights.items():
             mult = 1.0
             try:
-                rec = research_tracker.get_track_record(_component_signal(k))
+                # WHY (Q9): filter the track record to this horizon so we tilt
+                # on the component's hit-rate AT this horizon, not a pooled
+                # average across all horizons.
+                rec = research_tracker.get_track_record(
+                    _component_signal(k), horizon_days=horizon_days)
                 n = rec.get("n_directional") or 0
                 hr = rec.get("hit_rate")
                 if n >= _MIN_N_FOR_ADAPT and hr is not None:

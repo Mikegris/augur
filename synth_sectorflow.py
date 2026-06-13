@@ -376,19 +376,20 @@ def _congress_index() -> Dict[str, float]:
         sec = sym_to_sector.get(sym)
         if not sec:
             continue
-        txn = (t.get("transaction") or t.get("type") or "").lower()
-        # amount_min/amount_max are bands; use midpoint
-        amt_min = _safe_float(t.get("amount_min"))
-        amt_max = _safe_float(t.get("amount_max"))
-        if amt_min is None and amt_max is None:
-            amt_min = _safe_float(t.get("amount"))
-            amt_max = amt_min
-        if amt_min is None:
+        # WHY (S2): congress.py emits `txn_type`/`txn_type_raw` and a numeric
+        # `amount_val` — NOT `transaction`/`type` or `amount_min`/`amount_max`/
+        # `amount`. The old keys never existed, so `txn` was always "" and amt
+        # always None → every trade `continue`d and this whole congress index
+        # was dead. Read the real fields.
+        txn = "{} {}".format(
+            t.get("txn_type") or "", t.get("txn_type_raw") or "").lower().strip()
+        raw = (t.get("txn_type_raw") or "").upper().strip()
+        amt = _safe_float(t.get("amount_val"))
+        if amt is None:
             continue
-        amt = ((amt_min or 0.0) + (amt_max or amt_min or 0.0)) / 2.0
-        if "purchase" in txn or "buy" in txn:
+        if "purchase" in txn or "buy" in txn or raw.startswith("P"):
             agg[sec] += amt
-        elif "sale" in txn or "sell" in txn:
+        elif "sale" in txn or "sell" in txn or raw.startswith("S"):
             agg[sec] -= amt
     # round to whole dollars
     return {k: round(v, 2) for k, v in agg.items()}
@@ -662,7 +663,11 @@ def _build_sector_row(spec: Dict[str, str], insiders, congress, factors,
     row.update(_narrative_panel(etf))                          # narrative
     row["factor_1d_return_pct"] = _factor_contribution(sector, factors)
     row["insider_buy_ratio_30d"] = _insider_buy_ratio(insiders, sector)
-    row["congress_net_30d_usd"] = congress.get(sector, 0.0) or None
+    # WHY (S2): `or None` mapped a genuine net flow of exactly 0.0 (balanced
+    # buys/sells) to None, dropping a real, informative weight. Only treat a
+    # truly absent sector as None; keep 0.0 as 0.0.
+    _cong = congress.get(sector)
+    row["congress_net_30d_usd"] = _cong if _cong is not None else None
     row.update(_reddit_panel(sector))
     row.update(_hn_panel(etf, sector))
     row.update(_wiki_panel(etf))

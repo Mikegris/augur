@@ -294,6 +294,15 @@ def get_earnings_dossier(symbol):
         else:
             price_hist = _pd.DataFrame()
         if not price_hist.empty:
+            # The index is built from epoch seconds via pd.to_datetime(unit="s"),
+            # so it's already tz-NAIVE. Calling tz_localize(None) on a naive
+            # index raises ("Already tz-naive"), and since the loop body is
+            # wrapped in try/except: continue, EVERY date failed and
+            # post_earnings_moves came back empty every time. Only strip the tz
+            # when one is actually present.
+            hist_index = price_hist.index
+            if getattr(hist_index, "tz", None) is not None:
+                hist_index = hist_index.tz_localize(None)
             # Use earnings_dates index for past dates
             ed2 = t.earnings_dates
             if ed2 is not None and not ed2.empty:
@@ -302,7 +311,7 @@ def get_earnings_dossier(symbol):
                     try:
                         # Convert to tz-naive for comparison
                         dt_naive = dt.tz_localize(None) if dt.tzinfo else dt
-                        idx = price_hist.index.tz_localize(None).searchsorted(dt_naive)
+                        idx = hist_index.searchsorted(dt_naive)
                         # Measure the POST-earnings reaction (announcement day ->
                         # next session), not the run-up into it. The old idx-1 ->
                         # idx window ended on the earnings day itself.

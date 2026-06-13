@@ -563,14 +563,26 @@ def compute_score(symbol):
 
     try:
         result = _compute_score_uncached(symbol)
+        # WHY (S9): publish to _score_cache BEFORE ev.set(). The old order set
+        # the event first, so a waiter woken by ev.set() could re-check the
+        # cache before this thread had written it, miss, and redundantly
+        # recompute the same symbol — defeating the coalescing. Writing the
+        # cache first guarantees every waiter that observes the set event also
+        # observes the result.
+        if owner:
+            with _score_lock:
+                _score_cache[symbol] = (time.time(), copy.deepcopy(result))
     finally:
         if owner:
             with _score_lock:
                 _score_inflight.pop(symbol, None)
             ev.set()
 
-    with _score_lock:
-        _score_cache[symbol] = (time.time(), copy.deepcopy(result))
+    if not owner:
+        # Non-owner that fell through to a direct compute (timeout/miss): still
+        # populate the cache for subsequent callers.
+        with _score_lock:
+            _score_cache[symbol] = (time.time(), copy.deepcopy(result))
     return result
 
 

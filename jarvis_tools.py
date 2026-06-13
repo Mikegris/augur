@@ -39,6 +39,28 @@ def _sym(args: Dict[str, Any]) -> str:
     return s
 
 
+def _quote_symbol(sym: str) -> str:
+    """Map a held-crypto ticker (BTC) to its quote symbol (BTC-USD).
+
+    Crypto holdings are stored bare in the portfolio but the data feeds quote
+    them as SYM-USD; the bare ticker is often an unrelated equity/trust (the
+    BTC-trust mispricing lesson). Mirrors _t_stress_test's mapping so the
+    symbol-consuming read tools quote the actual instrument the user holds.
+    Already-suffixed (BTC-USD) and non-held symbols pass through unchanged.
+    Fail-open: any portfolio-read error leaves the symbol as-is."""
+    try:
+        if sym.upper().endswith("-USD"):
+            return sym
+        import database as db
+        for h in db.get_portfolio() or []:
+            if (h.get("symbol") or "").upper() == sym.upper() \
+                    and (h.get("asset_type") or "").lower() == "crypto":
+                return sym + "-USD"
+    except Exception:
+        pass
+    return sym
+
+
 def _num_arg(v: Any) -> Optional[float]:
     """Coerce a model-supplied number that may arrive as '5000', '-30%', etc.
     Returns None if it isn't a finite number."""
@@ -66,11 +88,12 @@ def _portfolio_stock_symbols(max_n: int = 15) -> List[str]:
 
 def _t_get_quote(args):
     import fetcher
-    q = fetcher.get_quote(_sym(args)) or {}
+    sym = _quote_symbol(_sym(args))
+    q = fetcher.get_quote(sym) or {}
     keep = ("symbol", "price", "change", "change_pct", "prev_close", "volume",
             "market_cap", "fifty_two_week_high", "fifty_two_week_low")
     if not q.get("price"):
-        return {"note": "no quote available for {}".format(_sym(args))}
+        return {"note": "no quote available for {}".format(sym)}
     return {k: q.get(k) for k in keep}
 
 
@@ -127,8 +150,8 @@ def _t_forecast(args):
     import forecast_ensemble
     horizon = int(args.get("horizon_days") or 20)
     horizon = max(5, min(horizon, 120))
-    f = forecast_ensemble.ensemble_forecast(_sym(args), horizon_days=horizon)
-    ens = (f or {}).get("ensemble") or {}
+    f = forecast_ensemble.ensemble_forecast(_sym(args), horizon_days=horizon) or {}
+    ens = f.get("ensemble") or {}
     return {"symbol": f.get("symbol"), "horizon_days": f.get("horizon_days"),
             "n_signals": f.get("n_signals"),
             "prob_up": ens.get("prob_up"), "direction": ens.get("direction"),
@@ -181,7 +204,7 @@ def _t_options_flow(args):
 
 def _t_news(args):
     import fetcher
-    n = fetcher.get_news(_sym(args), limit=5)
+    n = fetcher.get_news(_quote_symbol(_sym(args)), limit=5)
     return [{"title": x.get("title"), "publisher": x.get("publisher"),
              "published": x.get("published") or x.get("providerPublishTime")}
             for x in (n or [])[:5]]
@@ -530,7 +553,7 @@ def _t_price_history(args):
     import fetcher
     import time as _t
     from datetime import datetime as _dt
-    sym = _sym(args)
+    sym = _quote_symbol(_sym(args))
     n = _num_arg(args.get("days"))
     days = int(max(5, min(n, 365))) if n else 30
     # Fetch the smallest cached period that covers the window — get_chart_data
@@ -608,6 +631,199 @@ def _t_crypto_market(args):
             "active_coins": g.get("active_coins")}
 
 
+def _t_factor_exposure(args):
+    try:
+        import research_factors
+    except Exception as e:
+        return {"note": "factor engine unavailable: {}".format(str(e)[:100])}
+    if args.get("symbol"):
+        r = research_factors.factor_exposure(_sym(args)) or {}
+    else:
+        import database as db
+        import fetcher
+        holdings = [h for h in db.get_portfolio()
+                    if h.get("asset_type") != "crypto"]
+        if not holdings:
+            return {"note": "no stock positions to decompose"}
+        prices = fetcher.get_quotes_batch([h["symbol"] for h in holdings])
+        hl = []
+        for h in holdings:
+            p = (prices.get(h["symbol"]) or {}).get("price")
+            hl.append({"symbol": h["symbol"],
+                       "market_value": (p if p else h["avg_cost"]) * h["shares"]})
+        # Each holding costs a regression; cap at the 15 largest positions.
+        hl = sorted(hl, key=lambda x: -x["market_value"])[:15]
+        r = research_factors.portfolio_factor_exposure(hl) or {}
+    if r.get("error"):
+        return {"error": str(r["error"])[:200]}
+    factors = {}
+    for name, v in (r.get("exposures") or {}).items():
+        factors[name] = v.get("beta") if isinstance(v, dict) else v
+    out = {"factors": factors, "r_squared": r.get("r_squared"),
+           "alpha_annual_pct": r.get("alpha_annual_pct"),
+           "period_years": r.get("period_years"),
+           "n_obs": r.get("n_obs"), "as_of": r.get("as_of"),
+           "idiosyncratic_vol_pct": r.get("idiosyncratic_vol_pct")}
+    if r.get("symbol"):
+        out["symbol"] = r["symbol"]
+    if r.get("n_holdings"):
+        out["scope"] = "portfolio"
+        out["n_holdings"] = r["n_holdings"]
+    return out
+
+
+_FORM_RE = re.compile(r"^[A-Z0-9][A-Z0-9\-/ ]{0,11}$")
+
+
+def _t_filing_summary(args):
+    sym = _sym(args)
+    form = str(args.get("form_type") or "").strip().upper()
+    if form and not _FORM_RE.match(form):
+        raise ValueError("invalid form_type")
+    try:
+        import sec_edgar
+    except Exception as e:
+        return {"note": "SEC filings unavailable: {}".format(str(e)[:100])}
+    filings = sec_edgar.get_recent_filings(
+        sym, forms=[form] if form else None, limit=1) or []
+    if not filings:
+        return {"note": "no recent {} filings found for {}".format(
+            form or "SEC", sym)}
+    f = filings[0]
+    out = {"symbol": sym, "form": f.get("form_type"),
+           "filing_date": f.get("filing_date"),
+           "description": f.get("description")}
+    cached = None
+    try:
+        import database as db
+        cached = db.get_cached_filing(f.get("accession"))
+    except Exception:
+        pass
+    if cached and (cached.get("ai_summary") or cached.get("ai_signal")):
+        out["signal"] = cached.get("ai_signal")
+        out["summary"] = cached.get("ai_summary")
+        out["key_points"] = (cached.get("ai_key_points") or [])[:4]
+        return out
+    # Same summarizer the intel feed rides (rule-based when no API key);
+    # read-only here — no db.cache_filing, the feed owns the cache.
+    try:
+        import ai_summarizer
+        ai = ai_summarizer.summarize_filing(
+            "", f.get("form_type") or "", sym, f.get("description") or "") or {}
+        out["signal"] = ai.get("signal")
+        out["summary"] = ai.get("summary")
+        out["key_points"] = (ai.get("key_points") or [])[:4]
+    except Exception as e:
+        out["note"] = "summary unavailable: {}".format(str(e)[:100])
+    return out
+
+
+def _t_track_record(args):
+    try:
+        import forecast_accountability
+    except Exception as e:
+        return {"note": "accountability ledger unavailable: {}".format(str(e)[:100])}
+    rep = forecast_accountability.accountability_report() or {}
+    ens = rep.get("ensemble") or {}
+    tr = ens.get("track_record") or {}
+    cal = ens.get("calibration") or {}
+    out = {"ensemble": {"n_scored": tr.get("n"),
+                        "n_directional": tr.get("n_directional"),
+                        "hit_rate": tr.get("hit_rate"),
+                        "avg_return": tr.get("avg_return")},
+           "weights_adapted": rep.get("weights_adapted")}
+    if cal.get("brier") is not None:
+        out["ensemble"]["brier"] = cal.get("brier")
+        out["ensemble"]["brier_skill"] = cal.get("brier_skill")
+    board = rep.get("leaderboard") or []
+    if board:
+        b = board[0]
+        out["top_component"] = {"key": b.get("key"), "n": b.get("n"),
+                                "hit_rate": b.get("hit_rate"),
+                                "brier": b.get("brier")}
+    if not tr.get("n") and not board:
+        return {"note": "no scored forecasts yet — the ledger needs "
+                        "forecasts old enough to grade"}
+    return out
+
+
+def _t_counterfactual_review(args):
+    try:
+        import jarvis_counterfactual
+    except Exception:
+        return {"note": "counterfactual engine unavailable"}
+    sym = _sym(args) if args.get("symbol") else None
+    n = _num_arg(args.get("limit"))
+    limit = int(max(1, min(n, 10))) if n else 10
+    r = jarvis_counterfactual.analyze(symbol=sym, limit=limit) or {}
+    if r.get("error"):
+        return {"error": str(r["error"])[:200]}
+    if not r.get("n_sells"):
+        return {"note": r.get("summary") or "no sells to review"}
+    return {"n_sells": r.get("n_sells"), "net_usd": r.get("net_usd"),
+            "summary": r.get("summary"),
+            "sells": (r.get("sells") or [])[:5]}
+
+
+def _t_check_policy(args):
+    try:
+        import jarvis_policy
+    except Exception:
+        return {"note": "policy engine unavailable"}
+    out: Dict[str, Any] = {}
+    try:
+        chk = jarvis_policy.check_portfolio() or {}
+        vio = chk.get("violations") or []
+        out["n_rules"] = chk.get("n")
+        out["n_violations"] = len(vio)
+        out["violations"] = [
+            {"kind": v.get("kind"), "severity": v.get("severity"),
+             "detail": str(v.get("detail") or "")[:150]}
+            for v in vio[:6] if isinstance(v, dict)]
+    except Exception as e:
+        out["error"] = str(e)[:200]
+    try:
+        desc = jarvis_policy.describe_rules()
+        out["rules"] = desc if isinstance(desc, list) else str(desc)[:600]
+    except Exception:
+        pass
+    if not out:
+        return {"note": "policy engine returned nothing"}
+    return out
+
+
+def _t_get_watches(args):
+    try:
+        import jarvis_watches
+    except Exception:
+        return {"note": "watch engine unavailable"}
+    ws = jarvis_watches.list_watches() or []
+    if not ws:
+        return {"note": "no watches set — offer add_watch to create one"}
+    return {"count": len(ws),
+            "watches": [{"id": w.get("id"), "name": w.get("name"),
+                         "description": w.get("description"),
+                         "armed": w.get("armed"),
+                         "triggered_at": w.get("triggered_at")}
+                        for w in ws[:15]]}
+
+
+def _t_recall_memory(args):
+    q = str(args.get("query") or "").strip()
+    if not q:
+        raise ValueError("query required")
+    try:
+        import jarvis_semmem
+        hits = jarvis_semmem.recall(q, k=5) or []
+    except Exception:
+        return {"note": "semantic memory unavailable"}
+    if not hits:
+        return {"note": "no related memories found"}
+    return {"matches": [{"text": str(h.get("text") or "")[:200],
+                         "score": h.get("score")}
+                        for h in hits[:5] if isinstance(h, dict)]}
+
+
 # ─── mutating-tool implementations (only via execute_mutating) ───────────────
 
 def _t_remember(args):
@@ -640,6 +856,122 @@ def _t_add_watchlist(args):
     sym = _sym(args)
     db.add_to_watchlist(sym)
     return {"status": "added", "label": "{} added to watchlist".format(sym)}
+
+
+# Watch condition vocabulary — mirrors jarvis_watches, but kept local so
+# proposal validation/labels still work when that module can't import.
+_WATCH_METRICS = ("price", "change_pct", "vix", "book_day_pct")
+_WATCH_SYMBOL_METRICS = ("price", "change_pct")
+_WATCH_OPS = ("gt", "lt")
+
+
+def _watch_label(args: Dict[str, Any]) -> str:
+    """'Create watch "NVDA breakout": NVDA price > $200 AND VIX > 25' —
+    prefers jarvis_watches.describe but must render without it."""
+    name = str(args.get("name") or "").strip()
+    conds = args.get("conditions") if isinstance(args.get("conditions"), list) else []
+    desc = ""
+    try:
+        import jarvis_watches
+        desc = jarvis_watches.describe({"conditions": conds}) or ""
+    except Exception:
+        desc = ""
+    if not desc:
+        parts = []
+        for c in conds:
+            if not isinstance(c, dict):
+                continue
+            op = ">" if c.get("op") == "gt" else "<"
+            bits = [str(x) for x in (c.get("symbol"), c.get("metric"),
+                                     op, c.get("value")) if x is not None]
+            parts.append(" ".join(bits))
+        desc = " AND ".join(parts)
+    if desc:
+        return 'Create watch "{}": {}'.format(name, desc)
+    return 'Create watch "{}"'.format(name)
+
+
+def _t_add_watch(args):
+    try:
+        import jarvis_watches
+    except Exception:
+        return {"error": "watch engine unavailable"}
+    # jarvis_watches._normalize_condition rejects numeric STRINGS ("200") —
+    # but the validator accepts them, so a string-valued condition would pass
+    # the confirm and then fail at exec. Coerce values to real floats here.
+    conds = args.get("conditions")
+    if isinstance(conds, list):
+        coerced = []
+        for c in conds:
+            if isinstance(c, dict):
+                c = dict(c)
+                fv = _num_arg(c.get("value"))
+                if fv is not None:
+                    c["value"] = fv
+            coerced.append(c)
+        conds = coerced
+    r = jarvis_watches.add_watch(args.get("name"), conds) or {}
+    if r.get("error"):
+        return {"error": str(r["error"])[:200]}
+    return {"status": "created", "id": r.get("id"), "label": _watch_label(args)}
+
+
+def _policy_kinds() -> Optional[tuple]:
+    """Valid policy-rule kinds when jarvis_policy exposes them; None when
+    unknown (module missing or no constant) — callers then defer to
+    set_rule's own validation at execution time."""
+    try:
+        import jarvis_policy
+    except Exception:
+        return None
+    for attr in ("KINDS", "RULE_KINDS", "POLICY_KINDS", "VALID_KINDS", "_KINDS"):
+        v = getattr(jarvis_policy, attr, None)
+        if isinstance(v, (list, tuple, set, frozenset, dict)) and v:
+            return tuple(v)
+    return None
+
+
+def _policy_range(kind: str):
+    """(lo, hi) inclusive range for a policy kind from jarvis_policy._RANGES,
+    or None when the module/constant/kind is unknown — callers then skip the
+    range check and defer to set_rule's own validation."""
+    try:
+        import jarvis_policy
+        ranges = getattr(jarvis_policy, "_RANGES", None)
+        if isinstance(ranges, dict):
+            r = ranges.get(kind)
+            if isinstance(r, (list, tuple)) and len(r) == 2:
+                return float(r[0]), float(r[1])
+    except Exception:
+        pass
+    return None
+
+
+def _t_set_policy_rule(args):
+    try:
+        import jarvis_policy
+    except Exception:
+        return {"error": "policy engine unavailable"}
+    kind = str(args.get("kind") or "").strip()
+    value = _num_arg(args.get("value"))
+    if not kind:
+        # Natural-language variant — resolved HERE, at execution time.
+        text = str(args.get("text") or "").strip()
+        rule = jarvis_policy.parse_rule(text) if text else None
+        if not isinstance(rule, dict):
+            return {"error": "could not parse a policy rule from: {}".format(
+                text[:140] or "(empty)")}
+        kind = str(rule.get("kind") or "").strip()
+        value = _num_arg(rule.get("value"))
+    if not kind or value is None:
+        return {"error": "a policy rule needs a kind and a numeric value"}
+    r = jarvis_policy.set_rule(kind, value)
+    if not isinstance(r, dict):
+        r = {"ok": bool(r)}
+    if r.get("error") or not r.get("ok"):
+        return {"error": str(r.get("error") or "could not set rule")[:200]}
+    return {"status": "set",
+            "label": "Set policy rule: {} = {:g}".format(kind, value)}
 
 
 # ─── registry ────────────────────────────────────────────────────────────────
@@ -878,6 +1210,42 @@ TOOLS: Dict[str, Dict[str, Any]] = {
         "description": "Use when asked what Jarvis remembers about the user: durable cross-session facts.",
         "parameters": _p({}),
     },
+    "factor_exposure": {
+        "fn": _t_factor_exposure, "mutating": False,
+        "description": "Use for 'what's really driving my returns / is X a value or momentum bet': Fama-French 5 + momentum factor loadings (beta per factor) with alpha and R-squared. Give a symbol for one stock; omit it to decompose the whole portfolio.",
+        "parameters": _p({"symbol": {"type": "string", "description": "Optional ticker — omit for the whole portfolio"}}),
+    },
+    "filing_summary": {
+        "fn": _t_filing_summary, "mutating": False,
+        "description": "Use for 'what did X just file / summarize the latest 10-K': the symbol's most recent SEC filing with date, form, analyst-style summary, signal (BULLISH/BEARISH/NEUTRAL/MATERIAL) and key points. Optional form_type filter (8-K, 10-K, 10-Q, S-1).",
+        "parameters": _p(dict(_SYM_PROP, form_type={"type": "string", "description": "Optional form filter, e.g. 10-K"}), ["symbol"]),
+    },
+    "get_track_record": {
+        "fn": _t_track_record, "mutating": False,
+        "description": "Use for 'how accurate are your forecasts / should I trust the model': the ensemble's scored hit rate and sample size, Brier calibration, and which component signal has earned the most skill. Cite this before leaning on a forecast.",
+        "parameters": _p({}),
+    },
+    "counterfactual_review": {
+        "fn": _t_counterfactual_review, "mutating": False,
+        "description": "Use for 'was selling X a mistake / how have my sells aged': replays past sells against today's prices — what each exited position would be worth now, the net dollar impact, and a verdict. Optional symbol filter.",
+        "parameters": _p({"symbol": {"type": "string", "description": "Optional ticker to review sells of"},
+                          "limit": {"type": "integer", "description": "How many sells to analyze (max 10)"}}),
+    },
+    "check_policy": {
+        "fn": _t_check_policy, "mutating": False,
+        "description": "Use for 'am I breaking my own rules / hold me accountable': checks the live portfolio against the user's standing policy rules and lists violations with severity. Run this before endorsing a new buy.",
+        "parameters": _p({}),
+    },
+    "get_watches": {
+        "fn": _t_get_watches, "mutating": False,
+        "description": "Use when asked what conditional watches are standing ('what are you watching for me'): each watch with its trigger conditions, whether it's still armed, and when it fired. Read-only; use add_watch to create one.",
+        "parameters": _p({}),
+    },
+    "recall_memory": {
+        "fn": _t_recall_memory, "mutating": False,
+        "description": "Use for 'what did we discuss about X / didn't I mention Y once': semantic search over Jarvis's long-term memory — past conversations, notes and facts ranked by relevance. Broader than list_memories, which only lists saved facts.",
+        "parameters": _p({"query": {"type": "string", "description": "What to look for, in plain English"}}, ["query"]),
+    },
     # ── mutating: proposal-only from the agent loop ──────────────────────────
     "remember_fact": {
         "fn": lambda args: _t_remember(args),
@@ -897,6 +1265,36 @@ TOOLS: Dict[str, Dict[str, Any]] = {
         "fn": _t_add_watchlist, "mutating": True,
         "description": "Add a symbol to the user's watchlist. The user must confirm before this executes.",
         "parameters": _p(dict(_SYM_PROP), ["symbol"]),
+    },
+    "add_watch": {
+        "fn": _t_add_watch, "mutating": True,
+        "description": "Create a conditional watch that fires when ALL its conditions hold at once — e.g. 'NVDA price > 200 AND VIX > 25'. 1-4 conditions; metrics: price and change_pct (both need a symbol), vix, book_day_pct (portfolio day move). The user must confirm before this executes.",
+        "parameters": _p({
+            "name": {"type": "string", "description": "Short watch name, e.g. 'NVDA breakout'"},
+            "conditions": {
+                "type": "array",
+                "description": "1-4 conditions, ALL must hold",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "metric": {"type": "string", "enum": ["price", "change_pct", "vix", "book_day_pct"]},
+                        "symbol": {"type": "string", "description": "Ticker — required for price/change_pct"},
+                        "op": {"type": "string", "enum": ["gt", "lt"]},
+                        "value": {"type": "number"},
+                    },
+                    "required": ["metric", "op", "value"],
+                },
+            },
+        }, ["name", "conditions"]),
+    },
+    "set_policy_rule": {
+        "fn": _t_set_policy_rule, "mutating": True,
+        "description": "Set or update one of the user's standing portfolio policy rules (the discipline check_policy enforces). Pass kind + numeric value, OR a natural-language text like 'max position 10%'. The user must confirm before this executes.",
+        "parameters": _p({
+            "kind": {"type": "string", "description": "Policy rule kind (use with value)"},
+            "value": {"type": "number", "description": "Numeric threshold for the rule"},
+            "text": {"type": "string", "description": "Alternative: the rule in plain English, e.g. 'max position 10%'"},
+        }),
     },
 }
 
@@ -925,14 +1323,64 @@ def valid_proposal_args(name: str, args: Dict[str, Any]) -> bool:
     if name == "add_price_alert":
         if str(args.get("alert_type") or "").lower() not in ("above", "below"):
             return False
-        if not str(args.get("symbol") or "").strip():
+        # Mirror _t_add_alert's own guards (_SYM_RE + the 10M cap) so a
+        # bad symbol or out-of-range price is rejected BEFORE the confirm,
+        # not at execution time after the user clicks confirm.
+        sym = str(args.get("symbol") or "").strip().upper()
+        if not _SYM_RE.match(sym):
             return False
         try:
-            return float(args.get("price")) > 0
+            price = float(args.get("price"))
         except (TypeError, ValueError):
             return False
+        return 0 < price < 10_000_000
     if name == "add_to_watchlist":
         return bool(str(args.get("symbol") or "").strip())
+    if name == "add_watch":
+        if not str(args.get("name") or "").strip():
+            return False
+        conds = args.get("conditions")
+        if not isinstance(conds, list) or not (1 <= len(conds) <= 4):
+            return False
+        for c in conds:
+            if not isinstance(c, dict):
+                return False
+            if c.get("metric") not in _WATCH_METRICS:
+                return False
+            if c.get("op") not in _WATCH_OPS:
+                return False
+            if _num_arg(c.get("value")) is None:
+                return False
+            sym = str(c.get("symbol") or "").strip().upper()
+            if c.get("metric") in _WATCH_SYMBOL_METRICS:
+                if not sym or not _SYM_RE.match(sym):
+                    return False
+            elif sym and not _SYM_RE.match(sym):
+                return False
+        return True
+    if name == "set_policy_rule":
+        kind = str(args.get("kind") or "").strip()
+        if not kind:
+            # Text variant — parse_rule resolves it at EXECUTION time; a
+            # non-empty phrase is enough to offer a confirm.
+            return bool(str(args.get("text") or "").strip())
+        if not re.match(r"^[A-Za-z][A-Za-z0-9_]{1,39}$", kind):
+            return False
+        val = _num_arg(args.get("value"))
+        if val is None:
+            return False
+        kinds = _policy_kinds()
+        if kinds and kind not in kinds:
+            return False
+        # Range-check known kinds against jarvis_policy's own ranges so an
+        # out-of-band value (max_weight_pct = 250) is rejected before the
+        # confirm rather than at execution where set_rule would fail.
+        rng = _policy_range(kind)
+        if rng is not None:
+            lo, hi = rng
+            if not (lo <= val <= hi):
+                return False
+        return True
     return True
 
 
@@ -944,6 +1392,16 @@ def proposal_label(name: str, args: Dict[str, Any]) -> str:
             str(args.get("symbol", "")).upper(), args.get("alert_type"), args.get("price"))
     if name == "add_to_watchlist":
         return "Add {} to watchlist".format(str(args.get("symbol", "")).upper())
+    if name == "add_watch":
+        return _watch_label(args if isinstance(args, dict) else {})
+    if name == "set_policy_rule":
+        kind = str(args.get("kind") or "").strip()
+        if kind:
+            v = _num_arg(args.get("value"))
+            return "Set policy rule: {} = {}".format(
+                kind, "{:g}".format(v) if v is not None else args.get("value"))
+        return 'Set policy rule: "{}"'.format(
+            str(args.get("text") or "").strip()[:140])
     return "{} {}".format(name, json.dumps(args))
 
 
@@ -987,7 +1445,22 @@ def execute_read(name: str, args: Dict[str, Any]) -> str:
                     if longest_k is None or longest_len == 0:
                         break
                     trimmed[longest_k] = trimmed[longest_k][:max(1, longest_len // 2)]
-                return json.dumps(trimmed, default=str)
+                # A dict with NO list fields (or one still over budget after
+                # halving — e.g. one giant string field) never shrank above.
+                # Truncate the longest string values until it fits, then fall
+                # back to a tiny envelope so we never emit oversized JSON.
+                for _ in range(40):
+                    if len(json.dumps(trimmed, default=str)) <= _RESULT_CHAR_BUDGET:
+                        break
+                    longest_k, longest_len = None, 0
+                    for k, v in trimmed.items():
+                        if isinstance(v, str) and len(v) > longest_len:
+                            longest_k, longest_len = k, len(v)
+                    if longest_k is None or longest_len <= 1:
+                        break
+                    trimmed[longest_k] = trimmed[longest_k][:max(1, longest_len // 2)]
+                if len(json.dumps(trimmed, default=str)) <= _RESULT_CHAR_BUDGET:
+                    return json.dumps(trimmed, default=str)
         except Exception:
             pass
         return json.dumps({"truncated": True, "note": "result too large to inline"})
@@ -1004,3 +1477,41 @@ def execute_mutating(name: str, args: Dict[str, Any]) -> Dict[str, Any]:
         return spec["fn"](args or {})
     except Exception as e:
         return {"error": str(e)[:200]}
+
+
+def execute_mutating_batch(actions: Any) -> Dict[str, Any]:
+    """Run up to 10 confirmed mutating actions in order. Each item is
+    {"tool": name, "args": {...}} and is individually re-checked against the
+    whitelist (is_mutating + valid_proposal_args) before executing through
+    execute_mutating — one malformed or failing item never stops the rest."""
+    results: List[Dict[str, Any]] = []
+    n_ok = 0
+    items = actions if isinstance(actions, list) else []
+    for item in items[:10]:
+        if not isinstance(item, dict):
+            results.append({"tool": None, "ok": False,
+                            "error": "malformed action (expected an object)"})
+            continue
+        tool = str(item.get("tool") or "")
+        targs = item.get("args") if isinstance(item.get("args"), dict) else {}
+        if not is_mutating(tool):
+            results.append({"tool": tool, "ok": False,
+                            "error": "not a confirmable action"})
+            continue
+        if not valid_proposal_args(tool, targs):
+            results.append({"tool": tool, "ok": False,
+                            "error": "invalid arguments"})
+            continue
+        r = execute_mutating(tool, targs)
+        if isinstance(r, dict) and not r.get("error"):
+            results.append({"tool": tool, "ok": True,
+                            "label": r.get("label") or proposal_label(tool, targs)})
+            n_ok += 1
+        else:
+            results.append({"tool": tool, "ok": False,
+                            "error": str((r or {}).get("error") or "failed")[:200]})
+    if isinstance(actions, list) and len(actions) > 10:
+        results.append({"tool": None, "ok": False,
+                        "error": "batch capped at 10 actions; "
+                                 "{} dropped".format(len(actions) - 10)})
+    return {"results": results, "n_ok": n_ok}

@@ -185,7 +185,16 @@ def _tte_from_expiry(expiry_str):
     try:
         exp_date = datetime.strptime(expiry_str, "%Y-%m-%d")
         if _NY_TZ is not None:
-            exp_dt = exp_date.replace(hour=16, minute=0, second=0, tzinfo=_NY_TZ)
+            naive_1600 = exp_date.replace(hour=16, minute=0, second=0)
+            # WHY (S6): pytz timezones must be attached via .localize(), NOT
+            # via replace(tzinfo=...). replace() binds pytz's default LMT entry
+            # (-04:56, the 1883 "local mean time" offset) instead of EST/EDT,
+            # mis-pricing every 0/1DTE by ~4 minutes. zoneinfo (no .localize)
+            # handles replace() correctly, so branch on capability.
+            if hasattr(_NY_TZ, "localize"):
+                exp_dt = _NY_TZ.localize(naive_1600)
+            else:
+                exp_dt = naive_1600.replace(tzinfo=_NY_TZ)
             now = datetime.now(timezone.utc)
         else:
             # Fallback if no tz library available: treat expiry as 16:00 UTC
@@ -452,7 +461,14 @@ def compute_gex(symbol):
         # but G already embedded total OI, so:
         # delta_shares = (net_gex / (S^2 * 0.01)) * price_change
         if spot > 0:
-            delta_shares = (net_gex / (spot * spot * 0.01)) * price_change
+            # WHY (S5): (net_gex/(S^2*0.01))*ΔS is the change in the dealer's
+            # delta INVENTORY (+Γ·ΔS). The hedge TRADE that keeps them
+            # delta-neutral is the OPPOSITE sign: -Γ·ΔS. With long gamma
+            # (net_gex>0) and an up move, dealers must SELL into strength to
+            # stay flat — that's the stabilizing flow GEX is meant to show.
+            # The unnegated value implied dealers BUYING the rally, inverting
+            # the entire long-gamma pinning narrative. Negate it.
+            delta_shares = -(net_gex / (spot * spot * 0.01)) * price_change
         else:
             delta_shares = 0.0
         dealer_hedge_estimates[label] = {

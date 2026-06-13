@@ -24,11 +24,21 @@ HEADERS_STWITS   = {"User-Agent": UA, "Accept": "application/json"}
 _cache = {}
 _lock = threading.Lock()
 
+# Sentinel for a NEGATIVE cache entry ("we already tried and got nothing").
+# A bare None can't be cached usefully: _cget couldn't tell a cached-None from
+# a plain miss, so it returned None either way and every caller re-hit the
+# (rate-limited) upstream regardless — the negative cache was inert. Callers
+# store this sentinel instead and translate it back to None on read.
+_NEG = {"__neg_cache__": True}
+
 
 def _cget(k):
+    """Return the cached value, the _NEG sentinel for a cached negative, or
+    None on a genuine miss/expiry. Callers that negative-cache must map _NEG
+    back to their own no-data return value."""
     with _lock:
         v = _cache.get(k)
-        if v and v[1] > time.time():
+        if v is not None and v[1] > time.time():
             return v[0]
         return None
 
@@ -157,6 +167,8 @@ def stocktwits_symbol_sentiment(symbol):
     """Pull recent messages for a symbol and compute bull/bear ratio."""
     cache_key = ("stwits", symbol.upper())
     hit = _cget(cache_key)
+    if hit is _NEG:
+        return None  # cached negative — don't re-hit the rate-limited API
     if hit is not None:
         return hit
     try:
@@ -165,9 +177,10 @@ def stocktwits_symbol_sentiment(symbol):
             # Stocktwits aggressively rate-limits (~200/hr without auth).
             # Cache the failure so idea_generator's parallel pool calls
             # don't retry on every page load — that's how we end up locked
-            # out for hours at a time.
+            # out for hours at a time. Store the _NEG sentinel (not None) so
+            # the cache is actually consultable on the next call.
             ttl = 1800 if r.status_code == 429 else 600
-            _cset(cache_key, None, ttl)
+            _cset(cache_key, _NEG, ttl)
             return None
         data = r.json()
         msgs = data.get("messages") or []
@@ -202,7 +215,7 @@ def stocktwits_symbol_sentiment(symbol):
         return out
     except Exception as e:
         log.warning("stocktwits %s: %s", symbol, e)
-        _cset(cache_key, None, 120)
+        _cset(cache_key, _NEG, 120)
         return None
 
 

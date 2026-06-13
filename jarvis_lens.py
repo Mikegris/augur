@@ -405,7 +405,13 @@ def _temperament_uncached() -> Dict[str, Any]:
     # Order by full timestamp so same-day BUY→SELL pairs resolve correctly.
     dated = [(t, _parse_day(t), _parse_ts(t)) for t in txns]
     dated = [(t, d, ts) for t, d, ts in dated if d is not None]
-    dated.sort(key=lambda x: x[2] or x[1])
+    # Sort by DAY first, then full timestamp as tiebreak. Sorting on the
+    # timestamp alone let rows with a missing ts (which fall back to the day,
+    # i.e. midnight) jump ahead of same-day rows that DO carry a time, and
+    # ties preserved input order — which arrives newest-first — reversing the
+    # intended chronology. (day, ts) keeps days monotonic and only uses the
+    # time to order within a day.
+    dated.sort(key=lambda x: (x[1], x[2] or x[1]))
     recent_count = sum(1 for t, d, ts in dated if (now - d).days <= 90)
 
     observations: List[Dict[str, str]] = []

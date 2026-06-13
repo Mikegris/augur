@@ -390,11 +390,18 @@ def _parse_ptr_pdf(pdf_bytes, member_name, doc_id, filing_year):
 
         i += 1
 
-    # Deduplicate (same ticker + date + type within same filing)
+    # Deduplicate (same ticker + date + type + amount within same filing).
+    # WHY (S15): a member can legitimately file two DISTINCT purchases of the
+    # same ticker on the same day in different dollar bands (e.g. one
+    # $1K-$15K and one $50K-$100K). Omitting amount_str from the key collapsed
+    # those into a single row, understating both the trade count and the
+    # aggregate dollar totals. Include amount_str so genuinely distinct
+    # band purchases survive while true duplicate lines still dedupe.
     seen = set()
     unique = []
     for t in transactions:
-        key = (t["ticker"], t["txn_date"], t["txn_type_raw"], t["owner"])
+        key = (t["ticker"], t["txn_date"], t["txn_type_raw"], t["owner"],
+               t.get("amount_str", ""))
         if key not in seen:
             seen.add(key)
             unique.append(t)

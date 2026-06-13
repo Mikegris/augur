@@ -501,11 +501,40 @@ def nowcast_revenue(symbol):
         # Estimated surprise magnitude
         estimated_surprise_pct = round((nowcast - 50) * 0.15, 2)
 
-        # Confidence level
+        # Confidence level.
+        # A signal counts as "available" only if its scorer actually had data.
+        # The old test (`detail != "data unavailable"`) only caught the SIX
+        # exception-fallback strings; every scorer's OWN no-data return uses a
+        # different phrase ("Revenue growth data unavailable", "Insufficient
+        # chart data", "No options data available", "Options chain
+        # unavailable", …), so a scorer that bailed for lack of data was still
+        # counted as available — inflating confidence to HIGH on near-empty
+        # inputs. Match the real per-scorer no-data verdicts: every no-data
+        # path returns score==50 with one of these details, so treat that exact
+        # pairing as "no data" and anything else as a genuine computed signal.
+        _NO_DATA_DETAILS = {
+            "data unavailable",
+            "Revenue growth data unavailable",
+            "Insufficient chart data",
+            "Insufficient price/volume data",
+            "No options data available",
+            "Options chain unavailable",
+            "Incomplete options data",
+            "Could not find ATM options",
+            "Invalid option prices",
+            "Price data unavailable",
+            "Insufficient chart data for sector comparison",
+        }
+
+        def _has_data(sig):
+            # A no-data return is uniquely identified by score==50 AND a known
+            # unavailable detail; a real computed signal that lands on 50 keeps
+            # a descriptive detail string and so still counts as data.
+            return not (sig.get("score") == 50
+                        and sig.get("detail") in _NO_DATA_DETAILS)
+
         all_scores = [s1, s2, s3, s4, s5, s6]
-        data_available = sum(
-            1 for sig in signals.values() if sig["detail"] != "data unavailable"
-        )
+        data_available = sum(1 for sig in signals.values() if _has_data(sig))
         score_range = max(all_scores) - min(all_scores)
 
         if data_available >= 4 and score_range < 40:

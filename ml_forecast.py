@@ -202,6 +202,11 @@ def _rf_predict(hist):
     if len(train) >= 80 + 20:
         holdout = train.iloc[-60:] if len(train) >= 60 else train.iloc[-20:]
         train_oos = train.iloc[: len(train) - len(holdout)]
+        # WHY (Q1): labels are 20-day forward returns, so the last 20 rows of
+        # train_oos have their realized outcome land *inside* the holdout window
+        # — training on them leaks holdout information and inflates the OOS
+        # score. Purge those overlapping rows before fitting the OOS model.
+        train_oos = train_oos.iloc[:-20] if len(train_oos) > 20 else train_oos.iloc[:0]
         if len(train_oos) >= 60 and len(holdout) >= 20:
             scaler_oos = StandardScaler()
             X_tr_oos = scaler_oos.fit_transform(train_oos[feature_cols].values)
@@ -301,14 +306,19 @@ def _trend_forecast(hist, days_ahead=30):
     lower_price = round(current_price * np.exp(log_ratio - ci_factor), 2)
 
     # Forecast path (daily for chart)
-    short_coeffs = np.polyfit(np.arange(min(60, n)), log_prices[-min(60, n):], 1)
+    w = min(60, n)
+    short_coeffs = np.polyfit(np.arange(w), log_prices[-w:], 1)
     path = []
     for d in range(days_ahead + 1):
-        t = min(60, n) + d
+        # WHY (Q12): the fit's x-axis runs 0..w-1, so the *last observed* day
+        # sits at t=w-1, not t=w. Evaluating day0 at t=w over-extrapolated the
+        # whole path by one step. Anchor day d at t=w-1+d. Likewise the band
+        # must vanish at d=0 (no forecast error on the anchor), so use √d.
+        t = (w - 1) + d
         log_p = np.polyval(short_coeffs, t)
         p = float(np.exp(log_p))
-        u = float(np.exp(log_p + res_std * np.sqrt(d + 1) * 1.96))
-        l = float(np.exp(log_p - res_std * np.sqrt(d + 1) * 1.96))
+        u = float(np.exp(log_p + res_std * np.sqrt(d) * 1.96))
+        l = float(np.exp(log_p - res_std * np.sqrt(d) * 1.96))
         path.append({"day": d, "price": round(p, 2), "upper": round(u, 2), "lower": round(l, 2)})
 
     # Trend direction
