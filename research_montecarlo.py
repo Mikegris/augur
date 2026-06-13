@@ -2,7 +2,11 @@
 Monte Carlo portfolio simulation — research module for AUGUR.
 
 Given a set of current holdings (symbol + market_value), sample N forward
-NAV paths over a horizon of 30 / 90 / 365 days using either:
+NAV paths over a horizon expressed in TRADING days (the bootstrap samples
+daily-return rows, so each step is one trading day, ~252/yr — NOT calendar
+days). Typical horizons: 21 (~1mo), 63 (~1qtr), 252 (~1yr) trading days.
+Earlier code drew 365 trading-day steps and labeled it "1 year", which is
+really ~17 calendar months; use 252 for a true one-year horizon. Methods:
 
   * historical_bootstrap (default): pull the last ~2y of daily returns for
     each holding, align on a common index, and sample full rows
@@ -86,13 +90,19 @@ _DEFAULT_RNG = np.random.default_rng()
 def simulate_portfolio(
     holdings: List[Dict[str, Any]],
     n_paths: int = 10000,
-    horizon_days: int = 365,
+    horizon_days: int = 252,
     method: str = "historical_bootstrap",
     seed: Optional[int] = None,
 ) -> Dict[str, Any]:
     """
     Run a Monte Carlo simulation of NAV over `horizon_days` and return
     percentile cones + summary stats.
+
+    WHY (Q8): `horizon_days` is in TRADING days (one bootstrapped return row
+    per step). The default is 252 (~one calendar year of trading), not 365 —
+    365 trading days is ~17 calendar months and was mislabeled "1 year".
+    NOTE for orchestrator: the app.py route default still needs updating to
+    252 (this module owns only the function default).
 
     Parameters
     ----------
@@ -126,7 +136,13 @@ def simulate_portfolio(
     cache_key = _make_cache_key(clean, horizon_days, method, n_paths)
 
     def _do():
-        return _simulate_uncached(clean, n_paths, horizon_days, method, seed)
+        # WHY (Q4): _simulate_uncached attaches a raw numpy `_paths` array for
+        # prob_of_target's exact computation. simulate_portfolio is the public/
+        # cacheable entry point, so strip it here — it isn't JSON-serializable
+        # and must not reach the cache or an HTTP response.
+        res = _simulate_uncached(clean, n_paths, horizon_days, method, seed)
+        res.pop("_paths", None)
+        return res
 
     if cache_store is not None and seed is None:
         try:
@@ -160,31 +176,44 @@ def prob_of_target(
         "implied_return_pct": ...,
     }
     """
-    sim = simulate_portfolio(holdings, n_paths=n_paths,
-                             horizon_days=horizon_days, method=method,
-                             seed=seed)
+    # WHY (Q4): go straight to _simulate_uncached so the raw `_paths` array is
+    # guaranteed present. simulate_portfolio routes through the JSON cache,
+    # which never carries the numpy paths, so the old code's `_paths` was
+    # ALWAYS None — the exact branch was dead and every call fell back to the
+    # Gaussian approximation with prob_touch=min(1,prob_term*1.4). That bound
+    # is also flat-out wrong for DOWNSIDE targets (a portfolio almost certain
+    # to terminate above a low target still has high touch probability, not a
+    # small multiple of a tiny terminal prob).
+    clean = _clean_holdings(holdings)
+    if not clean:
+        sim = _empty_response(holdings, horizon_days, method, n_paths,
+                              reason="No valid holdings supplied")
+    else:
+        sim = _simulate_uncached(clean, int(max(100, min(n_paths, _MAX_PATHS))),
+                                 int(max(1, min(horizon_days, _MAX_HORIZON))),
+                                 (method or "historical_bootstrap").lower(), seed)
     initial_nav = sim.get("initial_nav", 0.0) or 0.0
     target_nav = float(target_nav)
-    # Re-run with the *same parameters* and pull terminal column probability
-    # from the percentile cone. We don't have the raw paths cached, so
-    # approximate via the terminal distribution if available.
-    paths = sim.pop("_paths", None)  # populated only on freshly-computed
-    if paths is None:
-        # Approximate using terminal distribution percentiles + a Gaussian
-        # fit. Good enough for the prob-of-touch fallback — terminal Δ ~
-        # log-normal so this is a coarse approximation.
+    paths = sim.pop("_paths", None)
+    if paths is None or getattr(paths, "size", 0) == 0:
+        # No paths (empty/failed sim) — approximate via the terminal
+        # distribution Normal fit. Touch is then unknowable; report terminal.
         td = sim.get("terminal_distribution", {})
         mu = td.get("mean", initial_nav)
         sd = td.get("std", 0.0) or 1.0
-        # P(terminal ≥ target) under Normal(mu, sd^2)
         z = (target_nav - mu) / sd if sd else 0.0
         prob_term = float(0.5 * math.erfc(z / math.sqrt(2)))
-        prob_touch = min(1.0, prob_term * 1.4)  # crude reflection upper bound
+        prob_touch = prob_term
     else:
         terminal = paths[:, -1]
-        prob_term = float((terminal >= target_nav).mean())
-        # Path-touch probability: any column in any path ≥ target.
-        prob_touch = float((paths >= target_nav).any(axis=1).mean())
+        # Direction matters: an UP-target is "ever ≥ target", a DOWN-target
+        # (below the starting NAV) is "ever ≤ target".
+        if target_nav >= initial_nav:
+            prob_term = float((terminal >= target_nav).mean())
+            prob_touch = float((paths >= target_nav).any(axis=1).mean())
+        else:
+            prob_term = float((terminal <= target_nav).mean())
+            prob_touch = float((paths <= target_nav).any(axis=1).mean())
 
     implied_return_pct = ((target_nav / initial_nav) - 1.0) * 100.0 if initial_nav else None
     return {
@@ -206,7 +235,12 @@ def _clean_holdings(holdings: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """Drop holdings without a symbol or market_value, normalise types."""
     if not isinstance(holdings, list):
         return []
-    clean = []
+    # WHY (Q6): the same symbol can appear in multiple rows (e.g. split lots,
+    # multiple accounts). Emitting one cleaned entry per row left duplicate
+    # symbols, and the weight vector (mv / total_nav per entry) then assigned
+    # that symbol weight TWICE — so a portfolio with one duplicated holding
+    # summed to >1.0 (1.5x phantom leverage). Aggregate market_value by symbol.
+    agg: Dict[str, float] = {}
     for h in holdings:
         if not isinstance(h, dict):
             continue
@@ -219,8 +253,9 @@ def _clean_holdings(holdings: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
             continue
         if mv <= 0:
             continue
-        clean.append({"symbol": str(sym).upper(), "market_value": mv})
-    return clean
+        key = str(sym).upper()
+        agg[key] = agg.get(key, 0.0) + mv
+    return [{"symbol": k, "market_value": v} for k, v in agg.items()]
 
 
 def _make_cache_key(clean: List[Dict[str, Any]], horizon_days: int,
@@ -320,13 +355,21 @@ def _build_returns_matrix(symbols: List[str]) -> Tuple[np.ndarray, List[str], Li
     # has a real return for every kept holding, which is what makes the
     # block bootstrap valid.
     df = pd.concat(series, axis=1, join="outer").sort_index().dropna()
+    # WHY (Q14): the old fallback re-joined with join="inner" + dropna(), but
+    # that is identical to outer+dropna() (both keep only rows with every
+    # column present) — a literal no-op. The real cause of a starved matrix is
+    # ONE much-newer symbol forcing the common date window tiny. Fix: drop the
+    # shortest-history symbol(s) into `dropped` and rebuild until we clear the
+    # 30-row floor (or run out of symbols).
+    while (df.empty or len(df) < 30) and len(series) > 1:
+        # Evict the symbol with the fewest observations — it is the binding
+        # constraint on the intersection of dates.
+        shortest_i = min(range(len(series)), key=lambda i: len(series[i]))
+        dropped.append(str(series[shortest_i].name))
+        series.pop(shortest_i)
+        df = pd.concat(series, axis=1, join="outer").sort_index().dropna()
     if df.empty or len(df) < 30:
-        # Fall back to inner join with a more forgiving alignment if outer
-        # join scrubbed too much data (common when one holding is much
-        # newer than the others).
-        df = pd.concat(series, axis=1, join="inner").dropna()
-    if df.empty or len(df) < 30:
-        return np.zeros((0, 0)), [], dropped + [s.name for s in series]
+        return np.zeros((0, 0)), [], dropped + [str(s.name) for s in series]
 
     kept = [str(c) for c in df.columns]
     return df.to_numpy(dtype=np.float64, copy=False), kept, dropped
@@ -527,6 +570,12 @@ def _simulate_uncached(clean: List[Dict[str, Any]], n_paths: int,
         "lookback_days_used": int(R.shape[0]),
         "elapsed_ms": int(elapsed * 1000),
         "as_of": _dt.datetime.now(_timezone.utc).date().isoformat(),
+        # WHY (Q4): raw dollar NAV paths, attached so prob_of_target can do an
+        # EXACT terminal/touch probability instead of a Gaussian approximation.
+        # Callers that hit the JSON cache won't see this (np array isn't
+        # serialized there) — prob_of_target deliberately calls _simulate_uncached
+        # directly to guarantee it's present. Stripped before any HTTP response.
+        "_paths": nav_paths * surviving_mv,
     }
 
 

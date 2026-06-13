@@ -48,6 +48,7 @@
   --amber:         #ffaa00;
   --amber-dim:     #cc8800;
   --amber-glow:    rgba(255, 170, 0, 0.15);
+  --yellow:        #ffd633;   /* distinct from amber; used by .col-yellow */
 
   --red:           #ff3355;
   --red-dim:       #cc2244;
@@ -2159,6 +2160,10 @@ body::before {
   .jarvis-pri.p1 { animation: none !important; }
   .sub-nav-item.active::after { animation: none !important; }
   .spinner::after { animation: none !important; }
+  /* explicit guards for entrance/pulse animations the universal rule only
+     speeds up rather than disables (subnav-indicator-in is already covered by
+     .sub-nav-item.active::after above) */
+  .score-bar-fill, .ml-detail-panel, .term-spinner-text { animation: none !important; }
 }
 
 /* ── High contrast preference (subtle bump) ─────────────────────── */
@@ -2183,6 +2188,9 @@ body::before {
   .panel, .kpi-card, .modal, .toast { box-shadow: none !important; background: white !important; }
   .skeleton { animation: none !important; background: #eee !important; }
   .kpi-value, .brand-name { text-shadow: none !important; }
+  /* still entrance/pulse animations on paper */
+  .score-bar-fill, .ml-detail-panel, .term-spinner-text,
+  .sub-nav-item.active::after { animation: none !important; }
 }
 
 /* ── JARVIS: briefing panel + command palette ───────────────────── */

@@ -25,6 +25,7 @@ compatible.
 from __future__ import annotations
 
 import logging
+import os
 import re
 from typing import Any, Dict, List, Optional
 
@@ -82,7 +83,10 @@ def _web_research_uncached(query: str) -> Dict[str, Any]:
         msg = str(e)
         if "web_search" in msg or "tool" in msg.lower():
             return {"note": "web search isn't available on this OpenAI account/model."}
-        return {"note": "web search failed (network or rate limit) — try again shortly."}
+        # Network / rate-limit is transient — flag it so cache_store doesn't
+        # freeze the failure for the full TTL.
+        return {"error": "web_transient",
+                "note": "web search failed (network or rate limit) — try again shortly."}
 
 
 def _extract_citations(resp: Any) -> List[Dict[str, str]]:
@@ -126,7 +130,8 @@ def search_news(query: str, days: int = 14) -> Dict[str, Any]:
                                                timespan="{}d".format(days))
         except Exception as e:
             log.debug("search_news failed: %s", e)
-            return {"note": "news search unavailable right now."}
+            return {"error": "news_unavailable",
+                    "note": "news search unavailable right now."}
         if not arts:
             return {"query": query, "articles": [],
                     "note": "no recent news matched — try a broader phrasing."}
@@ -179,21 +184,33 @@ def search_sec_filings(query: str, forms: Optional[str] = None) -> Dict[str, Any
         if forms:
             params["forms"] = forms
         try:
-            headers = {"User-Agent": "AUGUR research jarvis@augur.local"}
+            # SEC fair-use requires a routable contact UA; the bare
+            # jarvis@augur.local (.local is mDNS-reserved) gets filtered and
+            # 429-throttled. Mirror sec_edgar.py / sec_filings_v2.py's UA.
+            ua = os.environ.get(
+                "AUGUR_SEC_UA", "AUGUR Research Bot research@augur-app.org")
+            headers = {"User-Agent": ua}
             r = requests.get(_EFTS, params=params, headers=headers, timeout=15)
             if r.status_code != 200:
-                return {"query": query, "filings": [],
+                # Transient: carry an "error" key (and keep the envelope to
+                # <=3 keys) so cache_store's negative guard won't freeze this
+                # as a success for the full TTL.
+                return {"error": "edgar_status",
                         "note": "EDGAR returned {} — it rate-limits; try again.".format(r.status_code)}
             hits = (r.json().get("hits", {}) or {}).get("hits", []) or []
         except Exception as e:
             log.debug("search_sec_filings failed: %s", e)
-            return {"note": "SEC search unavailable right now."}
+            return {"error": "sec_unavailable",
+                    "note": "SEC search unavailable right now."}
         out = []
         for h in hits[:8]:
             src = h.get("_source", {}) or {}
             disp = src.get("display_names") or []
             out.append({
-                "form": src.get("file_type") or src.get("root_form"),
+                # file_type is the exhibit type and root_form doesn't exist
+                # on these hits; the actual form lives under "form" with
+                # "root_forms" (plural, a list) as the fallback.
+                "form": src.get("form") or (src.get("root_forms") or [None])[0],
                 "filer": disp[0] if disp else None,
                 "filed": src.get("file_date"),
                 "id": h.get("_id"),
@@ -220,7 +237,8 @@ def search_hacker_news(query: str) -> Dict[str, Any]:
             hits = hn_sentiment._algolia_search(query, hours=720, hits=20)
         except Exception as e:
             log.debug("search_hacker_news failed: %s", e)
-            return {"note": "HN search unavailable right now."}
+            return {"error": "hn_unavailable",
+                    "note": "HN search unavailable right now."}
         stories = [h for h in hits if h.get("title")][:8]
         if not stories:
             return {"query": query, "stories": [], "note": "no recent HN discussion."}

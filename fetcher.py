@@ -10,6 +10,7 @@ import numpy as np
 from datetime import datetime, timedelta, timezone
 import time
 import threading
+import re
 
 try:
     from zoneinfo import ZoneInfo
@@ -112,6 +113,16 @@ def _cached(key, ttl=60):
 
 def _set_cache(key, value, ttl=60):
     cache_store.cache_set(key, value, ttl)
+    # Whenever a real price lands in the quote cache, invalidate any stale
+    # negative verdict for that symbol so a recovered upstream isn't shadowed
+    # by a still-live ("quote_neg",sym) entry for the rest of its 10-min TTL.
+    try:
+        if (isinstance(key, tuple) and len(key) == 2
+                and key[0] in ("quote", "quote_batch")
+                and isinstance(value, dict) and value.get("price") is not None):
+            cache_store.cache_delete(("quote_neg", key[1]))
+    except Exception:
+        pass
 
 # ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -468,11 +479,16 @@ def _confirmed_no_quote(err) -> bool:
     if not s:
         return False
     # Transient signatures first — any of these means "try again later".
-    # "50" catches requests' "500/502/503 Server Error" status prefixes.
     for transient in ("rate limit", "too many requests", "429", "timed out",
-                      "timeout", "connection", "temporarily", "50"):
+                      "timeout", "connection", "temporarily"):
         if transient in s:
             return False
+    # 5xx server errors are transient too, but match them on a word boundary:
+    # a bare `"50" in s` substring test also fired on "$50", "/api/v50",
+    # "AAPL50" etc., misclassifying genuine no-data answers as transient and
+    # defeating the whole negative cache.
+    if re.search(r"\b50[0-9]\b", s):
+        return False
     return ("404" in s or "not found" in s or "delisted" in s
             or "empty result" in s or "no data found" in s)
 
@@ -486,11 +502,21 @@ def _maybe_negative_cache_quote(symbol: str, direct_probe) -> None:
             return
         if not _confirmed_no_quote(direct_probe.get("error")):
             return
+        # Yahoo is NOT authoritative for crypto: a coin we can price via
+        # CoinGecko routinely 404s on Yahoo (or CG is merely cooling down).
+        # Negative-caching on Yahoo's verdict would blank a perfectly valid
+        # coin, so skip it whenever we recognise the symbol as a coin.
+        if _coin_id_for_yf_symbol(symbol) is not None:
+            return
         # A previously-good quote (even an expired one) outranks one bad
         # answer — Yahoo intermittently 404s symbols it served minutes ago.
-        stale = cache_store.cache_get_stale(("quote", sym))
-        if isinstance(stale, dict) and stale.get("price") is not None:
-            return
+        # Batch quotes are stored under ("quote_batch",sym), so consult both
+        # keyspaces; a single-quote lookup alone missed the batch-warmed path
+        # entirely and let live symbols get negative-cached.
+        for stale_key in (("quote", sym), ("quote_batch", sym)):
+            stale = cache_store.cache_get_stale(stale_key)
+            if isinstance(stale, dict) and stale.get("price") is not None:
+                return
         # No "error" key on purpose: cache_get drops small error-envelopes
         # at read time, which would silently disable this negative cache.
         envelope = {"symbol": sym, "note": "no_quote",
@@ -619,8 +645,16 @@ def get_quotes_batch(symbols: list) -> dict:
             cached = _cached(("quote_batch", su), ttl=30)
         if cached is not None and cached.get("price") is not None:
             results[su] = cached
-        else:
-            to_fetch.append(sym)
+            continue
+        # Honor the negative cache here too: get_quote() short-circuits known
+        # -bad symbols, but the batch path used to skip the check and re-walk
+        # the network for every confirmed-miss symbol on every briefing/strip
+        # refresh. Serve the price-less envelope straight through instead.
+        neg = _cached(("quote_neg", su))
+        if isinstance(neg, dict) and neg.get("note") == "no_quote":
+            results[su] = dict(neg)
+            continue
+        to_fetch.append(sym)
 
     # yfinance's fast_info is lazy and per-ticker — iterating it serially fires
     # one network round-trip per symbol (≈16s for the 36-name movers list, ≈8s
@@ -1132,12 +1166,15 @@ def get_top_movers() -> dict:
     of liquid large-cap names and re-sort by intraday change_pct within that
     set. Anything outside the curated universe will never appear here.
 
-    Coalesce-cached 90s to match the warmer's movers cadence: the warmer
-    refreshes the entry right as it expires, so route hits in between are
-    pure cache reads instead of a 36-symbol re-batch (~1.4s observed).
-    An all-empty result is failure-shaped and never cached.
+    Coalesce-cached 60s to match the warmer's MARKET_INTERVAL: the warmer
+    refreshes the entry every 60s right as it expires, so route hits in
+    between are pure cache reads instead of a 36-symbol re-batch (~1.4s
+    observed). The old 90s TTL left a 30s cold window every cycle (warmer
+    fires at 60s, entry still valid; entry expires at 90s; next warm not
+    until 120s), so 1-in-3 ticks saw a miss. An all-empty result is
+    failure-shaped and never cached.
     """
-    return cache_store.coalesce(("top_movers",), 90, _top_movers_uncached)
+    return cache_store.coalesce(("top_movers",), 60, _top_movers_uncached)
 
 
 def _top_movers_uncached() -> dict:

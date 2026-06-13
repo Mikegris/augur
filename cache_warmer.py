@@ -96,14 +96,19 @@ HYPOTHESIS_SCORE_INTERVAL = 24 * 3600  # research_hypothesis daily scoring
 CLUSTER_INTERVAL = int(5.5 * 3600)  # synth_cluster bull+bear scans (SCAN_TTL_S = 6h)
 DIVMAP_INTERVAL = 55 * 60           # synth_divmap divergence scan (_CACHE_TTL = 1h)
 SECTORFLOW_INTERVAL = 9 * 60        # synth_sectorflow heatmap (CACHE_TTL = 600s)
-# Jarvis briefing (_BRIEFING_TTL = 240s) — warmed just inside the TTL so the
-# Overview's first paint reads a hot cache instead of paying the full
-# briefing pipeline (quote batch + earnings + regime, multi-second cold).
-# get_briefing() is read-through, so a tick that lands while the entry is
-# still fresh is a cheap cache read; the recompute lands within one cadence
-# of expiry rather than at the exact boundary — close enough, and it keeps
-# the warmer from forcing extra LLM-voice calls the way force_refresh would.
-JARVIS_BRIEFING_INTERVAL = 200
+# Jarvis briefing (_BRIEFING_TTL = 240s) — warmed at ≤ TTL/2 so the Overview's
+# first paint reads a hot cache instead of paying the full briefing pipeline
+# (quote batch + earnings + regime, multi-second cold).
+# get_briefing() is read-through: a tick that lands while the entry is still
+# fresh is a cheap cache read (a no-op refresh), and a tick after expiry
+# recomputes once. The OLD 200s interval against a 240s TTL left a ~160s cold
+# window — the entry expired at 240s but the next warm didn't fire until 400s,
+# so reads in that gap paid the full cold pipeline. At 115s the warm cadence
+# guarantees a recompute within ~115s of expiry, collapsing the cold window.
+# Tradeoff: we deliberately keep a PLAIN get_briefing() (not force_refresh)
+# so the warmer never triggers an extra LLM-voice call each tick; the 115s
+# cadence is what actually keeps the entry warm, not a forced recompute.
+JARVIS_BRIEFING_INTERVAL = 115
 # Daily housekeeping: prune monotonically-growing tables + occasional VACUUM.
 # Without this an active user's wealth.db grows without bound (observed 535MB).
 PRUNE_INTERVAL = 24 * 3600
@@ -214,12 +219,18 @@ def _portfolio_symbols():
 
 
 def _watchlist_symbols():
+    """Best-effort (equity, crypto) split of watchlist symbols. Crypto must be
+    warmed under the same yfinance `SYM-USD` form the quote path uses; merging
+    it into the equity batch (the old behavior) asked Yahoo for a bare coin
+    ticker it doesn't serve, so those rows never warmed."""
     try:
         import database as db
         rows = db.get_watchlist() or []
-        return [r["symbol"] for r in rows][:PORTFOLIO_WARM_CAP]
+        eq = [r["symbol"] for r in rows if r.get("asset_type") != "crypto"]
+        crypto = [r["symbol"] for r in rows if r.get("asset_type") == "crypto"]
+        return eq[:PORTFOLIO_WARM_CAP], crypto[:PORTFOLIO_WARM_CAP]
     except Exception:
-        return []
+        return [], []
 
 
 def _loop():
@@ -265,15 +276,28 @@ def _loop():
             time.sleep(INTER_REQUEST_DELAY)
 
         # ── portfolio quotes (cheap when batched) ────────────────────
+        # Equity and crypto legs are gated on SEPARATE cadence labels. The old
+        # code gated the whole block on "quotes": a crypto-only portfolio left
+        # all_eq empty, so _safe("quotes",…) never ran and never stamped
+        # _last_cycle["quotes"] — making _due("quotes") true on every 15s tick
+        # and re-warming the crypto batch ~20× more often than intended (its
+        # failures even recorded under "quotes_crypto", a key the gate never
+        # checked). Each leg now stamps/backs-off under its own key.
+        eq, crypto = _portfolio_symbols()
+        wl_eq, wl_crypto = _watchlist_symbols()
         if _due("quotes", QUOTES_INTERVAL, now):
-            eq, crypto = _portfolio_symbols()
-            wl = _watchlist_symbols()
-            all_eq = list(dict.fromkeys(eq + wl))  # dedupe, keep order
+            all_eq = list(dict.fromkeys(eq + wl_eq))  # dedupe, keep order
             if all_eq:
                 _safe("quotes", fetcher.get_quotes_batch, all_eq)
                 time.sleep(INTER_REQUEST_DELAY)
-            if crypto:
-                yf_crypto = [s + "-USD" for s in crypto]
+        if _due("quotes_crypto", QUOTES_INTERVAL, now):
+            all_crypto = list(dict.fromkeys(crypto + wl_crypto))
+            if all_crypto:
+                # Mirror get_portfolio_quotes' guard: holdings already stored
+                # as "BTC-USD" must NOT become "BTC-USD-USD" (which Yahoo 404s),
+                # so only append the suffix when it isn't already present.
+                yf_crypto = [s if s.upper().endswith("-USD") else s + "-USD"
+                             for s in all_crypto]
                 _safe("quotes_crypto", fetcher.get_quotes_batch, yf_crypto)
                 time.sleep(INTER_REQUEST_DELAY)
 
@@ -298,9 +322,15 @@ def _loop():
             if any_ok or not eq:
                 _last_cycle["news"] = time.time()
 
-        if _due("benchmark", BENCHMARK_INTERVAL, now):
-            _safe("benchmark", fetcher.get_benchmark_history, "SPY", "1y")
-            time.sleep(INTER_REQUEST_DELAY)
+        # NOTE: benchmark warm task dropped (was wasted budget). It warmed
+        # the cache key ("bench","SPY","1y", base_value=None), but the route
+        # always calls get_benchmark_history with a per-user base_value (the
+        # portfolio's starting value) so the bars are normalized into that
+        # row — a different cache key the warm could never match. Since the
+        # normalization is baked into the cached value, there is no shared
+        # base_value=None raw form for the route to reuse, so warming it just
+        # spent a yfinance round-trip on an entry nothing reads. If a raw
+        # (unnormalized) cache form is added later, warm that instead.
 
         # Chart history for portfolio + watchlist symbols at the Research
         # view's default period (6mo / 1d). Without this, the first time a
@@ -309,8 +339,8 @@ def _loop():
         # to pile on rate-limited upstreams.
         if _due("chart", CHART_INTERVAL, now):
             eq, _ = _portfolio_symbols()
-            wl = _watchlist_symbols()
-            symbols = list(dict.fromkeys(eq + wl))[:PORTFOLIO_WARM_CAP]
+            wl_eq, _ = _watchlist_symbols()
+            symbols = list(dict.fromkeys(eq + wl_eq))[:PORTFOLIO_WARM_CAP]
             any_ok = False
             for sym in symbols:
                 any_ok = _safe("chart", fetcher.get_chart_data, sym, "6mo", "1d") or any_ok

@@ -403,20 +403,32 @@ def financedb_universe(asset="equities"):
     """Returns parsed JerBouma FinanceDatabase rows (bz2-compressed CSV)."""
     if asset not in ("equities", "etfs", "funds", "indices", "currencies", "cryptos", "moneymarkets"):
         asset = "equities"
+    # Double-checked locking: the lock guards only the cache dict, NOT the
+    # 30s download+decompress. Holding it across requests.get() serialized
+    # every asset's first load behind any other in-flight load — a single slow
+    # bz2 fetch froze all the others. Worst case now is two threads racing the
+    # same cold asset both download (rare, idempotent), which is far cheaper
+    # than a global stall.
     with _FINDB_LOCK:
-        if asset in _FINDB_UNIVERSE:
-            return _FINDB_UNIVERSE[asset]
-        try:
-            url = f"{FINDB_BASE}/{asset}.bz2"
-            r = requests.get(url, headers=HEADERS, timeout=30)
-            r.raise_for_status()
-            text = bz2.decompress(r.content).decode("utf-8", errors="replace")
-            rows = list(csv.DictReader(io.StringIO(text)))
-            _FINDB_UNIVERSE[asset] = rows
-            return rows
-        except Exception as e:
-            log.warning("financedb load failed (%s): %s", asset, e)
-            return []
+        cached = _FINDB_UNIVERSE.get(asset)
+    if cached is not None:
+        return cached
+    try:
+        url = f"{FINDB_BASE}/{asset}.bz2"
+        r = requests.get(url, headers=HEADERS, timeout=30)
+        r.raise_for_status()
+        text = bz2.decompress(r.content).decode("utf-8", errors="replace")
+        rows = list(csv.DictReader(io.StringIO(text)))
+    except Exception as e:
+        log.warning("financedb load failed (%s): %s", asset, e)
+        return []
+    with _FINDB_LOCK:
+        # Re-check: another thread may have populated it while we downloaded.
+        existing = _FINDB_UNIVERSE.get(asset)
+        if existing is not None:
+            return existing
+        _FINDB_UNIVERSE[asset] = rows
+    return rows
 
 
 def financedb_filter(asset="equities", *, country=None, sector=None, industry=None, exchange=None, limit=200):

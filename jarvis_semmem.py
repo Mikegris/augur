@@ -156,6 +156,25 @@ def store(kind, ref_id, text):
         return False
 
 
+def forget(kind, ref_id):
+    """Delete the embedding mirror for (kind, ref_id). Returns True when a
+    row was removed. Without this, "forget N" drops the jarvis_memory row but
+    leaves its embedding behind, so recall() re-injects the "forgotten" fact.
+    Fail-open: any error returns False rather than breaking the forget path."""
+    try:
+        import database as db
+        _ensure_table()
+        with db._write_lock:
+            cur = db.get_conn().execute(
+                "DELETE FROM jarvis_embeddings WHERE kind=? AND ref_id=?",
+                (str(kind), str(ref_id)))
+            db.get_conn().commit()
+            return cur.rowcount > 0
+    except Exception as e:
+        log.debug("semmem forget failed: %s", e)
+        return False
+
+
 def recall(query, k=6, kinds=None):
     """Top-k semantically similar rows for `query`.
 

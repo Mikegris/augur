@@ -433,11 +433,18 @@ def update_account(account_id, name=None, account_type=None, institution=None, n
 def delete_account(account_id):
     with _write_lock:
         conn = get_conn()
-        # Nullify portfolio/transaction references first
-        conn.execute("UPDATE portfolio SET account_id = NULL WHERE account_id = ?", (account_id,))
-        conn.execute("UPDATE transactions SET account_id = NULL WHERE account_id = ?", (account_id,))
-        conn.execute("DELETE FROM accounts WHERE id = ?", (account_id,))
-        conn.commit()
+        try:
+            # Nullify portfolio/transaction references first. All three
+            # statements must land together — a failure after the UPDATEs but
+            # before the DELETE (or vice versa) would leave the account half
+            # detached. Roll back so nothing is committed on partial failure.
+            conn.execute("UPDATE portfolio SET account_id = NULL WHERE account_id = ?", (account_id,))
+            conn.execute("UPDATE transactions SET account_id = NULL WHERE account_id = ?", (account_id,))
+            conn.execute("DELETE FROM accounts WHERE id = ?", (account_id,))
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
 
 
 # ── Portfolio ──────────────────────────────────────────────────────────────────
@@ -476,10 +483,26 @@ def add_position(symbol, name, shares, avg_cost, asset_type="stock", sector="", 
             ).fetchone()
         if existing:
             total_shares = existing["shares"] + shares
-            total_cost = (existing["shares"] * existing["avg_cost"]) + (shares * avg_cost)
-            # A fully-offsetting add (shares == -existing) zeroes the position;
-            # guard the average so it doesn't ZeroDivisionError and abort the write.
-            new_avg = (total_cost / total_shares) if total_shares else 0.0
+            if shares < 0:
+                # A partial sell: the cost basis (avg_cost) is unchanged by a
+                # sale — only the share count drops. The old weighted-average
+                # math used the SELL price as if it were a buy, which corrupted
+                # basis (and could drive avg_cost to 0/negative). Reject an
+                # over-sell (would make holdings negative) rather than silently
+                # flip the position short.
+                if total_shares < 0:
+                    raise ValueError(
+                        f"Cannot sell {abs(shares)} shares of {symbol.upper()}; "
+                        f"only {existing['shares']} held"
+                    )
+                new_avg = existing["avg_cost"]
+                if total_shares == 0:
+                    # Fully closed: basis is meaningless, leave it at the prior
+                    # avg so history reads sanely; shares==0 marks it flat.
+                    new_avg = existing["avg_cost"]
+            else:
+                total_cost = (existing["shares"] * existing["avg_cost"]) + (shares * avg_cost)
+                new_avg = (total_cost / total_shares) if total_shares else 0.0
             conn.execute(
                 "UPDATE portfolio SET shares = ?, avg_cost = ?, name = ? WHERE id = ?",
                 (total_shares, new_avg, name or existing["name"], existing["id"])
@@ -530,20 +553,37 @@ def get_watchlist():
 
 
 def add_to_watchlist(symbol, name="", asset_type="stock", alert_high=None, alert_low=None, notes=""):
+    sym = symbol.upper()
     with _write_lock:
         conn = get_conn()
         try:
             conn.execute(
                 "INSERT INTO watchlist (symbol, name, asset_type, alert_high, alert_low, notes) VALUES (?,?,?,?,?,?)",
-                (symbol.upper(), name, asset_type, alert_high, alert_low, notes)
+                (sym, name, asset_type, alert_high, alert_low, notes)
             )
             conn.commit()
             result = True
         except sqlite3.IntegrityError:
-            # Update alerts if already exists
+            # Only treat this as a duplicate if a row with that symbol actually
+            # exists; any other constraint failure (e.g. NOT NULL) must surface
+            # rather than be swallowed as a no-op "update".
+            existing = conn.execute(
+                "SELECT 1 FROM watchlist WHERE symbol = ?", (sym,)
+            ).fetchone()
+            if not existing:
+                raise
+            # On a re-add, only overwrite fields the caller explicitly passed.
+            # The old blanket UPDATE wiped alert_high/low/notes to None/'' even
+            # when the caller didn't supply them (e.g. a plain `watch AAPL`
+            # erased alerts set earlier). Pass-through None/'' means "leave it".
             conn.execute(
-                "UPDATE watchlist SET alert_high = ?, alert_low = ?, notes = ? WHERE symbol = ?",
-                (alert_high, alert_low, notes, symbol.upper())
+                """UPDATE watchlist SET
+                       alert_high = COALESCE(?, alert_high),
+                       alert_low  = COALESCE(?, alert_low),
+                       notes      = CASE WHEN ? <> '' THEN ? ELSE notes END,
+                       name       = CASE WHEN ? <> '' THEN ? ELSE name END
+                   WHERE symbol = ?""",
+                (alert_high, alert_low, notes, notes, name, name, sym)
             )
             conn.commit()
             result = False
@@ -731,20 +771,27 @@ def jarvis_add_exchange(conversation_id, question, answer, symbol=None):
     to questions. Writing the pair together keeps them adjacent."""
     with _write_lock:
         conn = get_conn()
-        conn.execute(
-            "INSERT INTO jarvis_messages (conversation_id, role, content, symbol) "
-            "VALUES (?,?,?,?)",
-            (conversation_id, "user", (question or "")[:4000], symbol))
-        conn.execute(
-            "INSERT INTO jarvis_messages (conversation_id, role, content, symbol) "
-            "VALUES (?,?,?,?)",
-            (conversation_id, "assistant", (answer or "")[:4000], symbol))
-        conn.execute(
-            "DELETE FROM jarvis_messages WHERE conversation_id=? AND id NOT IN "
-            "(SELECT id FROM jarvis_messages WHERE conversation_id=? "
-            " ORDER BY id DESC LIMIT ?)",
-            (conversation_id, conversation_id, _JARVIS_TURN_LIMIT))
-        conn.commit()
+        try:
+            conn.execute(
+                "INSERT INTO jarvis_messages (conversation_id, role, content, symbol) "
+                "VALUES (?,?,?,?)",
+                (conversation_id, "user", (question or "")[:4000], symbol))
+            conn.execute(
+                "INSERT INTO jarvis_messages (conversation_id, role, content, symbol) "
+                "VALUES (?,?,?,?)",
+                (conversation_id, "assistant", (answer or "")[:4000], symbol))
+            conn.execute(
+                "DELETE FROM jarvis_messages WHERE conversation_id=? AND id NOT IN "
+                "(SELECT id FROM jarvis_messages WHERE conversation_id=? "
+                " ORDER BY id DESC LIMIT ?)",
+                (conversation_id, conversation_id, _JARVIS_TURN_LIMIT))
+            conn.commit()
+        except Exception:
+            # Roll back so we never commit a lone user message (or a U/A pair
+            # without the trim) — a partial write here is exactly what corrupts
+            # the Q/A adjacency this function exists to protect.
+            conn.rollback()
+            raise
 
 
 def jarvis_get_messages(conversation_id, limit=40):
@@ -994,7 +1041,7 @@ def get_cached_filing(accession):
     row = conn.execute(
         """SELECT * FROM sec_filings_cache
            WHERE accession = ?
-           AND datetime(cached_at) > datetime('now', '-24 hours')""",
+           AND cached_at > datetime('now', '-24 hours')""",
         (accession,)
     ).fetchone()
     # connection reused (thread-local pool)
@@ -1039,7 +1086,7 @@ def get_cached_insiders(ticker, days=90):
     rows = conn.execute(
         """SELECT * FROM insider_transactions_cache
            WHERE ticker = ?
-           AND datetime(cached_at) > datetime('now', ?)
+           AND cached_at > datetime('now', ?)
            ORDER BY date DESC""",
         (ticker.upper(), f"-{days} days")
     ).fetchall()
@@ -1087,7 +1134,7 @@ def get_cached_institutional(fund_cik):
     row = conn.execute(
         """SELECT * FROM institutional_cache
            WHERE fund_cik = ?
-           AND datetime(cached_at) > datetime('now', '-7 days')
+           AND cached_at > datetime('now', '-7 days')
            ORDER BY filing_date DESC LIMIT 1""",
         (str(fund_cik),)
     ).fetchone()
@@ -1134,7 +1181,7 @@ def get_cached_earnings_dossier(symbol, max_age_hours=6):
     row = conn.execute(
         """SELECT dossier_json FROM earnings_cache
            WHERE symbol = ?
-           AND datetime(cached_at) > datetime('now', ?)""",
+           AND cached_at > datetime('now', ?)""",
         (symbol.upper(), f"-{max_age_hours} hours")
     ).fetchone()
     # connection reused (thread-local pool)
@@ -1218,7 +1265,7 @@ def get_scanner_watchlist(limit=20, days=30):
                   MAX(scanned_at) AS last_seen,
                   MIN(rank_in_scan) AS best_rank
            FROM scanner_history
-           WHERE datetime(scanned_at) > datetime('now', ?)
+           WHERE scanned_at > datetime('now', ?)
            GROUP BY symbol
            ORDER BY appearances DESC, max_score DESC
            LIMIT ?""",
@@ -1272,7 +1319,7 @@ def prune_insider_cache(days=90):
     with _write_lock:
         conn = get_conn()
         cur = conn.execute(
-            "DELETE FROM insider_transactions_cache WHERE datetime(cached_at) < datetime('now', ?)",
+            "DELETE FROM insider_transactions_cache WHERE cached_at < datetime('now', ?)",
             (f"-{int(days)} days",)
         )
         conn.commit()
@@ -1285,7 +1332,7 @@ def prune_institutional_cache(days=30):
     with _write_lock:
         conn = get_conn()
         cur = conn.execute(
-            "DELETE FROM institutional_cache WHERE datetime(cached_at) < datetime('now', ?)",
+            "DELETE FROM institutional_cache WHERE cached_at < datetime('now', ?)",
             (f"-{int(days)} days",)
         )
         conn.commit()
@@ -1298,7 +1345,7 @@ def prune_sec_filings_cache(days=30):
     with _write_lock:
         conn = get_conn()
         cur = conn.execute(
-            "DELETE FROM sec_filings_cache WHERE datetime(cached_at) < datetime('now', ?)",
+            "DELETE FROM sec_filings_cache WHERE cached_at < datetime('now', ?)",
             (f"-{int(days)} days",)
         )
         conn.commit()
@@ -1311,7 +1358,7 @@ def prune_earnings_cache(hours=48):
     with _write_lock:
         conn = get_conn()
         cur = conn.execute(
-            "DELETE FROM earnings_cache WHERE datetime(cached_at) < datetime('now', ?)",
+            "DELETE FROM earnings_cache WHERE cached_at < datetime('now', ?)",
             (f"-{int(hours)} hours",)
         )
         conn.commit()
@@ -1382,19 +1429,26 @@ def prune_jarvis_conversations(days=90):
     with _write_lock:
         conn = get_conn()
         cutoff = (f"-{int(days)} days",)
-        conn.execute(
-            "DELETE FROM jarvis_messages WHERE conversation_id IN ("
-            "  SELECT id FROM jarvis_conversations"
-            "  WHERE archived=1 AND datetime(started_at) < datetime('now', ?))",
-            cutoff
-        )
-        cur = conn.execute(
-            "DELETE FROM jarvis_conversations "
-            "WHERE archived=1 AND datetime(started_at) < datetime('now', ?)",
-            cutoff
-        )
-        conn.commit()
-        return cur.rowcount or 0
+        try:
+            conn.execute(
+                "DELETE FROM jarvis_messages WHERE conversation_id IN ("
+                "  SELECT id FROM jarvis_conversations"
+                "  WHERE archived=1 AND datetime(started_at) < datetime('now', ?))",
+                cutoff
+            )
+            cur = conn.execute(
+                "DELETE FROM jarvis_conversations "
+                "WHERE archived=1 AND datetime(started_at) < datetime('now', ?)",
+                cutoff
+            )
+            conn.commit()
+            return cur.rowcount or 0
+        except Exception:
+            # Roll back so we don't orphan messages whose parent conversation
+            # delete failed (on a pre-cascade DB those rows would never be
+            # reclaimed otherwise).
+            conn.rollback()
+            raise
 
 
 def prune_ai_call_log(days=90):
@@ -1410,25 +1464,40 @@ def prune_ai_call_log(days=90):
 
 
 def vacuum_db():
-    """Reclaim disk pages freed by DELETEs. Cannot run inside a transaction,
-    so we commit any pending writes first. Returns the new file size in bytes
-    (or -1 if the DB path can't be stat'd)."""
-    with _write_lock:
-        conn = get_conn()
-        try:
-            conn.commit()  # close any open implicit txn
-        except Exception:
-            pass
-        try:
-            conn.execute("VACUUM")
-        except sqlite3.OperationalError:
-            # Some SQLite builds reject VACUUM under WAL mode if a reader is
-            # still active. Best-effort — just skip on failure.
-            return -1
-        try:
-            return os.path.getsize(DB_PATH)
-        except OSError:
-            return -1
+    """Reclaim disk pages freed by DELETEs. Returns the new file size in bytes
+    (or -1 if VACUUM was skipped / the DB path can't be stat'd).
+
+    Deliberately does NOT hold _write_lock. The old version did, which froze
+    every app-wide write for the (potentially many-second) VACUUM; worse, the
+    warmer's 45s soft timeout would "abandon" the call and move on while the
+    orphaned thread still held the lock, leaving writes wedged. SQLite
+    serializes VACUUM against other writers internally, and the dedicated
+    connection's busy_timeout absorbs contention — so the lock buys us nothing
+    but the freeze. We use a fresh short-lived connection (not the thread-local
+    one) so VACUUM runs outside any implicit transaction and we can close it
+    immediately afterward."""
+    conn = None
+    try:
+        conn = sqlite3.connect(DB_PATH, check_same_thread=False, timeout=30.0)
+        conn.execute("PRAGMA busy_timeout=30000")  # wait out a transient writer
+        conn.isolation_level = None  # autocommit: VACUUM can't run in a txn
+        conn.execute("VACUUM")
+    except sqlite3.OperationalError:
+        # Some SQLite builds reject VACUUM under WAL mode if a reader/writer is
+        # still active. Best-effort — just skip on failure.
+        return -1
+    except Exception:
+        return -1
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+    try:
+        return os.path.getsize(DB_PATH)
+    except OSError:
+        return -1
 
 
 def run_daily_prune():

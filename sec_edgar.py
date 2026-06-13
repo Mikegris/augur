@@ -186,14 +186,20 @@ def _edgar_get(url, params=None, timeout=30):
         return payload
 
     if cache_store is not None:
+        # IMPORTANT: do NOT blanket-catch here. The old code wrapped coalesce in
+        # `try/except: pass` and then fell through to a SECOND _do_fetch() on
+        # ANY exception — including when _do_fetch itself raised (e.g. a 429
+        # bubbling up through raise_for_status). During a 429 storm that turned
+        # every failed request into TWO SEC hits, accelerating the rate-limit
+        # spiral. Let a fetch error propagate (the caller already handles it);
+        # only fall back to a direct fetch when coalesce can't run at all.
         try:
-            payload = cache_store.coalesce(cache_key, ttl, _do_fetch)
-            return _CachedResp(payload)
+            coalesce_fn = cache_store.coalesce
         except Exception:
-            # If cache_store hiccups, fall through to a direct fetch so the
-            # request still goes out. coalesce should not normally fail
-            # for our key types.
-            pass
+            coalesce_fn = None
+        if coalesce_fn is not None:
+            payload = coalesce_fn(cache_key, ttl, _do_fetch)
+            return _CachedResp(payload)
 
     # cache_store unavailable — direct fetch.
     payload = _do_fetch()

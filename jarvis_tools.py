@@ -39,6 +39,28 @@ def _sym(args: Dict[str, Any]) -> str:
     return s
 
 
+def _quote_symbol(sym: str) -> str:
+    """Map a held-crypto ticker (BTC) to its quote symbol (BTC-USD).
+
+    Crypto holdings are stored bare in the portfolio but the data feeds quote
+    them as SYM-USD; the bare ticker is often an unrelated equity/trust (the
+    BTC-trust mispricing lesson). Mirrors _t_stress_test's mapping so the
+    symbol-consuming read tools quote the actual instrument the user holds.
+    Already-suffixed (BTC-USD) and non-held symbols pass through unchanged.
+    Fail-open: any portfolio-read error leaves the symbol as-is."""
+    try:
+        if sym.upper().endswith("-USD"):
+            return sym
+        import database as db
+        for h in db.get_portfolio() or []:
+            if (h.get("symbol") or "").upper() == sym.upper() \
+                    and (h.get("asset_type") or "").lower() == "crypto":
+                return sym + "-USD"
+    except Exception:
+        pass
+    return sym
+
+
 def _num_arg(v: Any) -> Optional[float]:
     """Coerce a model-supplied number that may arrive as '5000', '-30%', etc.
     Returns None if it isn't a finite number."""
@@ -66,11 +88,12 @@ def _portfolio_stock_symbols(max_n: int = 15) -> List[str]:
 
 def _t_get_quote(args):
     import fetcher
-    q = fetcher.get_quote(_sym(args)) or {}
+    sym = _quote_symbol(_sym(args))
+    q = fetcher.get_quote(sym) or {}
     keep = ("symbol", "price", "change", "change_pct", "prev_close", "volume",
             "market_cap", "fifty_two_week_high", "fifty_two_week_low")
     if not q.get("price"):
-        return {"note": "no quote available for {}".format(_sym(args))}
+        return {"note": "no quote available for {}".format(sym)}
     return {k: q.get(k) for k in keep}
 
 
@@ -127,8 +150,8 @@ def _t_forecast(args):
     import forecast_ensemble
     horizon = int(args.get("horizon_days") or 20)
     horizon = max(5, min(horizon, 120))
-    f = forecast_ensemble.ensemble_forecast(_sym(args), horizon_days=horizon)
-    ens = (f or {}).get("ensemble") or {}
+    f = forecast_ensemble.ensemble_forecast(_sym(args), horizon_days=horizon) or {}
+    ens = f.get("ensemble") or {}
     return {"symbol": f.get("symbol"), "horizon_days": f.get("horizon_days"),
             "n_signals": f.get("n_signals"),
             "prob_up": ens.get("prob_up"), "direction": ens.get("direction"),
@@ -181,7 +204,7 @@ def _t_options_flow(args):
 
 def _t_news(args):
     import fetcher
-    n = fetcher.get_news(_sym(args), limit=5)
+    n = fetcher.get_news(_quote_symbol(_sym(args)), limit=5)
     return [{"title": x.get("title"), "publisher": x.get("publisher"),
              "published": x.get("published") or x.get("providerPublishTime")}
             for x in (n or [])[:5]]
@@ -530,7 +553,7 @@ def _t_price_history(args):
     import fetcher
     import time as _t
     from datetime import datetime as _dt
-    sym = _sym(args)
+    sym = _quote_symbol(_sym(args))
     n = _num_arg(args.get("days"))
     days = int(max(5, min(n, 365))) if n else 30
     # Fetch the smallest cached period that covers the window — get_chart_data
@@ -873,7 +896,21 @@ def _t_add_watch(args):
         import jarvis_watches
     except Exception:
         return {"error": "watch engine unavailable"}
-    r = jarvis_watches.add_watch(args.get("name"), args.get("conditions")) or {}
+    # jarvis_watches._normalize_condition rejects numeric STRINGS ("200") —
+    # but the validator accepts them, so a string-valued condition would pass
+    # the confirm and then fail at exec. Coerce values to real floats here.
+    conds = args.get("conditions")
+    if isinstance(conds, list):
+        coerced = []
+        for c in conds:
+            if isinstance(c, dict):
+                c = dict(c)
+                fv = _num_arg(c.get("value"))
+                if fv is not None:
+                    c["value"] = fv
+            coerced.append(c)
+        conds = coerced
+    r = jarvis_watches.add_watch(args.get("name"), conds) or {}
     if r.get("error"):
         return {"error": str(r["error"])[:200]}
     return {"status": "created", "id": r.get("id"), "label": _watch_label(args)}
@@ -891,6 +928,22 @@ def _policy_kinds() -> Optional[tuple]:
         v = getattr(jarvis_policy, attr, None)
         if isinstance(v, (list, tuple, set, frozenset, dict)) and v:
             return tuple(v)
+    return None
+
+
+def _policy_range(kind: str):
+    """(lo, hi) inclusive range for a policy kind from jarvis_policy._RANGES,
+    or None when the module/constant/kind is unknown — callers then skip the
+    range check and defer to set_rule's own validation."""
+    try:
+        import jarvis_policy
+        ranges = getattr(jarvis_policy, "_RANGES", None)
+        if isinstance(ranges, dict):
+            r = ranges.get(kind)
+            if isinstance(r, (list, tuple)) and len(r) == 2:
+                return float(r[0]), float(r[1])
+    except Exception:
+        pass
     return None
 
 
@@ -1270,12 +1323,17 @@ def valid_proposal_args(name: str, args: Dict[str, Any]) -> bool:
     if name == "add_price_alert":
         if str(args.get("alert_type") or "").lower() not in ("above", "below"):
             return False
-        if not str(args.get("symbol") or "").strip():
+        # Mirror _t_add_alert's own guards (_SYM_RE + the 10M cap) so a
+        # bad symbol or out-of-range price is rejected BEFORE the confirm,
+        # not at execution time after the user clicks confirm.
+        sym = str(args.get("symbol") or "").strip().upper()
+        if not _SYM_RE.match(sym):
             return False
         try:
-            return float(args.get("price")) > 0
+            price = float(args.get("price"))
         except (TypeError, ValueError):
             return False
+        return 0 < price < 10_000_000
     if name == "add_to_watchlist":
         return bool(str(args.get("symbol") or "").strip())
     if name == "add_watch":
@@ -1308,11 +1366,20 @@ def valid_proposal_args(name: str, args: Dict[str, Any]) -> bool:
             return bool(str(args.get("text") or "").strip())
         if not re.match(r"^[A-Za-z][A-Za-z0-9_]{1,39}$", kind):
             return False
-        if _num_arg(args.get("value")) is None:
+        val = _num_arg(args.get("value"))
+        if val is None:
             return False
         kinds = _policy_kinds()
         if kinds and kind not in kinds:
             return False
+        # Range-check known kinds against jarvis_policy's own ranges so an
+        # out-of-band value (max_weight_pct = 250) is rejected before the
+        # confirm rather than at execution where set_rule would fail.
+        rng = _policy_range(kind)
+        if rng is not None:
+            lo, hi = rng
+            if not (lo <= val <= hi):
+                return False
         return True
     return True
 
@@ -1378,7 +1445,22 @@ def execute_read(name: str, args: Dict[str, Any]) -> str:
                     if longest_k is None or longest_len == 0:
                         break
                     trimmed[longest_k] = trimmed[longest_k][:max(1, longest_len // 2)]
-                return json.dumps(trimmed, default=str)
+                # A dict with NO list fields (or one still over budget after
+                # halving — e.g. one giant string field) never shrank above.
+                # Truncate the longest string values until it fits, then fall
+                # back to a tiny envelope so we never emit oversized JSON.
+                for _ in range(40):
+                    if len(json.dumps(trimmed, default=str)) <= _RESULT_CHAR_BUDGET:
+                        break
+                    longest_k, longest_len = None, 0
+                    for k, v in trimmed.items():
+                        if isinstance(v, str) and len(v) > longest_len:
+                            longest_k, longest_len = k, len(v)
+                    if longest_k is None or longest_len <= 1:
+                        break
+                    trimmed[longest_k] = trimmed[longest_k][:max(1, longest_len // 2)]
+                if len(json.dumps(trimmed, default=str)) <= _RESULT_CHAR_BUDGET:
+                    return json.dumps(trimmed, default=str)
         except Exception:
             pass
         return json.dumps({"truncated": True, "note": "result too large to inline"})

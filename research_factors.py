@@ -265,12 +265,19 @@ def _load_factor_data() -> Tuple[List[str], np.ndarray, np.ndarray]:
 
 
 def _stock_log_returns(symbol: str, period_years: int) -> Tuple[List[str], np.ndarray]:
-    """Daily log returns for a symbol over ~period_years.
+    """Daily SIMPLE returns for a symbol over ~period_years.
 
-    Returns ``(date_strings, log_return_array)`` aligned so that
-    ``log_return_array[i]`` corresponds to the trading day ``date_strings[i]``
+    Returns ``(date_strings, simple_return_array)`` aligned so that
+    ``return_array[i]`` corresponds to the trading day ``date_strings[i]``
     (i.e. close-to-close return ending on that day; the first calendar day
     is dropped because we have no prior close).
+
+    WHY (Q7): this is the dependent variable in the FF5+MOM regression, and
+    the Fama-French factor series are SIMPLE (arithmetic) returns. Regressing
+    log stock returns on simple factor returns mixes units and biases the
+    intercept (alpha) low by ~σ²/2 per day, i.e. ~σ²/2·252 annualized — a
+    material drag for volatile names. Use simple returns to match the factors.
+    (Name kept for call-site stability; it now returns simple returns.)
     """
     if fetcher is None:
         raise RuntimeError("fetcher module unavailable")
@@ -294,7 +301,9 @@ def _stock_log_returns(symbol: str, period_years: int) -> Tuple[List[str], np.nd
     if len(closes) < 2:
         return [], np.zeros(0, dtype=float)
     arr = np.asarray(closes, dtype=float)
-    lr = np.diff(np.log(arr))
+    # WHY (Q7): simple close-to-close returns (arr[i]/arr[i-1] - 1) to match
+    # the Fama-French simple-return factors, not log returns.
+    lr = arr[1:] / arr[:-1] - 1.0
     return dates[1:], lr
 
 

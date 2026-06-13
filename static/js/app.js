@@ -92,6 +92,12 @@ function _jesc(s) {
     .replace(/\r/g, '\\r');
 }
 
+// ── URL scheme validation (block javascript:/data: hrefs from third-party data)
+function safeUrl(u) {
+  if (u == null) return '#';
+  return /^https?:\/\//i.test(String(u)) ? String(u) : '#';
+}
+
 // ── Color helpers ─────────────────────────────────────────────────────────────
 const col = {
   pnl: (v) => v > 0 ? 'col-positive' : v < 0 ? 'col-negative' : 'col-neutral',
@@ -1042,7 +1048,7 @@ function _portfolioTableHtml(items, summary, acctOptsHtml, showAccount) {
   items.forEach(function(p) {
     var weight = summary.total_value ? ((p.market_value / summary.total_value) * 100) : 0;
     var acctColor = p.account_color || '';
-    var acctDot = acctColor ? '<span style="display:inline-block;width:6px;height:6px;border-radius:50%;background:' + acctColor + ';margin-right:4px"></span>' : '';
+    var acctDot = acctColor ? '<span style="display:inline-block;width:6px;height:6px;border-radius:50%;background:' + _esc(acctColor) + ';margin-right:4px"></span>' : '';
     var acctLabel = p.account_name || '<span class="text-dim">--</span>';
     h += '<tr>'
       + '<td><span class="col-symbol" onclick="openResearch(\'' + _jesc(p.symbol) + '\')">' + _esc(p.symbol) + '</span></td>'
@@ -1108,13 +1114,13 @@ async function loadPortfolio() {
     var acctFilterHtml = '<option value="">ALL ACCOUNTS</option>';
     accounts.forEach(function(a) {
       var sel = (_portfolioAccountFilter == a.id) ? ' selected' : '';
-      acctFilterHtml += '<option value="' + a.id + '"' + sel + '>' + a.name + '</option>';
+      acctFilterHtml += '<option value="' + a.id + '"' + sel + '>' + _esc(a.name) + '</option>';
     });
 
     // Build account select options for inline account assignment
     var acctOptsHtml = '<option value="">--</option>';
     accounts.forEach(function(a) {
-      acctOptsHtml += '<option value="' + a.id + '">' + a.name + '</option>';
+      acctOptsHtml += '<option value="' + a.id + '">' + _esc(a.name) + '</option>';
     });
 
     var html = '<div class="flex-between mb-8">'
@@ -1206,11 +1212,11 @@ async function loadPortfolio() {
         g.items.forEach(function(h) { gValue += (h.market_value || 0); gCost += (h.cost_basis || h.shares * h.avg_cost); });
         gPnl = gValue - gCost;
         var gPct = gCost ? (gPnl / gCost * 100) : 0;
-        var colorBar = g.color ? 'border-left:3px solid ' + g.color + ';padding-left:8px' : '';
+        var colorBar = g.color ? 'border-left:3px solid ' + _esc(g.color) + ';padding-left:8px' : '';
         var typeLabel = g.type ? ' (' + (ACCT_TYPE_LABELS[g.type] || g.type) + ')' : '';
-        html += '<div style="padding:8px 12px;background:var(--bg-panel);border-bottom:1px solid var(--border);' + colorBar + '">'
+        html += '<div class="pf-group-band" style="padding:8px 12px;background:var(--bg-panel);border-bottom:1px solid var(--border);' + colorBar + '">'
           + '<div class="flex-between">'
-          + '<span style="font-size:11px;letter-spacing:.08em;color:var(--green)">' + g.name.toUpperCase() + '<span class="text-dim">' + typeLabel + '</span></span>'
+          + '<span style="font-size:11px;letter-spacing:.08em;color:var(--green)">' + _esc(g.name.toUpperCase()) + '<span class="text-dim">' + typeLabel + '</span></span>'
           + '<span style="font-size:11px">'
           + '<span class="text-dim">VALUE</span> $' + fmt.currency(gValue)
           + ' &nbsp; <span class="' + col.pnl(gPnl) + '">' + (gPnl >= 0 ? '+' : '') + '$' + fmt.currency(gPnl) + ' (' + fmt.pct(gPct) + ')</span>'
@@ -1239,6 +1245,19 @@ async function loadPortfolio() {
           var sym = cells[0] ? cells[0].textContent.toLowerCase() : '';
           var name = cells[1] ? cells[1].textContent.toLowerCase() : '';
           tr.style.display = (sym.indexOf(q) >= 0 || name.indexOf(q) >= 0) ? '' : 'none';
+        });
+        // Hide orphan group-header bands whose following table has no visible rows.
+        pfPanel.querySelectorAll('.pf-group-band').forEach(function(band) {
+          if (!q) { band.style.display = ''; return; }
+          var table = band.nextElementSibling;
+          while (table && table.tagName !== 'TABLE') table = table.nextElementSibling;
+          var anyVisible = false;
+          if (table) {
+            table.querySelectorAll('tbody tr').forEach(function(tr) {
+              if (tr.style.display !== 'none') anyVisible = true;
+            });
+          }
+          band.style.display = anyVisible ? '' : 'none';
         });
       });
     }
@@ -1333,14 +1352,14 @@ function renderPortfolioAnalysis(r) {
   const listItems = (arr) => (arr || []).map(s =>
     `<div style="display:flex;gap:6px;padding:3px 0;font-size:11px">
       <span style="color:var(--green-dim);flex-shrink:0">▸</span>
-      <span style="color:var(--text-secondary)">${s}</span>
+      <span style="color:var(--text-secondary)">${_esc(s)}</span>
     </div>`
   ).join('');
 
   const divScore = r.diversification?.score || 0;
   const divColor = divScore >= 7 ? 'var(--green)' : divScore >= 4 ? 'var(--amber)' : 'var(--red)';
   const concWarnings = (r.diversification?.concentration_warnings || [])
-    .map(w => `<div style="font-size:10px;color:var(--amber);margin-top:3px">⚠ ${w}</div>`).join('');
+    .map(w => `<div style="font-size:10px;color:var(--amber);margin-top:3px">⚠ ${_esc(w)}</div>`).join('');
 
   content.innerHTML = `
     <!-- Header row: signal, score, model -->
@@ -1399,7 +1418,7 @@ function renderPortfolioAnalysis(r) {
     <!-- Position insights -->
     ${posRows ? `
     <div style="margin-bottom:12px">
-      <div style="font-size:10px;color:var(--text-dim);margin-bottom:8px;letter-spacing:.1em">▸ ${_esc(m)}POSITION ASSESSMENTS</div>
+      <div style="font-size:10px;color:var(--text-dim);margin-bottom:8px;letter-spacing:.1em">▸ POSITION ASSESSMENTS</div>
       <table class="data-table" style="font-size:11px">
         <thead><tr><th>SYMBOL</th><th>ASSESSMENT</th><th>INSIGHT</th></tr></thead>
         <tbody>${posRows}</tbody>
@@ -1470,7 +1489,7 @@ async function loadAccountsList() {
         + '<td class="text-dim">' + _esc(a.institution || '-') + '</td>'
         + '<td class="text-dim">' + _esc(a.position_count || '-') + '</td>'
         + '<td class="col-actions">'
-        + '<button class="btn btn-red btn-sm" onclick="deleteAccount(' + a.id + ', \'' + _jesc(a.name) + '\')">DEL</button>'
+        + '<button class="btn btn-red btn-sm" onclick="deleteAccount(' + a.id + ', \'' + _esc(_jesc(a.name)) + '\')">DEL</button>'
         + '</td></tr>';
     });
     html += '</tbody></table>';
@@ -1734,8 +1753,8 @@ async function loadResearchFor(symbol) {
           </div>
         </div>
         <div style="display:flex;flex-direction:column;gap:4px;margin-left:16px">
-          <button class="btn btn-green btn-sm" onclick="quickAddToPortfolio('${symbol}', '${_jesc(fund.name || '')}')">+ PORTFOLIO</button>
-          <button class="btn btn-blue btn-sm" onclick="quickAddToWatchlist('${symbol}', '${_jesc(fund.name || '')}')">+ WATCHLIST</button>
+          <button class="btn btn-green btn-sm" onclick="quickAddToPortfolio('${_esc(symbol)}', '${_esc(_jesc(fund.name || ''))}')">+ PORTFOLIO</button>
+          <button class="btn btn-blue btn-sm" onclick="quickAddToWatchlist('${_esc(symbol)}', '${_esc(_jesc(fund.name || ''))}')">+ WATCHLIST</button>
         </div>
       </div>
 
@@ -2012,7 +2031,7 @@ async function loadNewsFor(symbol, containerId) {
       return;
     }
     el.innerHTML = news.map(n => `
-      <div class="news-item" onclick="window.open('${_jesc(n.url || '')}', '_blank')">
+      <div class="news-item" onclick="window.open('${_esc(_jesc(safeUrl(n.url)))}', '_blank')">
         <div class="news-title">${_esc(n.title || '')}</div>
         <div class="news-summary">${_esc(n.summary ? n.summary.substring(0, 120) + '...' : '')}</div>
         <div class="news-meta">
@@ -2241,6 +2260,7 @@ async function openCryptoResearch(coinId, symbol) {
   // Same entry sanitization as loadResearchFor — symbol reaches innerHTML.
   symbol = String(symbol || '').replace(/[^A-Za-z0-9.\-]/g, '').toUpperCase().slice(0, 12);
   coinId = String(coinId || '').replace(/[^a-z0-9\-]/g, '');
+  const gen = ++_researchGen;
   navigate('research');
   const view = document.getElementById('view-research');
   view.innerHTML = `<div class="loading"><div class="spinner"></div> FETCHING ${_esc(symbol)}...</div>`;
@@ -2250,6 +2270,9 @@ async function openCryptoResearch(coinId, symbol) {
       API.get(`/api/crypto/quote/${coinId}`),
       API.get(`/api/crypto/chart/${coinId}?days=90`),
     ]);
+
+    // A newer research request (stock or crypto) superseded this one.
+    if (gen !== _researchGen || !view.isConnected) return;
 
     const chgCls = col.pnl(coin.change_24h);
 
@@ -2270,8 +2293,8 @@ async function openCryptoResearch(coinId, symbol) {
           </div>
         </div>
         <div style="display:flex;flex-direction:column;gap:4px;margin-left:16px">
-          <button class="btn btn-green btn-sm" onclick="quickAddToPortfolio('${_esc(coin.symbol)}', '${_jesc(coin.name)}', 'crypto')">+ PORTFOLIO</button>
-          <button class="btn btn-blue btn-sm" onclick="quickAddToWatchlist('${_esc(coin.symbol)}', '${_jesc(coin.name)}')">+ WATCHLIST</button>
+          <button class="btn btn-green btn-sm" onclick="quickAddToPortfolio('${_esc(coin.symbol)}', '${_esc(_jesc(coin.name))}', 'crypto')">+ PORTFOLIO</button>
+          <button class="btn btn-blue btn-sm" onclick="quickAddToWatchlist('${_esc(coin.symbol)}', '${_esc(_jesc(coin.name))}')">+ WATCHLIST</button>
         </div>
       </div>
 
@@ -2315,6 +2338,7 @@ async function openCryptoResearch(coinId, symbol) {
       ChartEngine.createPriceChart('crypto-chart-container', chartData, { type: 'line', height: 380, showVolume: false });
     }
   } catch(e) {
+    if (gen !== _researchGen || !view.isConnected) return;
     view.innerHTML = `<div class="empty-state"><span class="empty-icon">⚠</span><span class="text-red">${_esc(e.message)}</span></div>`;
   }
 }
@@ -2539,7 +2563,7 @@ async function loadGlobalNews() {
         </div>
         <div style="max-height:calc(100vh - 200px);overflow-y:auto">
           ${all.length ? all.map(n => `
-            <div class="news-item" onclick="window.open('${_jesc(n.url || '')}', '_blank')">
+            <div class="news-item" onclick="window.open('${_esc(_jesc(safeUrl(n.url)))}', '_blank')">
               <div class="news-title">${_esc(n.title)}</div>
               <div class="news-summary">${_esc(n.summary ? n.summary.substring(0, 200) + '...' : '')}</div>
               <div class="news-meta">
@@ -2772,7 +2796,7 @@ async function runScreener() {
     if (minCap) rows = rows.filter(q => (q.market_cap || 0) >= minCap);
     rows.sort((a, b) => {
       if (sortBy === 'market_cap') return (b.market_cap || 0) - (a.market_cap || 0);
-      if (sortBy === 'change_pct') return (b.change_pct || -999) - (a.change_pct || -999);
+      if (sortBy === 'change_pct') return (b.change_pct ?? -999) - (a.change_pct ?? -999);
       if (sortBy === 'price') return (b.price || 0) - (a.price || 0);
       return 0;
     });
@@ -3375,7 +3399,7 @@ function renderStressResults(data) {
         const lossColor = s.total_loss_pct < -30 ? 'var(--red)' : s.total_loss_pct < -15 ? 'var(--amber)' : 'var(--text-secondary)';
         const isCustom = name === 'Custom Scenario';
         return `
-          <div class="stress-card ${isCustom ? 'stress-card-custom' : ''}" onclick="showScenarioDetail('${_jesc(name)}', ${_esc(JSON.stringify(s))})">
+          <div class="stress-card ${isCustom ? 'stress-card-custom' : ''}" onclick="showScenarioDetail('${_esc(_jesc(name))}', ${_esc(JSON.stringify(s))})">
             <div style="font-size:10px;color:${isCustom ? 'var(--amber)' : 'var(--blue)'};letter-spacing:.08em;margin-bottom:6px">${name.toUpperCase()}</div>
             <div style="font-size:11px;color:var(--text-dim);margin-bottom:10px;line-height:1.5">${_esc(s.description)}</div>
             <div style="font-size:22px;font-weight:bold;color:${lossColor}">${s.total_loss_pct.toFixed(1)}%</div>
@@ -3383,7 +3407,7 @@ function renderStressResults(data) {
             <div style="margin-top:8px;display:flex;justify-content:space-between;font-size:11px">
               <span style="color:var(--text-dim)">$${fmt.currency(current)} → <span style="color:${lossColor}">$${fmt.currency(s.new_portfolio_value)}</span></span>
             </div>
-            <div style="margin-top:6px;font-size:9px;color:var(--text-dim)">▸ ${_esc(m)}CLICK FOR POSITION BREAKDOWN</div>
+            <div style="margin-top:6px;font-size:9px;color:var(--text-dim)">▸ CLICK FOR POSITION BREAKDOWN</div>
           </div>`;
       }).join('')}
     </div>
@@ -3507,7 +3531,7 @@ async function loadEarningsView() {
 
       ${later.length ? `
       <div style="margin-bottom:16px">
-        <div style="font-size:10px;color:var(--text-dim);letter-spacing:.1em;margin-bottom:6px">▸ ${_esc(m)}LATER (${later.length})</div>
+        <div style="font-size:10px;color:var(--text-dim);letter-spacing:.1em;margin-bottom:6px">▸ LATER (${later.length})</div>
         ${renderEarningsGrid(later)}
       </div>` : ''}
 
@@ -3552,7 +3576,7 @@ function renderEarningsGrid(events) {
           </div>
         </div>
         <div style="margin-top:8px;font-size:10px;color:var(--green);letter-spacing:.05em">
-          ▸ ${_esc(m)}CLICK FOR FULL DOSSIER + AI BRIEF
+          ▸ CLICK FOR FULL DOSSIER + AI BRIEF
         </div>
       </div>`;
     }).join('')}
@@ -4433,7 +4457,8 @@ async function loadResearchIntelTab(symbol) {
     const avg = vals.reduce((a,b) => a+b, 0) / Math.max(vals.length, 1);
     const lo = Math.min(...vals), hi = Math.max(...vals);
     const norm = v => (hi === lo) ? 50 : 100 - ((v - lo) / (hi - lo) * 100);
-    const pts = series.map((p, i) => `${(i / (series.length - 1) * 100).toFixed(2)},${norm(p.value).toFixed(2)}`).join(' ');
+    const denom = series.length > 1 ? series.length - 1 : 1; // avoid 0/0 → NaN for single-point series
+    const pts = series.map((p, i) => `${(i / denom * 100).toFixed(2)},${norm(p.value).toFixed(2)}`).join(' ');
     const cls = avg >= 0.5 ? 'col-positive' : avg <= -0.5 ? 'col-negative' : '';
     toneHtml = `
       <div style="display:flex;align-items:center;gap:14px">
@@ -4453,7 +4478,7 @@ async function loadResearchIntelTab(symbol) {
   const articlesHtml = arts.length
     ? arts.map(a => `<tr>
         <td style="font-size:10px;color:var(--text-dim);white-space:nowrap">${_esc((a.seendate||'').slice(0,8))}</td>
-        <td><a href="${_esc(a.url)}" target="_blank" rel="noopener" style="color:var(--blue);font-size:11px">${_esc((a.title||'').slice(0,90))}</a></td>
+        <td><a href="${_esc(safeUrl(a.url))}" target="_blank" rel="noopener" style="color:var(--blue);font-size:11px">${_esc((a.title||'').slice(0,90))}</a></td>
         <td style="font-size:10px;color:var(--text-secondary)">${_esc(a.domain || '')}</td>
       </tr>`).join('')
     : '<tr><td colspan="3" class="empty-state">No recent GDELT articles</td></tr>';
@@ -4483,7 +4508,7 @@ async function loadResearchIntelTab(symbol) {
   const form4Html = f4.length
     ? f4.map(t => `<tr>
         <td style="font-size:10px;color:var(--text-dim);white-space:nowrap">${_esc(t.filed || '')}</td>
-        <td style="font-size:11px"><a href="${_esc(t.url || '#')}" target="_blank" rel="noopener" style="color:var(--blue)">${_esc(t.owner || '—')}</a></td>
+        <td style="font-size:11px"><a href="${_esc(safeUrl(t.url))}" target="_blank" rel="noopener" style="color:var(--blue)">${_esc(t.owner || '—')}</a></td>
         <td style="font-size:10px;color:var(--text-secondary)">${_esc((t.role||'').slice(0,38))}</td>
       </tr>`).join('')
     : '<tr><td colspan="3" class="empty-state">No recent Form 4 filings</td></tr>';
@@ -5206,7 +5231,7 @@ function renderFilingFeed(filings, panel) {
     return `
       <tr onclick="toggleFilingExpand('fexpand-${idx}')" style="cursor:pointer">
         <td style="white-space:nowrap;font-size:11px;color:var(--text-dim)">${_esc(f.filing_date || '—')}</td>
-        <td><span class="col-symbol" style="cursor:pointer" onclick="event.stopPropagation();openResearch('${_esc(f.ticker)}')">${_esc(f.ticker)}</span></td>
+        <td><span class="col-symbol" style="cursor:pointer" onclick="event.stopPropagation();openResearch('${_esc(_jesc(f.ticker))}')">${_esc(f.ticker)}</span></td>
         <td><span class="badge badge-blue">${_esc(f.form_type)}</span></td>
         <td style="max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:11px">${_esc(f.event_type || f.description || '—')}</td>
         <td><span class="signal-badge ${sigClass}">${_esc(f.signal || 'NEUTRAL')}</span></td>
@@ -5214,7 +5239,7 @@ function renderFilingFeed(filings, panel) {
         <td>
           ${aiBadge}
           <button class="btn btn-ghost btn-sm" style="margin-left:4px" onclick="event.stopPropagation();toggleFilingExpand('fexpand-${idx}')">ANALYZE</button>
-          <a href="${f.filing_url}" target="_blank" rel="noopener" onclick="event.stopPropagation()" style="margin-left:4px;font-size:10px;color:var(--blue)">VIEW ↗</a>
+          <a href="${_esc(safeUrl(f.filing_url))}" target="_blank" rel="noopener" onclick="event.stopPropagation()" style="margin-left:4px;font-size:10px;color:var(--blue)">VIEW ↗</a>
         </td>
       </tr>
       <tr class="filing-row-expand" id="fexpand-${idx}">
@@ -5231,7 +5256,7 @@ function renderFilingFeed(filings, panel) {
               <div style="font-size:11px;color:var(--text-secondary);line-height:1.6">${_esc(f.summary || '—')}</div>
             </div>
             <div>
-              <a href="${f.filing_url}" target="_blank" rel="noopener" class="btn btn-ghost btn-sm">VIEW FILING ↗</a>
+              <a href="${_esc(safeUrl(f.filing_url))}" target="_blank" rel="noopener" class="btn btn-ghost btn-sm">VIEW FILING ↗</a>
             </div>
           </div>
         </td>
@@ -5352,7 +5377,7 @@ function renderInsiders(data, panel, symbol) {
         <td style="font-size:11px;text-align:right">${t.price ? '$' + fmt.price(t.price) : '—'}</td>
         <td style="font-size:11px;text-align:right;color:${isBuy ? 'var(--green)' : 'var(--red)'}">${t.value ? '$' + fmt.compact(t.value) : '—'}</td>
         <td style="font-size:11px;text-align:right;color:var(--text-dim)">${t.shares_after ? fmt.compact(t.shares_after) : '—'}</td>
-        <td><a href="${t.form_url}" target="_blank" rel="noopener" style="font-size:10px;color:var(--blue)">FORM4 ↗</a></td>
+        <td><a href="${_esc(safeUrl(t.form_url))}" target="_blank" rel="noopener" style="font-size:10px;color:var(--blue)">FORM4 ↗</a></td>
       </tr>
     `;
   }).join('');
@@ -5405,7 +5430,7 @@ function renderInstitutional(data, panel) {
     // between e.g. "Berkshire Hathaway" and "Berkshire  Hathaway" (double
     // space), and broke entirely on names with non-alphanumeric chars.
     return `
-      <div class="fund-card" id="fcard-${i}" onclick="showFundHoldings('${_jesc(name)}', ${i})">
+      <div class="fund-card" id="fcard-${i}" onclick="showFundHoldings('${_esc(_jesc(name))}', ${i})">
         <div style="font-size:11px;font-weight:700;color:var(--green);margin-bottom:6px">${_esc(name)}</div>
         ${hasError
           ? `<div style="font-size:10px;color:var(--red)">Data unavailable</div>`
@@ -5517,7 +5542,7 @@ async function loadResearchSecTab(symbol) {
   ]);
 
   // Filings for this symbol
-  if (filingsEl) {
+  if (filingsEl && filingsEl.isConnected) {
     const allFilings = filingsData.status === 'fulfilled' ? filingsData.value : [];
     const symFilings = allFilings.filter(f => f.ticker === symbol.toUpperCase());
     if (!symFilings.length) {
@@ -5532,7 +5557,7 @@ async function loadResearchSecTab(symbol) {
               <span class="signal-badge ${sigClass}">${_esc(f.signal)}</span>
               <span style="font-size:10px;color:var(--text-dim)">${_esc(f.filing_date)}</span>
               ${f.ai_powered ? '<span class="ai-badge">AI</span>' : ''}
-              <a href="${f.filing_url}" target="_blank" rel="noopener" style="font-size:10px;color:var(--blue);margin-left:auto">VIEW ↗</a>
+              <a href="${_esc(safeUrl(f.filing_url))}" target="_blank" rel="noopener" style="font-size:10px;color:var(--blue);margin-left:auto">VIEW ↗</a>
             </div>
             <div style="font-size:11px;color:var(--text-secondary)">${_esc(f.summary || f.description || '—')}</div>
           </div>
@@ -5542,7 +5567,7 @@ async function loadResearchSecTab(symbol) {
   }
 
   // Insiders
-  if (insidersEl) {
+  if (insidersEl && insidersEl.isConnected) {
     const iData = insidersData.status === 'fulfilled' ? insidersData.value : { transactions: [] };
     const txns = iData.transactions || [];
     if (!txns.length) {
@@ -5586,6 +5611,9 @@ function _loadingStages(containerId, stages, intervalMs = 2500) {
   };
   render();
   const timer = setInterval(() => {
+    // Self-clear if the loader's node was detached by navigation — avoids
+    // firing against a node that is no longer in the document.
+    if (!el.isConnected || !el.querySelector('.scan-loading')) { clearInterval(timer); return; }
     if (idx < stages.length - 1) { idx++; render(); }
     else clearInterval(timer);
   }, intervalMs);
@@ -6422,7 +6450,7 @@ function renderCongressView(data) {
     const color = t.sentiment === 'BULLISH' ? 'var(--green)' : t.sentiment === 'BEARISH' ? 'var(--red)' : 'var(--amber)';
     const opacity = Math.max(0.4, Math.min(1.0, t.total_trades / (topTickers[0]?.total_trades || 1)));
     return `
-      <div class="congress-heatmap-item" onclick="filterCongressByTicker('${_esc(t.ticker)}')" style="border-color:${color};opacity:${opacity + 0.1}">
+      <div class="congress-heatmap-item" data-congress-ticker="${_esc(t.ticker)}" style="cursor:pointer;border-color:${color};opacity:${opacity + 0.1}">
         <div style="font-size:12px;font-weight:700;color:${color}">${_esc(t.ticker)}</div>
         <div style="font-size:9px;color:var(--text-dim)">${t.total_trades} trades</div>
         <div style="font-size:9px;color:${color}">${t.buy_pct}% BUY</div>
@@ -6440,13 +6468,13 @@ function renderCongressView(data) {
   const tradeRows = trades.slice(0, 100).map(t => `
     <tr>
       <td style="font-size:10px;color:var(--text-dim)">${t.txn_date || '—'}</td>
-      <td style="font-weight:700;color:var(--green);cursor:pointer" onclick="filterCongressByTicker('${_esc(t.ticker)}')">${_esc(t.ticker)}</td>
+      <td style="font-weight:700;color:var(--green);cursor:pointer" data-congress-ticker="${_esc(t.ticker)}">${_esc(t.ticker)}</td>
       <td><span class="signal-badge ${txnTypeColor(t.txn_type)}" style="font-size:9px">${_esc(t.txn_type)}</span></td>
       <td style="font-size:10px">${t.amount_str || '—'}</td>
       <td style="font-size:10px;color:var(--text-secondary)">${_esc(t.member_name)}</td>
       <td style="font-size:10px;color:var(--text-dim)">${t.state || ''}</td>
       <td style="font-size:10px;color:var(--text-dim)">${t.owner || ''}</td>
-      <td><a href="${t.pdf_url || '#'}" target="_blank" rel="noopener" style="font-size:10px;color:var(--blue)">PDF ↗</a></td>
+      <td><a href="${_esc(safeUrl(t.pdf_url))}" target="_blank" rel="noopener" style="font-size:10px;color:var(--blue)">PDF ↗</a></td>
     </tr>
   `).join('');
 
@@ -6481,7 +6509,7 @@ function renderCongressView(data) {
             ${tickerSummary.map(t => {
               const sentColor = t.sentiment === 'BULLISH' ? 'col-positive' : t.sentiment === 'BEARISH' ? 'col-negative' : 'col-yellow';
               return `<tr>
-                <td style="font-weight:700;color:var(--green);cursor:pointer" onclick="filterCongressByTicker('${_esc(t.ticker)}')">${_esc(t.ticker)}</td>
+                <td style="font-weight:700;color:var(--green);cursor:pointer" data-congress-ticker="${_esc(t.ticker)}">${_esc(t.ticker)}</td>
                 <td>${t.total_trades}</td><td class="col-positive">${t.buys}</td><td class="col-negative">${t.sells}</td>
                 <td>${t.buy_pct}%</td><td>${t.member_count}</td><td style="color:var(--text-dim)">${_esc(t.latest_date)}</td>
                 <td><span class="signal-badge ${sentColor}">${_esc(t.sentiment)}</span></td>
@@ -6492,11 +6520,22 @@ function renderCongressView(data) {
       </div>
     </div>
 
-    <div style="margin-top:16px;padding:12px;background:var(--surface);border:1px solid var(--border);font-size:10px;color:var(--text-dim)">
+    <div style="margin-top:16px;padding:12px;background:var(--bg-panel);border:1px solid var(--border);font-size:10px;color:var(--text-dim)">
       Data sourced from official House Financial Disclosure PTR PDFs at disclosures-clerk.house.gov.
       Under the STOCK Act, members must report trades within 30-45 days. Parsed in real-time from source PDFs.
     </div>
   `;
+
+  // Delegated listener: ticker values come from third-party House Clerk PDFs (hostile).
+  // Using data-attributes + delegation avoids onclick-attribute injection.
+  // Attach once — body is a persistent element re-rendered on filter/clear.
+  if (!body.dataset.congressWired) {
+    body.dataset.congressWired = '1';
+    body.addEventListener('click', (e) => {
+      const el = e.target.closest('[data-congress-ticker]');
+      if (el && body.contains(el)) filterCongressByTicker(el.getAttribute('data-congress-ticker'));
+    });
+  }
 }
 
 function filterCongressByTicker(ticker) {
@@ -6521,7 +6560,7 @@ function filterCongressByTicker(ticker) {
         <td style="font-size:10px;color:var(--text-secondary)">${_esc(t.member_name)}</td>
         <td style="font-size:10px;color:var(--text-dim)">${t.state || ''}</td>
         <td style="font-size:10px;color:var(--text-dim)">${t.owner || ''}</td>
-        <td><a href="${t.pdf_url || '#'}" target="_blank" rel="noopener" style="font-size:10px;color:var(--blue)">PDF ↗</a></td>
+        <td><a href="${_esc(safeUrl(t.pdf_url))}" target="_blank" rel="noopener" style="font-size:10px;color:var(--blue)">PDF ↗</a></td>
       </tr>
     `).join('');
   }
@@ -6935,6 +6974,7 @@ async function analyzeGex(sym) {
 
   try {
     var data = await API.get('/api/gex/' + symbol);
+    if (!results.isConnected) return; // navigated away during fetch
     if (data.error) throw new Error(data.error);
     var g = data;
 
@@ -7031,6 +7071,7 @@ async function mapContagion(sym) {
 
   try {
     var data = await API.get('/api/contagion/' + symbol);
+    if (!results.isConnected) return; // navigated away during fetch
     if (data.error) throw new Error(data.error);
 
     var connections = data.connections || data.connected_companies || [];
@@ -7085,6 +7126,7 @@ async function assessContagionImpact() {
 
   try {
     var data = await API.get('/api/contagion/' + symbol + '/impact');
+    if (!results.isConnected) return; // navigated away during fetch
     if (data.error) throw new Error(data.error);
     var loadEl = document.getElementById('contagion-impact-loading');
     if (loadEl) loadEl.remove();
@@ -7276,6 +7318,7 @@ async function analyzeForecast(sym) {
 
   try {
     var data = await API.get('/api/forecast/ensemble/' + symbol + '?horizon=' + horizon);
+    if (!results.isConnected) return; // navigated away during fetch
     if (data.error) throw new Error(data.error);
     var ens = data.ensemble;
     if (!ens) throw new Error('No ensemble produced');
@@ -7418,6 +7461,7 @@ async function analyzeNarrative(sym) {
 
   try {
     var data = await API.get('/api/narrative/' + symbol);
+    if (!results.isConnected) return; // navigated away during fetch
     if (data.error) throw new Error(data.error);
 
     var dominant = data.dominant_narrative || '—';
@@ -7719,7 +7763,7 @@ async function detectReflexivity(sym) {
         + '</div>'
         + '<div style="margin-bottom:8px">'
         + '<div style="font-size:10px;color:var(--text-dim);margin-bottom:2px">Strength</div>'
-        + '<div style="background:var(--bg);border-radius:3px;height:8px;overflow:hidden">'
+        + '<div style="background:var(--bg-primary);border-radius:3px;height:8px;overflow:hidden">'
         + '<div style="height:100%;width:' + Math.min(strength, 100) + '%;background:' + _alphaScoreColor(strength) + ';border-radius:3px"></div>'
         + '</div>'
         + '<div style="font-size:10px;color:' + _alphaScoreColor(strength) + ';margin-top:2px">' + _alphaFmtNum(strength, 1) + '/100</div>'
@@ -7828,7 +7872,7 @@ async function loadLiquidityData() {
           + '<td style="font-weight:600;font-size:11px">' + (ind.indicator || ind.name || '—') + '</td>'
           + '<td>'
           + '<div style="display:flex;align-items:center;gap:6px">'
-          + '<div style="width:60px;height:6px;background:var(--bg);border-radius:3px;overflow:hidden">'
+          + '<div style="width:60px;height:6px;background:var(--bg-primary);border-radius:3px;overflow:hidden">'
           + '<div style="height:100%;width:' + barWidth + '%;background:' + _alphaScoreColor(indScore) + ';border-radius:3px"></div>'
           + '</div>'
           + '<span style="font-size:11px;color:' + _alphaScoreColor(indScore) + '">' + _alphaFmtNum(indScore, 1) + '</span>'
@@ -7888,6 +7932,7 @@ async function nowcastAltData(sym) {
 
   try {
     var data = await API.get('/api/alt-data/' + symbol);
+    if (!results.isConnected) return; // navigated away during fetch
     if (data.error) throw new Error(data.error);
 
     var score = data.nowcast_score != null ? data.nowcast_score : (data.score || 0);
@@ -8021,7 +8066,7 @@ async function renderSocialPulse(symbol) {
         + '<span>Latest: <b>' + _esc((ws.latest != null ? ws.latest.toLocaleString('en-US') : '—')) + '</b> views/day</span>'
         + '<span>7d baseline: ' + _esc((ws.baseline_7d != null ? Math.round(ws.baseline_7d).toLocaleString('en-US') : '—')) + '</span></div>'
         + _miniSparkline(wk.points, 'var(--blue)')
-        + (wk.article_url ? '<div style="margin-top:6px"><a href="' + _esc(wk.article_url) + '" target="_blank" rel="noopener" style="font-size:10px;color:var(--blue)">' + _esc(wk.article || 'article') + ' ↗</a></div>' : '');
+        + (wk.article_url ? '<div style="margin-top:6px"><a href="' + _esc(safeUrl(wk.article_url)) + '" target="_blank" rel="noopener" style="font-size:10px;color:var(--blue)">' + _esc(wk.article || 'article') + ' ↗</a></div>' : '');
     } else {
       html += '<div style="font-size:11px;color:var(--text-dim)">Wikipedia attention unavailable for ' + _esc(symbol) + '.</div>';
     }
@@ -8037,7 +8082,7 @@ async function renderSocialPulse(symbol) {
       var hm = hn.mentions || [];
       for (var j = 0; j < Math.min(hm.length, 4); j++) {
         var it = hm[j];
-        html += '<div style="font-size:10px;margin-bottom:3px">' + (it.url ? '<a href="' + _esc(it.url) + '" target="_blank" rel="noopener" style="color:var(--blue)">' : '<span style="color:var(--text-secondary)">') + _esc((it.title || it.text || '').slice(0, 110)) + (it.url ? ' ↗</a>' : '</span>') + '</div>';
+        html += '<div style="font-size:10px;margin-bottom:3px">' + (it.url ? '<a href="' + _esc(safeUrl(it.url)) + '" target="_blank" rel="noopener" style="color:var(--blue)">' : '<span style="color:var(--text-secondary)">') + _esc((it.title || it.text || '').slice(0, 110)) + (it.url ? ' ↗</a>' : '</span>') + '</div>';
       }
     } else {
       html += '<div style="font-size:11px;color:var(--text-dim)">No Hacker News chatter on ' + _esc(symbol) + ' in the last 7 days.</div>';
@@ -8082,6 +8127,7 @@ async function scanAltDataPortfolio() {
 
   try {
     var data = await API.post('/api/alt-data/scan', {});
+    if (!results.isConnected) return; // navigated away during fetch
     if (data.error) throw new Error(data.error);
     var items = data.results || data.scores || [];
     if (!items.length) {
@@ -8331,7 +8377,7 @@ const DataPanels = {
           <td class="col-symbol">${this._esc(m.ticker)}</td>
           <td class="col-number">${m.mentions}</td>
           <td class="col-number">${this._fmtCompact(m.total_score)}</td>
-          <td><a href="${this._esc(m.sample_url || '#')}" target="_blank" rel="noopener" style="font-size:10px;color:var(--blue)">post ↗</a></td>
+          <td><a href="${this._esc(safeUrl(m.sample_url))}" target="_blank" rel="noopener" style="font-size:10px;color:var(--blue)">post ↗</a></td>
         </tr>`).join('');
       const stwitsRows = (stwits?.trending || []).map(s => `
         <tr><td class="col-symbol">${this._esc(s.symbol)}</td>
@@ -8460,7 +8506,7 @@ const DataPanels = {
           <div class="panel-header"><span class="panel-title">DAILY PAGEVIEWS — ${this._esc(data.article || symbol)}</span></div>
           <div class="panel-body">
             ${sparkline}
-            <div style="font-size:10px;color:var(--text-dim);margin-top:6px">${n} daily observations · <a href="${this._esc(data.article_url)}" target="_blank" rel="noopener" style="color:var(--blue)">Wikipedia article ↗</a></div>
+            <div style="font-size:10px;color:var(--text-dim);margin-top:6px">${n} daily observations · <a href="${this._esc(safeUrl(data.article_url))}" target="_blank" rel="noopener" style="color:var(--blue)">Wikipedia article ↗</a></div>
           </div>
         </div>`;
     } catch (e) {
@@ -8488,7 +8534,7 @@ const DataPanels = {
             <td>${this._esc(m.title || '')}</td>
             <td style="color:var(--text-dim);font-size:10px">${m.kind || ''}</td>
             <td style="color:var(--text-dim);font-size:10px">${dateStr}</td>
-            <td><a href="${this._esc(m.url)}" target="_blank" rel="noopener" style="color:var(--blue);font-size:10px">open ↗</a></td>
+            <td><a href="${this._esc(safeUrl(m.url))}" target="_blank" rel="noopener" style="color:var(--blue);font-size:10px">open ↗</a></td>
           </tr>`;
       }).join('');
       parent.innerHTML = `
@@ -8581,8 +8627,8 @@ const DataPanels = {
       }
       const dash = '—';
       const fmtEmp = d.employees == null ? dash : d.employees.toLocaleString('en-US');
-      const fmtSite = d.website ? `<a href="${this._esc(d.website)}" target="_blank" rel="noopener" style="color:var(--blue)">${this._esc(d.website.replace(/^https?:\/\//,'').replace(/\/$/,''))} ↗</a>` : dash;
-      const wikiLink = d.wikidata_url ? `<a href="${this._esc(d.wikidata_url)}" target="_blank" rel="noopener" style="color:var(--blue)">${this._esc(d.qid)} ↗</a>` : dash;
+      const fmtSite = d.website ? `<a href="${this._esc(safeUrl(d.website))}" target="_blank" rel="noopener" style="color:var(--blue)">${this._esc(d.website.replace(/^https?:\/\//,'').replace(/\/$/,''))} ↗</a>` : dash;
+      const wikiLink = d.wikidata_url ? `<a href="${this._esc(safeUrl(d.wikidata_url))}" target="_blank" rel="noopener" style="color:var(--blue)">${this._esc(d.qid)} ↗</a>` : dash;
       const cell = (label, val) => `
         <div style="background:var(--bg-secondary);padding:10px;border:1px solid var(--border)">
           <div style="font-size:9px;color:var(--text-dim);letter-spacing:.1em;margin-bottom:4px">${label}</div>
@@ -8957,7 +9003,7 @@ const Ideas = {
 
           <div style="display:flex;gap:8px;margin-top:12px;flex-wrap:wrap">
             <button class="btn btn-green" onclick="Ideas.roll()">⚄ ROLL AGAIN</button>
-            <button class="btn btn-blue btn-sm" onclick="quickAddToWatchlist('${_esc(d.symbol)}', '${_jesc(snap.name || '')}')">+ WATCHLIST</button>
+            <button class="btn btn-blue btn-sm" onclick="quickAddToWatchlist('${_esc(d.symbol)}', '${_esc(_jesc(snap.name || ''))}')">+ WATCHLIST</button>
             <button class="btn btn-ghost btn-sm" onclick="openResearch('${_esc(d.symbol)}')">OPEN RESEARCH ↗</button>
             <div style="flex:1"></div>
             <span style="font-size:9px;color:var(--text-dim);align-self:center">
@@ -9130,7 +9176,7 @@ const Ideas = {
         </div>
         <div class="panel-body" style="padding:10px">
           <div style="border-left:3px solid var(--blue);padding:6px 10px;margin-bottom:6px;background:rgba(0,200,255,0.04)">
-            <div style="font-size:9px;color:var(--blue);letter-spacing:.1em;margin-bottom:2px">▸ ${_esc(m)}ENTRY ZONE</div>
+            <div style="font-size:9px;color:var(--blue);letter-spacing:.1em;margin-bottom:2px">▸ ENTRY ZONE</div>
             <div style="font-size:11px;color:var(--text-primary)">$${fmt.price(p.entry.low)} – $${fmt.price(p.entry.high)} <span class="text-dim">· spot $${fmt.price(p.entry.current)}</span></div>
           </div>
           <div style="border-left:3px solid var(--red);padding:6px 10px;margin-bottom:6px;background:rgba(255,51,85,0.04)">
@@ -9624,7 +9670,7 @@ const Ideas = {
         }).join('');
 
     const earlySignals = (str.early_signals || []).map(s =>
-      `<div style="font-size:10px;color:var(--amber);margin-bottom:2px">▸ ${_esc(m)}${_esc(s)}</div>`
+      `<div style="font-size:10px;color:var(--amber);margin-bottom:2px">▸ ${_esc(s)}</div>`
     ).join('') || '<div style="font-size:10px;color:var(--text-dim)">None detected</div>';
 
     return `
@@ -9719,7 +9765,7 @@ const Ideas = {
       ? '<div style="font-size:10px;color:var(--text-dim)">No recent headlines</div>'
       : headlines.map(h => `
           <div style="font-size:10px;color:var(--text-primary);line-height:1.4;margin-bottom:6px;border-left:2px solid var(--border);padding-left:8px">
-            ${h.url ? `<a href="${_esc(h.url)}" target="_blank" rel="noopener" style="color:var(--text-primary);text-decoration:none">${_esc(h.title || '')} ↗</a>` : _esc(h.title || '')}
+            ${h.url ? `<a href="${_esc(safeUrl(h.url))}" target="_blank" rel="noopener" style="color:var(--text-primary);text-decoration:none">${_esc(h.title || '')} ↗</a>` : _esc(h.title || '')}
             <div style="font-size:9px;color:var(--text-dim);margin-top:1px">${_esc(h.source || '')} · ${fmt.timeAgo(h.published)}</div>
           </div>`).join('');
 

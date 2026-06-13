@@ -359,7 +359,13 @@ def _compute_metrics(
 ) -> Dict[str, Any]:
     """Roll up per-bar pnl + signal log into the canonical metrics dict."""
     n_signals = len(signal_log)
-    realised = [s.get("realized_return") for s in signal_log
+    # WHY (Q11): exclude truncated-horizon signals from the signal-level
+    # aggregates (hit-rate, avg-return-per-signal) — they were scored over a
+    # shortened window and aren't comparable to full-horizon signals. They
+    # stay in the signal_log (with the `truncated` flag) for transparency.
+    scored_signals = [s for s in signal_log if not s.get("truncated")]
+    n_truncated = n_signals - len(scored_signals)
+    realised = [s.get("realized_return") for s in scored_signals
                 if isinstance(s.get("realized_return"), (int, float))
                 and math.isfinite(s["realized_return"])]
 
@@ -367,7 +373,7 @@ def _compute_metrics(
     # normalise to "directional pnl" (positive when the signal called it right)
     # by sign-flipping SELL returns when computing the realised series.
     directional_pnls: List[float] = []
-    for s in signal_log:
+    for s in scored_signals:
         r = s.get("realized_return")
         if r is None or not isinstance(r, (int, float)) or not math.isfinite(r):
             continue
@@ -424,6 +430,8 @@ def _compute_metrics(
 
     return {
         "n_signals":            int(n_signals),
+        "n_signals_scored":     int(len(scored_signals)),
+        "n_signals_truncated":  int(n_truncated),
         "hit_rate":             round(float(hit_rate), 4),
         "avg_return_per_signal": round(float(avg_return_per_signal) * 100.0, 4),
         "total_return_pct":     round(float(total_return_pct), 4),
@@ -554,7 +562,14 @@ def _run(
         # Executing at *that* close is the standard "decision at close, fill
         # at close" convention.
         entry_idx = t - 1
-        exit_idx = min(entry_idx + horizon, n - 1)
+        # WHY (Q11): if the full horizon would run past the end of the data
+        # (entry_idx + horizon > n-1), exit_idx gets clamped to n-1 and the
+        # signal is scored over a SHORTER-than-intended window. Counting those
+        # at full weight biases aggregates (a 20d signal scored over 3 days is
+        # not comparable). Flag them so _compute_metrics can exclude them.
+        full_exit = entry_idx + horizon
+        truncated = full_exit > (n - 1)
+        exit_idx = min(full_exit, n - 1)
         if exit_idx <= entry_idx:
             continue
         entry_px = closes[entry_idx]
@@ -572,6 +587,7 @@ def _run(
             "exit_price":      round(float(exit_px), 4),
             "exit_date":       dates[exit_idx].strftime("%Y-%m-%d"),
             "realized_return": round(float(realized), 6),
+            "truncated":       bool(truncated),
         })
 
         # Mark the position vector for the held interval. Overwrite (rather

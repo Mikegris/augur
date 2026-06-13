@@ -206,7 +206,12 @@ def _build_universe(profile):
             _add(sym, "stock", f"universe_{strategy}")
 
     # Momentum: pull from top movers
-    if strategy == "momentum" or "stocks" in asset_types:
+    # WHY (S14): `strategy=="momentum" or "stocks" in asset_types` injected the
+    # day's top gainers into EVERY strategy whenever stocks were in scope —
+    # value/income/quality scans got polluted with hot momentum names. Top
+    # gainers belong only to the momentum strategy. (`and` so it fires only
+    # when we're actually running momentum *and* stocks are in scope.)
+    if strategy == "momentum" and "stocks" in asset_types:
         try:
             movers = fetcher.get_top_movers()
             for g in (movers.get("gainers", []) or [])[:15]:
@@ -294,8 +299,15 @@ def _score_equity(symbol, profile, weights):
         "composite": 0,
     }
 
+    # WHY (S4): equity dimensions default to 50 (neutral) for MISSING data, not
+    # 0. The crypto scorer already uses 50-neutral defaults; equities used 0
+    # (max-bearish), so a rate-limited or partially-fetched stock was scored as
+    # maximally negative on every absent dimension and dropped from results —
+    # systematically biasing the scanner toward crypto. A genuinely absent
+    # signal is "no information" (neutral), not "bearish". (Dividend yield keeps
+    # a 0 default: 0% yield is real data, not a missing signal.)
     # 1. Smart Money Score (0-100 from compute_score)
-    sm_score = 0
+    sm_score = 50
     sm_data = {}
     try:
         import smart_money
@@ -312,17 +324,32 @@ def _score_equity(symbol, profile, weights):
             result["details"]["smart_money"] = {"score": 0, "signal": "N/A", "error": sm_data.get("error")}
     except Exception as e:
         logger.debug("Smart money error for %s: %s", symbol, e)
-    result["scores"]["smart_money"] = sm_score
 
     # Extract sub-signals from smart money components for detail
     components = sm_data.get("components", {})
+
+    # WHY (S3): smart_money.compute_score is itself a composite of momentum +
+    # earnings-quality + insider + ML (+ institutional/options/sec). Below we
+    # ALSO score momentum / fundamentals / insider / ml_forecast as their own
+    # weighted dimensions — so each of those signals was being counted twice
+    # (once inside smart_money, once standalone), drowning out the independent
+    # dimensions. Fix (lower-risk variant): feed the composite a *reduced*
+    # smart_money score that keeps only the NON-overlapping components
+    # (institutional flow, options pricing, SEC sentiment) and rescales to
+    # 0-100. The overlapping signals are represented by their standalone dims.
+    if components:
+        _keep = ("institutional", "options_pricing", "sec_sentiment")
+        kept_score = sum(components.get(k, {}).get("score", 0) for k in _keep)
+        kept_max = sum(components.get(k, {}).get("max", 0) for k in _keep)
+        sm_score = round(kept_score / kept_max * 100) if kept_max else sm_score
+    result["scores"]["smart_money"] = sm_score
 
     # 2. ML Forecast
     # ml_forecast.ml_forecast() returns nested components — not the flat
     # keys we used to read here. Pull each value from its real nest;
     # missing/None components fall back to neutral defaults so partial
     # signal sets don't zero out the whole channel.
-    ml_score = 0
+    ml_score = 50  # S4: neutral default for missing data
     try:
         import ml_forecast as mlf
         ml_data = mlf.ml_forecast(symbol)
@@ -359,14 +386,14 @@ def _score_equity(symbol, profile, weights):
     result["scores"]["ml_forecast"] = ml_score
 
     # 3. Momentum (from smart_money components or compute fresh)
-    momentum_score = 0
+    momentum_score = 50  # S4: neutral default for missing data
     mom_comp = components.get("momentum", {})
     if mom_comp:
         momentum_score = round(mom_comp.get("score", 0) / max(mom_comp.get("max", 1), 1) * 100)
     result["scores"]["momentum"] = momentum_score
 
     # 4. Fundamentals
-    fund_score = 0
+    fund_score = 50  # S4: neutral default for missing data
     earnings_comp = components.get("earnings_quality", {})
     if earnings_comp:
         fund_score = round(earnings_comp.get("score", 0) / max(earnings_comp.get("max", 1), 1) * 100)
@@ -398,7 +425,7 @@ def _score_equity(symbol, profile, weights):
     result["scores"]["fundamentals"] = fund_score
 
     # 5. Insider Activity
-    insider_score = 0
+    insider_score = 50  # S4: neutral default for missing data
     insider_comp = components.get("insider_activity", {})
     if insider_comp:
         insider_score = round(insider_comp.get("score", 0) / max(insider_comp.get("max", 1), 1) * 100)
@@ -422,7 +449,7 @@ def _score_equity(symbol, profile, weights):
     result["scores"]["insider"] = insider_score
 
     # 6. Congressional Interest
-    congress_score = 0
+    congress_score = 50  # S4: neutral default for missing data
     try:
         import congress as cong_mod
         trades = cong_mod.get_trades_for_ticker(symbol, days=90)
@@ -450,7 +477,7 @@ def _score_equity(symbol, profile, weights):
     result["scores"]["congress"] = congress_score
 
     # 7. Options Flow
-    options_score = 0
+    options_score = 50  # S4: neutral default for missing data
     try:
         flow = fetcher.get_unusual_options_flow(symbol)
         unusual = flow.get("unusual", [])

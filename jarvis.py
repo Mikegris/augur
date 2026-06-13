@@ -254,6 +254,11 @@ def _llm_context_snapshot() -> str:
     return "\n".join(lines) if lines else "(no local data available)"
 
 
+# One-shot guard: index_memories() backfill runs once per process, the first
+# time _memory_block does a real recall (so it only fires when a key exists).
+_SEMMEM_BACKFILLED = False
+
+
 def _memory_block(query: Optional[str] = None) -> str:
     """Durable user facts, formatted for prompt injection. Empty when none.
     When `query` is given, up to 3 semantically-recalled snippets (old thread
@@ -276,6 +281,18 @@ def _memory_block(query: Optional[str] = None) -> str:
     if query:
         try:
             import jarvis_semmem
+            # One-time backfill: pre-key memories were never embedded (nothing
+            # else calls index_memories). The first recall with a key present
+            # is the natural moment to embed the backlog so it becomes
+            # recallable. Throttled by a module flag — runs at most once per
+            # process, and is itself fully guarded / fail-open.
+            global _SEMMEM_BACKFILLED
+            if not _SEMMEM_BACKFILLED:
+                _SEMMEM_BACKFILLED = True
+                try:
+                    jarvis_semmem.index_memories()
+                except Exception as e:
+                    log.debug("semmem backfill skipped: %s", e)
             seen = {l.lower() for l in lines}
             for hit in jarvis_semmem.recall(query, k=3) or []:
                 quoted = '- "{}"'.format(_one_line(hit.get("text") or ""))
@@ -447,19 +464,56 @@ def _result_note(result_json: str) -> str:
     return "returned data"
 
 
+def _result_is_data(result_json: str) -> bool:
+    """True when a tool result parsed to actual DATA, not an error/empty
+    payload. Used to grade confidence on tools that DELIVERED, not on tools
+    merely invoked — an all-errored run must not badge 'high'. A bare {"note":
+    ...} (no usable fields) or any {"error": ...} counts as no-data."""
+    try:
+        parsed = json.loads(result_json)
+    except Exception:
+        return False
+    if isinstance(parsed, dict):
+        if parsed.get("error"):
+            return False
+        # A dict whose ONLY substantive content is a "note" carried no data
+        # (e.g. {"note": "no quote available"}). Any other field = real data.
+        keys = [k for k in parsed.keys() if k not in ("note",)]
+        return bool(keys)
+    if isinstance(parsed, list):
+        # All-error rows (every dict has an "error") = no usable data.
+        if parsed and all(isinstance(x, dict) and x.get("error") for x in parsed):
+            return False
+        return bool(parsed)
+    return parsed is not None
+
+
 def _confidence(used: Optional[List[str]] = None, salvaged: bool = False,
                 citations: Optional[List[Any]] = None,
-                reasoning: Optional[Dict[str, Any]] = None) -> Dict[str, str]:
+                reasoning: Optional[Dict[str, Any]] = None,
+                succeeded: Optional[List[str]] = None) -> Dict[str, str]:
     """Honest self-assessment for the UI badge: how much evidence actually
     backs this answer. Low = salvaged or zero tools; high = three-plus
     distinct engines on a clean run; moderate otherwise. The note names the
-    basis so 'high' is never just vibes."""
+    basis so 'high' is never just vibes.
+
+    `succeeded`, when supplied, is the subset of `used` whose result actually
+    parsed to DATA (not an error/empty payload). The badge keys on THAT, not
+    on how many tools were merely invoked — three tools that all errored is
+    not a 'high'-confidence answer."""
     try:
-        distinct = sorted(set(used or []))
+        # Grade on tools that returned data when we know which those were;
+        # otherwise fall back to "invoked" (legacy callers pass no `succeeded`).
+        graded = succeeded if succeeded is not None else used
+        distinct = sorted(set(graded or []))
         if salvaged:
             return {"level": "low",
                     "note": "partial data — connection dropped mid-analysis"}
         if not distinct:
+            # Tools may have been invoked but none returned usable data.
+            if used:
+                return {"level": "low",
+                        "note": "engines consulted but returned no usable data"}
             return {"level": "low", "note": "no engines consulted — answered from context"}
         if len(distinct) >= 3:
             note = "cross-referenced {} engines".format(len(distinct))
@@ -627,6 +681,7 @@ def _agent_ask(query: str, history: Optional[List[Dict[str, Any]]] = None,
 
     schemas = jarvis_tools.openai_schemas()
     used: List[str] = []           # distinct tool names consulted (for the UI trace)
+    succeeded: List[str] = []      # subset of `used` whose result carried DATA
     tool_cache: Dict[str, str] = {}  # (name+args) -> result, dedup across rounds
     citations: List[Dict[str, Any]] = []  # web_research sources, for the UI
 
@@ -678,7 +733,8 @@ def _agent_ask(query: str, history: Optional[List[Dict[str, Any]]] = None,
             if citations:
                 out["citations"] = citations[:6]
             out["confidence"] = _confidence(used, citations=citations,
-                                            reasoning=reasoning)
+                                            reasoning=reasoning,
+                                            succeeded=succeeded)
             return out
 
         # Mutating request → stop and hand the proposal to the UI. Check this
@@ -696,9 +752,22 @@ def _agent_ask(query: str, history: Optional[List[Dict[str, Any]]] = None,
                                       "missing the details — try again with the symbol "
                                       "and the specifics?", "used": used}
                 label = jarvis_tools.proposal_label(name, args)
-                return {"answer": "I can do that: {}. Confirm and I'll execute.".format(label),
-                        "proposal": {"tool": name, "args": args, "label": label},
-                        "used": used}
+                # Policy guard: warn (don't block) when a staged mutation would
+                # breach a standing rule, e.g. a buy over max_single_buy_usd.
+                # Fail-open — a broken policy engine never stops a proposal.
+                warning = None
+                try:
+                    import jarvis_policy
+                    warning = jarvis_policy.check_proposal(name, args)
+                except Exception as e:
+                    log.debug("policy check_proposal skipped: %s", e)
+                answer = "I can do that: {}. Confirm and I'll execute.".format(label)
+                proposal = {"tool": name, "args": args, "label": label}
+                if warning:
+                    answer += " Heads up — {}.".format(warning)
+                    proposal["label"] = "{} ⚠ {}".format(label, warning)
+                    proposal["warning"] = warning
+                return {"answer": answer, "proposal": proposal, "used": used}
 
         # Read tools: execute (deduped + memoized) and feed results back.
         messages.append({"role": "assistant", "content": msg.content or "",
@@ -726,6 +795,10 @@ def _agent_ask(query: str, history: Optional[List[Dict[str, Any]]] = None,
                 if len(reasoning["consulted"]) < 8:
                     reasoning["consulted"].append(
                         {"tool": tc.function.name, "note": _result_note(result)})
+            # Track which tools actually delivered data, so confidence grades
+            # on evidence, not on call count (an all-errored run isn't "high").
+            if tc.function.name not in succeeded and _result_is_data(result):
+                succeeded.append(tc.function.name)
             # Harvest web_research source citations to surface in the UI.
             if tc.function.name == "web_research":
                 try:
@@ -738,7 +811,20 @@ def _agent_ask(query: str, history: Optional[List[Dict[str, Any]]] = None,
             messages.append({"role": "tool", "tool_call_id": tc.id, "content": result})
 
     if ai_summarizer._cap_exceeded():
-        return None  # budget gone mid-loop — fail open to the cheaper paths
+        # Budget gone mid-loop. If tools already ran, don't discard that
+        # evidence and land on the help text — salvage a partial answer from
+        # what they returned. Only with NOTHING consulted do we fail open to
+        # the cheaper paths (which a None return triggers).
+        if used:
+            log.debug("agent cap exhausted mid-loop, salvaging %d tools", len(used))
+            notify("Budget reached — answering from what I gathered…")
+            out = _salvage_payload(query, used, reasoning, tool_cache)
+            out["confidence"] = _confidence(used, salvaged=True,
+                                            citations=citations, reasoning=reasoning)
+            if citations:
+                out["citations"] = citations[:6]
+            return out
+        return None  # nothing gathered — fail open to the cheaper paths
     # Round budget exhausted — ask for a final synthesis without tools.
     notify("Wrapping up…")
     model = (ai_summarizer.MODEL_HEAVY if len(set(used)) > 2
@@ -767,7 +853,8 @@ def _agent_ask(query: str, history: Optional[List[Dict[str, Any]]] = None,
         out["reasoning"] = reasoning
     if citations:
         out["citations"] = citations[:6]
-    out["confidence"] = _confidence(used, citations=citations, reasoning=reasoning)
+    out["confidence"] = _confidence(used, citations=citations, reasoning=reasoning,
+                                    succeeded=succeeded)
     return out
 
 
@@ -2990,8 +3077,13 @@ def _answer_social(q: str, ql: str) -> Optional[Dict[str, Any]]:
             phase = "doing their thing"
         return {"answer": "{}. Markets are {} — what shall we look at?".format(
             _greeting(), phase)}
-    if len(stripped.split()) <= 5 and _THANKS_RE.search(stripped):
-        return {"answer": _THANKS_ACKS[len(q) % len(_THANKS_ACKS)]}
+    # Only ack when the message is ONLY gratitude. "thanks, now forecast NVDA"
+    # carries a real request after the thanks — strip the gratitude phrase and,
+    # if anything substantive remains, fall through so it gets answered.
+    if _THANKS_RE.search(stripped):
+        remainder = _THANKS_RE.sub(" ", stripped).strip(" ,.!?-—")
+        if not remainder:
+            return {"answer": _THANKS_ACKS[len(q) % len(_THANKS_ACKS)]}
     return None
 
 
@@ -3020,7 +3112,12 @@ def _sanitize_history(history: Any) -> List[Dict[str, Any]]:
     return out
 
 
-_FOLLOW_UP_RE = re.compile(r"\b(it|its|that|this|same|again)\b", re.IGNORECASE)
+# Strong back-references that genuinely point at the prior turn's subject.
+# "this"/"that" are deliberately EXCLUDED: bare "why am I down this year"
+# would otherwise inherit a stale ticker and defeat attribution's not-symbol
+# gate. The "what about"/"how about"/"and " prefixes below still catch the
+# legitimate "what about that?" follow-up phrasing.
+_FOLLOW_UP_RE = re.compile(r"\b(it|its|same|again)\b", re.IGNORECASE)
 
 # "Why am I down today" / "what's driving my book" → per-holding attribution.
 # Deliberately anchored on MY portfolio/book phrasing so "why is the market
@@ -3170,7 +3267,17 @@ def _answer_memory(q: str) -> Optional[Dict[str, Any]]:
         return {"answer": "Noted (#{}) — I'll keep that in mind: “{}”.".format(mid, fact)}
     m = _FORGET_RE.match(q)
     if m:
-        ok = db.jarvis_delete_memory(int(m.group(1)))
+        mem_id = int(m.group(1))
+        ok = db.jarvis_delete_memory(mem_id)
+        if ok:
+            # Also drop the mirrored embedding — otherwise semmem.recall()
+            # re-injects the "forgotten" fact by meaning even though the
+            # jarvis_memory row is gone. Guarded — best-effort cleanup.
+            try:
+                import jarvis_semmem
+                jarvis_semmem.forget("memory", str(mem_id))
+            except Exception:
+                pass
         return {"answer": "Forgotten." if ok else "I have no memory #{}.".format(m.group(1))}
 
     def _full_list() -> Dict[str, Any]:
@@ -3194,8 +3301,12 @@ def _answer_memory(q: str) -> Optional[Dict[str, Any]]:
         if hits:
             listing = " ".join("#{} {}.".format(f["id"], f["fact"]) for f in hits[-8:])
             return {"answer": "On “{}”: {}".format(topic, listing)}
-        # No matches — the honest fallback is everything I hold.
-        return _full_list()
+        # Zero stored facts on this topic does NOT mean "dump my whole memory":
+        # "what do you know about NVIDIA" is a RESEARCH question, not a memory
+        # query. Return None so the chain continues to the agent/research path
+        # rather than dead-ending on the full memory listing. The full list is
+        # reserved for the explicit "about me/myself" form (_LIST_MEMORY_RE).
+        return None
     if _LIST_MEMORY_RE.match(q.strip()):
         return _full_list()
     return None
@@ -3284,9 +3395,14 @@ def summarize_thread(conv_id: Any) -> int:
 # remainder of the corrected message re-enters the normal chain so the user
 # gets their actual answer in the same turn.
 
+# Real correction SHAPE only. The bare "no, …" alternative was removed: it
+# treated any "no, just equities" answer to a clarify question as a routing
+# correction, stripping the "no," and rerouting the remainder. A correction
+# must look like one — "no, I meant …", "that's wrong", "not what I asked".
 _CORRECTION_RE = re.compile(
-    r"^(?:no,?\s+i\s+meant\s+|no,\s+|not\s+what\s+i\s+\w+[,.\s]*|"
-    r"that'?s\s+wrong[,.\s]*|wrong[,:]\s+)",
+    r"^(?:no,?\s+i\s+meant\s+|no,?\s+not\s+|"
+    r"not\s+what\s+i\s+\w+[,.\s]*|"
+    r"that'?s\s+(?:wrong|not\s+(?:right|it|what))[,.\s]*|wrong[,:]\s+)",
     re.IGNORECASE)
 
 _CORRECTIONS_ASK_RE = re.compile(
@@ -3375,10 +3491,14 @@ def _set_pending_clarify(conv_id: Optional[int], intent: str) -> None:
 
 def ask(query: str, history: Any = None, conversation_id: Any = None,
         persist: bool = True, progress: Any = None,
-        _depth: int = 0) -> Dict[str, Any]:
+        _depth: int = 0, cancelled: Any = None) -> Dict[str, Any]:
     """Route a natural-language question to the right engine. Local-only,
     with server-persisted conversation state for follow-up resolution.
     `progress` is an optional callable(str) for streaming status lines.
+    `cancelled` is an optional callable() -> bool: when it returns True the
+    caller (a streaming worker) has already given up and abandoned the answer,
+    so we must NOT persist it (the user will never see it; persisting an
+    unseen turn corrupts the next prompt's history).
     `_depth` guards the correction-rerouting recursion — internal only."""
     q = (query or "").strip()
     if not q:
@@ -3433,7 +3553,20 @@ def ask(query: str, history: Any = None, conversation_id: Any = None,
             log.debug("ask: conversation load failed: %s", e)
             conv_id = None
 
+    def _cancelled() -> bool:
+        if cancelled is None:
+            return False
+        try:
+            return bool(cancelled())
+        except Exception:
+            return False
+
     def _persisted(payload: Dict[str, Any]) -> Dict[str, Any]:
+        # The streaming caller already timed out and walked away — don't write
+        # an answer nobody will read into the conversation log, and don't fire
+        # implicit learning for an abandoned turn.
+        if _cancelled():
+            return payload
         if conv_id is not None:
             payload["conversation_id"] = conv_id
             try:
@@ -3444,17 +3577,29 @@ def ask(query: str, history: Any = None, conversation_id: Any = None,
             except Exception as e:
                 log.debug("ask: persist failed: %s", e)
         # Implicit learning — skip the explicit memory intent (it already
-        # stored or deleted exactly what the user asked for).
-        if payload.get("intent") != "memory":
+        # stored or deleted exactly what the user asked for). Also skip when
+        # this isn't a persisting turn (persist=False / no conv_id): the inner
+        # correction-reroute ask() runs with persist=False and would otherwise
+        # call _maybe_learn a SECOND time for the same user message.
+        if persist and payload.get("intent") != "memory":
             _maybe_learn(q)
         return payload
 
-    # Durable memory management — checked first, never needs a key.
-    mem = _answer_memory(q)
-    if mem is not None:
-        mem["intent"] = "memory"
-        mem.setdefault("symbol", None)
-        return _persisted(mem)
+    # Durable memory management — checked first, never needs a key. Its DB
+    # writes (add/forget memory + embedding mirror) can raise; wrap it in the
+    # same error-payload discipline as the main rule chain so a memory write
+    # failure returns a graceful error rather than escaping ask() unhandled.
+    try:
+        mem = _answer_memory(q)
+        if mem is not None:
+            mem["intent"] = "memory"
+            mem.setdefault("symbol", None)
+            return _persisted(mem)
+    except Exception as e:
+        log.warning("jarvis.ask memory branch failed for %r: %s", q, e)
+        return _persisted({"intent": "error", "symbol": None,
+                "answer": "Something went wrong managing memory just then — "
+                          "try that again in a moment."})
 
     # Follow-up resolution: "will it keep falling?" after a question about
     # NVDA should mean NVDA. Inherit the most recent symbol from history,
@@ -3483,7 +3628,14 @@ def ask(query: str, history: Any = None, conversation_id: Any = None,
     # prefix. Log it against what we were answering before, strip the prefix,
     # and route the remainder through the normal chain. Depth-guarded so a
     # remainder that itself starts with "no," can't recurse forever.
-    if _depth < 2 and turns:
+    #
+    # BUT when the prior turn was a CLARIFY question, a "no, just equities"
+    # is an ANSWER to that question, not a routing correction — stripping the
+    # negation would mangle it. Skip the correction path entirely when a
+    # clarify is pending so the original text passes through unchanged.
+    _clarify_pending = (conv_id is not None
+                        and _PENDING_CLARIFY.get(conv_id) is not None)
+    if _depth < 2 and turns and not _clarify_pending:
         m_corr = _CORRECTION_RE.match(q)
         if m_corr:
             prior_q = ""
@@ -3517,7 +3669,14 @@ def ask(query: str, history: Any = None, conversation_id: Any = None,
     # Clarify resume: if the last turn was Jarvis asking which symbol, and
     # the reply is essentially just a symbol, re-dispatch the ORIGINAL
     # intent instead of treating "NVDA" as a bare quote request.
-    if conv_id is not None and symbol and len(ql.split()) <= 3:
+    # Only resume when the reply is ESSENTIALLY JUST the symbol — "NVDA",
+    # "NVDA please". If the short reply independently reads as a quote/price
+    # request ("price of NVDA", "NVDA quote"), it's a fresh question, not an
+    # answer to the clarify, so don't hijack it back into the pending intent.
+    _reply_is_bare_symbol = (
+        symbol and len(ql.split()) <= 3
+        and not re.search(r"\b(price|quote|cost|worth|trading|value)\b", ql))
+    if conv_id is not None and _reply_is_bare_symbol:
         pend = _PENDING_CLARIFY.get(conv_id)
         if pend is not None:
             import time as _t
@@ -3526,6 +3685,26 @@ def ask(query: str, history: Any = None, conversation_id: Any = None,
                 try:
                     if pend.get("intent") == "forecast":
                         return done("forecast", _answer_forecast(symbol, ql))
+                    if pend.get("intent") == "agent":
+                        # Agent/planner asked "which symbol?" — resume the
+                        # agent with the bare-symbol reply and full history
+                        # rather than dropping to the quote fast-path (J2).
+                        r = _agent_ask(ql, turns, progress=progress)
+                        if r and r.get("answer"):
+                            payload = {"answer": r["answer"],
+                                       "used": r.get("used") or []}
+                            for k in ("reasoning", "confidence", "citations",
+                                      "proposal"):
+                                if r.get(k):
+                                    payload[k] = r[k]
+                            if r.get("salvaged"):
+                                payload["salvaged"] = True
+                            if r.get("clarify"):
+                                _set_pending_clarify(conv_id, "agent")
+                                return done("clarify", payload)
+                            if r.get("proposal"):
+                                return done("action", payload)
+                            return done("llm", payload)
                 except Exception as e:
                     log.debug("clarify resume failed: %s", e)
 
@@ -3534,8 +3713,14 @@ def ask(query: str, history: Any = None, conversation_id: Any = None,
     # sell", "worth holding", "vs", "compare") deserve the lens tools, not a
     # canned rule-based line. Short quote-shaped queries still take the fast
     # path below.
+    # NOTE: bare "worth" is deliberately NOT here — it swallowed "net worth"
+    # and "what is my portfolio worth", which must reach _answer_portfolio.
+    # Only the judgment multiword forms ("worth holding"/"worth buying") are
+    # analytical.
     _analytical = any(w in ql for w in (
-        "good business", "overvalued", "undervalued", "fairly valued", "worth",
+        "good business", "overvalued", "undervalued", "fairly valued",
+        "worth holding", "worth buying", "worth owning", "worth keeping",
+        "worth selling", "worth it",
         "should i", "vs ", " versus ", "compare", "quality", "moat", "risky",
         "temperament", "behavior", "behaviour", "what if", "macro"))
 
@@ -3567,6 +3752,10 @@ def ask(query: str, history: Any = None, conversation_id: Any = None,
         # A span word (week/month/recently) routes to the snapshot-window
         # path; plain phrasing keeps the live day-scope answer.
         if _ATTRIB_RE.search(ql) and not symbol:
+            if re.search(r"\byear\b|ytd\b|this year\b", ql):
+                return done("attribution", _answer_why_window(365, "year"))
+            if re.search(r"\bquarter\b", ql):
+                return done("attribution", _answer_why_window(90, "quarter"))
             if re.search(r"\bmonth\b", ql):
                 return done("attribution", _answer_why_window(30, "month"))
             if re.search(r"\bweek\b", ql):
@@ -3635,7 +3824,16 @@ def ask(query: str, history: Any = None, conversation_id: Any = None,
                                             "avg cost", "what did i pay",
                                             "how much did i pay")):
             return done("basis", _answer_basis(symbol))
-        if any(w in ql for w in ("earnings", "report", "reports", "reporting")):
+        # "earnings" always routes here; bare "report(s/ing)" must NOT — it
+        # caught "portfolio report"/"summary report". Only treat a report word
+        # as earnings when an earnings/when-context or a symbol is present.
+        if ("earnings" in ql
+                or (re.search(r"\breport(s|ing)?\b", ql)
+                    and (symbol
+                         or "earnings" in ql
+                         or any(w in ql for w in ("when", "next", "upcoming",
+                                                  "quarter", "guidance",
+                                                  "beat", "miss", "eps"))))):
             return done("earnings", _answer_earnings(symbol))
         # Biggest position before exposure AND portfolio — a one-liner, not
         # the full weights table ("position"/"holding" overlap both intents).
@@ -3731,6 +3929,9 @@ def ask(query: str, history: Any = None, conversation_id: Any = None,
                     payload["salvaged"] = True
                 if r.get("clarify"):
                     # The agent (or planner) chose to ask rather than guess.
+                    # Mark a pending clarify so a bare-symbol reply resumes the
+                    # agent with history instead of hitting the quote fast-path.
+                    _set_pending_clarify(conv_id, "agent")
                     return done("clarify", payload)
                 if r.get("citations"):
                     payload["citations"] = r["citations"]
@@ -3783,7 +3984,13 @@ def _direct_research(query: str) -> Optional[Dict[str, Any]]:
 
 # ─── streaming ask: live status narration while the answer is computed ───────
 
-_ASK_STREAM_DEADLINE = 300  # s — agent worst case is ~5 rounds × 55s client timeout
+# Worst-case agent wall time: per-round timeout 55s × (1 + max_retries=2) ≈
+# 165s/round × _AGENT_MAX_ROUNDS rounds, plus the planner call and the final
+# tool-less synthesis. 300s cut off legitimate multi-round answers — the
+# worker kept billing OpenAI and then persisted an answer the user never saw.
+# Size the deadline to actually cover the loop; the cancel flag (below) is the
+# backstop that stops the worker from persisting if we DO give up first.
+_ASK_STREAM_DEADLINE = int(55 * 3 * (_AGENT_MAX_ROUNDS + 1) + 60)  # ~1050s
 
 
 def ask_stream(query: str, history: Any = None, conversation_id: Any = None):
@@ -3802,6 +4009,7 @@ def ask_stream(query: str, history: Any = None, conversation_id: Any = None):
     import time as _time
 
     events: "_queue.Queue" = _queue.Queue()
+    _cancel = threading.Event()  # set when we give up; worker skips persistence
 
     def _progress(text: str) -> None:
         try:
@@ -3811,8 +4019,20 @@ def ask_stream(query: str, history: Any = None, conversation_id: Any = None):
 
     def _run() -> None:
         try:
-            payload = ask(query, history=history,
-                          conversation_id=conversation_id, progress=_progress)
+            try:
+                payload = ask(query, history=history,
+                              conversation_id=conversation_id, progress=_progress,
+                              cancelled=_cancel.is_set)
+            except TypeError as te:
+                # A patched/older ask() without the `cancelled` param raises
+                # "unexpected keyword argument 'cancelled'" at call binding,
+                # before its body runs — fall back to the plain call. The
+                # deadline still abandons the worker; only the persist-skip
+                # optimization is forgone. Re-raise any OTHER TypeError.
+                if "cancelled" not in str(te):
+                    raise
+                payload = ask(query, history=history,
+                              conversation_id=conversation_id, progress=_progress)
         except Exception as e:
             log.warning("ask_stream worker failed for %r: %s", query, e)
             payload = {"intent": "error",
@@ -3830,6 +4050,9 @@ def ask_stream(query: str, history: Any = None, conversation_id: Any = None):
             ev = events.get(timeout=1.0)
         except _queue.Empty:
             if _time.time() > deadline:
+                # Abandon the worker — and signal it NOT to persist whatever it
+                # eventually produces, since the user has already moved on.
+                _cancel.set()
                 yield {"type": "answer",
                        "payload": {"intent": "error",
                                    "answer": "That one ran long and I cut it "

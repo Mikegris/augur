@@ -34,6 +34,15 @@ PORT = int(os.environ.get("E2E_PORT", "5099"))
 BASE = "http://127.0.0.1:{}".format(PORT)
 TIMEOUT = 60  # generous: some engines do real work on a cold cache
 
+# Heavy analytical sweeps legitimately take >60s on a stone-cold cache (they
+# fan out per-symbol option chains / scan ~100 names). They're coalesce-cached
+# in production, so a real user pays this once; the e2e contract is "the server
+# returns a valid response", not "it's fast". Give these a wider ceiling.
+HEAVY_ROUTE_TIMEOUT = 150
+HEAVY_ROUTES = ("/api/synth/catalyst", "/api/synth/cluster-scan",
+                "/api/synth/peerdiv", "/api/synth/divmap", "/api/cluster",
+                "/api/synthetic-insider", "/api/montecarlo")
+
 PASS, WARN, FAIL = "PASS", "WARN", "FAIL"
 results = []  # (status, route, note)
 
@@ -149,8 +158,9 @@ def get_sweep():
             record(WARN, "GET " + rule.rule, "param substitution failed: {}".format(e))
             continue
         t0 = time.time()
+        rt = HEAVY_ROUTE_TIMEOUT if any(path.startswith(h) for h in HEAVY_ROUTES) else TIMEOUT
         try:
-            status, body = req("GET", path)
+            status, body = req("GET", path, timeout=rt)
         except Exception as e:
             record(FAIL, "GET " + path, "transport: {}".format(e))
             continue

@@ -337,8 +337,18 @@ def _summary_stats(curves: np.ndarray, dates: List[str],
     t0 = window_days
     if curves.size == 0:
         return {}
-    # Return at T0 (== cumulative return from T-W to T0)
-    avg_T0 = float(np.nanmean(curves[:, t0])) * 100.0
+    # WHY (Q10): curves[:, t0] is the CUMULATIVE return from T-W to T0 — i.e.
+    # the pre-event run-up over the whole left window, not the event-day move.
+    # The actual T0 one-day return is the step from T0-1 to T0:
+    #   (1 + c_t0) / (1 + c_{t0-1}) - 1
+    # which isolates the event-day reaction. (c_{t0-1} exists since t0 = W ≥ 1.)
+    if t0 >= 1:
+        c_t0 = curves[:, t0]
+        c_prev = curves[:, t0 - 1]
+        event_day_ret = (1.0 + c_t0) / (1.0 + c_prev) - 1.0
+        avg_T0 = float(np.nanmean(event_day_ret)) * 100.0
+    else:
+        avg_T0 = float(np.nanmean(curves[:, t0])) * 100.0
 
     # Post-event 5d performance: T+5 vs T0
     post_idx = min(t0 + 5, curves.shape[1] - 1)
@@ -349,6 +359,18 @@ def _summary_stats(curves: np.ndarray, dates: List[str],
     # the rate reflects only events with usable post-event returns.
     finite_rel = rel[np.isfinite(rel)]
     hit = float(np.mean(finite_rel > 0)) if finite_rel.size else 0.0
+
+    # WHY (S13): magnitude consumers (e.g. synth_catalyst) want the typical
+    # ABSOLUTE move around the event. Averaging signed returns and then taking
+    # |.| collapses toward 0 for symmetric outcomes (half +8%, half -8% → ~0),
+    # badly understating the realized volatility. Instead average the absolute
+    # PER-EPISODE move from just-before-event (T0-1) through T+5, so each
+    # episode's magnitude counts before any sign cancellation.
+    base_idx = t0 - 1 if t0 >= 1 else t0
+    per_episode_total = (1.0 + curves[:, post_idx]) / (1.0 + curves[:, base_idx]) - 1.0
+    finite_total = per_episode_total[np.isfinite(per_episode_total)]
+    avg_abs_move = (float(np.mean(np.abs(finite_total))) * 100.0
+                    if finite_total.size else None)
 
     # Best/worst individual end-of-window cumulative
     end_rets = curves[:, -1]
@@ -363,6 +385,7 @@ def _summary_stats(curves: np.ndarray, dates: List[str],
     return {
         "avg_T0_return_pct": round(avg_T0, 3),
         "avg_post_event_5d_pct": round(avg_post5, 3),
+        "avg_abs_event_move_pct": round(avg_abs_move, 3) if avg_abs_move is not None else None,
         "hit_rate_positive_post": round(hit, 3),
         "best_window": best,
         "worst_window": worst,

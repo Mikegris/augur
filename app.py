@@ -40,6 +40,7 @@ import io
 import csv
 import logging
 import re
+import math
 import threading
 import time
 from collections import deque
@@ -83,6 +84,14 @@ def _safe_int(val, default):
 
 def _valid_ticker(symbol):
     return isinstance(symbol, str) and bool(_TICKER_RE.match(symbol.strip().upper()))
+
+def _err(e, msg="internal error", status=500):
+    """Log an engine/DB/upstream exception server-side and return a generic
+    JSON error so raw str(e) (SQL, file paths, upstream URLs, stack detail)
+    never leaks to the client. Use for unexpected exceptions only — keep
+    validation 400s with their specific user-facing messages."""
+    log.exception(e)
+    return jsonify({"error": msg}), status
 
 def _utc_now():
     return datetime.now(timezone.utc)
@@ -173,6 +182,10 @@ else:
 # sleep is ever shortened.
 _JARVIS_WATCH_EVAL_LAST = 0.0
 _JARVIS_WATCH_EVAL_INTERVAL = 300  # seconds
+# The cadence gate below is a check-then-set on a module global. The snapshot
+# worker is the only caller today, but guard it so a second caller (or a future
+# reload) can't both pass the interval check and double-run the evaluation.
+_JARVIS_WATCH_EVAL_LOCK = threading.Lock()
 
 
 def _evaluate_jarvis_watches():
@@ -181,9 +194,10 @@ def _evaluate_jarvis_watches():
     module may not exist yet, and nothing here may kill the worker loop."""
     global _JARVIS_WATCH_EVAL_LAST
     now = time.time()
-    if now - _JARVIS_WATCH_EVAL_LAST < _JARVIS_WATCH_EVAL_INTERVAL:
-        return
-    _JARVIS_WATCH_EVAL_LAST = now
+    with _JARVIS_WATCH_EVAL_LOCK:
+        if now - _JARVIS_WATCH_EVAL_LAST < _JARVIS_WATCH_EVAL_INTERVAL:
+            return
+        _JARVIS_WATCH_EVAL_LAST = now
     try:
         import jarvis_watches
     except Exception:
@@ -276,8 +290,11 @@ def _snapshot_worker():
         time.sleep(300)  # 5 minutes
 
 
-# Guard against Flask reloader double-start
-if os.environ.get("WERKZEUG_RUN_MAIN") == "true" or not app.debug:
+# Guard against Flask reloader double-start — reuse the same reloader-parent
+# detection cache_warmer uses so we start the snapshot worker in exactly one
+# process (app.debug is False at import time, so checking it always started in
+# BOTH the reloader parent and child).
+if not _IS_RELOADER_PARENT:
     _t = threading.Thread(target=_snapshot_worker, daemon=True)
     _t.start()
 
@@ -301,7 +318,7 @@ def quote(symbol):
 def quotes_batch():
     symbols_param = request.args.get("symbols", "")
     symbols = [s.strip().upper() for s in symbols_param.split(",") if s.strip()]
-    symbols = [s for s in symbols if _valid_ticker(s)]
+    symbols = [s for s in symbols if _valid_ticker(s)][:50]
     if not symbols:
         return jsonify({"error": "No valid symbols provided"}), 400
     return jsonify(fetcher.get_quotes_batch(symbols))
@@ -500,6 +517,12 @@ def add_position():
         fees = float(data.get("fees", 0))
     except (TypeError, ValueError):
         return jsonify({"error": "shares, avg_cost, fees must be numeric"}), 400
+    if not (math.isfinite(shares) and math.isfinite(avg_cost) and math.isfinite(fees)):
+        return jsonify({"error": "shares, avg_cost, fees must be finite"}), 400
+    if shares <= 0:
+        return jsonify({"error": "shares must be > 0"}), 400
+    if avg_cost < 0 or fees < 0:
+        return jsonify({"error": "avg_cost and fees must be >= 0"}), 400
     acct_id = _safe_int(data.get("account_id"), None) if data.get("account_id") else None
     row_id = db.add_position(
         symbol=data["symbol"],
@@ -550,6 +573,10 @@ def update_position(pos_id):
             avg_cost = float(avg_cost)
     except (TypeError, ValueError):
         return jsonify({"error": "shares and avg_cost must be numeric"}), 400
+    if shares is not None and (not math.isfinite(shares) or shares <= 0):
+        return jsonify({"error": "shares must be a finite number > 0"}), 400
+    if avg_cost is not None and (not math.isfinite(avg_cost) or avg_cost < 0):
+        return jsonify({"error": "avg_cost must be a finite number >= 0"}), 400
     ok = db.update_position(
         pos_id,
         shares=shares,
@@ -1031,9 +1058,10 @@ def add_alert():
         price = float(data.get("price", 0))
     except (TypeError, ValueError):
         return jsonify({"error": "Invalid price"}), 400
-    # price must be a positive number — `not price` rejected a legitimate 0 and
-    # let negatives through (creating an alert that can never trigger).
-    if not symbol or price <= 0 or alert_type not in ("above", "below"):
+    # price must be a positive FINITE number — `not price` rejected a legitimate
+    # 0 and let negatives through, and NaN slips past `price <= 0` (all NaN
+    # comparisons are False) creating an alert that can never trigger.
+    if not symbol or not math.isfinite(price) or price <= 0 or alert_type not in ("above", "below"):
         return jsonify({"error": "symbol, valid alert_type, and price > 0 required"}), 400
     if not _valid_ticker(symbol):
         return jsonify({"error": "Invalid symbol"}), 400
@@ -1233,7 +1261,8 @@ def earnings_dossier(symbol):
     try:
         dossier = earnings_module.get_earnings_dossier(symbol)
     except Exception as e:
-        return jsonify({"error": str(e), "symbol": symbol}), 500
+        log.exception(e)
+        return jsonify({"error": "internal error", "symbol": symbol}), 500
 
     # Generate AI brief
     brief = ai_summarizer.generate_earnings_brief(dossier, model=ai_model)
@@ -1507,12 +1536,14 @@ def intel_filing_detail(accession):
             "ai_powered": bool(ai_result.get("ai_powered")),
         })
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        return _err(e)
 
 
 @app.route("/api/intel/insiders/<symbol>")
 def intel_insiders(symbol):
     """Get Form 4 insider transactions for a symbol."""
+    if not _valid_ticker(symbol):
+        return jsonify({"error": "invalid symbol"}), 400
     symbol = symbol.upper()
     refresh = request.args.get("refresh", "false").lower() == "true"
 
@@ -1531,7 +1562,8 @@ def intel_insiders(symbol):
         pattern = ai_summarizer.analyze_insider_pattern(transactions, symbol)
         return jsonify({"transactions": transactions, "pattern": pattern, "from_cache": False})
     except Exception as e:
-        return jsonify({"error": str(e), "transactions": [], "pattern": {}}), 500
+        log.exception(e)
+        return jsonify({"error": "internal error", "transactions": [], "pattern": {}}), 500
 
 
 @app.route("/api/intel/institutional")
@@ -1607,7 +1639,7 @@ def intel_institutional_fund(fund_name):
             db.cache_institutional(fund_name, fund_cik, fund_data)
         return jsonify(fund_data)
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        return _err(e)
 
 
 # ── Smart Money Convergence Score ─────────────────────────────────────────────
@@ -1628,7 +1660,7 @@ def smart_money_score(symbol):
             pass
         return jsonify(result)
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        return _err(e)
 
 
 @app.route("/api/smart-money/scores", methods=["POST"])
@@ -1647,7 +1679,7 @@ def smart_money_scores_bulk():
         scores = smart_money.compute_scores_bulk(symbols[:20])
         return jsonify({"scores": scores})
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        return _err(e)
 
 
 # ── Unusual Options Activity ────────────────────────────────────────────────────
@@ -1661,7 +1693,7 @@ def options_flow_symbol(symbol):
         result = fetcher.get_unusual_options_flow(symbol.upper())
         return jsonify(result)
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        return _err(e)
 
 
 @app.route("/api/options-flow/scan", methods=["POST"])
@@ -1678,7 +1710,7 @@ def options_flow_scan():
         results = fetcher.scan_unusual_options_portfolio(symbols[:15])
         return jsonify({"results": results, "scanned": len(symbols)})
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        return _err(e)
 
 
 # ── Congressional Trading Intelligence ─────────────────────────────────────────
@@ -1687,13 +1719,15 @@ def options_flow_scan():
 def congress_trades():
     """Get recent congressional trading activity summary."""
     import congress
-    days = _safe_int(request.args.get("days"), 90)
-    max_pdfs = _safe_int(request.args.get("max_pdfs"), 60)
+    # Clamp unbounded params — a huge max_pdfs/days would fan out to hundreds of
+    # slow PDF fetches and peg the request thread (DoS).
+    days = min(max(_safe_int(request.args.get("days"), 90), 1), 365)
+    max_pdfs = min(max(_safe_int(request.args.get("max_pdfs"), 60), 1), 200)
     try:
         result = congress.get_congress_summary(days=days, max_pdfs=max_pdfs)
         return jsonify(result)
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        return _err(e)
 
 
 @app.route("/api/congress/trades/<symbol>")
@@ -1702,12 +1736,12 @@ def congress_trades_symbol(symbol):
     import congress
     if not _valid_ticker(symbol):
         return jsonify({"error": "Invalid symbol"}), 400
-    days = _safe_int(request.args.get("days"), 180)
+    days = min(max(_safe_int(request.args.get("days"), 180), 1), 365)
     try:
         trades = congress.get_trades_for_ticker(symbol.upper(), days=days)
         return jsonify({"trades": trades, "symbol": symbol.upper()})
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        return _err(e)
 
 
 @app.route("/api/terminal", methods=["POST"])
@@ -1718,10 +1752,26 @@ def terminal_exec():
     if not command:
         return jsonify({"output": "", "error": "No command provided"}), 400
 
-    # Block dangerous commands
-    blocked = ("serve", "rm ", "sudo", "del ", "os.", "import ", "eval", "exec")
-    if any(command.lower().startswith(b) or f" {b}" in command.lower() for b in blocked):
-        return jsonify({"output": "\033[31m  Command not allowed in web terminal.\033[0m\n", "exit_code": 1})
+    # Allowlist the CLI subcommand. The old substring denylist was bypassable
+    # (e.g. ";rm", a tab-prefixed "\trm", or "serve" reached via an alias) — and
+    # cli.run_command shells the string into argparse, so anything not on the
+    # known-safe READ-ONLY list must be rejected. Mutating/admin commands
+    # (portfolio, watchlist, transactions, alerts, settings) and the server
+    # launcher (serve) are deliberately excluded.
+    _ALLOWED_CLI = {
+        "help", "quote", "fundamentals", "chart", "news", "search", "market",
+        "analytics", "options", "dividends", "macro", "earnings", "intel",
+        "smart-money", "ml-forecast", "congress", "crypto", "ai", "scanner",
+        "gex", "contagion", "narrative", "synthetic-insider", "reflexivity",
+        "liquidity", "alt-data",
+    }
+    first = command.split()[0].lower() if command.split() else ""
+    if first not in _ALLOWED_CLI:
+        return jsonify({
+            "output": "\033[31m  Command '{}' not allowed in web terminal. "
+                      "Only read-only commands are permitted.\033[0m\n".format(first),
+            "exit_code": 1,
+        })
 
     import cli as cli_mod
     try:
@@ -1734,6 +1784,8 @@ def terminal_exec():
 @app.route("/api/smart-money/ml-forecast/<symbol>")
 def ml_forecast_route(symbol):
     """ML-based predictive analytics for a symbol."""
+    if not _valid_ticker(symbol):
+        return jsonify({"error": "invalid symbol"}), 400
     import ml_forecast as mlf
     try:
         result = mlf.ml_forecast(symbol.upper())
@@ -1750,13 +1802,15 @@ def ml_forecast_route(symbol):
             mimetype="application/json"
         )
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        return _err(e)
 
 
 # ─── GEX (Gamma Exposure) Flow Predictor ────────────────────────────────────
 
 @app.route("/api/gex/<symbol>")
 def gex_analysis(symbol):
+    if not _valid_ticker(symbol):
+        return jsonify({"error": "invalid symbol"}), 400
     import gex_engine
     try:
         result = gex_engine.compute_gex(symbol.upper())
@@ -1769,23 +1823,27 @@ def gex_analysis(symbol):
             pass
         return Response(json.dumps(result, default=str), mimetype="application/json")
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        return _err(e)
 
 
 @app.route("/api/gex/summary/<symbol>")
 def gex_summary(symbol):
+    if not _valid_ticker(symbol):
+        return jsonify({"error": "invalid symbol"}), 400
     import gex_engine
     try:
         result = gex_engine.get_gex_summary(symbol.upper())
         return jsonify(result)
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        return _err(e)
 
 
 # ─── Corporate Contagion Graph ──────────────────────────────────────────────
 
 @app.route("/api/contagion/<symbol>")
 def contagion_graph_route(symbol):
+    if not _valid_ticker(symbol):
+        return jsonify({"error": "invalid symbol"}), 400
     import contagion_graph
     try:
         result = contagion_graph.build_graph(symbol.upper())
@@ -1793,11 +1851,13 @@ def contagion_graph_route(symbol):
             return jsonify(result), 400
         return Response(json.dumps(result, default=str), mimetype="application/json")
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        return _err(e)
 
 
 @app.route("/api/contagion/impact/<symbol>")
 def contagion_impact(symbol):
+    if not _valid_ticker(symbol):
+        return jsonify({"error": "invalid symbol"}), 400
     import contagion_graph
     event_type = request.args.get("event", "earnings_miss")
     try:
@@ -1806,13 +1866,15 @@ def contagion_impact(symbol):
             return jsonify(result), 400
         return Response(json.dumps(result, default=str), mimetype="application/json")
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        return _err(e)
 
 
 # ─── Narrative Velocity Engine ──────────────────────────────────────────────
 
 @app.route("/api/narrative/<symbol>")
 def narrative_analysis(symbol):
+    if not _valid_ticker(symbol):
+        return jsonify({"error": "invalid symbol"}), 400
     import narrative_engine
     try:
         result = narrative_engine.analyze_narrative(symbol.upper())
@@ -1825,13 +1887,15 @@ def narrative_analysis(symbol):
             pass
         return Response(json.dumps(result, default=str), mimetype="application/json")
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        return _err(e)
 
 
 # ─── Synthetic Insider Composite ────────────────────────────────────────────
 
 @app.route("/api/synthetic-insider/<symbol>")
 def synthetic_insider_route(symbol):
+    if not _valid_ticker(symbol):
+        return jsonify({"error": "invalid symbol"}), 400
     import synthetic_insider
     try:
         result = synthetic_insider.compute_composite(symbol.upper())
@@ -1839,7 +1903,7 @@ def synthetic_insider_route(symbol):
             return jsonify(result), 400
         return Response(json.dumps(result, default=str), mimetype="application/json")
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        return _err(e)
 
 
 @app.route("/api/synthetic-insider/scan", methods=["POST"])
@@ -1856,13 +1920,15 @@ def synthetic_insider_scan():
         results = synthetic_insider.scan_composite_bulk(symbols[:15])
         return Response(json.dumps({"results": results}, default=str), mimetype="application/json")
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        return _err(e)
 
 
 # ─── Reflexivity Detector ──────────────────────────────────────────────────
 
 @app.route("/api/reflexivity/<symbol>")
 def reflexivity_detect(symbol):
+    if not _valid_ticker(symbol):
+        return jsonify({"error": "invalid symbol"}), 400
     import reflexivity_detector
     try:
         result = reflexivity_detector.detect_loops(symbol.upper())
@@ -1870,7 +1936,7 @@ def reflexivity_detect(symbol):
             return jsonify(result), 400
         return Response(json.dumps(result, default=str), mimetype="application/json")
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        return _err(e)
 
 
 # ─── Liquidity Regime Monitor ──────────────────────────────────────────────
@@ -1884,13 +1950,15 @@ def liquidity_monitor_route():
             return jsonify(result), 400
         return Response(json.dumps(result, default=str), mimetype="application/json")
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        return _err(e)
 
 
 # ─── Alt-Data Revenue Nowcasting ───────────────────────────────────────────
 
 @app.route("/api/alt-data/<symbol>")
 def alt_data_nowcast(symbol):
+    if not _valid_ticker(symbol):
+        return jsonify({"error": "invalid symbol"}), 400
     import alt_data_engine
     try:
         result = alt_data_engine.nowcast_revenue(symbol.upper())
@@ -1898,7 +1966,7 @@ def alt_data_nowcast(symbol):
             return jsonify(result), 400
         return Response(json.dumps(result, default=str), mimetype="application/json")
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        return _err(e)
 
 
 @app.route("/api/alt-data/scan", methods=["POST"])
@@ -1915,7 +1983,7 @@ def alt_data_scan():
         results = alt_data_engine.nowcast_bulk(symbols[:15])
         return Response(json.dumps({"results": results}, default=str), mimetype="application/json")
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        return _err(e)
 
 
 # ─── Opportunity Scanner ──────────────────────────────────────────────────────
@@ -1952,7 +2020,7 @@ def scanner_scan():
             mimetype="application/json"
         )
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        return _err(e)
 
 
 @app.route("/api/scanner/results")
@@ -2116,21 +2184,21 @@ except Exception as _fred_err:
 @app.route("/api/macro/fred/snapshot")
 def fred_snapshot():
     if not fred_data:
-        return jsonify({"error": "fred_data module not available"}), 500
+        return jsonify({"error": "fred_data module not available"}), 503
     return jsonify(fred_data.snapshot())
 
 
 @app.route("/api/macro/fred/catalog")
 def fred_catalog():
     if not fred_data:
-        return jsonify({"error": "fred_data module not available"}), 500
+        return jsonify({"error": "fred_data module not available"}), 503
     return jsonify({"series": fred_data.catalog()})
 
 
 @app.route("/api/macro/fred/<series_id>")
 def fred_series(series_id):
     if not fred_data:
-        return jsonify({"error": "fred_data module not available"}), 500
+        return jsonify({"error": "fred_data module not available"}), 503
     obs = _safe_int(request.args.get("observations"), 60)
     return jsonify(fred_data.fetch_series(series_id, observations=obs))
 
@@ -2149,7 +2217,7 @@ except Exception as _cftc_err:
 @app.route("/api/macro/cftc/snapshot")
 def cftc_snapshot():
     if not cftc_cot:
-        return jsonify({"error": "cftc_cot module not available"}), 500
+        return jsonify({"error": "cftc_cot module not available"}), 503
     return jsonify(cftc_cot.snapshot())
 
 
@@ -2166,7 +2234,7 @@ except Exception as _wd_err:
 @app.route("/api/research/wikidata/<symbol>")
 def research_wikidata(symbol):
     if not wikidata_meta:
-        return jsonify({"error": "wikidata_meta module not available"}), 500
+        return jsonify({"error": "wikidata_meta module not available"}), 503
     if not _valid_ticker(symbol):
         return jsonify({"error": "Invalid symbol"}), 400
     return jsonify(wikidata_meta.fetch_facts(symbol.upper()))
@@ -2184,14 +2252,14 @@ except Exception as _fv_err:
 @app.route("/api/market/finviz/sectors")
 def finviz_sectors():
     if not finviz_data:
-        return jsonify({"error": "finviz_data module not available"}), 500
+        return jsonify({"error": "finviz_data module not available"}), 503
     return jsonify(finviz_data.sector_heatmap())
 
 
 @app.route("/api/intel/finviz/insiders")
 def finviz_insiders():
     if not finviz_data:
-        return jsonify({"error": "finviz_data module not available"}), 500
+        return jsonify({"error": "finviz_data module not available"}), 503
     option = request.args.get("option", "latest")
     return jsonify(finviz_data.insider_trades(option=option))
 
@@ -2199,7 +2267,7 @@ def finviz_insiders():
 @app.route("/api/news/finviz/<symbol>")
 def finviz_news(symbol):
     if not finviz_data:
-        return jsonify({"error": "finviz_data module not available"}), 500
+        return jsonify({"error": "finviz_data module not available"}), 503
     if not _valid_ticker(symbol):
         return jsonify({"error": "Invalid symbol"}), 400
     return jsonify(finviz_data.stock_news(symbol.upper()))
@@ -2472,7 +2540,7 @@ except Exception as _wiki_err:
 @app.route("/api/alt-data/wiki/<symbol>")
 def alt_wiki_pageviews(symbol):
     if not wiki_attention:
-        return jsonify({"error": "wiki_attention module not available"}), 500
+        return jsonify({"error": "wiki_attention module not available"}), 503
     if not _valid_ticker(symbol):
         return jsonify({"error": "Invalid symbol"}), 400
     days = _safe_int(request.args.get("days"), 30)
@@ -2492,7 +2560,7 @@ except Exception as _hn_err:
 @app.route("/api/alt-data/hackernews/<symbol>")
 def alt_hackernews(symbol):
     if not hn_sentiment:
-        return jsonify({"error": "hn_sentiment module not available"}), 500
+        return jsonify({"error": "hn_sentiment module not available"}), 503
     if not _valid_ticker(symbol):
         return jsonify({"error": "Invalid symbol"}), 400
     hours = _safe_int(request.args.get("hours"), 168)
@@ -2534,12 +2602,16 @@ def ideas_random():
             exclude=exclude,
             discovery_mode=discovery_mode,
         )
+        # No idea matched the filters is a normal empty result, not a server
+        # fault — return 404 with the generator's own message so the UI can say
+        # "nothing matched, loosen your filters" rather than showing an error.
         if not idea or idea.get("error"):
-            return jsonify(idea or {"error": "Unknown error"}), 500
+            msg = (idea or {}).get("error") or "no idea matched the given filters"
+            return jsonify({"error": msg}), 404
         return jsonify(idea)
     except Exception as e:
         log.exception("ideas_random failed: %s", e)
-        return jsonify({"error": str(e)}), 500
+        return _err(e)
 
 
 @app.route("/api/ideas/universe")
@@ -2549,7 +2621,7 @@ def ideas_universe():
     try:
         return jsonify(idea_generator.list_universe(discovery_mode=discovery_mode))
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        return _err(e)
 
 
 @app.route("/api/ideas/enrich/<symbol>")
@@ -2565,7 +2637,7 @@ def ideas_enrich(symbol):
         return jsonify(idea_generator.enrich_idea(symbol.upper(), asset_class, strategy))
     except Exception as e:
         log.exception("ideas_enrich %s failed: %s", symbol, e)
-        return jsonify({"error": str(e)}), 500
+        return _err(e)
 
 
 @app.route("/api/ideas/warmer/status")
@@ -2627,7 +2699,7 @@ def cache_clear():
         n = cache_store.clear()
         return jsonify({"cleared": n})
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        return _err(e)
 
 
 # ─── Research modules (v0.2.0) ──────────────────────────────────────
@@ -2708,7 +2780,7 @@ except Exception as _rt_err:
 @app.route("/api/research/backtest")
 def research_backtest_route():
     if research_backtest is None:
-        return jsonify({"error": "research_backtest module not available"}), 500
+        return jsonify({"error": "research_backtest module not available"}), 503
     symbol = (request.args.get("symbol") or "").upper()
     if not _valid_ticker(symbol):
         return jsonify({"error": "Invalid symbol"}), 400
@@ -2731,14 +2803,14 @@ def research_backtest_route():
         return jsonify(result)
     except Exception as e:
         log.exception("backtest failure")
-        return jsonify({"error": str(e)}), 500
+        return _err(e)
 
 
 # ── 2. Event Study ──────────────────────────────────────────────────
 @app.route("/api/research/event-study/<symbol>")
 def research_event_study_route(symbol):
     if research_eventstudy is None:
-        return jsonify({"error": "research_eventstudy module not available"}), 500
+        return jsonify({"error": "research_eventstudy module not available"}), 503
     if not _valid_ticker(symbol):
         return jsonify({"error": "Invalid symbol"}), 400
     try:
@@ -2754,27 +2826,27 @@ def research_event_study_route(symbol):
             benchmark=benchmark,
         ))
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        return _err(e)
 
 
 # ── 3. Fama-French Factors ─────────────────────────────────────────
 @app.route("/api/research/factors/<symbol>")
 def research_factors_symbol(symbol):
     if not research_factors:
-        return jsonify({"error": "research_factors module not available"}), 500
+        return jsonify({"error": "research_factors module not available"}), 503
     if not _valid_ticker(symbol):
         return jsonify({"error": "Invalid symbol"}), 400
     try:
         years = _safe_int(request.args.get("years"), 5)
         return jsonify(research_factors.factor_exposure(symbol.upper(), years))
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        return _err(e)
 
 
 @app.route("/api/research/factors/portfolio", methods=["GET", "POST"])
 def research_factors_portfolio():
     if not research_factors:
-        return jsonify({"error": "research_factors module not available"}), 500
+        return jsonify({"error": "research_factors module not available"}), 503
     try:
         years = _safe_int(request.args.get("years"), 5)
         holdings = []
@@ -2801,14 +2873,14 @@ def research_factors_portfolio():
                 holdings = []
         return jsonify(research_factors.portfolio_factor_exposure(holdings, years))
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        return _err(e)
 
 
 # ── 4. Hypothesis Lab ───────────────────────────────────────────────
 @app.route("/api/research/hypothesis/generate", methods=["POST"])
 def api_hypothesis_generate():
     if not research_hypothesis:
-        return jsonify({"error": "research_hypothesis module not available"}), 500
+        return jsonify({"error": "research_hypothesis module not available"}), 503
     try:
         data = request.get_json(silent=True) or {}
         symbol = (data.get("symbol") or "").strip().upper()
@@ -2816,13 +2888,13 @@ def api_hypothesis_generate():
             return jsonify({"error": "symbol required"}), 400
         return jsonify(research_hypothesis.generate_hypothesis(symbol))
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        return _err(e)
 
 
 @app.route("/api/research/hypothesis/save", methods=["POST"])
 def api_hypothesis_save():
     if not research_hypothesis:
-        return jsonify({"error": "research_hypothesis module not available"}), 500
+        return jsonify({"error": "research_hypothesis module not available"}), 503
     try:
         data = request.get_json(silent=True) or {}
         symbol = (data.get("symbol") or "").strip().upper()
@@ -2840,7 +2912,7 @@ def api_hypothesis_save():
 @app.route("/api/research/hypothesis", methods=["GET"])
 def api_hypothesis_list():
     if not research_hypothesis:
-        return jsonify({"error": "research_hypothesis module not available"}), 500
+        return jsonify({"error": "research_hypothesis module not available"}), 503
     try:
         status = request.args.get("status")
         symbol = request.args.get("symbol")
@@ -2849,13 +2921,13 @@ def api_hypothesis_list():
             status=status, symbol=symbol, limit=limit,
         ))
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        return _err(e)
 
 
 @app.route("/api/research/hypothesis/<int:hid>/status", methods=["POST"])
 def api_hypothesis_set_status(hid):
     if not research_hypothesis:
-        return jsonify({"error": "research_hypothesis module not available"}), 500
+        return jsonify({"error": "research_hypothesis module not available"}), 503
     try:
         data = request.get_json(silent=True) or {}
         status = (data.get("status") or "").strip().upper()
@@ -2864,46 +2936,46 @@ def api_hypothesis_set_status(hid):
     except ValueError as e:
         return jsonify({"error": str(e)}), 400
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        return _err(e)
 
 
 @app.route("/api/research/hypothesis/<int:hid>/score", methods=["POST"])
 def api_hypothesis_score(hid):
     if not research_hypothesis:
-        return jsonify({"error": "research_hypothesis module not available"}), 500
+        return jsonify({"error": "research_hypothesis module not available"}), 503
     try:
         return jsonify(research_hypothesis.score_hypothesis(hid))
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        return _err(e)
 
 
 @app.route("/api/research/hypothesis/stats", methods=["GET"])
 def api_hypothesis_stats():
     if not research_hypothesis:
-        return jsonify({"error": "research_hypothesis module not available"}), 500
+        return jsonify({"error": "research_hypothesis module not available"}), 503
     try:
         return jsonify(research_hypothesis.stats())
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        return _err(e)
 
 
 # ── 5. IV Risk-Neutral Density ─────────────────────────────────────
 @app.route("/api/research/rnd/<symbol>")
 def research_rnd_default(symbol):
     if not research_iv_density:
-        return jsonify({"error": "research_iv_density module not available"}), 500
+        return jsonify({"error": "research_iv_density module not available"}), 503
     if not _valid_ticker(symbol):
         return jsonify({"error": "Invalid symbol"}), 400
     try:
         return jsonify(research_iv_density.risk_neutral_density(symbol.upper()))
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        return _err(e)
 
 
 @app.route("/api/research/rnd/<symbol>/<expiry>")
 def research_rnd_with_expiry(symbol, expiry):
     if not research_iv_density:
-        return jsonify({"error": "research_iv_density module not available"}), 500
+        return jsonify({"error": "research_iv_density module not available"}), 503
     if not _valid_ticker(symbol):
         return jsonify({"error": "Invalid symbol"}), 400
     if not re.match(r"^\d{4}-\d{2}-\d{2}$", expiry or ""):
@@ -2911,7 +2983,7 @@ def research_rnd_with_expiry(symbol, expiry):
     try:
         return jsonify(research_iv_density.risk_neutral_density(symbol.upper(), expiry))
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        return _err(e)
 
 
 # ── 6. Monte Carlo ──────────────────────────────────────────────────
@@ -2945,14 +3017,16 @@ def _mc_holdings_from_portfolio(account_id=None):
 @app.route("/api/research/montecarlo", methods=["POST"])
 def research_montecarlo_route():
     if not _mc_mod:
-        return jsonify({"error": "research_montecarlo module not available"}), 500
+        return jsonify({"error": "research_montecarlo module not available"}), 503
     try:
         data = request.get_json(force=True, silent=True) or {}
         holdings = data.get("holdings") or []
         if not isinstance(holdings, list) or not holdings:
             return jsonify({"error": "holdings: non-empty list required"}), 400
-        horizon = _safe_int(data.get("horizon_days"), 365)
-        n_paths = _safe_int(data.get("n_paths"), 10000)
+        # Clamp unbounded sim params — an attacker-supplied n_paths=1e9 would
+        # peg a worker thread for minutes (DoS).
+        horizon = min(max(_safe_int(data.get("horizon_days"), 252), 1), 3650)
+        n_paths = min(max(_safe_int(data.get("n_paths"), 10000), 100), 50000)
         method = (data.get("method") or "historical_bootstrap").strip()
         seed = data.get("seed")
         if seed is not None:
@@ -2976,13 +3050,13 @@ def research_montecarlo_route():
                 pass
         return jsonify(sim)
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        return _err(e)
 
 
 @app.route("/api/research/montecarlo/portfolio", methods=["GET"])
 def research_montecarlo_portfolio():
     if not _mc_mod:
-        return jsonify({"error": "research_montecarlo module not available"}), 500
+        return jsonify({"error": "research_montecarlo module not available"}), 503
     try:
         acct = request.args.get("account_id")
         holdings = _mc_holdings_from_portfolio(
@@ -2990,35 +3064,35 @@ def research_montecarlo_portfolio():
         )
         if not holdings:
             return jsonify({"error": "No portfolio holdings available"}), 400
-        horizon = _safe_int(request.args.get("horizon_days"), 365)
-        n_paths = _safe_int(request.args.get("n_paths"), 10000)
+        horizon = min(max(_safe_int(request.args.get("horizon_days"), 252), 1), 3650)
+        n_paths = min(max(_safe_int(request.args.get("n_paths"), 10000), 100), 50000)
         method = request.args.get("method") or "historical_bootstrap"
         sim = _mc_mod.simulate_portfolio(
             holdings, n_paths=n_paths, horizon_days=horizon, method=method,
         )
         return jsonify(sim)
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        return _err(e)
 
 
 # ── 7. Multi-Horizon Forecast ──────────────────────────────────────
 @app.route("/api/research/horizons/<symbol>")
 def research_horizons(symbol):
     if not research_multihorizon:
-        return jsonify({"error": "research_multihorizon module not available"}), 500
+        return jsonify({"error": "research_multihorizon module not available"}), 503
     if not _valid_ticker(symbol):
         return jsonify({"error": "Invalid symbol"}), 400
     try:
         return jsonify(research_multihorizon.multi_horizon_forecast(symbol.upper()))
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        return _err(e)
 
 
 # ── 8. Portfolio Optimizer ─────────────────────────────────────────
 @app.route("/api/research/optimize", methods=["POST"])
 def research_optimize():
     if not research_optimizer:
-        return jsonify({"error": "research_optimizer module not available"}), 500
+        return jsonify({"error": "research_optimizer module not available"}), 503
     try:
         body = request.get_json(silent=True) or {}
         symbols = [
@@ -3072,35 +3146,37 @@ def research_optimize():
         return jsonify({"optimal": result, "compare": cmp_out})
     except Exception as e:
         log.exception("optimize failed")
-        return jsonify({"error": str(e)}), 500
+        return _err(e)
 
 
 # ── 9. Probabilistic Forecast ──────────────────────────────────────
 @app.route("/api/research/probforecast/<symbol>", methods=["GET"])
 def research_probforecast(symbol):
     if not _pf_mod:
-        return jsonify({"error": "research_probforecast module not available"}), 500
+        return jsonify({"error": "research_probforecast module not available"}), 503
     if not _valid_ticker(symbol):
         return jsonify({"error": "Invalid symbol"}), 400
     try:
-        horizon = _safe_int(request.args.get("horizon"), 20)
-        n_boot = _safe_int(request.args.get("n"), 2000)
+        # Clamp unbounded params — a huge n bootstrap or horizon would peg the
+        # request thread (DoS).
+        horizon = min(max(_safe_int(request.args.get("horizon"), 20), 1), 3650)
+        n_boot = min(max(_safe_int(request.args.get("n"), 2000), 100), 20000)
         return jsonify(_pf_mod.prob_forecast(symbol.upper(), horizon_days=horizon, n_bootstrap=n_boot))
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        return _err(e)
 
 
 @app.route("/api/research/probforecast/<symbol>/vs-point", methods=["GET"])
 def research_probforecast_vs_point(symbol):
     if not _pf_mod:
-        return jsonify({"error": "research_probforecast module not available"}), 500
+        return jsonify({"error": "research_probforecast module not available"}), 503
     if not _valid_ticker(symbol):
         return jsonify({"error": "Invalid symbol"}), 400
     try:
-        horizon = _safe_int(request.args.get("horizon"), 20)
+        horizon = min(max(_safe_int(request.args.get("horizon"), 20), 1), 3650)
         return jsonify(_pf_mod.compare_to_point(symbol.upper(), horizon_days=horizon))
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        return _err(e)
 
 
 @app.route("/api/forecast/ensemble/<symbol>", methods=["GET"])
@@ -3108,14 +3184,14 @@ def forecast_ensemble_route(symbol):
     """Calibrated meta-forecast fusing all available forecasting signals
     into one directional probability + return cone."""
     if not _ens_mod:
-        return jsonify({"error": "forecast_ensemble module not available"}), 500
+        return jsonify({"error": "forecast_ensemble module not available"}), 503
     if not _valid_ticker(symbol):
         return jsonify({"error": "Invalid symbol"}), 400
     try:
-        horizon = _safe_int(request.args.get("horizon"), 20)
+        horizon = min(max(_safe_int(request.args.get("horizon"), 20), 1), 3650)
         return jsonify(_ens_mod.ensemble_forecast(symbol.upper(), horizon_days=horizon))
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        return _err(e)
 
 
 @app.route("/api/forecast/accountability", methods=["GET"])
@@ -3125,12 +3201,12 @@ def forecast_accountability_route():
     try:
         import forecast_accountability
     except Exception as e:
-        return jsonify({"error": "forecast_accountability unavailable: {}".format(e)}), 500
+        return jsonify({"error": "forecast_accountability unavailable"}), 503
     try:
         since = request.args.get("since")
         return jsonify(forecast_accountability.accountability_report(since=since))
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        return _err(e)
 
 
 # ── Jarvis: unified assistant layer ────────────────────────────────
@@ -3143,7 +3219,7 @@ def jarvis_lens_review_route(symbol):
         import jarvis_lens
         return jsonify(jarvis_lens.position_review(symbol.upper()))
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        return _err(e)
 
 
 @app.route("/api/jarvis/lens/temperament", methods=["GET"])
@@ -3152,7 +3228,7 @@ def jarvis_lens_temperament_route():
         import jarvis_lens
         return jsonify(jarvis_lens.temperament_check())
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        return _err(e)
 
 
 @app.route("/api/jarvis/lens/macro", methods=["GET"])
@@ -3161,7 +3237,7 @@ def jarvis_lens_macro_route():
         import jarvis_lens
         return jsonify(jarvis_lens.macro_brief())
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        return _err(e)
 
 
 @app.route("/api/jarvis/tts", methods=["POST"])
@@ -3173,6 +3249,10 @@ def jarvis_tts_route():
     text = data.get("text")
     if not text or not isinstance(text, str):
         return jsonify({"error": "expected JSON body with a 'text' string"}), 400
+    # Cap text — OpenAI's TTS endpoint hard-rejects >4096 chars (and bills per
+    # character), so reject oversized input rather than pay-then-fail.
+    if len(text) > 4096:
+        return jsonify({"error": "text too long (max 4096 characters)"}), 400
     try:
         import ai_summarizer
         _OK_VOICES = {"alloy", "echo", "fable", "onyx", "nova", "shimmer"}
@@ -3188,7 +3268,7 @@ def jarvis_tts_route():
         return Response(audio, mimetype="audio/mpeg",
                         headers={"Cache-Control": "no-store"})
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        return _err(e)
 
 
 @app.route("/api/version", methods=["GET"])
@@ -3204,6 +3284,25 @@ def api_version_route():
 _JARVIS_ACT_TIMES = deque()
 _JARVIS_ACT_MAX = 10     # executions…
 _JARVIS_ACT_WINDOW = 60  # …per rolling window, seconds
+# Two requests racing the check-prune-append could each read the deque under
+# the limit and both append, overshooting MAX. Guard the whole sequence.
+_JARVIS_ACT_LOCK = threading.Lock()
+
+
+def _jarvis_act_charge(n):
+    """Atomically prune the rolling window and, if charging n executions keeps
+    the total within _JARVIS_ACT_MAX, append n timestamps and return True.
+    Otherwise return False (rate limited). Both batch and single callers use
+    this so the boundary (reject when total would exceed MAX) is identical."""
+    now = time.time()
+    with _JARVIS_ACT_LOCK:
+        while _JARVIS_ACT_TIMES and now - _JARVIS_ACT_TIMES[0] > _JARVIS_ACT_WINDOW:
+            _JARVIS_ACT_TIMES.popleft()
+        if len(_JARVIS_ACT_TIMES) + n > _JARVIS_ACT_MAX:
+            return False
+        for _ in range(n):
+            _JARVIS_ACT_TIMES.append(now)
+        return True
 
 
 @app.route("/api/jarvis/act", methods=["POST"])
@@ -3214,7 +3313,7 @@ def jarvis_act_route():
     try:
         import jarvis_tools
     except Exception as e:
-        return jsonify({"error": "jarvis_tools unavailable: {}".format(e)}), 500
+        return jsonify({"error": "jarvis_tools unavailable"}), 503
     data = request.get_json(silent=True) or {}
     # ── Batch form: {"actions": [{tool, args}, …]} (≤10) ───────────────────
     # Validated for shape here; per-action whitelisting/validation happens in
@@ -3235,17 +3334,12 @@ def jarvis_act_route():
         batch_fn = getattr(jarvis_tools, "execute_mutating_batch", None)
         if batch_fn is None:
             return jsonify({"error": "batch execution unavailable"}), 500
-        now = time.time()
-        while _JARVIS_ACT_TIMES and now - _JARVIS_ACT_TIMES[0] > _JARVIS_ACT_WINDOW:
-            _JARVIS_ACT_TIMES.popleft()
-        if len(_JARVIS_ACT_TIMES) + len(actions) > _JARVIS_ACT_MAX:
+        if not _jarvis_act_charge(len(actions)):
             return jsonify({"error": "rate limited"}), 429
-        for _ in actions:
-            _JARVIS_ACT_TIMES.append(now)
         try:
             r = batch_fn(actions)
         except Exception as e:
-            return jsonify({"error": str(e)}), 500
+            return _err(e)
         if not isinstance(r, dict):
             return jsonify({"error": "batch executor returned invalid result"}), 500
         return (jsonify(r), 400) if r.get("error") else jsonify(r)
@@ -3261,13 +3355,10 @@ def jarvis_act_route():
     if not jarvis_tools.valid_proposal_args(tool, args):
         return jsonify({"error": "invalid or incomplete action arguments"}), 400
     # Rate limit counts EXECUTIONS (checked after validation) so malformed
-    # requests can't burn the budget of legitimate confirmations.
-    now = time.time()
-    while _JARVIS_ACT_TIMES and now - _JARVIS_ACT_TIMES[0] > _JARVIS_ACT_WINDOW:
-        _JARVIS_ACT_TIMES.popleft()
-    if len(_JARVIS_ACT_TIMES) >= _JARVIS_ACT_MAX:
+    # requests can't burn the budget of legitimate confirmations. Same charge
+    # helper as the batch path, so the MAX boundary is identical.
+    if not _jarvis_act_charge(1):
         return jsonify({"error": "rate limited"}), 429
-    _JARVIS_ACT_TIMES.append(now)
     r = jarvis_tools.execute_mutating(tool, args)
     return (jsonify(r), 400) if r.get("error") else jsonify(r)
 
@@ -3279,12 +3370,12 @@ def jarvis_briefing_route():
     try:
         import jarvis
     except Exception as e:
-        return jsonify({"error": "jarvis unavailable: {}".format(e)}), 500
+        return jsonify({"error": "jarvis unavailable"}), 503
     try:
         force = request.args.get("refresh") == "1"
         return jsonify(jarvis.get_briefing(force_refresh=force))
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        return _err(e)
 
 
 @app.route("/api/jarvis/digest", methods=["GET"])
@@ -3294,12 +3385,12 @@ def jarvis_digest_route():
     try:
         import jarvis
     except Exception as e:
-        return jsonify({"error": "jarvis unavailable: {}".format(e)}), 500
+        return jsonify({"error": "jarvis unavailable"}), 503
     mark = request.args.get("mark_seen", "1") != "0"
     try:
         return jsonify(jarvis.away_digest(mark_seen=mark))
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        return _err(e)
 
 
 @app.route("/api/jarvis/health", methods=["GET"])
@@ -3309,7 +3400,7 @@ def jarvis_health_route():
         import jarvis
         return jsonify(jarvis.health_snapshot())
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        return _err(e)
 
 
 @app.route("/api/jarvis/conversation/export", methods=["GET"])
@@ -3330,7 +3421,7 @@ def jarvis_conversation_export_route():
             "attachment; filename=jarvis-conversation-{}.md".format(conv_id)
         return resp
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        return _err(e)
 
 
 @app.route("/api/jarvis/activity", methods=["GET"])
@@ -3340,7 +3431,7 @@ def jarvis_activity_route():
         import jarvis
         return jsonify(jarvis.activity_snapshot())
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        return _err(e)
 
 
 @app.route("/api/jarvis/activity/stream", methods=["GET"])
@@ -3355,7 +3446,7 @@ def jarvis_activity_stream_route():
     try:
         import jarvis
     except Exception as e:
-        return jsonify({"error": "jarvis unavailable: {}".format(e)}), 500
+        return jsonify({"error": "jarvis unavailable"}), 503
 
     def generate():
         import time as _time
@@ -3408,7 +3499,7 @@ def jarvis_context_route(view):
     try:
         import jarvis
     except Exception as e:
-        return jsonify({"error": "jarvis unavailable: {}".format(e)}), 500
+        return jsonify({"error": "jarvis unavailable"}), 503
     if not view or len(view) > 40 or not view.replace("-", "").isalnum():
         return jsonify({"error": "invalid view"}), 400
     symbol = request.args.get("symbol")
@@ -3417,7 +3508,7 @@ def jarvis_context_route(view):
     try:
         return jsonify(jarvis.view_context(view, symbol))
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        return _err(e)
 
 
 @app.route("/api/jarvis/ask", methods=["POST"])
@@ -3426,7 +3517,7 @@ def jarvis_ask_route():
     try:
         import jarvis
     except Exception as e:
-        return jsonify({"error": "jarvis unavailable: {}".format(e)}), 500
+        return jsonify({"error": "jarvis unavailable"}), 503
     data = request.get_json(silent=True) or {}
     query = data.get("query") if isinstance(data, dict) else None
     if not query or not isinstance(query, str):
@@ -3439,7 +3530,7 @@ def jarvis_ask_route():
         return jsonify(jarvis.ask(query, history=history,
                                   conversation_id=conversation_id))
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        return _err(e)
 
 
 @app.route("/api/jarvis/ask/stream", methods=["POST"])
@@ -3452,7 +3543,7 @@ def jarvis_ask_stream_route():
     try:
         import jarvis
     except Exception as e:
-        return jsonify({"error": "jarvis unavailable: {}".format(e)}), 500
+        return jsonify({"error": "jarvis unavailable"}), 503
     data = request.get_json(silent=True) or {}
     query = data.get("query") if isinstance(data, dict) else None
     if not query or not isinstance(query, str):
@@ -3491,7 +3582,7 @@ def jarvis_conversation_route():
         return jsonify({"conversation_id": conv_id,
                         "messages": db.jarvis_get_messages(conv_id, limit=12)})
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        return _err(e)
 
 
 @app.route("/api/jarvis/conversation/new", methods=["POST"])
@@ -3518,7 +3609,7 @@ def jarvis_new_conversation_route():
             threading.Thread(target=_summarize_old_thread, daemon=True).start()
         return jsonify({"conversation_id": new_id})
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        return _err(e)
 
 
 @app.route("/api/jarvis/memory", methods=["GET"])
@@ -3526,7 +3617,7 @@ def jarvis_memory_route():
     try:
         return jsonify({"memories": db.jarvis_list_memories()})
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        return _err(e)
 
 
 @app.route("/api/jarvis/memory/<int:memory_id>", methods=["DELETE"])
@@ -3535,7 +3626,7 @@ def jarvis_memory_delete_route(memory_id):
         ok = db.jarvis_delete_memory(memory_id)
         return jsonify({"status": "deleted" if ok else "not found"})
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        return _err(e)
 
 
 # ─── Jarvis Watches (standing conditions, evaluated by the snapshot loop) ────
@@ -3546,11 +3637,11 @@ def jarvis_watches_list_route():
     try:
         import jarvis_watches
     except Exception as e:
-        return jsonify({"error": "jarvis_watches unavailable: {}".format(e)}), 500
+        return jsonify({"error": "jarvis_watches unavailable"}), 503
     try:
         return jsonify({"watches": jarvis_watches.list_watches()})
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        return _err(e)
 
 
 @app.route("/api/jarvis/watches", methods=["POST"])
@@ -3560,7 +3651,7 @@ def jarvis_watches_add_route():
     try:
         import jarvis_watches
     except Exception as e:
-        return jsonify({"error": "jarvis_watches unavailable: {}".format(e)}), 500
+        return jsonify({"error": "jarvis_watches unavailable"}), 503
     data = request.get_json(silent=True) or {}
     name = data.get("name")
     conditions = data.get("conditions")
@@ -3571,7 +3662,7 @@ def jarvis_watches_add_route():
     try:
         r = jarvis_watches.add_watch(name.strip(), conditions)
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        return _err(e)
     if not isinstance(r, dict):
         return jsonify({"error": "add_watch returned invalid result"}), 500
     return (jsonify(r), 400) if r.get("error") else jsonify(r)
@@ -3582,11 +3673,11 @@ def jarvis_watches_delete_route(watch_id):
     try:
         import jarvis_watches
     except Exception as e:
-        return jsonify({"error": "jarvis_watches unavailable: {}".format(e)}), 500
+        return jsonify({"error": "jarvis_watches unavailable"}), 503
     try:
         ok = jarvis_watches.delete_watch(watch_id)
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        return _err(e)
     if not ok:
         return jsonify({"error": "watch not found"}), 404
     return jsonify({"status": "deleted"})
@@ -3597,11 +3688,11 @@ def jarvis_watches_rearm_route(watch_id):
     try:
         import jarvis_watches
     except Exception as e:
-        return jsonify({"error": "jarvis_watches unavailable: {}".format(e)}), 500
+        return jsonify({"error": "jarvis_watches unavailable"}), 503
     try:
         ok = jarvis_watches.rearm_watch(watch_id)
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        return _err(e)
     if not ok:
         return jsonify({"error": "watch not found"}), 404
     return jsonify({"status": "rearmed"})
@@ -3616,7 +3707,7 @@ def jarvis_policy_get_route():
     try:
         import jarvis_policy
     except Exception as e:
-        return jsonify({"error": "jarvis_policy unavailable: {}".format(e)}), 500
+        return jsonify({"error": "jarvis_policy unavailable"}), 503
     try:
         rules = jarvis_policy.get_rules()
         description = jarvis_policy.describe_rules()
@@ -3628,7 +3719,7 @@ def jarvis_policy_get_route():
         return jsonify({"rules": rules, "description": description,
                         "violations": violations})
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        return _err(e)
 
 
 @app.route("/api/jarvis/policy", methods=["POST"])
@@ -3638,7 +3729,7 @@ def jarvis_policy_set_route():
     try:
         import jarvis_policy
     except Exception as e:
-        return jsonify({"error": "jarvis_policy unavailable: {}".format(e)}), 500
+        return jsonify({"error": "jarvis_policy unavailable"}), 503
     data = request.get_json(silent=True) or {}
     kind = data.get("kind")
     value = data.get("value")
@@ -3647,7 +3738,7 @@ def jarvis_policy_set_route():
         try:
             parsed = jarvis_policy.parse_rule(text.strip())
         except Exception as e:
-            return jsonify({"error": str(e)}), 500
+            return _err(e)
         if not isinstance(parsed, dict) or parsed.get("error") \
                 or not parsed.get("kind"):
             return jsonify({"error": "could not parse rule from text"}), 400
@@ -3658,7 +3749,7 @@ def jarvis_policy_set_route():
     try:
         r = jarvis_policy.set_rule(kind.strip(), value)
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        return _err(e)
     if not isinstance(r, dict):
         return jsonify({"error": "set_rule returned invalid result"}), 500
     return (jsonify(r), 400) if r.get("error") else jsonify(r)
@@ -3669,13 +3760,13 @@ def jarvis_policy_delete_route(kind):
     try:
         import jarvis_policy
     except Exception as e:
-        return jsonify({"error": "jarvis_policy unavailable: {}".format(e)}), 500
+        return jsonify({"error": "jarvis_policy unavailable"}), 503
     if not kind or len(kind) > 60:
         return jsonify({"error": "invalid rule kind"}), 400
     try:
         r = jarvis_policy.remove_rule(kind)
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        return _err(e)
     if r is False:
         return jsonify({"error": "rule not found"}), 404
     return jsonify({"status": "removed"})
@@ -3685,7 +3776,7 @@ def jarvis_policy_delete_route(kind):
 @app.route("/api/research/track/<signal_name>")
 def research_track_record(signal_name):
     if not research_tracker:
-        return jsonify({"error": "research_tracker module not available"}), 500
+        return jsonify({"error": "research_tracker module not available"}), 503
     if not signal_name or not signal_name.replace("_", "").isalnum():
         return jsonify({"error": "Invalid signal name"}), 400
     try:
@@ -3695,13 +3786,13 @@ def research_track_record(signal_name):
             signal_name, since=since, symbol=symbol,
         ))
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        return _err(e)
 
 
 @app.route("/api/research/track/<signal_name>/calls")
 def research_track_calls(signal_name):
     if not research_tracker:
-        return jsonify({"error": "research_tracker module not available"}), 500
+        return jsonify({"error": "research_tracker module not available"}), 503
     if not signal_name or not signal_name.replace("_", "").isalnum():
         return jsonify({"error": "Invalid signal name"}), 400
     try:
@@ -3709,17 +3800,17 @@ def research_track_calls(signal_name):
         calls = research_tracker.get_recent_calls(signal_name, limit=limit)
         return jsonify({"calls": calls, "signal_name": signal_name})
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        return _err(e)
 
 
 @app.route("/api/research/track/_score", methods=["POST"])
 def research_track_score_now():
     if not research_tracker:
-        return jsonify({"error": "research_tracker module not available"}), 500
+        return jsonify({"error": "research_tracker module not available"}), 503
     try:
         return jsonify(research_tracker.score_due_forecasts())
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        return _err(e)
 
 
 # ─── Synthesis modules (v0.3.0) ─────────────────────────────────────
@@ -3795,7 +3886,7 @@ except Exception as _wif_err:
 @app.route("/api/synth/bayes-smart-money/<symbol>")
 def synth_bayes_smart_money_route(symbol):
     if not synth_bayessmart:
-        return jsonify({"error": "synth_bayessmart module not available"}), 500
+        return jsonify({"error": "synth_bayessmart module not available"}), 503
     if not _valid_ticker(symbol):
         return jsonify({"error": "Invalid symbol"}), 400
     try:
@@ -3806,25 +3897,25 @@ def synth_bayes_smart_money_route(symbol):
             pass
         return jsonify(result)
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        return _err(e)
 
 
 # ── 2. Catalyst Timeline ────────────────────────────────────────────
 @app.route("/api/synth/catalyst", methods=["GET"])
 def synth_catalyst_get():
     if synth_catalyst is None:
-        return jsonify({"error": "synth_catalyst module not available"}), 500
+        return jsonify({"error": "synth_catalyst module not available"}), 503
     days_ahead = _safe_int(request.args.get("days_ahead"), 60)
     try:
         return jsonify(synth_catalyst.catalyst_timeline(symbols=None, days_ahead=days_ahead))
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        return _err(e)
 
 
 @app.route("/api/synth/catalyst", methods=["POST"])
 def synth_catalyst_post():
     if synth_catalyst is None:
-        return jsonify({"error": "synth_catalyst module not available"}), 500
+        return jsonify({"error": "synth_catalyst module not available"}), 503
     body = request.get_json(silent=True) or {}
     syms = body.get("symbols") or []
     if not isinstance(syms, list):
@@ -3835,14 +3926,14 @@ def synth_catalyst_post():
     try:
         return jsonify(synth_catalyst.catalyst_timeline(symbols=syms, days_ahead=days_ahead))
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        return _err(e)
 
 
 # ── 3. Cluster Scan ─────────────────────────────────────────────────
 @app.route("/api/synth/cluster-scan", methods=["GET"])
 def synth_cluster_scan_get():
     if not synth_cluster:
-        return jsonify({"error": "synth_cluster module not available"}), 500
+        return jsonify({"error": "synth_cluster module not available"}), 503
     direction = (request.args.get("direction") or "bullish").lower()
     if direction not in ("bullish", "bearish"):
         direction = "bullish"
@@ -3857,13 +3948,13 @@ def synth_cluster_scan_get():
             universe=universe, direction=direction, min_sources=min_sources,
         ))
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        return _err(e)
 
 
 @app.route("/api/synth/cluster-scan", methods=["POST"])
 def synth_cluster_scan_post():
     if not synth_cluster:
-        return jsonify({"error": "synth_cluster module not available"}), 500
+        return jsonify({"error": "synth_cluster module not available"}), 503
     body = request.get_json(silent=True) or {}
     direction = (body.get("direction") or "bullish").lower()
     if direction not in ("bullish", "bearish"):
@@ -3877,27 +3968,27 @@ def synth_cluster_scan_post():
             universe=universe, direction=direction, min_sources=min_sources,
         ))
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        return _err(e)
 
 
 # ── 4. Cross-source Consensus ───────────────────────────────────────
 @app.route("/api/synth/consensus/<symbol>")
 def synth_consensus_route(symbol):
     if not synth_consensus:
-        return jsonify({"error": "synth_consensus module not available"}), 500
+        return jsonify({"error": "synth_consensus module not available"}), 503
     if not _valid_ticker(symbol):
         return jsonify({"error": "Invalid symbol"}), 400
     try:
         return jsonify(synth_consensus.consensus_score(symbol.upper()))
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        return _err(e)
 
 
 # ── 5. Divergence Map ───────────────────────────────────────────────
 @app.route("/api/synth/divergence-map", methods=["GET", "POST"])
 def synth_divergence_map_route():
     if not synth_divmap:
-        return jsonify({"error": "synth_divmap module not available"}), 500
+        return jsonify({"error": "synth_divmap module not available"}), 503
     if request.method == "POST":
         body = request.get_json(silent=True) or {}
         universe = body.get("universe")
@@ -3917,38 +4008,38 @@ def synth_divergence_map_route():
     try:
         return jsonify(synth_divmap.divergence_map(universe=universe, top_n=top_n))
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        return _err(e)
 
 
 # ── 6. Pattern-Grounded Hypothesis ──────────────────────────────────
 @app.route("/api/synth/grounded-hypothesis/<symbol>", methods=["POST"])
 def synth_grounded_hypothesis_route(symbol):
     if synth_groundhyp is None:
-        return jsonify({"error": "synth_groundhyp module not available"}), 500
+        return jsonify({"error": "synth_groundhyp module not available"}), 503
     if not _valid_ticker(symbol):
         return jsonify({"error": "Invalid symbol"}), 400
     try:
         return jsonify(synth_groundhyp.grounded_hypothesis(symbol.upper()))
     except Exception as e:
         log.exception("grounded_hypothesis failed")
-        return jsonify({"error": str(e)}), 500
+        return _err(e)
 
 
 # ── 7. Cross-Asset Macro Translator ─────────────────────────────────
 @app.route("/api/synth/macrotranslate/releases")
 def synth_macrotranslate_catalog():
     if not synth_macrotranslate:
-        return jsonify({"error": "synth_macrotranslate module not available"}), 500
+        return jsonify({"error": "synth_macrotranslate module not available"}), 503
     try:
         return jsonify({"releases": synth_macrotranslate.supported_releases()})
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        return _err(e)
 
 
 @app.route("/api/synth/macrotranslate/<release_id>")
 def synth_macrotranslate_get(release_id):
     if not synth_macrotranslate:
-        return jsonify({"error": "synth_macrotranslate module not available"}), 500
+        return jsonify({"error": "synth_macrotranslate module not available"}), 503
     surprise = request.args.get("surprise")
     try:
         surprise_pct = float(surprise) if surprise not in (None, "") else None
@@ -3957,13 +4048,13 @@ def synth_macrotranslate_get(release_id):
     try:
         return jsonify(synth_macrotranslate.macro_translate(release_id, surprise_pct=surprise_pct))
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        return _err(e)
 
 
 @app.route("/api/synth/macrotranslate/<release_id>/portfolio", methods=["POST"])
 def synth_macrotranslate_portfolio(release_id):
     if not synth_macrotranslate:
-        return jsonify({"error": "synth_macrotranslate module not available"}), 500
+        return jsonify({"error": "synth_macrotranslate module not available"}), 503
     body = request.get_json(silent=True) or {}
     holdings = body.get("holdings") or []
     surprise_pct = body.get("surprise_pct")
@@ -3986,14 +4077,14 @@ def synth_macrotranslate_portfolio(release_id):
         return jsonify(synth_macrotranslate.macro_translate(
             release_id, surprise_pct=surprise_pct, portfolio_holdings=holdings))
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        return _err(e)
 
 
 # ── 8. Peer Divergence ──────────────────────────────────────────────
 @app.route("/api/synth/peerdiv/<symbol>")
 def synth_peerdiv_route(symbol):
     if not synth_peerdiv:
-        return jsonify({"error": "synth_peerdiv module not available"}), 500
+        return jsonify({"error": "synth_peerdiv module not available"}), 503
     if not _valid_ticker(symbol):
         return jsonify({"error": "Invalid symbol"}), 400
     n = _safe_int(request.args.get("n"), 5)
@@ -4001,26 +4092,26 @@ def synth_peerdiv_route(symbol):
     try:
         return jsonify(synth_peerdiv.peer_divergence(symbol.upper(), n))
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        return _err(e)
 
 
 # ── 9. Sector Flow ──────────────────────────────────────────────────
 @app.route("/api/synth/sectorflow")
 def synth_sectorflow_route():
     if synth_sectorflow is None:
-        return jsonify({"error": "synth_sectorflow module not available"}), 500
+        return jsonify({"error": "synth_sectorflow module not available"}), 503
     try:
         return jsonify(synth_sectorflow.sector_flow())
     except Exception as e:
         log.exception("sectorflow failure")
-        return jsonify({"error": str(e)}), 500
+        return _err(e)
 
 
 # ── 10. Portfolio What-If ───────────────────────────────────────────
 @app.route("/api/synth/whatif", methods=["POST"])
 def synth_whatif_post():
     if not synth_whatif:
-        return jsonify({"error": "synth_whatif module not available"}), 500
+        return jsonify({"error": "synth_whatif module not available"}), 503
     body = request.get_json(silent=True) or {}
     current = body.get("current_holdings") or []
     candidate = body.get("candidate") or {}
@@ -4030,7 +4121,7 @@ def synth_whatif_post():
         return jsonify(synth_whatif.whatif(current, candidate))
     except Exception as e:
         log.exception("synth_whatif failed")
-        return jsonify({"error": str(e)}), 500
+        return _err(e)
 
 
 @app.route("/api/synth/whatif", methods=["GET"])
@@ -4038,7 +4129,7 @@ def synth_whatif_get():
     """Convenience GET that pulls current_holdings from the DB and accepts
     candidate parameters via query string (?symbol=...&market_value=...&action=...)."""
     if not synth_whatif:
-        return jsonify({"error": "synth_whatif module not available"}), 500
+        return jsonify({"error": "synth_whatif module not available"}), 503
     sym = (request.args.get("symbol") or "").strip().upper()
     try:
         mv = float(request.args.get("market_value") or 0.0)
@@ -4072,7 +4163,7 @@ def synth_whatif_get():
             "symbol": sym, "market_value": mv, "action": action,
         }))
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        return _err(e)
 
 
 def _start_idea_warmer(debug_mode: bool = False):

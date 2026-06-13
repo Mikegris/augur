@@ -285,6 +285,10 @@ def _ensure_table() -> bool:
                 written_at REAL NOT NULL
             )""")
             c.execute("CREATE INDEX IF NOT EXISTS api_cache_expiry ON api_cache(expiry)")
+            # Boot hydrate does `ORDER BY written_at DESC LIMIT N`; without this
+            # index that's a full-table sort on every startup (observed ~8k
+            # rows). written_at is a REAL epoch, so the index orders cleanly.
+            c.execute("CREATE INDEX IF NOT EXISTS api_cache_written ON api_cache(written_at)")
             c.commit()
             _table_ready = True
             return True
@@ -382,15 +386,22 @@ def init() -> None:
              loaded, skipped)
 
 
-def _load_from_disk(k: str):
+def _load_from_disk(k: str, allow_expired: bool = False):
     """Lazily hydrate one row from SQLite into the in-memory map.
 
     Boot-time hydration only eagerly loads the newest _MEM_EVICT_TARGET rows;
     anything older (or LRU-evicted mid-session) is recovered here on first
     miss. Returns the freshly-installed (value, expiry, last_access) tuple, or
-    None if the row is missing/expired/failure-shaped. A point lookup on the
-    PK costs ~10-50µs — three orders of magnitude cheaper than the upstream
-    refetch a miss would otherwise trigger."""
+    None if the row is missing/failure-shaped. A point lookup on the PK costs
+    ~10-50µs — three orders of magnitude cheaper than the upstream refetch a
+    miss would otherwise trigger.
+
+    By default expired rows are NOT returned (cache_get wants freshness). With
+    allow_expired=True the row is returned even past its expiry — this is what
+    makes cache_get_stale's disk fallback work after a restart, where the
+    expired row only lives on disk and was never hydrated into _mem. The
+    expired entry is NOT installed into _mem (it would pollute the fresh-read
+    path); the caller gets the tuple directly for graceful degradation."""
     if not _table_ready:
         return None
     try:
@@ -404,7 +415,8 @@ def _load_from_disk(k: str):
         return None
     raw, expiry = row
     now = time.time()
-    if not expiry or expiry <= now:
+    expired = (not expiry) or expiry <= now
+    if expired and not allow_expired:
         return None
     try:
         val = json.loads(_maybe_decompress(raw))
@@ -413,8 +425,11 @@ def _load_from_disk(k: str):
     if _looks_like_failure(val):
         return None
     hit = (val, expiry, now)
-    with _mem_lock:
-        _mem[k] = hit
+    if not expired:
+        # Only install fresh rows into _mem; an expired row must not be served
+        # by the fresh-read path (cache_get).
+        with _mem_lock:
+            _mem[k] = hit
     return hit
 
 
@@ -479,10 +494,16 @@ def cache_get_stale(key, max_age_seconds: float = 24 * 3600) -> Any:
     Doesn't refresh `last_access` so LRU still treats the entry as old.
     """
     k = _serialize_key(key)
+    from_disk = False
     hit = _mem.get(k)
     if hit is None:
-        # Fall back to disk so stale degradation survives a restart.
-        hit = _load_from_disk(k)
+        # Fall back to disk so stale degradation survives a restart. Pass
+        # allow_expired so an entry that lives ONLY on disk (never hydrated
+        # because it was already expired) is still served here — without this
+        # the disk fallback was dead, since _load_from_disk dropped expired
+        # rows and cache_get had already popped nothing into _mem.
+        hit = _load_from_disk(k, allow_expired=True)
+        from_disk = True
     if hit is None:
         return None
     if len(hit) == 2:
@@ -490,10 +511,17 @@ def cache_get_stale(key, max_age_seconds: float = 24 * 3600) -> Any:
         last_access = expiry
     else:
         value, expiry, last_access = hit
-    # Compute age from the writer's expiry; we wrote at (expiry - ttl) but
-    # don't know ttl here, so use last_access as a proxy. For an entry that
-    # was just expired, last_access ≈ expiry, so age ≈ now - expiry.
-    age = time.time() - last_access
+    now = time.time()
+    if from_disk:
+        # A disk-loaded expired row has last_access == now (set at load time),
+        # which would make age ≈ 0 and bypass the cap. Use expiry as the age
+        # anchor: for a fresh-on-disk row age is negative (treated as 0); for
+        # an expired one age ≈ now - expiry, the real staleness.
+        age = max(0.0, now - expiry)
+    else:
+        # Compute age from last_access; for an entry that just expired in
+        # memory, last_access ≈ expiry, so age ≈ now - expiry.
+        age = now - last_access
     if age > max_age_seconds:
         return None
     if _looks_like_failure(value):
@@ -580,6 +608,23 @@ def cache_set(key, value, ttl: float, allow_empty: bool = False,
         c.commit()
     except Exception as e:
         log.debug("cache persist failed for %s: %s", k[:60], e)
+
+
+def cache_delete(key) -> None:
+    """Drop a single entry from both the in-memory map and disk. Fail-open:
+    used to invalidate a stale negative verdict once a real value lands, so a
+    failure here must never propagate into the hot path."""
+    k = _serialize_key(key)
+    with _mem_lock:
+        _mem.pop(k, None)
+    if not _table_ready:
+        return
+    try:
+        c = _conn()
+        c.execute("DELETE FROM api_cache WHERE key=?", (k,))
+        c.commit()
+    except Exception:
+        pass
 
 
 def coalesce(key, ttl: float, fetch_fn: Callable[[], Any]) -> Any:

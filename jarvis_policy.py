@@ -265,6 +265,14 @@ def parse_rule(text: Any) -> Optional[Dict[str, Any]]:
             v = _pick(nums, pct=True, lo=1, hi=100)
             return {"kind": "max_weight_pct", "value": _norm(v)} if v is not None else None
 
+        # Bare "position" + a percent — the very example the set_policy_rule
+        # tool advertises ("max position 10%"). Guard on a %-spelled number so
+        # this doesn't poach "10 positions" (count, no pct) from the branch
+        # below; the singular word avoids matching the plural "positions".
+        if re.search(r"\bposition\b", t) and _pick(nums, pct=True, lo=1, hi=100) is not None:
+            v = _pick(nums, pct=True, lo=1, hi=100)
+            return {"kind": "max_weight_pct", "value": _norm(v)} if v is not None else None
+
         if any(w in t for w in _COUNT_WORDS):
             v = _pick(nums, pct=False, usd=False, lo=1, hi=100)
             if v is not None and float(v).is_integer():

@@ -280,7 +280,14 @@ def score_due_forecasts(max_rows: int = 200) -> Dict[str, int]:
         if issued is None:
             errors += 1
             continue
-        due_at = issued + timedelta(days=int(row["horizon_days"]))
+        # WHY (Q2): horizon_days is measured in TRADING days, but timedelta
+        # adds CALENDAR days — so a 20-trading-day horizon was scored ~28
+        # calendar days early (5 trading days ≈ 7 calendar days), reading the
+        # close ~30% short of the intended window and corrupting hit-rate /
+        # Brier / adaptive weights. Convert to calendar days: ceil(h*7/5).
+        horizon_td = int(row["horizon_days"])
+        horizon_cal = math.ceil(horizon_td * 7 / 5)
+        due_at = issued + timedelta(days=horizon_cal)
         if due_at > now:
             # NOTE: rows arrive sorted by issued_at, *not* by due_at, so we
             # can't `break` here — a later-issued forecast with a shorter
@@ -374,8 +381,15 @@ def get_track_record(
     signal_name: str,
     since: Optional[str] = None,
     symbol: Optional[str] = None,
+    horizon_days: Optional[int] = None,
 ) -> Dict[str, Any]:
-    """Aggregate stats for a signal. Empty record if nothing's scored yet."""
+    """Aggregate stats for a signal. Empty record if nothing's scored yet.
+
+    WHY (Q9): a forecast's skill is horizon-specific — a 5d call and a 60d
+    call from the same signal have different hit-rates/Brier. Callers that
+    adapt per-horizon weights must be able to restrict the track record to a
+    single horizon; pooling all horizons biases the tilt.
+    """
     init_tracker_db()
     conn = _get_conn()
     query = [
@@ -389,6 +403,9 @@ def get_track_record(
     if symbol:
         query.append("AND symbol = ?")
         params.append(symbol.upper())
+    if horizon_days is not None:
+        query.append("AND horizon_days = ?")
+        params.append(int(horizon_days))
     query.append("ORDER BY scored_at ASC")
     rows = conn.execute(" ".join(query), params).fetchall()
     stats = _stats_for_rows(rows)

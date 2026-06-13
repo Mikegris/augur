@@ -577,6 +577,16 @@ def _mad(xs: List[float], med: float) -> float:
     return _median(devs)
 
 
+def _stdev(xs: List[float]) -> float:
+    """Sample standard deviation (0.0 for <2 points or no spread)."""
+    n = len(xs)
+    if n < 2:
+        return 0.0
+    mean = sum(xs) / n
+    var = sum((x - mean) ** 2 for x in xs) / (n - 1)
+    return math.sqrt(var) if var > 0 else 0.0
+
+
 def _interpret(metric: str, z: float, sym_val: float, peer_med: float) -> str:
     """Generate a short human-readable interpretation of a divergence."""
     direction = "above" if z > 0 else "below"
@@ -683,14 +693,26 @@ def _enrich_with_stats(
             med = None
             mad = 0.0
         if sym_val is not None and med is not None:
-            denom = max(mad, 1e-9)
-            z = (sym_val - med) / denom
-            # Cap z at ±99 so a degenerate MAD=0 with sym_val != med doesn't
-            # blow the JSON encode out of range or render as Infinity.
-            if math.isinf(z) or math.isnan(z):
-                z = 0.0
-            z = max(-99.0, min(99.0, z))
-            block["z_score"] = round(z, 3)
+            # WHY (S8): when peers are (near) identical, MAD collapses to 0 and
+            # the old `denom = max(mad, 1e-9)` produced z = ±(diff)/1e-9 → it
+            # always pinned to the ±99 cap, manufacturing a "huge divergence"
+            # out of a rounding-level difference and crowding genuine outliers
+            # out of the top-K ranking. Fall back to the (scaled) stdev when
+            # MAD is 0; if there's no spread at all, the z is undefined → None.
+            if mad > 0:
+                denom = mad
+            else:
+                # 1.4826*MAD ≈ stdev for normal data; use stdev directly here.
+                sd = _stdev(peer_vals)
+                denom = sd if sd > 0 else None
+            if denom is None:
+                block["z_score"] = None
+            else:
+                z = (sym_val - med) / denom
+                if math.isinf(z) or math.isnan(z):
+                    z = 0.0
+                z = max(-99.0, min(99.0, z))
+                block["z_score"] = round(z, 3)
         else:
             block["z_score"] = None
         out[metric_name] = block

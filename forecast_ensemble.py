@@ -198,9 +198,11 @@ def _sig_narrative(symbol: str) -> Optional[Dict[str, Any]]:
         return None  # no news -> no signal, don't dilute with a 0.5 vote
     phase = (nar.get("narrative_phase") or "NEUTRAL").upper()
     p = _NARRATIVE_PHASE_PROB.get(phase, 0.5)
-    # Contrarian flag flips an over-extended narrative.
-    if nar.get("contrarian_signal"):
-        p = _clamp(1.0 - p) if p != 0.5 else 0.5
+    # WHY (Q3): _NARRATIVE_PHASE_PROB ALREADY encodes the contrarian view —
+    # CONSENSUS=0.52 and EXHAUSTION=0.40 are deliberately damped/bearish. The
+    # old `p -> 1-p` flip on contrarian_signal (set exactly for CONSENSUS /
+    # EXHAUSTION) double-inverted: EXHAUSTION 0.40 became 0.60 *bullish*. The
+    # table is the mapping; do not flip again.
     return {
         "prob_up": _clamp(p),
         "detail": "Narrative phase {} ({} articles)".format(

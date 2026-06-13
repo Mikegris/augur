@@ -42,6 +42,12 @@ _METRICS = ("price", "change_pct", "vix", "book_day_pct")
 _SYMBOL_METRICS = ("price", "change_pct")   # these require a symbol
 _OPS = ("gt", "lt")
 
+# A plausible ticker: 1-6 letters/digits, optional .X or -USD suffix (BRK.B,
+# BTC-USD). Without this, _normalize_condition accepts any non-empty string
+# as a symbol, so a typo'd "my favorite stock" becomes an un-quotable watch.
+import re as _re
+_SYM_RE = _re.compile(r"^[A-Z][A-Z0-9]{0,5}([.\-][A-Z0-9]{1,4})?$")
+
 _MAX_CONDITIONS = 4
 _MAX_NAME_LEN = 80
 _MAX_ARMED = 25
@@ -99,6 +105,8 @@ def _normalize_condition(cond: Any) -> Union[Dict[str, Any], str]:
         if not isinstance(symbol, str) or not symbol.strip():
             return "metric {!r} requires a symbol".format(metric)
         symbol = symbol.strip().upper()
+        if not _SYM_RE.match(symbol):
+            return "{!r} is not a valid ticker symbol".format(symbol)
     else:
         # vix / book_day_pct are global metrics — a symbol, if sent,
         # is meaningless; drop it rather than reject the whole watch.
@@ -282,6 +290,31 @@ def _fetch_quotes(symbols: List[str], crypto: set) -> Dict[str, Dict[str, Any]]:
         q = raw.get(fetch_sym)
         if isinstance(q, dict):
             out[user_sym] = q
+
+    # -USD fallback for non-held coins. _crypto_symbols() only knows symbols
+    # currently in the book, so a watch on a coin the user doesn't hold (DOGE)
+    # quotes the bare ticker — often an unrelated equity/trust (the same
+    # lesson as jarvis_counterfactual._price_now). For any symbol whose bare
+    # quote came back missing or non-positive, retry it as SYM-USD.
+    retry = {}  # fetch symbol (SYM-USD) -> user symbol
+    for sym in symbols:
+        if sym in crypto or sym.upper().endswith("-USD"):
+            continue
+        q = out.get(sym)
+        price = (q or {}).get("price") if isinstance(q, dict) else None
+        if not isinstance(price, (int, float)) or isinstance(price, bool) or price <= 0:
+            retry[(sym + "-USD").upper()] = sym
+    if retry:
+        try:
+            raw2 = fetcher.get_quotes_batch(list(retry.keys())) or {}
+        except Exception as e:
+            log.warning("watch -USD fallback fetch failed: %s", e)
+            raw2 = {}
+        for fetch_sym, user_sym in retry.items():
+            q = raw2.get(fetch_sym)
+            qp = (q or {}).get("price") if isinstance(q, dict) else None
+            if isinstance(qp, (int, float)) and not isinstance(qp, bool) and qp > 0:
+                out[user_sym] = q
     return out
 
 
