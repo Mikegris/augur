@@ -14,7 +14,10 @@ Caching & daily cap:
 import os
 import re
 import json
+import time
+import random
 import logging
+import threading
 
 try:
     import cache_store
@@ -80,6 +83,200 @@ def _is_model_not_found(exc):
     )
 
 
+# ── Shared request governor ──────────────────────────────────────────────────
+# Every OpenAI chat/embedding call in this process funnels through one governor
+# so concurrent sweeps (briefing fan-out, multi-round agent loops, embedding
+# warmers, cache warmers) cannot self-inflict 429s by firing simultaneously.
+# Three cooperating layers, all in-process and thread-safe:
+#   1. Concurrency cap   — a bounded semaphore limits in-flight API calls.
+#   2. Min-interval pacer — a token-bucket / RPM throttle spaces calls out
+#                           process-wide so we stay under the account RPM.
+#   3. Cooperative backoff — on 429/RateLimitError/5xx every caller sleeps with
+#                           exponential backoff + jitter (honoring Retry-After),
+#                           so concurrent workers back off *together* rather than
+#                           hammering in lockstep.
+# Hard rule for this codebase (wedged 3x by threads blocking forever): NEVER
+# block unboundedly. Every wait has a deadline; if we can't acquire in time we
+# fail OPEN and run the call ungoverned rather than hang an abandonable worker.
+# And if any governor logic itself raises, we fall through to the raw call.
+
+def _env_float(name, default):
+    try:
+        v = os.environ.get(name)
+        return float(v) if v not in (None, "") else float(default)
+    except (TypeError, ValueError):
+        return float(default)
+
+
+def _env_int(name, default):
+    try:
+        v = os.environ.get(name)
+        return int(v) if v not in (None, "") else int(default)
+    except (TypeError, ValueError):
+        return int(default)
+
+
+# Tunables (read once at import; env-overridable). Conservative defaults.
+_GOV_MAX_CONCURRENCY = max(1, _env_int("AUGUR_OPENAI_MAX_CONCURRENCY", 3))
+_GOV_RPM = max(1, _env_int("AUGUR_OPENAI_RPM", 180))            # requests/minute
+_GOV_MIN_INTERVAL = 60.0 / _GOV_RPM                            # seconds between calls
+# How long a worker will wait to enter the governor before giving up and running
+# ungoverned (fail-open). Keeps abandonable threads from wedging forever.
+_GOV_ACQUIRE_DEADLINE = _env_float("AUGUR_OPENAI_ACQUIRE_DEADLINE", 30.0)
+_GOV_MAX_RETRIES = max(0, _env_int("AUGUR_OPENAI_MAX_RETRIES", 4))
+_GOV_BACKOFF_BASE = _env_float("AUGUR_OPENAI_BACKOFF_BASE", 1.5)   # seconds
+_GOV_BACKOFF_CAP = _env_float("AUGUR_OPENAI_BACKOFF_CAP", 30.0)    # seconds
+# Upper bound we'll ever honor from a server Retry-After (defensive — a bad
+# header must not pin a worker for minutes).
+_GOV_RETRY_AFTER_CAP = _env_float("AUGUR_OPENAI_RETRY_AFTER_CAP", 60.0)
+
+_gov_sem = threading.BoundedSemaphore(_GOV_MAX_CONCURRENCY)
+_gov_pace_lock = threading.Lock()     # guards _gov_next_allowed
+_gov_next_allowed = 0.0               # monotonic time the next call may start
+
+
+def _gov_acquire_slot(deadline_ts):
+    """Acquire a concurrency slot before `deadline_ts` (monotonic). Returns True
+    if acquired (caller MUST release), False on timeout (caller runs ungoverned).
+    BoundedSemaphore.acquire(timeout=...) is available on py3.2+."""
+    remaining = deadline_ts - time.monotonic()
+    if remaining <= 0:
+        # Last-chance non-blocking try so a free slot is still used.
+        return _gov_sem.acquire(blocking=False)
+    return _gov_sem.acquire(timeout=remaining)
+
+
+def _gov_pace(deadline_ts):
+    """Token-bucket / min-interval pacer. Sleeps just long enough that calls are
+    spaced >= _GOV_MIN_INTERVAL apart process-wide, but never past the deadline.
+    Reserves this call's slot atomically so concurrent callers don't all wake at
+    the same instant."""
+    if _GOV_MIN_INTERVAL <= 0:
+        return
+    with _gov_pace_lock:
+        global _gov_next_allowed
+        now = time.monotonic()
+        start_at = max(now, _gov_next_allowed)
+        # Cap the wait at the deadline so pacing can't wedge an abandoned worker.
+        start_at = min(start_at, deadline_ts)
+        # Reserve the next slot relative to when this call actually starts.
+        _gov_next_allowed = start_at + _GOV_MIN_INTERVAL
+    wait = start_at - time.monotonic()
+    if wait > 0:
+        time.sleep(wait)
+
+
+def _is_rate_limit(exc):
+    """429 / RateLimitError — the canonical 'slow down' signal."""
+    if exc.__class__.__name__ == "RateLimitError":
+        return True
+    return getattr(exc, "status_code", None) == 429
+
+
+def _is_transient_server(exc):
+    """5xx / connection errors worth a cooperative retry."""
+    name = exc.__class__.__name__
+    if name in ("APIConnectionError", "APITimeoutError", "InternalServerError",
+                "APIError"):
+        # APIError is a broad base; only retry if it carries a 5xx status.
+        sc = getattr(exc, "status_code", None)
+        if name == "APIError":
+            return isinstance(sc, int) and 500 <= sc < 600
+        return True
+    sc = getattr(exc, "status_code", None)
+    return isinstance(sc, int) and 500 <= sc < 600
+
+
+def _retry_after_seconds(exc):
+    """Parse a Retry-After / retry-after header from the exception's response,
+    clamped to a sane cap. Returns None if absent/unparseable."""
+    try:
+        resp = getattr(exc, "response", None)
+        headers = getattr(resp, "headers", None)
+        if not headers:
+            return None
+        # Headers may be a case-insensitive mapping or a plain dict.
+        val = None
+        for k in ("retry-after", "Retry-After", "retry-after-ms"):
+            try:
+                val = headers.get(k)
+            except Exception:
+                val = None
+            if val:
+                ms = k.endswith("-ms")
+                secs = float(val) / 1000.0 if ms else float(val)
+                return max(0.0, min(secs, _GOV_RETRY_AFTER_CAP))
+        return None
+    except Exception:
+        return None
+
+
+def _backoff_delay(attempt, exc):
+    """Delay before the next attempt: prefer the server's Retry-After, else
+    exponential backoff with full jitter, capped."""
+    ra = _retry_after_seconds(exc)
+    if ra is not None:
+        # Add a little jitter even on Retry-After so concurrent callers that got
+        # the same header don't all resume on the exact same tick.
+        return ra + random.uniform(0.0, min(1.0, _GOV_BACKOFF_CAP))
+    raw = _GOV_BACKOFF_BASE * (2 ** attempt)
+    return random.uniform(0.0, min(raw, _GOV_BACKOFF_CAP))
+
+
+def governed_call(fn):
+    """Run `fn()` (a zero-arg callable that performs ONE OpenAI request) under
+    the shared governor: concurrency cap + RPM pacing + cooperative backoff on
+    429/5xx. Public so other modules (e.g. jarvis_semmem embeddings) can adopt
+    the same governor without re-implementing it.
+
+    Fail-open contract: if any *governor* machinery errors, or we can't acquire
+    a slot before the deadline, we still execute `fn()` (ungoverned) rather than
+    drop the work or hang. Exceptions raised by `fn` itself propagate normally
+    once retries are exhausted."""
+    deadline_ts = time.monotonic() + _GOV_ACQUIRE_DEADLINE
+    acquired = False
+    try:
+        acquired = _gov_acquire_slot(deadline_ts)
+    except Exception as e:  # governor broken → fail open
+        log.debug("governor slot acquire failed, running ungoverned: %s", e)
+        return fn()
+
+    try:
+        attempt = 0
+        while True:
+            try:
+                try:
+                    _gov_pace(deadline_ts)
+                except Exception as e:  # pacer broken → fail open, keep going
+                    log.debug("governor pacer failed (ignored): %s", e)
+                return fn()
+            except Exception as e:
+                retriable = False
+                try:
+                    retriable = _is_rate_limit(e) or _is_transient_server(e)
+                except Exception:
+                    retriable = False
+                if not retriable or attempt >= _GOV_MAX_RETRIES:
+                    raise
+                try:
+                    delay = _backoff_delay(attempt, e)
+                except Exception:
+                    delay = min(_GOV_BACKOFF_BASE * (2 ** attempt),
+                                _GOV_BACKOFF_CAP)
+                log.warning("OpenAI %s; cooperative backoff %.2fs "
+                            "(attempt %d/%d)", e.__class__.__name__, delay,
+                            attempt + 1, _GOV_MAX_RETRIES)
+                # Bounded sleep — backoff cap keeps this from wedging a worker.
+                time.sleep(max(0.0, delay))
+                attempt += 1
+    finally:
+        if acquired:
+            try:
+                _gov_sem.release()
+            except Exception:
+                pass
+
+
 def _chat_completion(client, model, messages, max_tokens=None, temperature=None,
                      json_mode=True, tools=None, tool_choice=None):
     """Single seam for every OpenAI chat call in the app.
@@ -106,7 +303,7 @@ def _chat_completion(client, model, messages, max_tokens=None, temperature=None,
                 kwargs["max_tokens"] = max_tokens
             if temperature is not None:
                 kwargs["temperature"] = temperature
-        return client.chat.completions.create(**kwargs)
+        return governed_call(lambda: client.chat.completions.create(**kwargs))
 
     try:
         return _call(model)
