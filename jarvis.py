@@ -3409,6 +3409,25 @@ _CORRECTIONS_ASK_RE = re.compile(
     r"what have you learn(?:ed|t).{0,30}correction|about my corrections",
     re.IGNORECASE)
 
+# Explicit hand-off to the Claude-Code backend ("the same power as you"):
+# a leading "claude …", "/claude …", "ask/use claude (code) …", or a
+# "deep dive / dig into the code(base) / investigate" cue routes to
+# jarvis_claude, which drives the local `claude` CLI with full local + web
+# tooling. Kept deliberately explicit so it never hijacks fast rule intents.
+_CLAUDE_RE = re.compile(
+    r"^\s*(?:/?claude(?:\s+code)?\b[\s,:>-]*"
+    r"|(?:ask|use|run|tell|have)\s+claude(?:\s+code)?\b[\s,:to-]*"
+    r"|deep[\s-]?dive\b|dig\s+into\b|investigate\b|look\s+into\b)",
+    re.IGNORECASE)
+
+
+def _strip_claude_trigger(text: str) -> str:
+    """Remove the routing cue so Claude Code sees the real request. A bare
+    cue with nothing after it ("ask claude") leaves the text as-is so Claude
+    still gets something to work with."""
+    stripped = _CLAUDE_RE.sub("", text, count=1).strip(" ,.:-—>")
+    return stripped or text.strip()
+
 
 def _corrections_table() -> None:
     """Lazy CREATE — the new-module pattern: no schema migration, the table
@@ -3622,6 +3641,24 @@ def ask(query: str, history: Any = None, conversation_id: Any = None,
     # Corrections meta-question — answered from the log, no LLM needed.
     if _CORRECTIONS_ASK_RE.search(ql):
         return done("corrections", _answer_corrections_learned())
+
+    # Claude-Code hand-off ("the same power as you"). An explicit cue routes the
+    # request to the local `claude` CLI, which can read the codebase, run the
+    # engines, query the book, and search the web — far beyond the closed-world
+    # rule/OpenAI paths. Degrades gracefully: when Claude Code is unavailable or
+    # the run yields nothing, we fall through to normal routing untouched.
+    if _CLAUDE_RE.search(q):
+        try:
+            import jarvis_claude
+            if jarvis_claude.available():
+                cpayload = jarvis_claude.ask_claude(
+                    _strip_claude_trigger(q), history=turns, progress=progress,
+                    cancelled=cancelled, symbol=symbol)
+                if cpayload:
+                    return done("claude", cpayload)
+        except Exception as e:
+            log.warning("jarvis.ask claude branch failed for %r: %s", q, e)
+        notify("Claude Code unavailable — taking the local route.")
 
     # Correction learning: "no, I meant the ETF" is two things at once — a
     # routing failure worth logging AND a real question hiding behind the
