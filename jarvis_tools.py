@@ -1011,6 +1011,26 @@ TOOLS: Dict[str, Dict[str, Any]] = {
         "parameters": _p({"query": {"type": "string", "description": "Company name or phrase"},
                           "forms": {"type": "string", "description": "Optional form type, e.g. S-1"}}, ["query"]),
     },
+    # ── v2.5 technical / composite reads ────────────────────────────────────
+    "symbol_signal": {
+        "fn": lambda args: __import__("portfolio_insights").symbol_signal(
+            str(args.get("symbol") or "")),
+        "mutating": False,
+        "description": "Technical/positioning read for ONE ticker: momentum score (0-100), RSI(14), max drawdown, annualized volatility, 52-week range position, and a bull/bear/neutral stance. Use for 'is X overbought', 'X momentum/trend', 'how is X holding up technically'.",
+        "parameters": _p({"symbol": {"type": "string"}}, ["symbol"]),
+    },
+    "portfolio_health": {
+        "fn": lambda args: __import__("portfolio_insights").portfolio_health(),
+        "mutating": False,
+        "description": "Technical BREADTH of the whole equity book: weighted momentum, % of names above their 50-day average, count near 52-week highs, count in deep (25%+) drawdowns, concentration (HHI), and an overall constructive/mixed/defensive tone. Use for 'how healthy/strong is my portfolio technically', 'breadth of my book'.",
+        "parameters": _p({}),
+    },
+    "deep_dossier": {
+        "fn": lambda args: __import__("jarvis").deep_dossier(str(args.get("symbol") or "")),
+        "mutating": False,
+        "description": "Full multi-engine dossier on ONE ticker: fuses the forecast ensemble, investor-lens quality/valuation, and smart-money flow into one synthesized thesis, explicitly flagging when the signals disagree. Use for 'deep dossier on X' / 'full work-up on X'.",
+        "parameters": _p({"symbol": {"type": "string"}}, ["symbol"]),
+    },
     "search_hacker_news": {
         "fn": lambda args: __import__("jarvis_research").search_hacker_news(str(args.get("query") or "")),
         "mutating": False,

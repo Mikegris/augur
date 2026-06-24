@@ -71,7 +71,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(me
 
 # Single source of truth for the app version — surfaced at /api/version and
 # in jarvis.health_snapshot().
-APP_VERSION = "2.4.0"
+APP_VERSION = "2.5.0"
 
 _TICKER_RE = re.compile(r"^[A-Z0-9][A-Z0-9.\-]{0,9}$")
 
@@ -777,6 +777,26 @@ def analytics_risk():
         return jsonify({})
     result = fetcher.get_risk_metrics(symbols, period=period)
     return jsonify(result)
+
+
+@app.route("/api/insights/symbol/<symbol>")
+def insights_symbol(symbol):
+    """v2.5 technical/positioning signal bundle for one symbol."""
+    try:
+        import portfolio_insights
+        return jsonify(portfolio_insights.symbol_signal(symbol))
+    except Exception as e:
+        return _err(e)
+
+
+@app.route("/api/insights/portfolio")
+def insights_portfolio():
+    """v2.5 technical breadth/health across equity holdings."""
+    try:
+        import portfolio_insights
+        return jsonify(portfolio_insights.portfolio_health())
+    except Exception as e:
+        return _err(e)
 
 
 # ─── Portfolio CSV Export / Import ────────────────────────────────────────────

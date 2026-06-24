@@ -57,6 +57,18 @@ def render_digest() -> Dict[str, str]:
     cards: List[Dict[str, Any]] = brief.get("insights") or []
     portfolio = brief.get("portfolio") or {}
 
+    # Technical breadth/health line (v2.5) — best-effort, never blocks the digest.
+    health_line = ""
+    try:
+        import portfolio_insights
+        h = portfolio_insights.portfolio_health() or {}
+        if h.get("analyzed"):
+            health_line = "Book technicals: {} (weighted momentum {}/100, {}% above 50-day avg).".format(
+                h.get("tone", "mixed"), h.get("weighted_momentum"),
+                h.get("breadth_above_50dma_pct"))
+    except Exception as e:
+        log.debug("digest health line failed: %s", e)
+
     today = _dt.date.today().isoformat()
     subject = "AUGUR briefing — {}".format(today)
 
@@ -71,6 +83,8 @@ def render_digest() -> Dict[str, str]:
         pv = portfolio.get("total_value")
         if pv is not None:
             tlines += ["", "Book: {}".format(pv)]
+    if health_line:
+        tlines += ["", health_line]
     if cards:
         tlines += ["", "Insights:"]
         for c in cards[:10]:
@@ -86,6 +100,8 @@ def render_digest() -> Dict[str, str]:
               "<p>{}</p>".format(_esc_html(greeting))]
     if headline:
         hparts.append("<p><strong>{}</strong></p>".format(_esc_html(headline)))
+    if health_line:
+        hparts.append("<p>{}</p>".format(_esc_html(health_line)))
     if cards:
         hparts.append("<ul>")
         for c in cards[:10]:

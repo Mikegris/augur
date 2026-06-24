@@ -2854,6 +2854,30 @@ _GLOSSARY: Dict[str, Dict[str, Any]] = {
                 "literally what hedging costs right now. Under ~15 is complacent, over ~28 is stress. "
                 "It spikes when everyone wants insurance at once.",
         "view": "macro"},
+    "rsi": {"aliases": ["relative strength index", "overbought", "oversold"],
+        "text": "A 0-100 momentum oscillator from the size of recent up-days vs down-days. Above ~70 is "
+                "'overbought' (the move got crowded), below ~30 'oversold'. It's a speed gauge, not a "
+                "direction call — strong trends can sit overbought for weeks. Ask me 'RSI on NVDA'."},
+    "momentum score": {"aliases": ["momentum"],
+        "text": "My 0-100 blend of three trend reads: price vs its 50-day average, the 50-day vs the "
+                "200-day, and the ~60-day return. High means price, intermediate trend, and recent drift "
+                "all point up. It's how I lean a symbol's technical stance. Ask 'momentum on AAPL'."},
+    "max drawdown": {"aliases": ["drawdown", "max dd"],
+        "text": "The worst peak-to-trough drop over a window, as a negative %. It answers 'how much pain "
+                "did holding this actually involve' better than volatility does — a -45% drawdown means at "
+                "some point you were down 45% from the high, regardless of where it ended."},
+    "sharpe ratio": {"aliases": ["sharpe"],
+        "text": "Return per unit of volatility — reward for the risk taken. Two names up 20% aren't equal "
+                "if one did it smoothly and the other on a rollercoaster. I show a rough proxy (annualized "
+                "return ÷ annualized vol, no risk-free rate), so read it as relative, not absolute."},
+    "breadth": {"aliases": ["market breadth", "participation"],
+        "text": "How many names are actually participating, not just the index. A book (or market) up on a "
+                "few megacaps while most names lag is narrow — fragile. I measure your book's breadth as the "
+                "share of holdings above their 50-day average. Ask 'how healthy is my portfolio'."},
+    "52-week range position": {"aliases": ["52-week range", "range position", "where in its range"],
+        "text": "Where today's price sits between the 52-week low (0%) and high (100%). Near 100% is "
+                "strength but little overhead history; near 0% is a name the market has left for dead — "
+                "sometimes value, sometimes a falling knife. Ask 'is NVDA near its high'."},
     "gamma exposure": {"aliases": ["gex", "gamma", "dealer gamma"],
         "text": "Options dealers hedge what they sell. When dealers are long gamma they sell rallies and buy dips — "
                 "pinning price; when short gamma they must chase moves, amplifying them. "
@@ -3039,8 +3063,10 @@ _HELP_ANSWER = (
     "book”, “what did I miss”, “summarize my day”, “price of NVDA”, “NVDA vs "
     "AMD”, “is AAPL near its high”, “forecast TSLA”, “when does AAPL report”, "
     "“what did I buy recently”, “am I beating the market”, “how much crypto do "
-    "I have”, “my watchlist”, “any ideas” — or just tell me something to "
-    "remember and I'll keep it."
+    "I have”, “my watchlist”, “any ideas”, “momentum on NVDA”, “how healthy is "
+    "my portfolio”, “what's moving”, “should I rebalance”, “dossier on AAPL”, or "
+    "“claude, <any open-ended question>” to investigate live — or just tell me "
+    "something to remember and I'll keep it."
 )
 
 
@@ -3435,6 +3461,159 @@ def _strip_claude_trigger(text: str) -> str:
 _DOSSIER_RE = re.compile(r"\bdossier\b|\bfull\s+(?:work[\s-]?up|breakdown|picture)\b",
                          re.IGNORECASE)
 
+# Per-symbol technical/positioning read (v2.5 portfolio_insights).
+_SIGNAL_RE = re.compile(
+    r"\b(momentum|technicals?|rsi|overbought|oversold|moving average|"
+    r"\bma\b|drawdown|trend(?:ing)?|chart\s+read)\b", re.IGNORECASE)
+# Portfolio-wide technical breadth/health.
+_HEALTH_RE = re.compile(
+    r"\b(portfolio health|how healthy|breadth|technical health|"
+    r"book'?s? (?:health|momentum|shape)|how(?:'?s| is) my (?:book|portfolio) "
+    r"(?:doing|looking|holding up|trending))\b", re.IGNORECASE)
+# Today's movers across holdings, and rebalance/concentration guardrail.
+_MOVERS_RE = re.compile(
+    r"\b(movers?|what'?s moving|moving today|biggest movers?|"
+    r"gainers? and losers?|gainers?\s*/\s*losers?|winners? and losers?)\b",
+    re.IGNORECASE)
+_REBAL_RE = re.compile(
+    r"\b(rebalance|re-balance|what (?:should i|to) trim|\btrim\b|overweight|"
+    r"too concentrated|reduce my position)\b", re.IGNORECASE)
+_CONC_GUARDRAIL_PCT = 25.0  # single-name weight above which we flag a trim
+
+
+def _priced_weights():
+    """[(symbol, weight_pct)] sorted desc, plus total $ value. Best-effort."""
+    try:
+        holdings = db.get_portfolio() or []
+    except Exception:
+        holdings = []
+    eq = [h for h in holdings if h.get("symbol")]
+    if not eq:
+        return [], 0.0
+    syms = list({h["symbol"].upper() for h in eq})
+    try:
+        import fetcher
+        quotes = fetcher.get_quotes_batch(syms) or {}
+    except Exception:
+        quotes = {}
+    vals: Dict[str, float] = {}
+    total = 0.0
+    for h in eq:
+        s = h["symbol"].upper()
+        px = (quotes.get(s) or {}).get("price")
+        if px:
+            v = float(h.get("shares") or 0) * float(px)
+            vals[s] = vals.get(s, 0.0) + v
+            total += v
+    if total <= 0:
+        return [], 0.0
+    return sorted(((s, v / total * 100.0) for s, v in vals.items()),
+                  key=lambda x: -x[1]), total
+
+
+def _answer_movers():
+    """Top gainers/losers among current holdings, intraday."""
+    try:
+        holdings = db.get_portfolio() or []
+    except Exception:
+        holdings = []
+    syms = list({h["symbol"].upper() for h in holdings if h.get("symbol")})
+    if not syms:
+        return {"answer": "No holdings yet — nothing to track for movers.",
+                "action": {"view": "portfolio"}}
+    try:
+        import fetcher
+        quotes = fetcher.get_quotes_batch(syms) or {}
+    except Exception:
+        quotes = {}
+    rows = [(s, (quotes.get(s) or {}).get("change_pct")) for s in syms]
+    rows = [(s, c) for s, c in rows if c is not None]
+    if not rows:
+        return {"answer": "Quote feed is slow right now — couldn't rank movers."}
+    rows.sort(key=lambda r: r[1], reverse=True)
+    ups = [r for r in rows if r[1] > 0][:3]
+    downs = sorted([r for r in rows if r[1] < 0], key=lambda r: r[1])[:3]
+    parts = []
+    if ups:
+        parts.append("Leading: " + ", ".join("{} {:+.1f}%".format(s, c) for s, c in ups))
+    if downs:
+        parts.append("Lagging: " + ", ".join("{} {:+.1f}%".format(s, c) for s, c in downs))
+    if not parts:
+        return {"answer": "Your book is flat today — no notable movers.",
+                "action": {"view": "portfolio"}}
+    return {"answer": " · ".join(parts) + ".", "action": {"view": "portfolio"}}
+
+
+def _answer_rebalance():
+    """Flag single-name concentration above the guardrail; suggest trims."""
+    weights, total = _priced_weights()
+    if not weights:
+        return {"answer": "Couldn't price the book just now — try again in a "
+                          "moment.", "action": {"view": "portfolio"}}
+    heavy = [(s, w) for s, w in weights if w > _CONC_GUARDRAIL_PCT]
+    if heavy:
+        body = ", ".join("{} at {:.0f}%".format(s, w) for s, w in heavy)
+        return {"answer": "Consider trimming — {} {} above the {:.0f}% "
+                          "single-name guardrail.".format(
+                              body, "is" if len(heavy) == 1 else "are",
+                              _CONC_GUARDRAIL_PCT),
+                "tone": "warn", "action": {"view": "analytics"}}
+    top_s, top_w = weights[0]
+    return {"answer": "Allocation looks balanced — your largest position is {} "
+                      "at {:.0f}%, under the {:.0f}% single-name guardrail.".format(
+                          top_s, top_w, _CONC_GUARDRAIL_PCT),
+            "action": {"view": "analytics"}}
+
+
+def _answer_signal(symbol):
+    """Technical/positioning read for one symbol (portfolio_insights)."""
+    import portfolio_insights as pi
+    s = pi.symbol_signal(symbol) or {}
+    if s.get("error"):
+        return {"answer": "I couldn't pull enough history on {} for a technical "
+                          "read right now.".format(symbol), "symbol": symbol}
+    lead = {"bull": "constructive", "bear": "weak", "neutral": "mixed"}.get(
+        s.get("stance"), "mixed")
+    bits = ["{} technicals look {}".format(symbol, lead)]
+    if s.get("momentum_score") is not None:
+        bits.append("momentum {}/100".format(s["momentum_score"]))
+    rsi_v = s.get("rsi14")
+    if rsi_v is not None:
+        tag = " (overbought)" if rsi_v >= 70 else (" (oversold)" if rsi_v <= 30 else "")
+        bits.append("RSI {:.0f}{}".format(rsi_v, tag))
+    if s.get("range_position_52w") is not None:
+        bits.append("{:.0f}% up its 52-wk range".format(s["range_position_52w"]))
+    if s.get("max_drawdown_pct") is not None:
+        bits.append("max drawdown {:.0f}%".format(s["max_drawdown_pct"]))
+    if s.get("annualized_vol_pct") is not None:
+        bits.append("annualized vol {:.0f}%".format(s["annualized_vol_pct"]))
+    return {"answer": ", ".join(bits) + ".", "symbol": symbol, "data": s,
+            "action": {"view": "forecast", "symbol": symbol}}
+
+
+def _answer_portfolio_health():
+    """Technical breadth/health across equity holdings (portfolio_insights)."""
+    import portfolio_insights as pi
+    h = pi.portfolio_health() or {}
+    if h.get("error") or h.get("n_holdings", 0) == 0:
+        return {"answer": "Add some equity holdings and I'll gauge the book's "
+                          "technical health.", "action": {"view": "portfolio"}}
+    if not h.get("analyzed"):
+        return {"answer": h.get("note", "Couldn't pull enough history to gauge "
+                                        "breadth right now.")}
+    parts = ["Your book looks {} technically".format(h.get("tone", "mixed"))]
+    if h.get("weighted_momentum") is not None:
+        parts.append("weighted momentum {}/100".format(h["weighted_momentum"]))
+    if h.get("breadth_above_50dma_pct") is not None:
+        parts.append("{}% of names above their 50-day average".format(
+            h["breadth_above_50dma_pct"]))
+    if h.get("near_52w_high"):
+        parts.append("{} near 52-wk highs".format(h["near_52w_high"]))
+    if h.get("in_deep_drawdown"):
+        parts.append("{} in a 25%+ drawdown".format(h["in_deep_drawdown"]))
+    return {"answer": ", ".join(parts) + ".", "data": h,
+            "action": {"view": "analytics"}}
+
 
 def _dossier_forecast(symbol):
     """Directional forecast ensemble → stance. See forecast_ensemble schema."""
@@ -3811,6 +3990,17 @@ def ask(query: str, history: Any = None, conversation_id: Any = None,
         except Exception as e:
             log.warning("jarvis.ask dossier branch failed for %r: %s", q, e)
 
+    # Concept explanations (glossary), checked early and symbol-AGNOSTIC: a
+    # definitional "what's RSI / what is momentum score" must win even when the
+    # term collides with a real ticker (RSI, MA, …). _answer_explain returns
+    # None for non-glossary phrasing, so this never hijacks other intents.
+    try:
+        _exp = _answer_explain(ql)
+        if _exp is not None:
+            return done("explain", _exp)
+    except Exception:
+        pass
+
     # Correction learning: "no, I meant the ETF" is two things at once — a
     # routing failure worth logging AND a real question hiding behind the
     # prefix. Log it against what we were answering before, strip the prefix,
@@ -3975,6 +4165,11 @@ def ask(query: str, history: Any = None, conversation_id: Any = None,
             s1, s2 = _vs_resolve(m_vs.group(1)), _vs_resolve(m_vs.group(2))
             if s1 and s2 and s1 != s2:
                 return done("compare", _answer_compare_quotes(s1, s2))
+        # Per-symbol technical read — "momentum on NVDA", "is AAPL overbought?",
+        # "TSLA drawdown". Before forecast/quote so the signal words aren't
+        # swallowed by the generic quote fallback.
+        if symbol and _SIGNAL_RE.search(ql):
+            return done("signal", _answer_signal(symbol))
         # "prob" matched "problem"/"probably" — require a forecasting verb or
         # a whole "prob"/"probability" word, plus a symbol.
         if symbol and (any(w in ql for w in ("forecast", "predict", "outlook", "go up", "go down"))
@@ -4033,6 +4228,18 @@ def ask(query: str, history: Any = None, conversation_id: Any = None,
         if "crypto" in ql and any(w in ql for w in ("how much", "share", "allocation",
                                                     "exposure", "weight", "percent", " %")):
             return done("crypto_share", _answer_crypto_share())
+        # Today's movers across the book. Before exposure so "movers"/"gainers"
+        # aren't shadowed by other portfolio intents.
+        if _MOVERS_RE.search(ql) and not symbol:
+            return done("movers", _answer_movers())
+        # Rebalance / trim — concentration guardrail. Before exposure because
+        # "overweight" contains "weight" (the exposure trigger).
+        if _REBAL_RE.search(ql):
+            return done("rebalance", _answer_rebalance())
+        # Technical breadth/health of the whole book (no symbol) — distinct
+        # from _answer_risk's vol/concentration read.
+        if not symbol and _HEALTH_RE.search(ql):
+            return done("portfolio_health", _answer_portfolio_health())
         if any(p in ql for p in ("how risky", "risk level", "portfolio risk",
                                  "my risk", "too risky", "risk profile")):
             return done("risk", _answer_risk())
