@@ -153,10 +153,21 @@ def _closes(symbol: str, period: str = "1y") -> List[float]:
 
 
 def symbol_signal(symbol: str, period: str = "1y") -> Dict[str, Any]:
-    """Technical/positioning signal bundle for one symbol. Fail-open."""
+    """Technical/positioning signal bundle for one symbol. Fail-open. Cached
+    (coalesced) 10 min — chart history barely moves intraday and the breadth
+    fan-out calls this per holding, so caching dedupes the heavy chart pulls."""
     symbol = (symbol or "").strip().upper()
     if not symbol:
         return {"error": "symbol required"}
+    try:
+        import cache_store
+        return cache_store.coalesce(("symbol_signal", symbol, period), 600,
+                                    lambda: _symbol_signal_compute(symbol, period))
+    except Exception:
+        return _symbol_signal_compute(symbol, period)
+
+
+def _symbol_signal_compute(symbol: str, period: str = "1y") -> Dict[str, Any]:
     out: Dict[str, Any] = {"symbol": symbol}
     try:
         closes = _closes(symbol, period)
