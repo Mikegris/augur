@@ -3429,6 +3429,148 @@ def _strip_claude_trigger(text: str) -> str:
     return stripped or text.strip()
 
 
+# Deep-dossier composite: fan out the strongest siloed engines for a symbol and
+# synthesize one thesis, flagging agreement vs disagreement. Triggered by
+# "dossier"/"full work-up" (distinct from the Claude "deep dive" cue above).
+_DOSSIER_RE = re.compile(r"\bdossier\b|\bfull\s+(?:work[\s-]?up|breakdown|picture)\b",
+                         re.IGNORECASE)
+
+
+def _dossier_forecast(symbol):
+    """Directional forecast ensemble → stance. See forecast_ensemble schema."""
+    import forecast_ensemble
+    r = forecast_ensemble.ensemble_forecast(symbol) or {}
+    ens = r.get("ensemble")
+    if not ens or r.get("error"):
+        return None
+    p = ens.get("prob_up")
+    if p is None:
+        return None
+    stance = "bull" if p >= 0.55 else ("bear" if p <= 0.45 else "neutral")
+    verdict = ens.get("verdict") or ens.get("direction") or ""
+    note = "{:.0f}% P(up) over {}d{}".format(
+        p * 100, r.get("horizon_days", 20),
+        " — " + str(verdict) if verdict else "")
+    return {"name": "Forecast ensemble", "stance": stance, "note": note}
+
+
+def _dossier_lens(symbol):
+    """Investor-lens quality/valuation → stance. See jarvis_lens.position_review."""
+    import jarvis_lens
+    r = jarvis_lens.position_review(symbol) or {}
+    if r.get("error"):
+        return None
+    quality = r.get("quality") or {}
+    verdict = (quality.get("verdict") or "").upper()
+    tone = (r.get("valuation") or {}).get("tone") or ""
+    if verdict == "QUALITY":
+        stance = "bull"
+    elif verdict == "WEAK":
+        stance = "bear"
+    else:
+        stance = "neutral"
+    score = quality.get("score")
+    bits = []
+    if score is not None:
+        bits.append("quality {}/100 ({})".format(score, verdict.title() or "n/a"))
+    elif verdict:
+        bits.append("quality {}".format(verdict.title()))
+    if tone and tone.lower() not in ("n/a", "unclear"):
+        bits.append("valuation {}".format(tone))
+    if not bits:
+        return None  # NO DATA / N/A — contribute nothing rather than a fake neutral
+    return {"name": "Investor lens", "stance": stance, "note": ", ".join(bits)}
+
+
+def _dossier_smart_money(symbol):
+    """Smart-money composite (insiders/institutions/options) → stance."""
+    import smart_money
+    r = smart_money.compute_score(symbol) or {}
+    if r.get("error") or r.get("score") is None:
+        return None
+    sig = (r.get("signal") or "").upper()
+    score = r.get("score")
+    if any(w in sig for w in ("ACCUMULATE", "BUY", "STRONG")):
+        stance = "bull"
+    elif any(w in sig for w in ("AVOID", "SELL", "DISTRIBUTE", "WEAK")):
+        stance = "bear"
+    else:
+        stance = "neutral"
+    return {"name": "Smart money", "stance": stance,
+            "note": "score {}/100 — {}".format(score, sig.title() or "neutral")}
+
+
+# Engines fanned out per dossier. Each adapter is best-effort: returns a
+# {name, stance, note} dict or None, and is individually guarded at call time —
+# a slow/failing engine never sinks the dossier. Extend by appending here.
+_DOSSIER_ADAPTERS = [_dossier_forecast, _dossier_lens, _dossier_smart_money]
+
+
+def deep_dossier(symbol):
+    """Compose the siloed engines for `symbol` into one synthesized thesis.
+    Mirrors the forecast-ensemble philosophy: when the signals disagree, the
+    headline conviction is shrunk toward neutral and the split is stated
+    explicitly rather than papered over."""
+    symbol = (symbol or "").strip().upper()
+    if not symbol:
+        return {"answer": "Give me a ticker and I'll build a dossier.", "symbol": None}
+    import safe_executor
+
+    def _run(fn):
+        try:
+            return fn(symbol)
+        except Exception as e:
+            log.debug("dossier adapter %s failed for %s: %s",
+                      getattr(fn, "__name__", fn), symbol, e)
+            return None
+
+    results = safe_executor.parallel_map(
+        _run, _DOSSIER_ADAPTERS, max_workers=4, timeout_per_item=25,
+        thread_name_prefix="dossier")
+    components = [r for r in results if r]
+    if not components:
+        return {"answer": "I couldn't pull enough signal on {} to build a "
+                          "dossier right now — the data feeds may be slow. Try "
+                          "again in a moment.".format(symbol), "symbol": symbol}
+
+    bulls = [c for c in components if c["stance"] == "bull"]
+    bears = [c for c in components if c["stance"] == "bear"]
+    n = len(components)
+    net = len(bulls) - len(bears)
+    lean = "constructive" if net > 0 else ("cautious" if net < 0 else "mixed")
+    disagreement = bool(bulls and bears)
+    # Consensus = the largest stance bloc's share. Conviction is shrunk when the
+    # signals split or there's thin coverage — refuse conviction they don't share.
+    consensus = max(len(bulls), len(bears),
+                    len([c for c in components if c["stance"] == "neutral"])) / float(n)
+    if disagreement or consensus < 0.6 or n < 2:
+        conviction = "low"
+    elif consensus >= 0.8 and n >= 3:
+        conviction = "high"
+    else:
+        conviction = "moderate"
+
+    if disagreement:
+        head = ("Dossier on {}: a {} read, but the signals disagree "
+                "({} bullish vs {} bearish) — so I'm keeping conviction low."
+                ).format(symbol, lean, len(bulls), len(bears))
+    else:
+        head = ("Dossier on {}: a {} read with {} conviction "
+                "({} of {} signals aligned).").format(
+                    symbol, lean, conviction,
+                    max(len(bulls), len(bears), n - len(bulls) - len(bears)), n)
+    lines = ["• {} → {}: {}".format(c["name"], c["stance"], c["note"]) for c in components]
+    return {
+        "answer": head + "\n" + "\n".join(lines),
+        "symbol": symbol,
+        "engine": "deep-dossier",
+        "dossier": {"lean": lean, "conviction": conviction,
+                    "disagreement": disagreement, "consensus": round(consensus, 2),
+                    "n_signals": n, "components": components},
+        "action": {"view": "forecast", "symbol": symbol},
+    }
+
+
 def _corrections_table() -> None:
     """Lazy CREATE — the new-module pattern: no schema migration, the table
     appears the first time a correction happens."""
@@ -3659,6 +3801,15 @@ def ask(query: str, history: Any = None, conversation_id: Any = None,
         except Exception as e:
             log.warning("jarvis.ask claude branch failed for %r: %s", q, e)
         notify("Claude Code unavailable — taking the local route.")
+
+    # Deep dossier — fan out the engines for one symbol and synthesize. Needs a
+    # symbol; the "dossier"/"full work-up" cue is distinct from the Claude cue.
+    if symbol and _DOSSIER_RE.search(ql):
+        notify("Building a dossier on {}…".format(symbol))
+        try:
+            return done("dossier", deep_dossier(symbol))
+        except Exception as e:
+            log.warning("jarvis.ask dossier branch failed for %r: %s", q, e)
 
     # Correction learning: "no, I meant the ETF" is two things at once — a
     # routing failure worth logging AND a real question hiding behind the
