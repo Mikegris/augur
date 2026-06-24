@@ -1,0 +1,34 @@
+# AJTA autonomy policy (AJTA-SPEC-1.0 §11, §19, Appendix C).
+# Documents the autonomy posture enforced in code (aj_risk, aj_operator).
+
+autonomy_level: triggered        # non-24/7; run_once per trigger, process exits
+
+# Actions the agent MAY take without a human, by mode:
+paper:
+  propose:  true
+  gate:     true
+  execute:  true                 # only if auto_approve_paper AND gate passes
+live:
+  propose:  true
+  gate:     true
+  execute:  false                # LIVE NEVER auto-executes — human approval per order
+
+# High-risk actions that ALWAYS require explicit human action:
+high_risk_actions:
+  - enable_live_trading          # flip live_trading_enabled
+  - enable_robinhood
+  - approve_live_order
+  - rearm_after_halt
+  - raise_caps
+
+identity_trust:
+  cli:   operator                # local CLI is trusted-local
+  web:   operator                # localhost control plane
+  voice: inherits-identity       # but high-risk actions still require approval
+  model: untrusted               # tool/web/market content is DATA, never instructions
+
+caps_source: risk.yaml           # all numeric caps live in the risk config
+sandbox_forbidden_paths:         # opencode (optional) may not touch these
+  - wealth.db
+  - "*.lock"
+  - secrets/

@@ -71,7 +71,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(me
 
 # Single source of truth for the app version — surfaced at /api/version and
 # in jarvis.health_snapshot().
-APP_VERSION = "2.7.0"
+APP_VERSION = "3.0.0"
 
 _TICKER_RE = re.compile(r"^[A-Z0-9][A-Z0-9.\-]{0,9}$")
 
@@ -143,6 +143,14 @@ except ImportError:
     pass
 
 db.init_db()
+
+# AJTA trading-agent schema (additive aj_* tables + forward-only migration).
+# Safe + idempotent; never alters existing AUGUR tables.
+try:
+    import aj_db as _aj_db
+    _aj_db.aj_migrate()
+except Exception as _aj_err:
+    log.warning("aj_migrate failed (trading-agent tables): %s", _aj_err)
 
 # Hydrate the persistent API cache from disk so the first navigation after
 # launch reads from the cache instead of hammering Yahoo/Finviz cold. The
@@ -3303,6 +3311,151 @@ def api_version_route():
     """The running app version — lets UIs and health checks confirm what
     they're talking to."""
     return jsonify({"version": APP_VERSION})
+
+
+# ─── AJTA trading agent (AJTA-SPEC-1.0) ──────────────────────────────────────
+# Read routes + a local control plane. The control routes (kill/rearm/run/
+# config/approve) are localhost operator actions, NOT model-driven; every
+# order still passes the fail-closed risk gate (§11). Paper-first: all trade
+# switches default false, live never auto-executes.
+
+@app.route("/api/aj/status", methods=["GET"])
+def aj_status_route():
+    try:
+        import aj_metrics
+        return jsonify(aj_metrics.status())
+    except Exception as e:
+        return _err(e)
+
+
+@app.route("/api/aj/config", methods=["GET", "POST"])
+def aj_config_route():
+    try:
+        import aj_config
+        if request.method == "POST":
+            data = request.get_json(silent=True) or {}
+            if not isinstance(data, dict):
+                return jsonify({"error": "expected JSON object"}), 400
+            return jsonify(aj_config.set_config(data))
+        return jsonify(aj_config.get_config())
+    except Exception as e:
+        return _err(e)
+
+
+@app.route("/api/aj/proposals", methods=["GET"])
+def aj_proposals_route():
+    try:
+        import aj_db
+        limit = _safe_int(request.args.get("limit"), 50)
+        return jsonify({"proposals": aj_db.query(
+            "SELECT * FROM aj_proposals ORDER BY id DESC LIMIT ?", (limit,))})
+    except Exception as e:
+        return _err(e)
+
+
+@app.route("/api/aj/orders", methods=["GET"])
+def aj_orders_route():
+    try:
+        import aj_db
+        limit = _safe_int(request.args.get("limit"), 50)
+        return jsonify({"orders": aj_db.query(
+            "SELECT * FROM aj_orders ORDER BY id DESC LIMIT ?", (limit,))})
+    except Exception as e:
+        return _err(e)
+
+
+@app.route("/api/aj/audit", methods=["GET"])
+def aj_audit_route():
+    try:
+        import aj_db
+        limit = _safe_int(request.args.get("limit"), 100)
+        rows = aj_db.query("SELECT * FROM aj_audit ORDER BY id DESC LIMIT ?", (limit,))
+        return jsonify({"audit": rows, "chain": aj_db.verify_audit_chain()})
+    except Exception as e:
+        return _err(e)
+
+
+@app.route("/api/aj/kill", methods=["POST"])
+def aj_kill_route():
+    try:
+        import aj_risk
+        data = request.get_json(silent=True) or {}
+        reason = str(data.get("reason") or "kill (web)")[:200]
+        return jsonify(aj_risk.kill_switch(reason))
+    except Exception as e:
+        return _err(e)
+
+
+@app.route("/api/aj/rearm", methods=["POST"])
+def aj_rearm_route():
+    try:
+        import aj_risk
+        return jsonify(aj_risk.rearm(actor="web"))
+    except Exception as e:
+        return _err(e)
+
+
+@app.route("/api/aj/run", methods=["POST"])
+def aj_run_route():
+    """Trigger one operator cycle (§19). Paper-first; live proposes+gates only."""
+    try:
+        import aj_operator
+        data = request.get_json(silent=True) or {}
+        mode = "live" if str(data.get("mode")) == "live" else "paper"
+        return jsonify(aj_operator.run_once(mode))
+    except Exception as e:
+        return _err(e)
+
+
+@app.route("/api/aj/recon", methods=["POST"])
+def aj_recon_route():
+    try:
+        import aj_execution, aj_config
+        return jsonify(aj_execution.reconcile(
+            venue=aj_config.get_config().get("default_broker")))
+    except Exception as e:
+        return _err(e)
+
+
+@app.route("/api/aj/proposals/<int:pid>/approve", methods=["POST"])
+def aj_approve_route(pid):
+    """Human-in-the-loop approval of a pending proposal (§19). Re-runs the
+    risk gate at approval time (config may have changed) before executing —
+    the gate, not this route, authorizes the order. Live orders execute only
+    through the gated, VERIFY'd broker (which fails closed if not enabled)."""
+    try:
+        import aj_db, aj_risk, aj_execution
+        row = aj_db.get_row("aj_proposals", pid)
+        if not row:
+            return jsonify({"error": "proposal not found"}), 404
+        if row.get("status") not in ("approved", "proposed"):
+            return jsonify({"error": "proposal not approvable (status {})".format(row.get("status"))}), 400
+        proposal = {"id": pid, "symbol": row["symbol"], "side": row["side"],
+                    "qty": row.get("qty"), "notional_usd": row.get("notional_usd"),
+                    "order_type": row.get("order_type") or "market",
+                    "limit_price": row.get("limit_price"),
+                    "account_id": row.get("account_id")}
+        rd = aj_risk.evaluate(proposal)
+        if rd.get("decision") != "pass":
+            aj_db.update("aj_proposals", pid, status="blocked", risk_reason=rd.get("reason"))
+            return jsonify({"ok": False, "decision": rd.get("decision"), "reason": rd.get("reason")}), 400
+        aj_db.audit("approval", {"proposal_id": pid, "mode": rd.get("mode"),
+                                 "required": True, "decision": "human-approved"},
+                    ref_id=pid, actor="human:web")
+        ex = aj_execution.execute_trade(proposal, rd, cycle_id=row.get("cycle_id"))
+        return jsonify({"ok": ex.get("ok", False), "exec": ex})
+    except Exception as e:
+        return _err(e)
+
+
+@app.route("/api/aj/mcp/tools", methods=["GET"])
+def aj_mcp_tools_route():
+    try:
+        import aj_mcp_read
+        return jsonify({"tools": aj_mcp_read.schemas(),
+                        "contract_ok": aj_mcp_read.contract_ok()})
+    except Exception as e:
+        return _err(e)
 
 
 # Rolling-window rate limit for confirmed Jarvis actions: timestamps of the

@@ -1,0 +1,27 @@
+# AJTA capability/trust registry (AJTA-SPEC-1.0 §10, Appendix A).
+# The router filters by capability + trust BEFORE optimizing cost/latency.
+# Untested models enter at trust: low. Documentation of the runtime posture;
+# the live backends are resolved by ai_summarizer (OpenAI key / Ollama probe).
+
+models:
+  - name: ollama/llama3.1
+    local: true
+    trust: medium
+    capabilities: [chat, json, private]   # the ONLY class allowed for private prompts
+    cost_usd_per_1k: 0.0
+    notes: free local inference; required for any sensitivity=private routing
+
+  - name: openai/MODEL_LIGHT          # ai_summarizer.MODEL_LIGHT
+    local: false
+    trust: high
+    capabilities: [chat, json, tools]
+    notes: cap-gated + counted; NEVER used for private prompts
+
+  - name: openai/MODEL_HEAVY          # ai_summarizer.MODEL_HEAVY
+    local: false
+    trust: high
+    capabilities: [chat, json, tools, reasoning]
+    notes: escalation target for public, high-complexity synthesis
+
+# Trust rule: capabilities.private REQUIRES local: true. A model lacking
+# local:true can never serve a private prompt regardless of trust.
