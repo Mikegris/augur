@@ -96,9 +96,13 @@ _PERSIST_MIN_TTL = 60.0
 # data dir to a gigabyte. If an entry exceeds this AFTER compression, we
 # skip the disk write and rely on the in-memory cache only.
 _PERSIST_MAX_BYTES = 2 * 1024 * 1024  # 2 MB compressed
-# Aggregate cap on api_cache rows; when init() exceeds this we evict the
-# largest entries first.
-_TOTAL_DISK_TARGET_BYTES = 250 * 1024 * 1024  # 250 MB
+# Aggregate cap on api_cache payload bytes; eviction (largest-first) keeps the
+# table under this. Previously 250 MB and only enforced at boot — which let the
+# table balloon to ~90 MB during long-running sessions (expired rows are only
+# swept at startup too). Now a sane default, env-overridable, and enforced
+# periodically by the cache warmer as well as at boot. See prune_disk().
+_TOTAL_DISK_TARGET_BYTES = int(
+    os.environ.get("AUGUR_CACHE_MAX_BYTES", str(40 * 1024 * 1024)))  # 40 MB
 # Compress payloads larger than this — small JSON responses don't benefit
 # meaningfully and the inline base64 prefix costs us a few bytes either way.
 _COMPRESS_MIN_BYTES = 4 * 1024
@@ -297,6 +301,80 @@ def _ensure_table() -> bool:
             return False
 
 
+def prune_disk(target_bytes: Optional[int] = None) -> dict:
+    """Delete expired api_cache rows, then — if payload bytes still exceed the
+    cap — evict largest-first until under it. Safe to call repeatedly (boot +
+    the periodic warmer pass); fail-open. Uses cache_store's own connection, so
+    it never touches database._write_lock (the VACUUM-wedge hazard). Returns a
+    summary dict {expired, evicted, freed_mb, total_mb}."""
+    summary = {"expired": 0, "evicted": 0, "freed_mb": 0.0, "total_mb": 0.0}
+    if not _ensure_table():
+        return summary
+    target = _TOTAL_DISK_TARGET_BYTES if target_bytes is None else int(target_bytes)
+    # 1) Expired sweep — the piece that was previously boot-only, which let
+    #    expired rows pile up across a long-running session.
+    try:
+        c = _conn()
+        cur = c.execute("DELETE FROM api_cache WHERE expiry < ?", (time.time(),))
+        c.commit()
+        summary["expired"] = cur.rowcount if (cur.rowcount and cur.rowcount > 0) else 0
+    except Exception as e:
+        log.debug("prune_disk expired sweep failed: %s", e)
+    # 2) Size cap — evict the largest payloads first until under target.
+    try:
+        c = _conn()
+        total = c.execute(
+            "SELECT COALESCE(SUM(length(value)), 0) FROM api_cache").fetchone()[0] or 0
+        if total > target:
+            rows = c.execute(
+                "SELECT key, length(value) FROM api_cache "
+                "ORDER BY length(value) DESC").fetchall()
+            dropped = 0
+            freed = 0
+            for key, sz in rows:
+                c.execute("DELETE FROM api_cache WHERE key=?", (key,))
+                dropped += 1
+                freed += (sz or 0)
+                if total - freed <= target:
+                    break
+            c.commit()
+            summary["evicted"] = dropped
+            summary["freed_mb"] = freed / 1024.0 / 1024.0
+            total -= freed
+            log.info("cache size cap evicted %d largest rows (%.1f MB freed)",
+                     dropped, summary["freed_mb"])
+        summary["total_mb"] = total / 1024.0 / 1024.0
+    except Exception as e:
+        log.debug("prune_disk size cap failed: %s", e)
+    return summary
+
+
+def reclaim(force_vacuum: bool = False) -> dict:
+    """Heavier one-time reclamation: prune, then VACUUM to actually return the
+    freed space to the OS (a plain DELETE only moves pages to the freelist for
+    reuse — the file doesn't shrink). VACUUM rewrites the whole DB, so it runs
+    only when there's real slack (large freelist / bloated file) or when forced;
+    that keeps it from firing on every boot. Best-effort — never raises."""
+    summary = prune_disk()
+    try:
+        c = _conn()
+        page_size = c.execute("PRAGMA page_size").fetchone()[0]
+        page_count = c.execute("PRAGMA page_count").fetchone()[0]
+        freelist = c.execute("PRAGMA freelist_count").fetchone()[0]
+        file_mb = page_size * page_count / 1024.0 / 1024.0
+        slack_mb = freelist * page_size / 1024.0 / 1024.0
+        # Only worth a rewrite when there's meaningful reclaimable slack.
+        bloated = slack_mb > 20 or (file_mb > 60 and freelist > page_count * 0.2)
+        if force_vacuum or bloated:
+            c.execute("VACUUM")
+            c.commit()
+            summary["vacuumed_mb"] = round(slack_mb, 1)
+            log.info("cache reclaim VACUUM reclaimed ~%.1f MB", slack_mb)
+    except Exception as e:
+        log.debug("reclaim VACUUM skipped: %s", e)
+    return summary
+
+
 def init() -> None:
     """Create the cache table and hydrate the in-memory map from disk.
     Idempotent — safe to call multiple times. Called once at app startup."""
@@ -304,43 +382,14 @@ def init() -> None:
         return
     c = _conn()
 
-    # Sweep expired rows before loading — keeps the in-memory map lean and
-    # the SQLite table from growing without bound across many sessions.
+    # Prune expired + over-cap rows before loading, and reclaim file slack with
+    # a guarded VACUUM (only fires when the DB is actually bloated — e.g. the
+    # one-time shrink after this cap was lowered). Keeps the in-memory map lean
+    # and the SQLite file from growing without bound across sessions.
     try:
-        now = time.time()
-        cur = c.execute("DELETE FROM api_cache WHERE expiry < ?", (now,))
-        c.commit()
-        # Single summary line (count only — summing freed bytes would mean
-        # reading every doomed row's value first, defeating the cheap sweep).
-        if cur.rowcount and cur.rowcount > 0:
-            log.debug("cache prune dropped %d expired rows", cur.rowcount)
-    except Exception:
-        pass
-
-    # Aggregate-size cap: if the cache has grown larger than
-    # _TOTAL_DISK_TARGET_BYTES (default 250 MB), evict the largest rows
-    # until we're under the target. SEC EDGAR filing-text bodies can be
-    # 10-20 MB each; without this an active user can balloon the data dir
-    # past a gigabyte in a day even with TTL-based expiry working.
-    try:
-        total_size = c.execute("SELECT COALESCE(SUM(length(value)), 0) FROM api_cache").fetchone()[0]
-        if total_size and total_size > _TOTAL_DISK_TARGET_BYTES:
-            to_drop = c.execute(
-                "SELECT key, length(value) FROM api_cache ORDER BY length(value) DESC"
-            ).fetchall()
-            dropped = 0
-            dropped_bytes = 0
-            for key_to_drop, sz in to_drop:
-                c.execute("DELETE FROM api_cache WHERE key=?", (key_to_drop,))
-                dropped += 1
-                dropped_bytes += sz
-                if total_size - dropped_bytes <= _TOTAL_DISK_TARGET_BYTES:
-                    break
-            c.commit()
-            log.info("cache size cap evicted %d largest rows (%.1f MB freed)",
-                     dropped, dropped_bytes / 1024.0 / 1024.0)
+        reclaim()
     except Exception as e:
-        log.debug("cache size-cap eviction failed: %s", e)
+        log.debug("cache boot reclaim failed: %s", e)
 
     # Hydrate, skipping rows that look like cached failures from a prior
     # broken session. Otherwise a transient upstream outage at one boot would

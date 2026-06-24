@@ -71,7 +71,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(me
 
 # Single source of truth for the app version — surfaced at /api/version and
 # in jarvis.health_snapshot().
-APP_VERSION = "2.3.0"
+APP_VERSION = "2.4.0"
 
 _TICKER_RE = re.compile(r"^[A-Z0-9][A-Z0-9.\-]{0,9}$")
 
@@ -3389,6 +3389,37 @@ def jarvis_digest_route():
     mark = request.args.get("mark_seen", "1") != "0"
     try:
         return jsonify(jarvis.away_digest(mark_seen=mark))
+    except Exception as e:
+        return _err(e)
+
+
+@app.route("/api/jarvis/digest/preview", methods=["GET"])
+def jarvis_digest_preview_route():
+    """Render the briefing digest (text + HTML) without delivering it."""
+    try:
+        import jarvis_delivery
+    except Exception:
+        return jsonify({"error": "delivery unavailable"}), 503
+    try:
+        return jsonify(jarvis_delivery.render_digest())
+    except Exception as e:
+        return _err(e)
+
+
+@app.route("/api/jarvis/digest/send", methods=["POST"])
+def jarvis_digest_send_route():
+    """Deliver the digest now via the requested channels (notify/file/email).
+    Body: {"channels": ["file","notify"]} — omit to use the configured set."""
+    try:
+        import jarvis_delivery
+    except Exception:
+        return jsonify({"error": "delivery unavailable"}), 503
+    try:
+        body = request.get_json(silent=True) or {}
+        ch = body.get("channels")
+        if isinstance(ch, str):
+            ch = [c.strip() for c in ch.split(",") if c.strip()]
+        return jsonify(jarvis_delivery.deliver_digest(channels=ch or None))
     except Exception as e:
         return _err(e)
 

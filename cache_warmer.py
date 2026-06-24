@@ -113,6 +113,10 @@ JARVIS_BRIEFING_INTERVAL = 115
 # Without this an active user's wealth.db grows without bound (observed 535MB).
 PRUNE_INTERVAL = 24 * 3600
 VACUUM_INTERVAL = 7 * 24 * 3600
+# api_cache eviction (expired + size cap). cache_store only enforced these at
+# boot, so a long-running session let api_cache balloon (observed ~90 MB of a
+# 97 MB wealth.db). A 30-min cadence keeps it bounded between restarts.
+CACHE_PRUNE_INTERVAL = 30 * 60
 INTER_REQUEST_DELAY = 1.2          # spacing between requests within a cycle
 
 # Cap how many portfolio symbols we warm per cycle so an unusually large
@@ -435,6 +439,44 @@ def _loop():
             except Exception as e:
                 log.debug("prune skipped: %s", e)
             time.sleep(INTER_REQUEST_DELAY)
+
+        # ── api_cache eviction: every 30 min ────────────────────────────
+        # Bound the api_cache table between restarts (expired sweep + size
+        # cap). Previously boot-only, which let it grow to ~90 MB mid-session.
+        if _due("cache_prune", CACHE_PRUNE_INTERVAL, now):
+            try:
+                import cache_store as _cs
+                _safe("cache_prune", _cs.prune_disk)
+            except Exception as e:
+                log.debug("cache_prune skipped: %s", e)
+            time.sleep(INTER_REQUEST_DELAY)
+
+        # ── daily Jarvis digest delivery (opt-in, OFF by default) ───────
+        # When the `digest_enabled` setting is on, deliver the briefing once
+        # per day at/after the configured local hour (default 8). A date
+        # watermark prevents duplicate sends. Settings reads are TTL-cached, so
+        # this gate is cheap to evaluate every tick; the heavy work runs ≤1×/day.
+        try:
+            import database as _db
+            _settings = _db.get_settings() or {}
+            if str(_settings.get("digest_enabled", "")).strip().lower() in (
+                    "1", "on", "true", "yes"):
+                import datetime as _dtm
+                _local = _dtm.datetime.now()
+                try:
+                    _hour = int(_settings.get("digest_hour") or 8)
+                except (TypeError, ValueError):
+                    _hour = 8
+                _today = _local.date().isoformat()
+                if _local.hour >= _hour and _settings.get("digest_last_sent") != _today:
+                    import jarvis_delivery
+                    _safe("digest", jarvis_delivery.deliver_digest)
+                    try:
+                        _db.set_setting("digest_last_sent", _today)
+                    except Exception:
+                        pass
+        except Exception as e:
+            log.debug("digest schedule skipped: %s", e)
 
         # ── weekly VACUUM to reclaim freed pages ────────────────────────
         # DELETEs leave SQLite pages fragmented; without VACUUM the file
