@@ -3864,6 +3864,48 @@ async function loadSettings() {
                         title="Preview this voice" aria-label="Preview the selected Jarvis voice">▶</button>
               </div>
             </div>
+            <div class="form-group" style="margin-top:16px;padding-top:16px;border-top:1px solid var(--border)">
+              <label class="form-label" style="color:var(--accent,#4cd8ff)">◉ CLAUDE CODE (JARVIS)</label>
+              <div style="font-size:10px;color:var(--text-dim);margin:4px 0 8px">
+                Lets Jarvis answer open-ended questions by driving the local Claude Code CLI
+                (read the codebase &amp; engines, search the web). Trigger with “claude, …”,
+                “deep dive”, or “investigate”.
+              </div>
+              <label class="form-label">BACKEND</label>
+              <select class="form-select" id="set-claude-enabled">
+                <option value="1" ${String(settings.jarvis_claude_enabled || '1') !== '0' ? 'selected' : ''}>Enabled</option>
+                <option value="0" ${String(settings.jarvis_claude_enabled || '1') === '0' ? 'selected' : ''}>Disabled</option>
+              </select>
+              <label class="form-label" style="margin-top:8px">PERMISSION MODE</label>
+              <select class="form-select" id="set-claude-permission">
+                ${['default', 'acceptEdits', 'bypassPermissions'].map(m =>
+                  `<option value="${m}" ${(settings.jarvis_claude_permission || 'default') === m ? 'selected' : ''}>${m}${m === 'default' ? ' — read-only (safest)' : m === 'bypassPermissions' ? ' — full power (caution)' : ''}</option>`).join('')}
+              </select>
+              <div style="font-size:10px;color:var(--text-dim);margin-top:4px">
+                Default is read-only (the allowlist below). bypassPermissions grants full local
+                shell/file power — only on a machine you trust.
+              </div>
+              <label class="form-label" style="margin-top:8px">ALLOWED TOOLS</label>
+              <input class="form-input" id="set-claude-tools" value="${_esc(settings.jarvis_claude_allowed_tools || 'Read Grep Glob WebSearch WebFetch')}">
+              <label class="form-label" style="margin-top:8px">MODEL (OPTIONAL)</label>
+              <input class="form-input" id="set-claude-model" placeholder="inherit Claude Code default" value="${_esc(settings.jarvis_claude_model || '')}">
+            </div>
+            <div class="form-group" style="margin-top:16px;padding-top:16px;border-top:1px solid var(--border)">
+              <label class="form-label" style="color:var(--amber)">▲ DAILY DIGEST</label>
+              <div style="font-size:10px;color:var(--text-dim);margin:4px 0 8px">
+                Deliver the morning briefing outside the app: macOS notification, a dated markdown
+                file in ./digests/, and/or email (when SMTP is configured).
+              </div>
+              <label class="form-label">SCHEDULED DELIVERY</label>
+              <select class="form-select" id="set-digest-enabled">
+                <option value="0" ${String(settings.digest_enabled || '0') !== '1' ? 'selected' : ''}>Off</option>
+                <option value="1" ${String(settings.digest_enabled || '0') === '1' ? 'selected' : ''}>On</option>
+              </select>
+              <label class="form-label" style="margin-top:8px">DELIVERY HOUR (LOCAL, 0–23)</label>
+              <input class="form-input" id="set-digest-hour" type="number" min="0" max="23" value="${Number.isInteger(parseInt(settings.digest_hour, 10)) ? parseInt(settings.digest_hour, 10) : 8}">
+              <label class="form-label" style="margin-top:8px">CHANNELS</label>
+              <input class="form-input" id="set-digest-channels" placeholder="file,notify,email" value="${_esc(settings.digest_channels || 'file')}">
+            </div>
             <button class="btn btn-green btn-lg" onclick="saveSettings()" style="margin-top:8px">SAVE SETTINGS</button>
           </div>
         </div>
@@ -4041,6 +4083,14 @@ async function saveSettings() {
     if (keyField && keyField.value.trim()) {
       payload.openai_api_key = keyField.value.trim();
     }
+    // Claude Code backend + daily digest (v2.6).
+    const cE = document.getElementById('set-claude-enabled');     if (cE) payload.jarvis_claude_enabled = cE.value;
+    const cP = document.getElementById('set-claude-permission');  if (cP) payload.jarvis_claude_permission = cP.value;
+    const cT = document.getElementById('set-claude-tools');       if (cT) payload.jarvis_claude_allowed_tools = cT.value.trim();
+    const cM = document.getElementById('set-claude-model');       if (cM) payload.jarvis_claude_model = cM.value.trim();
+    const dE = document.getElementById('set-digest-enabled');     if (dE) payload.digest_enabled = dE.value;
+    const dH = document.getElementById('set-digest-hour');        if (dH && dH.value !== '') payload.digest_hour = dH.value;
+    const dC = document.getElementById('set-digest-channels');    if (dC) payload.digest_channels = dC.value.trim();
     await API.post('/api/settings', payload);
     // Pull the freshly-saved settings back so timers see the new interval.
     try { State.settings = await API.get('/api/settings'); } catch(e) {}
