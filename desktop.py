@@ -257,9 +257,13 @@ def main() -> int:
 
     log.info("[desktop] pywebview version: %s", getattr(webview, "__version__", "?"))
     log.info("[desktop] creating window ...")
+    # Per-launch cache-buster on the URL: WKWebView's persistent data store
+    # (keyed by bundle id) survives app updates, so navigating to a bare "/"
+    # could load a stale cached page from an older build. A changing query
+    # param forces a fresh document fetch each launch; the /  route ignores it.
     win = webview.create_window(
         title="AUGUR — Wealth Intelligence System",
-        url=f"http://127.0.0.1:{port}",
+        url=f"http://127.0.0.1:{port}/?_launch={int(time.time())}",
         width=1400,
         height=900,
         min_size=(900, 600),

@@ -31,7 +31,7 @@ _warnings.filterwarnings(
 import logging as _early_logging
 _early_logging.getLogger("yfinance").setLevel(_early_logging.CRITICAL)
 
-from flask import Flask, jsonify, request, render_template, abort, Response
+from flask import Flask, jsonify, request, render_template, abort, Response, make_response
 import database as db
 import fetcher
 import json
@@ -302,7 +302,14 @@ if not _IS_RELOADER_PARENT:
 
 @app.route("/")
 def index():
-    return render_template("index.html")
+    # Render the version into the page (status bar) so it can never go stale,
+    # and send no-store: the desktop WKWebView persists an on-disk cache keyed
+    # by bundle id, so without this an old index.html survived app updates —
+    # showing a stale version label AND loading old JS (no new features). The
+    # versioned ?v= asset URLs it references still handle their own busting.
+    resp = make_response(render_template("index.html", app_version=APP_VERSION))
+    resp.headers["Cache-Control"] = "no-store, must-revalidate"
+    return resp
 
 
 # ─── Market Data ──────────────────────────────────────────────────────────────
