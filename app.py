@@ -3393,6 +3393,37 @@ def jarvis_digest_route():
         return _err(e)
 
 
+@app.route("/api/jarvis/digest/preview", methods=["GET"])
+def jarvis_digest_preview_route():
+    """Render the briefing digest (text + HTML) without delivering it."""
+    try:
+        import jarvis_delivery
+    except Exception:
+        return jsonify({"error": "delivery unavailable"}), 503
+    try:
+        return jsonify(jarvis_delivery.render_digest())
+    except Exception as e:
+        return _err(e)
+
+
+@app.route("/api/jarvis/digest/send", methods=["POST"])
+def jarvis_digest_send_route():
+    """Deliver the digest now via the requested channels (notify/file/email).
+    Body: {"channels": ["file","notify"]} — omit to use the configured set."""
+    try:
+        import jarvis_delivery
+    except Exception:
+        return jsonify({"error": "delivery unavailable"}), 503
+    try:
+        body = request.get_json(silent=True) or {}
+        ch = body.get("channels")
+        if isinstance(ch, str):
+            ch = [c.strip() for c in ch.split(",") if c.strip()]
+        return jsonify(jarvis_delivery.deliver_digest(channels=ch or None))
+    except Exception as e:
+        return _err(e)
+
+
 @app.route("/api/jarvis/health", methods=["GET"])
 def jarvis_health_route():
     """Jarvis self-diagnostics: LLM key/budget, warmer liveness, cache size."""

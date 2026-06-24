@@ -451,6 +451,33 @@ def _loop():
                 log.debug("cache_prune skipped: %s", e)
             time.sleep(INTER_REQUEST_DELAY)
 
+        # ── daily Jarvis digest delivery (opt-in, OFF by default) ───────
+        # When the `digest_enabled` setting is on, deliver the briefing once
+        # per day at/after the configured local hour (default 8). A date
+        # watermark prevents duplicate sends. Settings reads are TTL-cached, so
+        # this gate is cheap to evaluate every tick; the heavy work runs ≤1×/day.
+        try:
+            import database as _db
+            _settings = _db.get_settings() or {}
+            if str(_settings.get("digest_enabled", "")).strip().lower() in (
+                    "1", "on", "true", "yes"):
+                import datetime as _dtm
+                _local = _dtm.datetime.now()
+                try:
+                    _hour = int(_settings.get("digest_hour") or 8)
+                except (TypeError, ValueError):
+                    _hour = 8
+                _today = _local.date().isoformat()
+                if _local.hour >= _hour and _settings.get("digest_last_sent") != _today:
+                    import jarvis_delivery
+                    _safe("digest", jarvis_delivery.deliver_digest)
+                    try:
+                        _db.set_setting("digest_last_sent", _today)
+                    except Exception:
+                        pass
+        except Exception as e:
+            log.debug("digest schedule skipped: %s", e)
+
         # ── weekly VACUUM to reclaim freed pages ────────────────────────
         # DELETEs leave SQLite pages fragmented; without VACUUM the file
         # never shrinks even after a big prune. database.vacuum_db() returns
