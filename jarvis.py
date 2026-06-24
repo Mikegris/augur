@@ -3065,8 +3065,11 @@ _HELP_ANSWER = (
     "“what did I buy recently”, “am I beating the market”, “how much crypto do "
     "I have”, “my watchlist”, “any ideas”, “momentum on NVDA”, “how healthy is "
     "my portfolio”, “what's moving”, “should I rebalance”, “dossier on AAPL”, or "
-    "“claude, <any open-ended question>” to investigate live — or just tell me "
-    "something to remember and I'll keep it."
+    "“claude, <any open-ended question>” to investigate live. I can also take "
+    "actions: “buy 10 NVDA at 800” or “sell 3 TSLA at 250” to update your "
+    "portfolio (you confirm first), and “take me to my watchlist” or “open the "
+    "forecast for AAPL” to navigate the app for you — or just tell me something "
+    "to remember and I'll keep it."
 )
 
 
@@ -3177,6 +3180,148 @@ _HOLDING_RE = re.compile(
 _ACTIONISH_RE = re.compile(
     r"\b(watch|track|add|remove|set|remind|keep an eye|monitor|follow)\b",
     re.IGNORECASE)
+
+
+# ── Trade capture (keyless) ──────────────────────────────────────────────────
+# "buy 10 NVDA at 800", "I bought 5 shares of AAPL at 150", "sell 3 TSLA @ 250",
+# "log a sell of 2 MSFT at 400". Requires BOTH a share count and a price so an
+# ambiguous "add NVDA" never fires a trade. Produces a confirm proposal — buys
+# update holdings (add_holding), sells log to the journal (record_trade) — so
+# Jarvis can update the portfolio with no API key.
+_TRADE_RE = re.compile(
+    r"\b(?P<verb>buy|bought|buying|add|added|sell|sold|selling)\b"
+    r"(?:\s+\w+){0,3}?"
+    r"\s+(?P<shares>\d+(?:\.\d+)?)\s*"
+    r"(?:shares?|units?|shrs?)?\s*(?:of\s+)?"
+    r"\$?(?P<sym>[A-Za-z][A-Za-z0-9.\-]{0,9})"
+    r"(?:\s+at\s+|\s+for\s+|\s*@\s*|\s+price\s+of\s+|\s+each\s+at\s+)"
+    r"\$?(?P<price>\d+(?:,\d{3})*(?:\.\d+)?)",
+    re.IGNORECASE)
+
+
+def _answer_trade(q: str) -> Optional[Dict[str, Any]]:
+    m = _TRADE_RE.search(q or "")
+    if not m:
+        return None
+    import jarvis_tools
+    verb = m.group("verb").lower()
+    raw_sym = m.group("sym")
+    sym = _COMPANY_NAMES.get(raw_sym.lower(), raw_sym.upper())
+    if sym in _STOPWORDS or not re.match(r"^[A-Z][A-Z0-9.\-]{0,9}$", sym):
+        return None
+    try:
+        shares = float(m.group("shares"))
+        price = float(m.group("price").replace(",", ""))
+    except (TypeError, ValueError):
+        return None
+    if not (0 < shares < 1e12) or not (0 <= price < 10_000_000):
+        return None
+    is_sell = verb in ("sell", "sold", "selling")
+    if is_sell:
+        tool = "record_trade"
+        args = {"symbol": sym, "side": "SELL", "shares": shares, "price": price}
+    else:
+        tool = "add_holding"
+        args = {"symbol": sym, "shares": shares, "price": price}
+    try:
+        if not jarvis_tools.valid_proposal_args(tool, args):
+            return None
+        label = jarvis_tools.proposal_label(tool, args)
+    except Exception:
+        return None
+    return {"answer": "Ready when you are — confirm to {} your records.".format(
+                "record this sale in" if is_sell else "update"),
+            "proposal": {"tool": tool, "args": args, "label": label}}
+
+
+# ── UI navigation (auto) ─────────────────────────────────────────────────────
+# "go to portfolio", "open the forecast for NVDA", "take me to settings". When
+# this resolves a known view, the answer carries action.auto=True so the
+# frontend navigates there immediately rather than waiting for an OPEN click.
+_NAV_VIEWS = {
+    "overview": "overview", "dashboard": "overview", "home": "overview",
+    "jarvis": "jarvis", "command center": "jarvis", "command centre": "jarvis",
+    "assistant": "jarvis",
+    "portfolio": "portfolio", "holdings": "portfolio", "positions": "portfolio",
+    "watchlist": "watchlist", "watch list": "watchlist",
+    "transactions": "transactions", "trades": "transactions",
+    "trade log": "transactions", "ledger": "transactions", "history": "transactions",
+    "dividends": "dividends", "dividend": "dividends",
+    "alerts": "alerts", "alert": "alerts",
+    "scanner": "scanner",
+    "markets": "markets", "market": "markets",
+    "sector flow": "sectorflow", "sectorflow": "sectorflow", "sectors": "sectorflow",
+    "crypto": "crypto", "cryptocurrency": "crypto",
+    "macro": "macro",
+    "stress": "stress", "stress test": "stress",
+    "liquidity": "liquidity",
+    "news": "news",
+    "research": "research",
+    "forecast": "forecast", "forecasts": "forecast",
+    "analytics": "analytics", "analysis": "analytics",
+    "backtest": "backtest",
+    "optimizer": "optimizer", "optimiser": "optimizer",
+    "monte carlo": "montecarlo", "montecarlo": "montecarlo",
+    "what-if": "whatif", "what if": "whatif", "whatif": "whatif",
+    "catalysts": "catalysts", "catalyst": "catalysts",
+    "research lab": "research-lab",
+    "intel": "intel", "intelligence": "intel",
+    "earnings": "earnings",
+    "screener": "screener",
+    "narrative": "narrative",
+    "alt data": "alt-data", "alt-data": "alt-data", "alternative data": "alt-data",
+    "signals": "signals",
+    "cluster": "cluster", "clusters": "cluster",
+    "divergences": "divergences", "divergence": "divergences",
+    "ideas": "ideas",
+    "options flow": "options-flow", "options-flow": "options-flow",
+    "option flow": "options-flow",
+    "gex": "gex",
+    "contagion": "contagion",
+    "reflexivity": "reflexivity",
+    "synthetic insider": "synthetic-insider", "synth insider": "synthetic-insider",
+    "congress": "congress",
+    "terminal": "terminal",
+    "settings": "settings", "preferences": "settings", "config": "settings",
+}
+_NAV_RE = re.compile(
+    r"^(?:please\s+)?(?:can you\s+|could you\s+|would you\s+|i want to\s+|let'?s\s+)?"
+    r"(?:go to|goto|open|show me|show|take me to|navigate to|nav to|switch to|"
+    r"jump to|pull up|bring up|view)\s+"
+    r"(?:the\s+|my\s+)?(?P<dest>.+?)"
+    r"(?:\s+(?:view|tab|page|screen|section))?\s*[.?!]*$",
+    re.IGNORECASE)
+
+
+def _answer_navigate(q: str) -> Optional[Dict[str, Any]]:
+    m = _NAV_RE.search((q or "").strip())
+    if not m:
+        return None
+    dest = re.sub(r"\s+", " ", m.group("dest").strip().lower()).strip(" .?!,")
+    if not dest:
+        return None
+    view = _NAV_VIEWS.get(dest)
+    sym: Optional[str] = None
+    if view is None:
+        parts = dest.split()
+        head = parts[0] if parts else ""
+        if head in ("research", "forecast", "chart", "analyze", "analyse"):
+            cand = _extract_symbol(q)
+            if cand:
+                sym = cand
+                view = "forecast" if head == "forecast" else "research"
+        if view is None and len(parts) >= 2:
+            view = _NAV_VIEWS.get(" ".join(parts[:-1]))  # "<view> for SYM" tail
+            if view in ("research", "forecast"):
+                sym = _extract_symbol(q)
+    if view is None:
+        return None
+    action: Dict[str, Any] = {"view": view, "auto": True}
+    label = view
+    if sym and view in ("research", "forecast"):
+        action["symbol"] = sym
+        label = "{} for {}".format(view, sym)
+    return {"answer": "Opening {}.".format(label), "action": action, "symbol": sym}
 
 
 # Two accepted fact forms:
@@ -4114,6 +4259,18 @@ def ask(query: str, history: Any = None, conversation_id: Any = None,
                                   "how do i use you"))
                 or ql.strip(" ?!.") in ("help", "help me")):
             return done("help", {"answer": _HELP_ANSWER})
+        # Explicit "take me to <view>" — resolve and auto-navigate. High
+        # precedence so "show me my portfolio" navigates rather than dumping a
+        # value line; only fires when it maps to a real view.
+        nav = _answer_navigate(q)
+        if nav is not None:
+            return done("navigate", nav)
+        # Trade capture — "buy 10 NVDA at 800" / "sell 3 TSLA at 250". Produces
+        # a confirm proposal that updates the portfolio. Requires shares+price,
+        # so conviction questions ("should I sell NVDA?") fall through untouched.
+        trade = _answer_trade(q)
+        if trade is not None:
+            return done("action", trade)
         # Deep knowledge: "what is gamma exposure" / "explain p/e". Before
         # the market/quote intents ("what is the vix" should TEACH, not just
         # quote a level) but only when no symbol is in play — "what is

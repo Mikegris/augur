@@ -364,12 +364,14 @@ else:
     fail("POST /api/terminal quote AAPL", f"status={r.status_code} exit={d.get('exit_code')}")
 
 # settings
+# 'settings' can mutate config, so the web terminal correctly refuses it
+# (read-only gate) — same posture as 'serve' below. Expect it blocked.
 r = tc.post("/api/terminal", json={"command": "settings list"})
 d = r.get_json()
-if r.status_code == 200 and d.get("exit_code") == 0:
-    ok("POST /api/terminal settings list")
+if r.status_code == 200 and d.get("exit_code") == 1:
+    ok("POST /api/terminal blocks 'settings' (read-only gate)")
 else:
-    fail("POST /api/terminal settings list", f"status={r.status_code}")
+    fail("POST /api/terminal should block settings", f"status={r.status_code} exit={d.get('exit_code')}")
 
 # blocked: serve
 r = tc.post("/api/terminal", json={"command": "serve"})
@@ -418,7 +420,10 @@ if subparsers_action:
                 "portfolio", "watchlist", "transactions", "alerts", "analytics",
                 "options", "dividends", "macro", "earnings", "intel",
                 "smart-money", "ml-forecast", "congress", "crypto", "ai",
-                "scanner", "settings", "serve"}
+                "scanner", "settings", "serve",
+                # newer subcommands added since this list was first written
+                "ask", "briefing", "health", "narrative", "reflexivity",
+                "synthetic-insider", "liquidity", "alt-data", "contagion", "gex"}
     if parser_commands == expected:
         ok(f"Parser has all {len(expected)} subcommands")
     else:

@@ -642,6 +642,9 @@
       'claude, investigate why my biggest holding moved',
       'set a policy: max 25% per name',
       "what if i hadn't sold my last sale",
+      'buy 10 NVDA at 800',
+      'take me to my watchlist',
+      'open the forecast for AAPL',
     ],
 
     init() {
@@ -1091,6 +1094,11 @@
           b.addEventListener('click', () => this._ask(b.dataset.q)));
         const go = document.getElementById('jp-answer-go');
         if (go) go.addEventListener('click', () => { this.close(); runAction(r.action); });
+        // Auto-navigation: an explicit "take me to <view>" carries action.auto,
+        // so Jarvis drives the UI there itself instead of waiting for a click.
+        if (r.action && r.action.auto) {
+          setTimeout(() => { this.close(); runAction(r.action); }, 320);
+        }
         const confirmBtn = document.getElementById('jp-confirm');
         if (confirmBtn) confirmBtn.addEventListener('click', async () => {
           try {
@@ -1811,9 +1819,10 @@
           const starters = ["Why am I down today?", "What did I miss?",
                             "How healthy is my portfolio?", "What's moving?",
                             "Should I rebalance?", "Dossier on AAPL",
-                            "Momentum on NVDA", "Claude, what's SpaceX worth right now?"];
+                            "Buy 10 NVDA at 800", "Take me to my watchlist",
+                            "Claude, what's SpaceX worth right now?"];
           el.innerHTML = '<div class="jv-bubble assistant">At your service. Ask about your book, a '
-            + 'business, or the macro picture — or try one of these:'
+            + 'business, or the macro picture — I can also log trades and open any view for you. Try one:'
             + '<div class="jv-starters">'
             + starters.map(s => `<button class="jv-starter">${esc(s)}</button>`).join('')
             + '</div></div>';
@@ -1936,6 +1945,20 @@
               else Toast.success('◉ JARVIS: done — ' + (out.label || r.proposal.label));
             } catch (e) { if (document.body.contains(prop)) prop.innerHTML = `<span class="col-negative">${esc(e.message)}</span>`; }
           });
+        }
+        // Navigation directive: auto-drive the UI when the user explicitly
+        // asked ("go to portfolio"), else offer an OPEN button.
+        if (r.action && r.action.view) {
+          if (r.action.auto) {
+            if (typeof Toast !== 'undefined' && Toast.success) {
+              Toast.success('◉ JARVIS: opening ' + r.action.view + (r.action.symbol ? ' · ' + r.action.symbol : ''));
+            }
+            setTimeout(() => runAction(r.action), 280);
+          } else if (thinking) {
+            const nav = this._append('assistant',
+              `<button class="jarvis-go jv-go-open" type="button">OPEN ${esc(r.action.view)}${r.action.symbol ? ' · ' + esc(r.action.symbol) : ''} →</button>`);
+            if (nav) { const b = nav.querySelector('.jv-go-open'); if (b) b.addEventListener('click', () => runAction(r.action)); }
+          }
         }
         Voice.speak(r.answer, null, spoken);
       } catch (e) {
