@@ -28,6 +28,11 @@ _FIXTURE = {
 def _patch_briefing():
     import jarvis
     jarvis.get_briefing = lambda *a, **k: dict(_FIXTURE)
+    # Stub the v2.5 health line so the digest render stays offline/fast.
+    import portfolio_insights
+    portfolio_insights.portfolio_health = lambda max_symbols=25: {
+        "analyzed": 3, "tone": "constructive", "weighted_momentum": 64,
+        "breadth_above_50dma_pct": 60}
 
 
 def test_render_contains_key_fields():

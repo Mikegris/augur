@@ -3063,8 +3063,10 @@ _HELP_ANSWER = (
     "book”, “what did I miss”, “summarize my day”, “price of NVDA”, “NVDA vs "
     "AMD”, “is AAPL near its high”, “forecast TSLA”, “when does AAPL report”, "
     "“what did I buy recently”, “am I beating the market”, “how much crypto do "
-    "I have”, “my watchlist”, “any ideas” — or just tell me something to "
-    "remember and I'll keep it."
+    "I have”, “my watchlist”, “any ideas”, “momentum on NVDA”, “how healthy is "
+    "my portfolio”, “what's moving”, “should I rebalance”, “dossier on AAPL”, or "
+    "“claude, <any open-ended question>” to investigate live — or just tell me "
+    "something to remember and I'll keep it."
 )
 
 
