@@ -3435,6 +3435,66 @@ def _strip_claude_trigger(text: str) -> str:
 _DOSSIER_RE = re.compile(r"\bdossier\b|\bfull\s+(?:work[\s-]?up|breakdown|picture)\b",
                          re.IGNORECASE)
 
+# Per-symbol technical/positioning read (v2.5 portfolio_insights).
+_SIGNAL_RE = re.compile(
+    r"\b(momentum|technicals?|rsi|overbought|oversold|moving average|"
+    r"\bma\b|drawdown|trend(?:ing)?|chart\s+read)\b", re.IGNORECASE)
+# Portfolio-wide technical breadth/health.
+_HEALTH_RE = re.compile(
+    r"\b(portfolio health|how healthy|breadth|technical health|"
+    r"book'?s? (?:health|momentum|shape)|how(?:'?s| is) my (?:book|portfolio) "
+    r"(?:doing|looking|holding up|trending))\b", re.IGNORECASE)
+
+
+def _answer_signal(symbol):
+    """Technical/positioning read for one symbol (portfolio_insights)."""
+    import portfolio_insights as pi
+    s = pi.symbol_signal(symbol) or {}
+    if s.get("error"):
+        return {"answer": "I couldn't pull enough history on {} for a technical "
+                          "read right now.".format(symbol), "symbol": symbol}
+    lead = {"bull": "constructive", "bear": "weak", "neutral": "mixed"}.get(
+        s.get("stance"), "mixed")
+    bits = ["{} technicals look {}".format(symbol, lead)]
+    if s.get("momentum_score") is not None:
+        bits.append("momentum {}/100".format(s["momentum_score"]))
+    rsi_v = s.get("rsi14")
+    if rsi_v is not None:
+        tag = " (overbought)" if rsi_v >= 70 else (" (oversold)" if rsi_v <= 30 else "")
+        bits.append("RSI {:.0f}{}".format(rsi_v, tag))
+    if s.get("range_position_52w") is not None:
+        bits.append("{:.0f}% up its 52-wk range".format(s["range_position_52w"]))
+    if s.get("max_drawdown_pct") is not None:
+        bits.append("max drawdown {:.0f}%".format(s["max_drawdown_pct"]))
+    if s.get("annualized_vol_pct") is not None:
+        bits.append("annualized vol {:.0f}%".format(s["annualized_vol_pct"]))
+    return {"answer": ", ".join(bits) + ".", "symbol": symbol, "data": s,
+            "action": {"view": "forecast", "symbol": symbol}}
+
+
+def _answer_portfolio_health():
+    """Technical breadth/health across equity holdings (portfolio_insights)."""
+    import portfolio_insights as pi
+    h = pi.portfolio_health() or {}
+    if h.get("error") or h.get("n_holdings", 0) == 0:
+        return {"answer": "Add some equity holdings and I'll gauge the book's "
+                          "technical health.", "action": {"view": "portfolio"}}
+    if not h.get("analyzed"):
+        return {"answer": h.get("note", "Couldn't pull enough history to gauge "
+                                        "breadth right now.")}
+    parts = ["Your book looks {} technically".format(h.get("tone", "mixed"))]
+    if h.get("weighted_momentum") is not None:
+        parts.append("weighted momentum {}/100".format(h["weighted_momentum"]))
+    if h.get("breadth_above_50dma_pct") is not None:
+        parts.append("{}% of names above their 50-day average".format(
+            h["breadth_above_50dma_pct"]))
+    if h.get("near_52w_high"):
+        parts.append("{} near 52-wk highs".format(h["near_52w_high"]))
+    if h.get("in_deep_drawdown"):
+        parts.append("{} in a 25%+ drawdown".format(h["in_deep_drawdown"]))
+    return {"answer": ", ".join(parts) + ".", "data": h,
+            "action": {"view": "analytics"}}
+
 
 def _dossier_forecast(symbol):
     """Directional forecast ensemble → stance. See forecast_ensemble schema."""
@@ -3975,6 +4035,11 @@ def ask(query: str, history: Any = None, conversation_id: Any = None,
             s1, s2 = _vs_resolve(m_vs.group(1)), _vs_resolve(m_vs.group(2))
             if s1 and s2 and s1 != s2:
                 return done("compare", _answer_compare_quotes(s1, s2))
+        # Per-symbol technical read — "momentum on NVDA", "is AAPL overbought?",
+        # "TSLA drawdown". Before forecast/quote so the signal words aren't
+        # swallowed by the generic quote fallback.
+        if symbol and _SIGNAL_RE.search(ql):
+            return done("signal", _answer_signal(symbol))
         # "prob" matched "problem"/"probably" — require a forecasting verb or
         # a whole "prob"/"probability" word, plus a symbol.
         if symbol and (any(w in ql for w in ("forecast", "predict", "outlook", "go up", "go down"))
@@ -4033,6 +4098,10 @@ def ask(query: str, history: Any = None, conversation_id: Any = None,
         if "crypto" in ql and any(w in ql for w in ("how much", "share", "allocation",
                                                     "exposure", "weight", "percent", " %")):
             return done("crypto_share", _answer_crypto_share())
+        # Technical breadth/health of the whole book (no symbol) — distinct
+        # from _answer_risk's vol/concentration read.
+        if not symbol and _HEALTH_RE.search(ql):
+            return done("portfolio_health", _answer_portfolio_health())
         if any(p in ql for p in ("how risky", "risk level", "portfolio risk",
                                  "my risk", "too risky", "risk profile")):
             return done("risk", _answer_risk())

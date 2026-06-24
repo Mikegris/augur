@@ -779,6 +779,26 @@ def analytics_risk():
     return jsonify(result)
 
 
+@app.route("/api/insights/symbol/<symbol>")
+def insights_symbol(symbol):
+    """v2.5 technical/positioning signal bundle for one symbol."""
+    try:
+        import portfolio_insights
+        return jsonify(portfolio_insights.symbol_signal(symbol))
+    except Exception as e:
+        return _err(e)
+
+
+@app.route("/api/insights/portfolio")
+def insights_portfolio():
+    """v2.5 technical breadth/health across equity holdings."""
+    try:
+        import portfolio_insights
+        return jsonify(portfolio_insights.portfolio_health())
+    except Exception as e:
+        return _err(e)
+
+
 # ─── Portfolio CSV Export / Import ────────────────────────────────────────────
 
 @app.route("/api/portfolio/export")
