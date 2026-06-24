@@ -634,6 +634,12 @@
       'am I beating the market',
       'any earnings coming up',
       'any ideas',
+      'how healthy is my portfolio',
+      "what's moving",
+      'should I rebalance',
+      'dossier on AAPL',
+      'momentum on NVDA',
+      'claude, investigate why my biggest holding moved',
       'set a policy: max 25% per name',
       "what if i hadn't sold my last sale",
     ],
@@ -1803,8 +1809,9 @@
           // Empty thread → offer clickable starters so the feature is
           // discoverable instead of a blank prompt.
           const starters = ["Why am I down today?", "What did I miss?",
-                            "How risky is my book?", "Is AAPL a good business to own?",
-                            "Am I beating the market?", "What would you check before earnings?"];
+                            "How healthy is my portfolio?", "What's moving?",
+                            "Should I rebalance?", "Dossier on AAPL",
+                            "Momentum on NVDA", "Claude, what's SpaceX worth right now?"];
           el.innerHTML = '<div class="jv-bubble assistant">At your service. Ask about your book, a '
             + 'business, or the macro picture — or try one of these:'
             + '<div class="jv-starters">'
