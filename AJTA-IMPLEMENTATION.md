@@ -18,8 +18,13 @@ live order.** Not investment, tax, or legal advice.
 | `aj_operator.py` | §19 | `run_once()` cycle: scan→forecast→judge→red-team→size→propose→gate→execute→reconcile→score |
 | `aj_metrics.py` | §21.2 | observability metrics + alert thresholds |
 | `aj_mcp_read.py` | §15 | **frozen** read-tool contract (VERIFY-MCP-READ) |
-| `aj_cli.py` | §19, §11.4 | `run / status / kill / rearm / recon / config / verify` |
+| `aj_secrets.py` | §22.3 | secrets broker — Fernet-encrypted, lease-based, never plaintext / never in model context |
+| `aj_alpaca.py` | §26.5, VERIFY-ALPACA | real Alpaca REST adapter (paper + live), keys leased from `aj_secrets`, fail-closed |
+| `aj_eval.py` | §23.5, §8, §23.3 | routing eval/leaderboard + demotion advice, `aj_routing` retention prune, backtest caveat |
+| `aj_cli.py` | §19, §11.4 | `run / status / kill / rearm / recon / config / verify / secret / verify-pass` |
+| app.js `trading` view | §11.4, §19, §21 | **AJ dashboard UI**: status, day/cum P&L, KILL button, RUN trigger, config editor, proposals/orders, alerts |
 | app.py `/api/aj/*` | — | read routes + local control plane (kill/rearm/run/config/approve) |
+| `deploy/` | §22.1 | docker-compose topology + Dockerfile (local-only profile) |
 
 ## ADR-001 — paper book vs real portfolio
 The spec models a Position as the AUGUR `portfolio` row. AUGUR is a **live

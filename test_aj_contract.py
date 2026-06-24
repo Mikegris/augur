@@ -125,19 +125,19 @@ def test_paper_crypto_fees_modeled():
 
 def test_gated_brokers_fail_closed():
     _reset(); _full(live_trading_enabled=False)
-    # live off => get_broker forces paper
-    assert isinstance(aj_broker.get_broker("alpaca"), aj_broker.PaperBroker)
-    # constructing a live broker directly raises (switch off)
+    # ccxt/robinhood are gated-live stubs => forced to internal paper when live off
+    assert isinstance(aj_broker.get_broker("ccxt"), aj_broker.PaperBroker)
+    assert isinstance(aj_broker.get_broker("robinhood"), aj_broker.PaperBroker)
+    # constructing a gated live broker directly raises (switch off)
     try:
-        aj_broker.AlpacaBroker()
+        aj_broker.CCXTBroker()
         assert False, "should have raised BrokerNotEnabled"
     except aj_broker.BrokerNotEnabled:
         pass
-    # even with live on, missing VERIFY gate blocks
-    aj_config.set_config({"live_trading_enabled": True})
+    # alpaca self-gates: unconfigured => BrokerNotEnabled (fail-closed), even paper
     try:
-        aj_broker.AlpacaBroker()
-        assert False, "VERIFY gate should block"
+        aj_broker.get_broker("alpaca")
+        assert False, "alpaca should fail closed when unconfigured"
     except aj_broker.BrokerNotEnabled:
         pass
 

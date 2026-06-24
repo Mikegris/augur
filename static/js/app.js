@@ -535,6 +535,7 @@ const NAV_GROUPS = {
     items: [
       { view: 'overview',     label: 'Overview' },
       { view: 'jarvis',       label: '◉ Jarvis' },
+      { view: 'trading',      label: '◉ Trading' },
       { view: 'portfolio',    label: 'Portfolio' },
       { view: 'watchlist',    label: 'Watchlist' },
       { view: 'transactions', label: 'Transactions' },
@@ -4185,8 +4186,152 @@ function selectSearchResult(symbol) {
 // here are considered "static enough" that ticking them on a 60s timer
 // adds noise without value (e.g. terminal, settings, research detail
 // which the user is actively interacting with).
+// ── Trading Agent (AJTA) view ───────────────────────────────────────────────
+function _ajToast(msg, ok) {
+  try {
+    if (typeof Toast !== 'undefined' && Toast) {
+      (ok === false ? (Toast.error || Toast.show) : (Toast.success || Toast.show)).call(Toast, msg);
+      return;
+    }
+  } catch (e) {}
+}
+function _ajMoney(v) {
+  if (v === null || v === undefined || isNaN(v)) return '—';
+  const n = Number(v);
+  return (n < 0 ? '-$' : '$') + Math.abs(n).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
+function _ajPill(label, on, tone) {
+  const cls = on ? (tone || 'green') : 'dim';
+  return `<span class="status-val ${cls}" style="padding:2px 8px;border:1px solid var(--border);border-radius:10px;font-size:11px;margin-right:6px">${_esc(label)}</span>`;
+}
+
+async function loadTradingView() {
+  const el = document.getElementById('view-trading');
+  if (!el) return;
+  el.innerHTML = '<div class="loading"><div class="spinner"></div> Loading trading agent…</div>';
+  let s;
+  try { s = await API.get('/api/aj/status'); }
+  catch (e) { el.innerHTML = `<div class="empty-state"><span>Trading agent unavailable: ${_esc(e.message)}</span></div>`; return; }
+
+  const cfg = s.config || {};
+  const pnl = s.day_pnl || {};
+  const cum = s.cumulative_pnl || {};
+  const orders = s.orders || {};
+  const halted = !!s.halted;
+  const enabled = !!s.trading_enabled;
+  const live = !!s.live_trading_enabled;
+
+  const alerts = (s.alerts || []).map(a =>
+    `<div class="jv-obs ${a.level === 'critical' ? 'neg' : (a.level === 'warning' ? 'warn' : 'info')}">• [${_esc(a.level)}] ${_esc(a.message)}</div>`).join('') || '<div class="muted">No alerts.</div>';
+
+  const allowlist = (cfg.symbol_allowlist || []).join(', ');
+
+  el.innerHTML = `
+    <div class="view-header">
+      <h1>◉ TRADING AGENT <span class="muted" style="font-size:13px">AJTA v${_esc(s.version || '3.0.0')}</span></h1>
+      <div class="view-actions">
+        <button class="btn btn-sm" id="aj-run">▶ RUN CYCLE (paper)</button>
+        <button class="btn btn-sm" id="aj-kill" style="background:var(--red);color:#fff;border-color:var(--red)">■ KILL SWITCH</button>
+        ${halted ? '<button class="btn btn-sm" id="aj-rearm">↻ RE-ARM</button>' : ''}
+      </div>
+    </div>
+
+    <div class="panel" style="border-left:3px solid ${enabled ? 'var(--green)' : 'var(--amber)'}">
+      <div class="panel-body" style="display:flex;align-items:center;flex-wrap:wrap;gap:8px">
+        ${_ajPill(enabled ? 'TRADING ON' : 'TRADING OFF', enabled, enabled ? 'green' : 'amber')}
+        ${_ajPill(live ? 'LIVE ENABLED' : 'PAPER ONLY', !live, live ? 'red' : 'green')}
+        ${_ajPill('session: ' + _esc(s.session || '—'), true, 'blue')}
+        ${halted ? _ajPill('HALTED', true, 'red') : ''}
+        ${_ajPill('chain ' + ((s.audit_chain || {}).ok ? 'OK' : 'BROKEN'), (s.audit_chain || {}).ok, (s.audit_chain || {}).ok ? 'green' : 'red')}
+        <span class="muted" style="margin-left:auto;font-size:11px">${enabled ? '' : 'Fail-closed: configure caps + allowlist to trade (paper).'}</span>
+      </div>
+    </div>
+
+    <div class="kpi-grid" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;margin:12px 0">
+      <div class="panel"><div class="panel-body"><div class="muted">Day P&L (paper)</div><div style="font-size:22px;color:${(pnl.day_pnl||0)>=0?'var(--green)':'var(--red)'}">${_ajMoney(pnl.day_pnl)}</div></div></div>
+      <div class="panel"><div class="panel-body"><div class="muted">Cumulative P&L</div><div style="font-size:22px;color:${(cum.total||0)>=0?'var(--green)':'var(--red)'}">${_ajMoney(cum.total)}</div></div></div>
+      <div class="panel"><div class="panel-body"><div class="muted">Open orders</div><div style="font-size:22px">${_esc(String(orders.open || 0))}</div></div></div>
+      <div class="panel"><div class="panel-body"><div class="muted">Fill rate</div><div style="font-size:22px">${orders.fill_rate == null ? '—' : Math.round(orders.fill_rate * 100) + '%'}</div></div></div>
+    </div>
+
+    <div class="panel">
+      <div class="panel-header"><span class="panel-title">RISK CONFIG (fail-closed)</span></div>
+      <div class="panel-body" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:10px">
+        <label class="muted">Master trading<br><select id="aj-cfg-trading_enabled"><option value="false"${!enabled?' selected':''}>OFF</option><option value="true"${enabled?' selected':''}>ON (paper)</option></select></label>
+        <label class="muted">Symbol allowlist (comma)<br><input id="aj-cfg-symbol_allowlist" value="${_esc(allowlist)}" placeholder="NVDA, AAPL"></label>
+        <label class="muted">Max order notional $<br><input id="aj-cfg-max_order_notional_usd" type="number" value="${_esc(String(cfg.max_order_notional_usd || 0))}"></label>
+        <label class="muted">Max trades / day<br><input id="aj-cfg-max_trades_per_day" type="number" value="${_esc(String(cfg.max_trades_per_day || 0))}"></label>
+        <label class="muted">Max daily loss $<br><input id="aj-cfg-max_daily_loss_usd" type="number" value="${_esc(String(cfg.max_daily_loss_usd || 0))}"></label>
+        <label class="muted">Default broker<br><input id="aj-cfg-default_broker" value="${_esc(cfg.default_broker || 'paper')}"></label>
+        <label class="muted">Auto-approve paper<br><select id="aj-cfg-auto_approve_paper"><option value="true"${cfg.auto_approve_paper?' selected':''}>YES</option><option value="false"${!cfg.auto_approve_paper?' selected':''}>NO</option></select></label>
+      </div>
+      <div class="panel-body" style="padding-top:0"><button class="btn btn-sm" id="aj-save-cfg">SAVE CONFIG</button> <span class="muted" style="font-size:11px">Live trading is intentionally not editable here — it requires CLI + VERIFY gates.</span></div>
+    </div>
+
+    <div class="panel"><div class="panel-header"><span class="panel-title">ALERTS</span></div><div class="panel-body">${alerts}</div></div>
+
+    <div class="panel"><div class="panel-header"><span class="panel-title">RECENT PROPOSALS</span></div><div class="panel-body" id="aj-proposals"><div class="muted">loading…</div></div></div>
+    <div class="panel"><div class="panel-header"><span class="panel-title">RECENT ORDERS</span></div><div class="panel-body" id="aj-orders"><div class="muted">loading…</div></div></div>
+  `;
+
+  // wire actions
+  const killBtn = document.getElementById('aj-kill');
+  if (killBtn) killBtn.addEventListener('click', async () => {
+    if (!confirm('KILL SWITCH: disable trading and cancel open orders now?')) return;
+    try { await API.post('/api/aj/kill', { reason: 'kill (UI)' }); _ajToast('◉ Kill switch engaged — trading disabled'); loadTradingView(); }
+    catch (e) { _ajToast('Kill failed: ' + e.message, false); }
+  });
+  const runBtn = document.getElementById('aj-run');
+  if (runBtn) runBtn.addEventListener('click', async () => {
+    if (!confirm('Run one PAPER operator cycle now? It may place paper trades if configured.')) return;
+    runBtn.disabled = true; runBtn.textContent = '… running';
+    try { const r = await API.post('/api/aj/run', { mode: 'paper' }); _ajToast('◉ Cycle complete: ' + ((r.proposals || []).length) + ' proposal(s)'); loadTradingView(); }
+    catch (e) { _ajToast('Run failed: ' + e.message, false); runBtn.disabled = false; runBtn.textContent = '▶ RUN CYCLE (paper)'; }
+  });
+  const rearmBtn = document.getElementById('aj-rearm');
+  if (rearmBtn) rearmBtn.addEventListener('click', async () => {
+    try { await API.post('/api/aj/rearm', {}); _ajToast('◉ Re-armed'); loadTradingView(); }
+    catch (e) { _ajToast('Re-arm failed: ' + e.message, false); }
+  });
+  const saveBtn = document.getElementById('aj-save-cfg');
+  if (saveBtn) saveBtn.addEventListener('click', async () => {
+    const body = {
+      trading_enabled: document.getElementById('aj-cfg-trading_enabled').value === 'true',
+      symbol_allowlist: document.getElementById('aj-cfg-symbol_allowlist').value.split(',').map(x => x.trim()).filter(Boolean),
+      max_order_notional_usd: Number(document.getElementById('aj-cfg-max_order_notional_usd').value) || 0,
+      max_trades_per_day: Number(document.getElementById('aj-cfg-max_trades_per_day').value) || 0,
+      max_daily_loss_usd: Number(document.getElementById('aj-cfg-max_daily_loss_usd').value) || 0,
+      default_broker: document.getElementById('aj-cfg-default_broker').value.trim() || 'paper',
+      auto_approve_paper: document.getElementById('aj-cfg-auto_approve_paper').value === 'true',
+    };
+    try { await API.post('/api/aj/config', body); _ajToast('◉ Config saved'); loadTradingView(); }
+    catch (e) { _ajToast('Save failed: ' + e.message, false); }
+  });
+
+  // tables (best-effort)
+  try {
+    const [pr, od] = await Promise.all([
+      API.get('/api/aj/proposals?limit=10').catch(() => ({ proposals: [] })),
+      API.get('/api/aj/orders?limit=10').catch(() => ({ orders: [] })),
+    ]);
+    const pEl = document.getElementById('aj-proposals');
+    if (pEl) {
+      const rows = (pr.proposals || []);
+      pEl.innerHTML = rows.length ? `<table class="data-table" style="width:100%"><thead><tr><th>Symbol</th><th>Side</th><th>Qty</th><th>Status</th><th>Thesis</th></tr></thead><tbody>${rows.map(p =>
+        `<tr><td>${_esc(p.symbol)}</td><td>${_esc(p.side)}</td><td>${_esc(String(p.qty || ''))}</td><td>${_esc(p.status)}</td><td class="muted" style="font-size:11px">${_esc((p.thesis || p.risk_reason || '').slice(0, 80))}</td></tr>`).join('')}</tbody></table>` : '<div class="muted">No proposals yet — run a cycle.</div>';
+    }
+    const oEl = document.getElementById('aj-orders');
+    if (oEl) {
+      const rows = (od.orders || []);
+      oEl.innerHTML = rows.length ? `<table class="data-table" style="width:100%"><thead><tr><th>Symbol</th><th>Side</th><th>Qty</th><th>State</th><th>Avg fill</th><th>Mode</th></tr></thead><tbody>${rows.map(o =>
+        `<tr><td>${_esc(o.symbol)}</td><td>${_esc(o.side)}</td><td>${_esc(String(o.qty || ''))}</td><td>${_esc(o.state)}</td><td>${o.avg_fill_price ? _ajMoney(o.avg_fill_price) : '—'}</td><td>${_esc(o.mode)}</td></tr>`).join('')}</tbody></table>` : '<div class="muted">No orders yet.</div>';
+    }
+  } catch (e) {}
+}
+
 const VIEW_LOADERS = {
   overview:     () => loadOverview(),
+  trading:      () => loadTradingView(),
   portfolio:    () => loadPortfolio(),
   crypto:       () => loadCrypto(),
   watchlist:    () => loadWatchlistView(),

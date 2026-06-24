@@ -81,6 +81,37 @@ def cmd_config(argv):
         _print(aj_config.get_config())
 
 
+def cmd_secret(argv):
+    """Store a broker credential in the secrets broker (encrypted at rest).
+    Kept off the HTTP path on purpose. Usage: secret --set scope=value [...]"""
+    import aj_db, aj_secrets
+    aj_db.aj_init()
+    i, stored = 0, []
+    while i < len(argv):
+        if argv[i] == "--set" and i + 1 < len(argv) and "=" in argv[i + 1]:
+            k, v = argv[i + 1].split("=", 1)
+            ok = aj_secrets.store(k.strip(), v.strip())
+            stored.append({k.strip(): "stored" if ok else "failed"})
+            i += 2
+        else:
+            i += 1
+    _print({"secrets": stored} if stored else
+           {"usage": "aj secret --set alpaca_key_id=PK... --set alpaca_secret_key=SK..."})
+
+
+def cmd_verify_pass(argv):
+    """Mark a VERIFY gate passed AFTER its contract test succeeds.
+    Usage: verify-pass <gate>   (e.g. alpaca)"""
+    import aj_db, database as dbase
+    aj_db.aj_init()
+    gate = argv[0] if argv else ""
+    if not gate:
+        _print({"usage": "aj verify-pass <gate>  (alpaca|ccxt|robinhood|opencode|mcp_read)"})
+        return
+    dbase.set_setting("aj_verify_" + gate, "pass")
+    _print({"gate": gate, "status": "pass"})
+
+
 def cmd_verify(argv):
     import aj_db, database as dbase
     aj_db.aj_init()
@@ -101,6 +132,7 @@ def cmd_verify(argv):
 _CMDS = {
     "run": cmd_run, "status": cmd_status, "kill": cmd_kill, "rearm": cmd_rearm,
     "recon": cmd_recon, "config": cmd_config, "verify": cmd_verify,
+    "secret": cmd_secret, "verify-pass": cmd_verify_pass,
 }
 
 

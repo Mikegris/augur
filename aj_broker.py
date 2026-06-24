@@ -250,11 +250,6 @@ class _GatedLiveBroker(BrokerClient):
         raise BrokerNotEnabled("{} not enabled".format(self.name))
 
 
-class AlpacaBroker(_GatedLiveBroker):
-    name = "alpaca"
-    verify_gate = "alpaca"
-
-
 class CCXTBroker(_GatedLiveBroker):
     name = "ccxt"
     verify_gate = "ccxt"
@@ -270,23 +265,31 @@ class RobinhoodBroker(_GatedLiveBroker):
 
 _BROKERS = {
     "paper": PaperBroker,
-    "alpaca": AlpacaBroker,
     "ccxt": CCXTBroker,
     "robinhood": RobinhoodBroker,
 }
 
 
+def _alpaca_cls():
+    """Lazy — keeps the `requests`/HTTP surface out of aj_broker import."""
+    import aj_alpaca
+    return aj_alpaca.AlpacaBroker
+
+
 def get_broker(name: Optional[str] = None) -> BrokerClient:
     """Construct a broker. Defaults to the configured default_broker. Live
-    venues raise BrokerNotEnabled unless fully gated+verified. When live
-    trading is off, any non-paper request is forced to PaperBroker (§11.3.8)."""
+    venues raise BrokerNotEnabled unless fully gated+verified. CCXT/Robinhood
+    are forced to PaperBroker when live trading is off (§11.3.8). Alpaca
+    self-gates (VERIFY-ALPACA + leased keys) and supports its own paper sub-mode
+    when live is off — so it's constructed directly and fails closed if not set
+    up."""
     cfg = aj_config.get_config()
     name = (name or cfg.get("default_broker") or "paper").lower()
+    if name == "alpaca":
+        return _alpaca_cls()()
     cls = _BROKERS.get(name)
     if cls is None:
         raise BrokerError("unknown broker {}".format(name))
-    # Force paper only for inherently-LIVE venues when live trading is off
-    # (§11.3.8). A paper-mode custom/alternate broker is returned as requested.
     if issubclass(cls, _GatedLiveBroker) and not cfg.get("live_trading_enabled"):
         log.info("live disabled -> forcing PaperBroker (requested %s)", name)
         return PaperBroker()

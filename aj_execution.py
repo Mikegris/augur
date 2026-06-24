@@ -161,8 +161,17 @@ def _apply_broker_result(order_id: int, res: Dict[str, Any],
 
 
 def _record_fill(order_id: int, fill: Dict[str, Any], cycle_id: Optional[str]) -> int:
+    # Idempotent on broker_fill_id: a reconciliation poll that re-reports the
+    # same fill must not double-count it (live brokers report cumulative fills).
+    bfid = fill.get("broker_fill_id")
+    if bfid:
+        dup = aj_db.query(
+            "SELECT id FROM aj_fills WHERE order_id=? AND broker_fill_id=?",
+            (order_id, bfid))
+        if dup:
+            return int(dup[0]["id"])
     fid = aj_db.insert(
-        "aj_fills", order_id=order_id, broker_fill_id=fill.get("broker_fill_id"),
+        "aj_fills", order_id=order_id, broker_fill_id=bfid,
         qty=float(fill.get("qty") or 0), price=float(fill.get("price") or 0),
         fees_usd=float(fill.get("fees_usd") or 0),
         filled_at=fill.get("filled_at") or aj_db.utc_now_iso())

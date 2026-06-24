@@ -1,0 +1,78 @@
+# AJTA deployment topology (AJTA-SPEC-1.0 §22.1, §22.2).
+#
+# LOCAL-ONLY PROFILE (default): binds everything to 127.0.0.1, enables only the
+# internal PaperBroker, and ships with all three trade switches false. This
+# profile requires NO purchased service and NO external trading egress.
+#
+# The base app also runs perfectly bare-metal (./run.sh / venv) — this compose
+# file is the optional containerized topology. Live profiles are opt-in
+# overlays; bring your own keys + pass the matching VERIFY gates first (§27).
+#
+#   docker compose up augur                      # app + AJ read server (paper)
+#   docker compose --profile models up           # + local model gateway + ollama
+#   docker compose --profile observability up     # + langfuse
+#
+# `data` and any execution path MUST NOT share a segment with an
+# internet-facing listener (§22.1).
+
+services:
+  augur:
+    build: { context: .., dockerfile: deploy/Dockerfile }
+    command: ["python", "app.py"]
+    environment:
+      - PORT=5001
+      - AUGUR_DB_PATH=/data/wealth.db
+      - AUGUR_NO_SELF_UPDATE=1
+      # secrets master key is injected at runtime, never baked into the image
+      - AUGUR_SECRETS_KEY=${AUGUR_SECRETS_KEY:-}
+    volumes:
+      - aj_data:/data
+    ports:
+      - "127.0.0.1:5001:5001"     # localhost-only by default
+    networks: [core, data]
+    restart: unless-stopped
+
+  # One-shot operator cycle (triggered; NOT a daemon). Invoke on a schedule from
+  # the host (cron/launchd/systemd timer) or: docker compose run --rm operator
+  operator:
+    build: { context: .., dockerfile: deploy/Dockerfile }
+    command: ["python", "aj_cli.py", "run", "--mode", "paper"]
+    environment:
+      - AUGUR_DB_PATH=/data/wealth.db
+      - AUGUR_SECRETS_KEY=${AUGUR_SECRETS_KEY:-}
+    volumes:
+      - aj_data:/data
+    networks: [core, data]
+    profiles: ["operator"]
+    restart: "no"
+
+  # ── optional overlays (OFF by default) ──────────────────────────────────────
+  model-gateway:                 # LiteLLM OpenAI-compatible proxy
+    image: ghcr.io/berriai/litellm:main-latest
+    networks: [models]
+    ports: ["127.0.0.1:4000:4000"]
+    profiles: ["models"]
+
+  ollama:                        # local models — required for private routing
+    image: ollama/ollama:latest
+    volumes: [ollama:/root/.ollama]
+    networks: [models]
+    ports: ["127.0.0.1:11434:11434"]
+    profiles: ["models"]
+
+  langfuse:                      # observability (self-host)
+    image: langfuse/langfuse:latest
+    networks: [core]
+    ports: ["127.0.0.1:3000:3000"]
+    profiles: ["observability"]
+
+networks:
+  core: {}
+  models: {}
+  data:
+    internal: true               # no internet-facing listener shares this segment
+  egress: {}                     # only broker/data endpoints attach here (live overlays)
+
+volumes:
+  aj_data: {}
+  ollama: {}
