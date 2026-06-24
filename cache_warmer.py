@@ -113,6 +113,10 @@ JARVIS_BRIEFING_INTERVAL = 115
 # Without this an active user's wealth.db grows without bound (observed 535MB).
 PRUNE_INTERVAL = 24 * 3600
 VACUUM_INTERVAL = 7 * 24 * 3600
+# api_cache eviction (expired + size cap). cache_store only enforced these at
+# boot, so a long-running session let api_cache balloon (observed ~90 MB of a
+# 97 MB wealth.db). A 30-min cadence keeps it bounded between restarts.
+CACHE_PRUNE_INTERVAL = 30 * 60
 INTER_REQUEST_DELAY = 1.2          # spacing between requests within a cycle
 
 # Cap how many portfolio symbols we warm per cycle so an unusually large
@@ -434,6 +438,17 @@ def _loop():
                 _safe("prune", _db.run_daily_prune)
             except Exception as e:
                 log.debug("prune skipped: %s", e)
+            time.sleep(INTER_REQUEST_DELAY)
+
+        # ── api_cache eviction: every 30 min ────────────────────────────
+        # Bound the api_cache table between restarts (expired sweep + size
+        # cap). Previously boot-only, which let it grow to ~90 MB mid-session.
+        if _due("cache_prune", CACHE_PRUNE_INTERVAL, now):
+            try:
+                import cache_store as _cs
+                _safe("cache_prune", _cs.prune_disk)
+            except Exception as e:
+                log.debug("cache_prune skipped: %s", e)
             time.sleep(INTER_REQUEST_DELAY)
 
         # ── weekly VACUUM to reclaim freed pages ────────────────────────
