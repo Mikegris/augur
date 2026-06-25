@@ -179,11 +179,12 @@ def get_sweep():
             try:
                 parsed = json.loads(body)
             except Exception:
-                if b"text/" not in body[:0]:  # non-JSON 200 on /api
-                    # export route returns markdown — allow by content sniff
-                    if b"# JARVIS" in body[:40] or path.endswith("/export"):
-                        record(PASS, "GET " + path, note + " (markdown)")
-                        continue
+                # Routes that legitimately return non-JSON: the markdown export
+                # and the CSV trade journal. Allow them by path/content sniff.
+                if (b"# JARVIS" in body[:40] or path.endswith("/export")
+                        or path.endswith(".csv") or b"filled_at,symbol" in body[:40]):
+                    record(PASS, "GET " + path, note + " (non-JSON ok)")
+                    continue
                 record(FAIL, "GET " + path, "200 but unparseable JSON")
                 continue
             if isinstance(parsed, dict) and parsed.get("error"):
