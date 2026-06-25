@@ -24,7 +24,13 @@ live order.** Not investment, tax, or legal advice.
 | `aj_cli.py` | §19, §11.4 | `run / status / kill / rearm / recon / config / verify / secret / verify-pass` |
 | app.js `trading` view | §11.4, §19, §21 | **AJ dashboard UI**: status, day/cum P&L, KILL button, RUN trigger, config editor, proposals/orders, alerts |
 | app.py `/api/aj/*` | — | read routes + local control plane (kill/rearm/run/config/approve) |
+| `aj_opencode.py` | §16, VERIFY-OPENCODE | sandboxed candidate-signal/backtest runner — research only, never execution, fail-closed + forbidden-path guard |
+| `aj_voice.py` | §18 | spoken-command gateway — reads run, high-risk needs approval (never auto-executes) |
+| `aj_langfuse.py` | §21.1 | trace exporter — fail-open no-op unless LANGFUSE_* configured |
 | `deploy/` | §22.1 | docker-compose topology + Dockerfile (local-only profile) |
+
+### Open-universe mode (off-allowlist trading)
+`allow_any_symbol` (config, default **false**) lets the agent choose ANY quotable, valid ticker instead of only the allowlist. It bypasses ONLY the allowlist rail (§11.3 step 3) — every other cap (per-order notional, trades/day, daily-loss HALT, IPS, quotability) still binds, and it's paper-first / human-approved for live. The operator then scans a bounded universe (allowlist ∪ watchlist ∪ equity holdings ∪ idea pool, capped at `scan_universe_max`). Toggle in the Trading tab.
 
 ## ADR-001 — paper book vs real portfolio
 The spec models a Position as the AUGUR `portfolio` row. AUGUR is a **live

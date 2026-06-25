@@ -51,6 +51,7 @@ LOCAL_MODULES = [
     "aj_db", "aj_config", "aj_risk", "aj_positions", "aj_broker",
     "aj_execution", "aj_routing", "aj_operator", "aj_metrics", "aj_mcp_read",
     "aj_cli", "aj_secrets", "aj_alpaca", "aj_eval",
+    "aj_opencode", "aj_voice", "aj_langfuse",
     "ai_summarizer",
     "alt_data_engine",
     "alt_signals",

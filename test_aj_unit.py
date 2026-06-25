@@ -131,6 +131,23 @@ def test_gate_passes_when_fully_configured():
     assert d["order_notional"] == 1600.0
 
 
+def test_open_universe_off_allowlist():
+    # default: off-allowlist symbol blocked. allow_any_symbol: passes (still
+    # bounded by all other caps), but an invalid symbol is still blocked.
+    _reset(); _quotes({"TSLA": 250}); _full_config(symbol_allowlist=["AAPL"])
+    d = aj_risk.evaluate({"symbol": "TSLA", "side": "buy", "qty": 1, "order_type": "market"})
+    assert d["decision"] == "block" and "allowlist" in d["reason"]
+    aj_config.set_config({"allow_any_symbol": True})
+    d = aj_risk.evaluate({"symbol": "TSLA", "side": "buy", "qty": 1, "order_type": "market"})
+    assert d["decision"] == "pass", d
+    bad = aj_risk.evaluate({"symbol": "@@", "side": "buy", "qty": 1, "order_type": "market"})
+    assert bad["decision"] == "block" and "invalid symbol" in bad["reason"]
+    # other caps still bind in open-universe mode
+    aj_config.set_config({"max_order_notional_usd": 100})
+    capped = aj_risk.evaluate({"symbol": "TSLA", "side": "buy", "qty": 5, "order_type": "market"})
+    assert capped["decision"] == "block" and "per-order cap" in capped["reason"]
+
+
 def test_gate_per_order_cap():
     _reset(); _quotes({"NVDA": 800}); _full_config(max_order_notional_usd=1000)
     d = aj_risk.evaluate({"symbol": "NVDA", "side": "buy", "qty": 10, "order_type": "market"})

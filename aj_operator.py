@@ -31,9 +31,41 @@ log = logging.getLogger("augur.aj_operator")
 # ── scan ──────────────────────────────────────────────────────────────────────
 
 def _scan_universe() -> List[str]:
-    """The tradable universe is exactly the allowlist — nothing else can pass
-    the gate, so forecasting non-allowlisted names for trading is wasted work."""
-    return list(aj_config.get_config().get("symbol_allowlist") or [])
+    """The candidate universe for the cycle.
+
+    Default (fail-closed): exactly the allowlist — nothing else can pass the
+    gate. Open-universe mode (`allow_any_symbol`): a broader, BOUNDED set the
+    agent may choose from — allowlist ∪ watchlist ∪ equity holdings ∪ a
+    best-effort idea-pool feed — capped at `scan_universe_max` so a cycle never
+    forecasts an unbounded list. The risk gate still binds every pick."""
+    cfg = aj_config.get_config()
+    allow = list(cfg.get("symbol_allowlist") or [])
+    if not cfg.get("allow_any_symbol"):
+        return allow
+
+    universe = set(s.upper() for s in allow)
+    try:
+        import database as db
+        universe.update(str(w.get("symbol") or "").upper()
+                        for w in (db.get_watchlist() or []))
+        universe.update(str(h.get("symbol") or "").upper()
+                        for h in (db.get_portfolio() or [])
+                        if (h.get("asset_type") or "") != "crypto")
+    except Exception:
+        log.debug("open-universe: watchlist/portfolio unavailable", exc_info=True)
+    # best-effort idea feed — genuinely "any" picks beyond what's tracked
+    try:
+        import idea_pool_warmer
+        for p in (idea_pool_warmer.list_warmed_symbols() or [])[:30]:
+            sym = p.get("symbol") if isinstance(p, dict) else p
+            if sym:
+                universe.add(str(sym).upper())
+    except Exception:
+        log.debug("open-universe: idea pool unavailable", exc_info=True)
+
+    universe.discard("")
+    cap = int(cfg.get("scan_universe_max") or 25)
+    return sorted(universe)[:cap]
 
 
 # ── forecast ──────────────────────────────────────────────────────────────────
@@ -235,6 +267,12 @@ def run_once(mode: str = "paper") -> Dict[str, Any]:
         aj_db.close_cycle(cycle_id, "completed")
         aj_db.audit("disconnect", {"cycle_id": cycle_id, "status": "completed"},
                     cycle_id=cycle_id)
+        # Optional observability export (§21.1) — fail-open, never blocks.
+        try:
+            import aj_langfuse
+            aj_langfuse.emit_cycle_trace(summary)
+        except Exception:
+            log.debug("langfuse emit skipped", exc_info=True)
         return summary
     except Exception as e:
         log.exception("run_once failed")

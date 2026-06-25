@@ -26,6 +26,7 @@ DEFAULTS: Dict[str, Any] = {
     "robinhood_enabled":      False,
     # caps — ALL zero = block (must be set > 0 to trade)
     "symbol_allowlist":       [],     # EMPTY = nothing tradable
+    "allow_any_symbol":       False,  # OPT-IN open universe: trade off-allowlist
     "max_order_notional_usd": 0.0,
     "max_trades_per_day":     0,
     "max_daily_loss_usd":     0.0,
@@ -49,17 +50,18 @@ DEFAULTS: Dict[str, Any] = {
     "min_edge_pct_pts":       3.0,     # |edge| floor; below => no trade
     "order_notional_target_usd": 0.0,  # 0 => half of max_order_notional_usd
     "use_llm_synthesis":      False,   # off => deterministic rule-based thesis
+    "scan_universe_max":      25,      # cap symbols/cycle in open-universe mode
 }
 
 _BOOL_KEYS = {"trading_enabled", "live_trading_enabled", "robinhood_enabled",
-              "auto_approve_paper", "use_llm_synthesis"}
+              "auto_approve_paper", "use_llm_synthesis", "allow_any_symbol"}
 _LIST_KEYS = {"symbol_allowlist", "session_whitelist"}
 _FLOAT_KEYS = {"max_order_notional_usd", "max_daily_loss_usd",
                "paper_slippage_bps", "paper_spread_fraction", "fee_bps",
                "min_fee_usd", "crypto_fee_bps", "buy_prob_threshold",
                "sell_prob_threshold", "min_edge_pct_pts",
                "order_notional_target_usd"}
-_INT_KEYS = {"max_trades_per_day", "forecast_horizon_days"}
+_INT_KEYS = {"max_trades_per_day", "forecast_horizon_days", "scan_universe_max"}
 _STR_KEYS = {"daily_loss_basis", "halt_rearm", "default_broker"}
 
 _PREFIX = "aj_"

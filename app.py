@@ -3448,6 +3448,18 @@ def aj_approve_route(pid):
         return _err(e)
 
 
+@app.route("/api/aj/voice", methods=["POST"])
+def aj_voice_route():
+    """Spoken trading command (§18). Read intents run; high-risk actions return
+    requires_approval and NEVER auto-execute."""
+    try:
+        import aj_voice
+        data = request.get_json(silent=True) or {}
+        return jsonify(aj_voice.handle_command(str(data.get("text") or "")[:300]))
+    except Exception as e:
+        return _err(e)
+
+
 @app.route("/api/aj/mcp/tools", methods=["GET"])
 def aj_mcp_tools_route():
     try:

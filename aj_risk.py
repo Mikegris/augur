@@ -22,7 +22,11 @@ import aj_config
 
 log = logging.getLogger("augur.aj_risk")
 
+import re
 _CRYPTO_SUFFIX = "-USD"
+# Valid ticker shape for open-universe mode — alnum core + optional one
+# .  or - suffix (e.g. BRK-B, BTC-USD). Bounds what "any symbol" can mean.
+_VALID_SYMBOL = re.compile(r"^[A-Z0-9]{1,9}(?:[.\-][A-Z0-9]{1,4})?$")
 
 
 # ── quotes / marks ────────────────────────────────────────────────────────────
@@ -347,11 +351,21 @@ def evaluate(proposal: Dict[str, Any]) -> RiskDecision:
             _record("block", "session {} not whitelisted".format(session), caps, None, pid)
             return RiskDecision(decision="block", reason="session {} not tradable".format(session))
 
-        # Step 3 — allowlist (EMPTY => all blocked)
+        # Step 3 — allowlist (EMPTY => all blocked) UNLESS open-universe mode is
+        # explicitly enabled. In open-universe mode the allowlist gate is
+        # bypassed, but the symbol must still be syntactically valid and
+        # quotable (next step), and EVERY other cap (notional, trades/day,
+        # daily-loss, IPS) still binds — this is a deliberate, opt-in loosening
+        # of one rail, never a removal of the gate.
         allow = cfg.get("symbol_allowlist") or []
-        if symbol not in allow:
-            _record("block", "symbol not in allowlist", caps, None, pid)
-            return RiskDecision(decision="block", reason="{} not in symbol allowlist".format(symbol))
+        if not cfg.get("allow_any_symbol"):
+            if symbol not in allow:
+                _record("block", "symbol not in allowlist", caps, None, pid)
+                return RiskDecision(decision="block", reason="{} not in symbol allowlist".format(symbol))
+        else:
+            if not _VALID_SYMBOL.match(symbol):
+                _record("block", "open-universe: invalid symbol", caps, None, pid)
+                return RiskDecision(decision="block", reason="invalid symbol {}".format(symbol))
 
         # price + notional
         price = _order_price(symbol, order_type, limit_price)

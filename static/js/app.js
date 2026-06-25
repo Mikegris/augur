@@ -4260,6 +4260,7 @@ async function loadTradingView() {
       <div class="panel-body" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:10px">
         <label class="muted">Master trading<br><select id="aj-cfg-trading_enabled"><option value="false"${!enabled?' selected':''}>OFF</option><option value="true"${enabled?' selected':''}>ON (paper)</option></select></label>
         <label class="muted">Symbol allowlist (comma)<br><input id="aj-cfg-symbol_allowlist" value="${_esc(allowlist)}" placeholder="NVDA, AAPL"></label>
+        <label class="muted">Allow ANY symbol (off allowlist)<br><select id="aj-cfg-allow_any_symbol"><option value="false"${!cfg.allow_any_symbol?' selected':''}>NO (allowlist only)</option><option value="true"${cfg.allow_any_symbol?' selected':''}>YES (open universe)</option></select></label>
         <label class="muted">Max order notional $<br><input id="aj-cfg-max_order_notional_usd" type="number" value="${_esc(String(cfg.max_order_notional_usd || 0))}"></label>
         <label class="muted">Max trades / day<br><input id="aj-cfg-max_trades_per_day" type="number" value="${_esc(String(cfg.max_trades_per_day || 0))}"></label>
         <label class="muted">Max daily loss $<br><input id="aj-cfg-max_daily_loss_usd" type="number" value="${_esc(String(cfg.max_daily_loss_usd || 0))}"></label>
@@ -4299,6 +4300,7 @@ async function loadTradingView() {
     const body = {
       trading_enabled: document.getElementById('aj-cfg-trading_enabled').value === 'true',
       symbol_allowlist: document.getElementById('aj-cfg-symbol_allowlist').value.split(',').map(x => x.trim()).filter(Boolean),
+      allow_any_symbol: document.getElementById('aj-cfg-allow_any_symbol').value === 'true',
       max_order_notional_usd: Number(document.getElementById('aj-cfg-max_order_notional_usd').value) || 0,
       max_trades_per_day: Number(document.getElementById('aj-cfg-max_trades_per_day').value) || 0,
       max_daily_loss_usd: Number(document.getElementById('aj-cfg-max_daily_loss_usd').value) || 0,
