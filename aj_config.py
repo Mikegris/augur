@@ -67,7 +67,26 @@ _STR_KEYS = {"daily_loss_basis", "halt_rearm", "default_broker"}
 _PREFIX = "aj_"
 _VALID_LOSS_BASIS = ("realized_plus_unrealized", "realized")
 _VALID_REARM = ("manual", "session_open")
-_VALID_SESSIONS = ("premarket", "regular", "afterhours", "closed")
+# 'closed' is a market STATE, never a tradable session — it must not be
+# whitelist-able or the gate's session check would treat market-closed as OK.
+_TRADABLE_SESSIONS = ("premarket", "regular", "afterhours")
+_BASE_BROKERS = {"paper", "alpaca", "ccxt", "robinhood"}
+
+
+def _valid_brokers() -> set:
+    """Allowed default_broker values = the known venues PLUS anything actually
+    registered in aj_broker (custom/test brokers). Lazy import avoids a circular
+    dependency. A typo still falls outside this set and resets to paper."""
+    brokers = set(_BASE_BROKERS)
+    try:
+        import aj_broker
+        brokers |= set(aj_broker._BROKERS.keys())
+    except Exception:
+        pass
+    return brokers
+# Config keys that are probabilities — clamped to [0,1] so a typo can't make
+# the agent buy/sell on every signal.
+_PROB_KEYS = ("buy_prob_threshold", "sell_prob_threshold")
 
 
 def _coerce_bool(v: Any) -> bool:
@@ -132,8 +151,22 @@ def get_config() -> Dict[str, Any]:
         cfg["daily_loss_basis"] = "realized_plus_unrealized"
     if cfg["halt_rearm"] not in _VALID_REARM:
         cfg["halt_rearm"] = "manual"
+    if str(cfg["default_broker"]).lower() not in _valid_brokers():
+        cfg["default_broker"] = "paper"   # unknown venue => safe internal paper
     cfg["session_whitelist"] = [s.lower() for s in cfg["session_whitelist"]
-                                if s.lower() in _VALID_SESSIONS] or ["regular"]
+                                if s.lower() in _TRADABLE_SESSIONS] or ["regular"]
+    # numeric guards: caps/counts can never be negative; probs clamp to [0,1].
+    for k in _FLOAT_KEYS:
+        if cfg.get(k, 0) < 0:
+            cfg[k] = 0.0
+    for k in _INT_KEYS:
+        if cfg.get(k, 0) < 0:
+            cfg[k] = 0
+    if cfg.get("scan_universe_max", 0) < 1:
+        cfg["scan_universe_max"] = 1
+    for k in _PROB_KEYS:
+        v = cfg.get(k, 0.5)
+        cfg[k] = min(1.0, max(0.0, v))
     return cfg
 
 

@@ -139,6 +139,15 @@ class PaperBroker(BrokerClient):
                    "raw": {"reason": "qty<=0"}}
             self._orders[boid] = res
             return res
+        # A limit order MUST carry a positive limit price. Without it the SELL
+        # marketability test (quote >= 0) was always true, so a malformed limit
+        # SELL filled like a market order. Reject it.
+        if otype == "limit" and (limit_price is None or float(limit_price) <= 0):
+            res = {"broker_order_id": boid, "state": "rejected", "filled_qty": 0.0,
+                   "avg_fill_price": None, "fees_usd": 0.0, "fills": [],
+                   "raw": {"reason": "limit order without a valid limit price"}}
+            self._orders[boid] = res
+            return res
 
         adverse = self._adverse_bps() / 1e4
         fill_price = None
@@ -286,6 +295,14 @@ def get_broker(name: Optional[str] = None) -> BrokerClient:
     cfg = aj_config.get_config()
     name = (name or cfg.get("default_broker") or "paper").lower()
     if name == "alpaca":
+        # Uniform with ccxt/robinhood: when live trading is OFF, route to the
+        # INTERNAL PaperBroker (the book reconcile treats as truth) rather than
+        # Alpaca's external paper endpoint — otherwise paper fills land at
+        # Alpaca while reconcile compares against the internal book (mismatch).
+        # Alpaca engages only when live is enabled AND VERIFY-ALPACA passed.
+        if not cfg.get("live_trading_enabled"):
+            log.info("live disabled -> internal PaperBroker (requested alpaca)")
+            return PaperBroker()
         return _alpaca_cls()()
     cls = _BROKERS.get(name)
     if cls is None:

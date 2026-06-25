@@ -126,15 +126,18 @@ def tool_names() -> List[str]:
 def contract_ok() -> bool:
     """The live registry MUST exactly equal the frozen contract (names + order)
     and expose NO mutating verbs."""
+    # The REAL guarantee is this exact-set equality (names + order) plus the
+    # contract test that pins FROZEN_TOOLS — adding any tool, mutating or not,
+    # breaks this until reviewed. (A substring verb-denylist was removed: it was
+    # dead code and would false-positive on read listings like 'aj_orders'.)
     if tuple(TOOLS.keys()) != FROZEN_TOOLS:
         return False
-    banned = ("place", "order", "submit", "buy", "sell", "kill", "set", "execute",
-              "cancel", "trade", "approve")
+    # Belt-and-suspenders: refuse known mutating verb names outright.
     for name in TOOLS:
-        low = name.lower()
-        # 'aj_orders'/'forecast' are read listings; only block verb-shaped names.
-        if low in ("place_order", "submit_order", "set_config", "kill_switch",
-                   "execute_trade", "cancel_order", "approve"):
+        if name.lower() in ("place_order", "submit_order", "set_config",
+                            "kill_switch", "execute_trade", "cancel_order",
+                            "approve", "execute_mutating", "add_holding",
+                            "record_trade"):
             return False
     return True
 

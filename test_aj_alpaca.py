@@ -87,10 +87,15 @@ def test_alpaca_fails_closed_without_keys():
 
 def test_get_broker_alpaca_self_gates():
     _reset()
-    aj_config.set_config({"default_broker": "alpaca"})
+    # live OFF => alpaca routes to the INTERNAL PaperBroker (uniform with
+    # ccxt/robinhood; paper fills land in the book reconcile treats as truth).
+    aj_config.set_config({"default_broker": "alpaca", "live_trading_enabled": False})
+    assert isinstance(aj_broker.get_broker("alpaca"), aj_broker.PaperBroker)
+    # live ON but unverified => fail closed (no path to a live order).
+    aj_config.set_config({"live_trading_enabled": True})
     try:
         aj_broker.get_broker("alpaca")
-        assert False, "alpaca should fail closed when unconfigured"
+        assert False, "alpaca should fail closed when live-on + unverified"
     except aj_broker.BrokerNotEnabled:
         pass
 

@@ -35,11 +35,20 @@ def available() -> bool:
 
 
 def path_allowed(path: str) -> bool:
-    p = str(path or "")
+    """False if the path touches anything forbidden — checked against the full
+    path, the basename, AND every individual segment, so a forbidden directory
+    (e.g. 'secrets') ANYWHERE in the path is caught, not just at the start (the
+    old code only matched 'secrets/*' as a prefix)."""
+    p = str(path or "").replace("\\", "/")
     base = p.rsplit("/", 1)[-1]
+    segments = [s for s in p.split("/") if s]
     for pat in FORBIDDEN_PATHS:
+        pat_dir = pat[:-2] if pat.endswith("/*") else pat  # 'secrets/*' -> 'secrets'
         if fnmatch.fnmatch(p, pat) or fnmatch.fnmatch(base, pat):
             return False
+        for seg in segments:
+            if fnmatch.fnmatch(seg, pat) or fnmatch.fnmatch(seg, pat_dir):
+                return False
     return True
 
 

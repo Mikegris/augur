@@ -38,25 +38,37 @@ def _load_master_key() -> bytes:
     """Resolve the Fernet master key: env first, then a 0600 key file
     (auto-generated on first use). Raises if cryptography is unavailable —
     a secrets failure must fail closed (§20.8), never silently downgrade."""
+    from cryptography.fernet import Fernet
     env = os.environ.get("AUGUR_SECRETS_KEY")
     if env:
-        return env.encode() if isinstance(env, str) else env
+        kb = env.encode() if isinstance(env, str) else env
+        Fernet(kb)   # validate now — a malformed env key fails loudly, not silently
+        return kb
     path = _key_file()
     if os.path.exists(path):
         with open(path, "rb") as f:
             return f.read().strip()
-    # generate + persist with restrictive perms
-    from cryptography.fernet import Fernet
+    # Generate + persist atomically with restrictive perms:
+    #  * umask 077 so the file is never group/world-readable even briefly;
+    #  * O_EXCL so a concurrent first-use can't have two processes write
+    #    DIFFERENT keys (which would make one's secrets undecryptable) — the
+    #    loser re-reads the winner's key;
+    #  * fchmod 0600 on the fd BEFORE writing the secret bytes.
     key = Fernet.generate_key()
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    old_umask = os.umask(0o077)
     try:
-        os.write(fd, key)
+        try:
+            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        except FileExistsError:
+            with open(path, "rb") as f:
+                return f.read().strip()
+        try:
+            os.fchmod(fd, 0o600)
+            os.write(fd, key)
+        finally:
+            os.close(fd)
     finally:
-        os.close(fd)
-    try:
-        os.chmod(path, 0o600)
-    except Exception:
-        pass
+        os.umask(old_umask)
     log.info("aj_secrets: generated master key at %s (0600)", path)
     return key
 

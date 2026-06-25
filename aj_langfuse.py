@@ -41,7 +41,12 @@ def emit_cycle_trace(summary: Dict[str, Any]) -> Dict[str, Any]:
                                    "mode": summary.get("mode"),
                                    "session": summary.get("session")})
         for p in (summary.get("proposals") or []):
-            trace.span(name="proposal", metadata=p)
+            # Redact: emit only non-sensitive fields. A proposal's thesis/qty
+            # and the cycle's P&L are portfolio data and must NOT leave the box
+            # to a (possibly remote) LANGFUSE_HOST.
+            safe = {k: p.get(k) for k in ("symbol", "side", "result")} \
+                if isinstance(p, dict) else {}
+            trace.span(name="proposal", metadata=safe)
         trace.span(name="reconcile", metadata={"status": summary.get("reconcile")})
         trace.span(name="score", metadata=summary.get("scored") or {})
         try:

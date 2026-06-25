@@ -3402,7 +3402,15 @@ def aj_run_route():
         import aj_operator
         data = request.get_json(silent=True) or {}
         mode = "live" if str(data.get("mode")) == "live" else "paper"
-        return jsonify(aj_operator.run_once(mode))
+        if not _jarvis_act_charge(1):
+            return jsonify({"ok": False, "reason": "rate limited"}), 429
+        result = aj_operator.run_once(mode)
+        # A single-instance lock refusal is not success — surface 409 so the UI
+        # doesn't report "cycle complete" when the cycle never ran.
+        if isinstance(result, dict) and result.get("ok") is False \
+                and "running" in str(result.get("reason", "")):
+            return jsonify(result), 409
+        return jsonify(result)
     except Exception as e:
         return _err(e)
 
@@ -3425,6 +3433,8 @@ def aj_approve_route(pid):
     through the gated, VERIFY'd broker (which fails closed if not enabled)."""
     try:
         import aj_db, aj_risk, aj_execution
+        if not _jarvis_act_charge(1):
+            return jsonify({"error": "rate limited"}), 429
         row = aj_db.get_row("aj_proposals", pid)
         if not row:
             return jsonify({"error": "proposal not found"}), 404

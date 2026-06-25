@@ -30,17 +30,34 @@ def _ai():
     return ai_summarizer
 
 
+import re as _re
+# Dollar amounts ("$1,200") and share quantities ("10 shares") strongly imply
+# position/P&L context — treat as private.
+_MONEY_RE = _re.compile(r"\$\s?\d")
+_SHARES_RE = _re.compile(r"\b\d[\d,]*\s+(?:shares?|units?|contracts?)\b")
+_FIRST_PERSON_HOLD_RE = _re.compile(
+    r"\bi\s+(own|hold|bought|sold|have|bought|am holding)\b|\bmy\s+"
+    r"(position|holding|stake|exposure|book|portfolio|trade)")
+
+_PRIVATE_CUES = (
+    "portfolio", "holding", "my position", "p&l", "pnl", "account",
+    "shares of", "avg cost", "cost basis", "net worth", "my book",
+    "unrealized", "realized gain", "day_pnl", "balance", "exposure",
+    "rebalance", "trim my", "position size", "buying power", "cash balance",
+    "should i sell", "should i buy", "should i trim", "should i hold")
+
+
 def is_private(text: Any) -> bool:
-    """Heuristic sensitivity classifier — true if a prompt likely contains
-    portfolio holdings, P&L, or account identifiers. Conservative: when in
-    doubt, treat as private (keeps it local)."""
+    """Heuristic sensitivity classifier — true if a prompt likely references
+    portfolio holdings, P&L, dollar amounts, share quantities, or account
+    identifiers. Errs toward PRIVATE (routes local, no egress) when any
+    position/money signal is present — the safe direction for a leak."""
     if not text:
         return False
     s = str(text).lower()
-    cues = ("portfolio", "holding", "my position", "p&l", "pnl", "account",
-            "shares of", "avg cost", "cost basis", "net worth", "my book",
-            "unrealized", "realized gain", "day_pnl", "balance")
-    return any(c in s for c in cues)
+    if _MONEY_RE.search(s) or _SHARES_RE.search(s) or _FIRST_PERSON_HOLD_RE.search(s):
+        return True
+    return any(c in s for c in _PRIVATE_CUES)
 
 
 def _messages_text(messages: Any) -> str:
@@ -105,7 +122,11 @@ def route(messages: List[Dict[str, Any]], role: str = "", complexity: float = 0.
             if not ok and max_escalations >= 1:
                 escalated = 1
                 fallback_used = 1
-                text = _ai().chat_any(messages, max_tokens=(max_tokens or 0) + 256,
+                # Don't turn an intended-unbounded (None) completion into a hard
+                # 256-token cap on the retry — that truncates the very output
+                # that failed the floor for being too short.
+                retry_tokens = (max_tokens + 256) if max_tokens else None
+                text = _ai().chat_any(messages, max_tokens=retry_tokens,
                                       json_mode=json_mode)
                 ok = _meets_floor(text, quality_floor)
     except Exception as e:

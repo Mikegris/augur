@@ -4196,6 +4196,30 @@ function _ajToast(msg, ok) {
     }
   } catch (e) {}
 }
+// window.confirm() is unreliable in pywebview/WKWebView (returns falsy without
+// showing a dialog), which would silently dead the KILL/RUN buttons. Use an
+// in-DOM modal that works in every webview.
+function _ajConfirm(message) {
+  return new Promise((resolve) => {
+    const ov = document.createElement('div');
+    ov.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:99999;display:flex;align-items:center;justify-content:center';
+    ov.innerHTML = '<div style="background:var(--panel,#0d0d0d);border:1px solid var(--border,#333);border-radius:8px;padding:20px;max-width:440px;font-size:13px">'
+      + '<div style="margin-bottom:16px">' + _esc(message) + '</div>'
+      + '<div style="display:flex;gap:10px;justify-content:flex-end">'
+      + '<button class="btn btn-sm" data-x="0">Cancel</button>'
+      + '<button class="btn btn-sm" data-x="1" style="background:var(--red,#c0392b);color:#fff;border-color:var(--red,#c0392b)">Confirm</button>'
+      + '</div></div>';
+    const done = (v) => { if (ov.parentNode) document.body.removeChild(ov); resolve(v); };
+    ov.addEventListener('click', (e) => {
+      const t = e.target;
+      if (t === ov) return done(false);
+      const x = t && t.getAttribute && t.getAttribute('data-x');
+      if (x === '0') return done(false);
+      if (x === '1') return done(true);
+    });
+    document.body.appendChild(ov);
+  });
+}
 function _ajMoney(v) {
   if (v === null || v === undefined || isNaN(v)) return '—';
   const n = Number(v);
@@ -4310,16 +4334,24 @@ async function loadTradingView() {
   // wire actions
   const killBtn = document.getElementById('aj-kill');
   if (killBtn) killBtn.addEventListener('click', async () => {
-    if (!confirm('KILL SWITCH: disable trading and cancel open orders now?')) return;
-    try { await API.post('/api/aj/kill', { reason: 'kill (UI)' }); _ajToast('◉ Kill switch engaged — trading disabled'); loadTradingView(); }
-    catch (e) { _ajToast('Kill failed: ' + e.message, false); }
+    if (!(await _ajConfirm('KILL SWITCH: disable trading and cancel open orders now?'))) return;
+    try {
+      const r = await API.post('/api/aj/kill', { reason: 'kill (UI)' });
+      _ajToast('◉ Kill switch engaged — trading disabled' + (r && r.still_open ? ' (' + r.still_open + ' still open!)' : ''), r && r.still_open ? false : true);
+      loadTradingView();
+    } catch (e) { _ajToast('Kill failed: ' + e.message, false); }
   });
   const runBtn = document.getElementById('aj-run');
   if (runBtn) runBtn.addEventListener('click', async () => {
-    if (!confirm('Run one PAPER operator cycle now? It may place paper trades if configured.')) return;
+    if (!(await _ajConfirm('Run one PAPER operator cycle now? It may place paper trades if configured.'))) return;
     runBtn.disabled = true; runBtn.textContent = '… running';
-    try { const r = await API.post('/api/aj/run', { mode: 'paper' }); _ajToast('◉ Cycle complete: ' + ((r.proposals || []).length) + ' proposal(s)'); loadTradingView(); }
-    catch (e) { _ajToast('Run failed: ' + e.message, false); runBtn.disabled = false; runBtn.textContent = '▶ RUN CYCLE (paper)'; }
+    try {
+      const r = await API.post('/api/aj/run', { mode: 'paper' });
+      const props = r.proposals || [];
+      const executed = props.filter(p => p && p.result === 'executed').length;
+      _ajToast('◉ Cycle complete: ' + executed + ' executed / ' + props.length + ' scanned');
+      loadTradingView();
+    } catch (e) { _ajToast('Run failed: ' + (e.message || e), false); runBtn.disabled = false; runBtn.textContent = '▶ RUN CYCLE (paper)'; }
   });
   const rearmBtn = document.getElementById('aj-rearm');
   if (rearmBtn) rearmBtn.addEventListener('click', async () => {
@@ -4331,7 +4363,10 @@ async function loadTradingView() {
     // Defensive readers — a missing field is skipped, never throws the save.
     const el = (id) => document.getElementById(id);
     const vBool = (id) => { const e = el(id); return e ? (e.value === 'true') : undefined; };
-    const vNum = (id) => { const e = el(id); return e ? (Number(e.value) || 0) : undefined; };
+    // Blank field => undefined (omitted from the save, leaves the stored value
+    // unchanged) rather than 0 — so clearing a threshold field can't silently
+    // set buy/sell/min-edge to 0 ("trade on everything").
+    const vNum = (id) => { const e = el(id); if (!e) return undefined; const t = e.value.trim(); if (t === '') return undefined; const n = Number(t); return isFinite(n) ? n : undefined; };
     const vStr = (id) => { const e = el(id); return e ? e.value.trim() : undefined; };
     const vList = (id) => { const e = el(id); return e ? e.value.split(',').map(x => x.trim()).filter(Boolean) : undefined; };
     const raw = {

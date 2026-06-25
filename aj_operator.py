@@ -98,21 +98,31 @@ def _judge(symbol: str, fc: Dict[str, Any], cfg: Dict[str, Any],
     prob = ens.get("prob_up")
     if not isinstance(prob, (int, float)):
         return None
-    edge_pts = abs(float(ens.get("edge_pct_pts") or (prob - 0.5) * 100))
+    # Use the calibrated edge when present; only fall back to raw (prob-0.5)
+    # when it's genuinely ABSENT (None) — `or` wrongly treated a legitimately
+    # zero calibrated edge as missing and substituted the raw value, letting a
+    # deliberately-shrunk edge clear the red-team floor on raw prob alone.
+    raw_edge = ens.get("edge_pct_pts")
+    edge_pts = abs(float(raw_edge)) if raw_edge is not None else abs((prob - 0.5) * 100)
     conviction = str(ens.get("conviction") or "").lower()
+    min_edge = float(cfg.get("min_edge_pct_pts", 0) or 0)
 
     # red-team: minimum edge + not a low-conviction coin-flip
-    if edge_pts < float(cfg.get("min_edge_pct_pts") or 0):
+    if edge_pts < min_edge:
         return None
     if conviction in ("low", "none", ""):
         # a split book where calibration shrank the edge to noise
-        if edge_pts < 2 * float(cfg.get("min_edge_pct_pts") or 0):
+        if edge_pts < 2 * min_edge:
             return None
 
+    # Explicit defaults (not `or`) so a legitimately-configured threshold of 0
+    # isn't silently overridden back to 0.55/0.45.
+    buy_thr = float(cfg.get("buy_prob_threshold", 0.55))
+    sell_thr = float(cfg.get("sell_prob_threshold", 0.45))
     side = None
-    if prob >= float(cfg.get("buy_prob_threshold") or 0.55):
+    if prob >= buy_thr:
         side = "buy"
-    elif prob <= float(cfg.get("sell_prob_threshold") or 0.45) and held_qty > 0:
+    elif prob <= sell_thr and held_qty > 0:
         side = "sell"
     if side is None:
         return None
@@ -140,7 +150,9 @@ def _judge(symbol: str, fc: Dict[str, Any], cfg: Dict[str, Any],
 # ── size ──────────────────────────────────────────────────────────────────────
 
 def _size(symbol: str, side: str, cfg: Dict[str, Any], held_qty: float) -> Optional[Dict[str, Any]]:
-    price = aj_risk._order_price(symbol, "market", None)
+    # Thread asset_type so a crypto symbol surfaced via the open universe is
+    # priced off SYM-USD, not the bare (possibly unrelated) equity ticker.
+    price = aj_risk._order_price(symbol, "market", None, aj_positions.infer_asset_type(symbol))
     if price is None or price <= 0:
         return None
     max_notional = aj_db.money(cfg.get("max_order_notional_usd") or 0)
@@ -179,11 +191,14 @@ def _propose_and_execute(cycle_id: str, symbol: str, decision: Dict[str, Any],
                 "qty": sizing["qty"], "order_type": "market", "limit_price": None}
     rd = aj_risk.evaluate(proposal)
     if rd.get("decision") != "pass":
-        aj_db.update("aj_proposals", pid,
-                     status=("blocked" if rd["decision"] != "halt" else "blocked"),
-                     risk_reason=rd.get("reason"))
-        return {"proposal_id": pid, "result": rd.get("decision"),
-                "reason": rd.get("reason")}
+        # The proposal CHECK constraint allows only proposed/blocked/approved/
+        # rejected/executed/expired, so both block and halt map to 'blocked';
+        # the distinction (and the halt) is carried in risk_reason + result.
+        reason = rd.get("reason")
+        if rd.get("decision") == "halt":
+            reason = "HALTED: " + str(reason or "daily-loss breach")
+        aj_db.update("aj_proposals", pid, status="blocked", risk_reason=reason)
+        return {"proposal_id": pid, "result": rd.get("decision"), "reason": reason}
 
     # passed. paper MAY auto-approve; live NEVER auto (human-in-the-loop §19).
     mode = rd.get("mode") or "paper"
@@ -254,9 +269,15 @@ def run_once(mode: str = "paper") -> Dict[str, Any]:
                 log.exception("symbol %s failed in cycle", symbol)
                 summary["proposals"].append({"symbol": symbol, "result": "error"})
 
-        # reconcile (paper self-truth) + score due forecasts + close
-        summary["reconcile"] = aj_execution.reconcile(venue=cfg.get("default_broker"),
-                                                      cycle_id=cycle_id)["status"]
+        # reconcile (paper self-truth) + score due forecasts + close.
+        # Non-fatal: a reconcile failure (e.g. an unverified live venue raising)
+        # must not mark an otherwise-successful paper cycle as crashed.
+        try:
+            summary["reconcile"] = aj_execution.reconcile(
+                venue=cfg.get("default_broker"), cycle_id=cycle_id)["status"]
+        except Exception:
+            log.exception("reconcile failed (non-fatal)")
+            summary["reconcile"] = "error"
         try:
             import research_tracker
             summary["scored"] = research_tracker.score_due_forecasts()

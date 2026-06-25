@@ -22,8 +22,19 @@ import aj_config
 
 log = logging.getLogger("augur.aj_risk")
 
+import math
 import re
 _CRYPTO_SUFFIX = "-USD"
+
+
+def _trading_enabled_fresh() -> bool:
+    """Uncached read of the master switch — a kill/halt on another thread (or
+    mid-evaluation) must be seen immediately, not up to 5s later through the
+    settings cache. Absent key => False (fail-closed)."""
+    raw = aj_db.get_setting_raw("aj_trading_enabled")
+    if raw is None:
+        return False
+    return str(raw).strip().lower() in ("1", "true", "yes", "on")
 # Valid ticker shape for open-universe mode — alnum core + optional one
 # .  or - suffix (e.g. BRK-B, BTC-USD). Bounds what "any symbol" can mean.
 _VALID_SYMBOL = re.compile(r"^[A-Z0-9]{1,9}(?:[.\-][A-Z0-9]{1,4})?$")
@@ -64,18 +75,34 @@ def _today() -> str:
     return aj_db.utc_now().strftime("%Y-%m-%d")
 
 
-def _session_open_unrealized(current_unrealized: float) -> float:
-    """The unrealized mark captured at session open. Snapshotted once per UTC
-    day on first observation; subsequent calls return the stored value so the
-    day's delta is measured from a fixed baseline."""
-    key = "__aj_unreal_open_" + _today()
+def _session_date() -> str:
+    """The ET trading date. The session-open baseline must reset at the ET
+    session, not at 00:00 UTC (which lands mid-afterhours ET)."""
     try:
-        raw = db.get_settings().get(key)
-        if raw is not None and str(raw) != "":
-            return aj_db.money(raw)
+        from zoneinfo import ZoneInfo
+        return aj_db.utc_now().astimezone(
+            ZoneInfo("America/New_York")).strftime("%Y-%m-%d")
     except Exception:
-        pass
-    db.set_setting(key, str(aj_db.money(current_unrealized)))
+        return aj_db.utc_now().strftime("%Y-%m-%d")
+
+
+def _session_open_unrealized(current_unrealized: float) -> float:
+    """The unrealized mark captured at session open. Snapshotted once per ET
+    trading day on first observation; subsequent calls return the stored value
+    so the day's delta is measured from a fixed baseline.
+
+    MUST use the raw settings reader: the key is `__`-prefixed and
+    get_settings() hides those, so the old code always read None and re-stamped
+    the snapshot to "now" every call — making (unreal_now - unreal_open) always
+    0 and silently dropping unrealized drawdown from the daily-loss HALT."""
+    key = "__aj_unreal_open_" + _session_date()
+    raw = aj_db.get_setting_raw(key)
+    if raw is not None and str(raw) != "":
+        try:
+            return aj_db.money(raw)
+        except Exception:
+            pass
+    aj_db.set_setting_raw(key, str(aj_db.money(current_unrealized)))
     return aj_db.money(current_unrealized)
 
 
@@ -273,13 +300,27 @@ def kill_switch(reason: str = "manual kill") -> Dict[str, Any]:
         aj_execution.disconnect_all()
     except Exception:
         pass
+    # Surface any order that survived cancellation — a live broker cancel that
+    # threw leaves a position open; the operator must know, not assume clean.
+    still_open = 0
+    try:
+        rows = aj_db.query(
+            "SELECT COUNT(*) AS n FROM aj_orders WHERE state IN "
+            "('new','submitted','accepted','partially_filled','unknown')")
+        still_open = int(rows[0]["n"]) if rows else 0
+    except Exception:
+        log.debug("kill_switch still-open count failed", exc_info=True)
     aj_db.insert("aj_risk_events", created_at=aj_db.utc_now_iso(),
                  proposal_id=None, decision="halt", reason="kill: " + reason,
                  caps_json="{}", day_pnl_usd=None)
     aj_db.audit("halt", {"reason": "kill_switch: " + reason,
-                         "orders_canceled": canceled}, actor="human")
+                         "orders_canceled": canceled, "still_open": still_open},
+                actor="human")
     _emit_alert("critical", "KILL SWITCH: {} ({} orders canceled)".format(reason, canceled))
-    return {"ok": True, "orders_canceled": canceled}
+    if still_open:
+        _emit_alert("critical",
+                    "KILL SWITCH: {} order(s) STILL OPEN after cancel — manual review".format(still_open))
+    return {"ok": True, "orders_canceled": canceled, "still_open": still_open}
 
 
 def rearm(actor: str = "human") -> Dict[str, Any]:
@@ -340,8 +381,8 @@ def evaluate(proposal: Dict[str, Any]) -> RiskDecision:
             _record("block", "invalid side", caps, None, pid)
             return RiskDecision(decision="block", reason="invalid side")
 
-        # Step 1 — master switch
-        if not cfg.get("trading_enabled"):
+        # Step 1 — master switch (uncached: see a kill/halt immediately)
+        if not _trading_enabled_fresh():
             _record("block", "trading_enabled is false", caps, None, pid)
             return RiskDecision(decision="block", reason="trading disabled (master switch off)")
 
@@ -379,9 +420,12 @@ def evaluate(proposal: Dict[str, Any]) -> RiskDecision:
         else:
             _record("block", "no qty/notional", caps, None, pid)
             return RiskDecision(decision="block", reason="proposal lacks qty and notional")
-        if qty <= 0:
-            _record("block", "qty <= 0", caps, None, pid)
-            return RiskDecision(decision="block", reason="qty must be > 0")
+        # qty MUST be finite + positive: a NaN/inf notional yields a non-finite
+        # qty that passes `qty <= 0` (NaN comparisons are False) and then
+        # money(qty*price)=0, which would slip under any positive cap.
+        if not math.isfinite(qty) or qty <= 0:
+            _record("block", "qty not finite/positive", caps, None, pid)
+            return RiskDecision(decision="block", reason="qty must be a finite number > 0")
         order_notional = aj_db.money(qty * price)
 
         # Step 4 — per-order notional cap (0 => block)
@@ -428,6 +472,12 @@ def evaluate(proposal: Dict[str, Any]) -> RiskDecision:
         if venue == "robinhood" and not cfg.get("robinhood_enabled"):
             _record("block", "robinhood_enabled is false", caps, None, pid)
             return RiskDecision(decision="block", reason="Robinhood venue not enabled")
+
+        # Final fresh master-switch check — a kill/halt may have landed during
+        # evaluation (between the step-1 read and here).
+        if not _trading_enabled_fresh():
+            _record("block", "trading disabled mid-evaluation", caps, None, pid)
+            return RiskDecision(decision="block", reason="trading disabled (master switch off)")
 
         _record("pass", None, caps, pnl["day_pnl"], pid)
         return RiskDecision(decision="pass", reason=None, mode=mode,

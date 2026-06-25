@@ -134,12 +134,9 @@ def test_gated_brokers_fail_closed():
         assert False, "should have raised BrokerNotEnabled"
     except aj_broker.BrokerNotEnabled:
         pass
-    # alpaca self-gates: unconfigured => BrokerNotEnabled (fail-closed), even paper
-    try:
-        aj_broker.get_broker("alpaca")
-        assert False, "alpaca should fail closed when unconfigured"
-    except aj_broker.BrokerNotEnabled:
-        pass
+    # alpaca: live off => internal PaperBroker (uniform with ccxt/robinhood);
+    # the live fail-closed path is covered in test_aj_alpaca.
+    assert isinstance(aj_broker.get_broker("alpaca"), aj_broker.PaperBroker)
 
 
 # ── BrokerClient conformance against a mock ───────────────────────────────────

@@ -21,6 +21,11 @@ import aj_db
 
 log = logging.getLogger("augur.aj_positions")
 
+# One consistent quantity epsilon — the old code mixed 1e-12 and 1e-9, so a
+# residual in (1e-12, 1e-9] was neither matched nor shorted nor flagged: it
+# silently vanished.
+_EPS = 1e-9
+
 # Minimal crypto inference for asset-type-sensitive rules/marks.
 _CRYPTO_HINTS = {"BTC", "ETH", "SOL", "XRP", "DOGE", "ADA", "HBAR", "LTC",
                  "BCH", "AVAX", "DOT", "MATIC", "LINK", "UNI", "ATOM"}
@@ -68,24 +73,38 @@ def paper_book(mode: str = "paper") -> Dict[str, Any]:
         fees_total += fees
         if is_today:
             fees_today += fees
+        dq = lots[sym]
         if side == "buy":
-            lots[sym].append([qty, price])
+            remaining = qty
+            # A buy first COVERS any open short lots (FIFO), realizing
+            # (short_price - cover_price) per share, THEN opens/extends a long.
+            # The old code appended every buy as a long even when a short was
+            # open — the cover P&L was never booked and the position silently
+            # netted to flat with zero realized.
+            while remaining > _EPS and dq and dq[0][0] < 0:
+                lot = dq[0]                       # lot[0] is negative (short)
+                take = min(remaining, -lot[0])
+                realized += (lot[1] - price) * take
+                lot[0] += take
+                remaining -= take
+                if lot[0] >= -_EPS:
+                    dq.popleft()
+            if remaining > _EPS:
+                dq.append([remaining, price])
         elif side == "sell":
             remaining = qty
-            dq = lots[sym]
-            while remaining > 1e-12 and dq:
+            # A sell first consumes open LONG lots (FIFO), then opens/extends a
+            # short with any excess.
+            while remaining > _EPS and dq and dq[0][0] > 0:
                 lot = dq[0]
                 take = min(remaining, lot[0])
                 realized += (price - lot[1]) * take
                 lot[0] -= take
                 remaining -= take
-                if lot[0] <= 1e-12:
+                if lot[0] <= _EPS:
                     dq.popleft()
-            if remaining > 1e-9:
-                # sold more than held — treat the excess as a short opened at
-                # this price (basis = price, zero immediate realized on the
-                # excess). Conservative: record a negative lot.
-                lots[sym].append([-remaining, price])
+            if remaining > _EPS:
+                dq.append([-remaining, price])
         realized_total += realized
         if is_today:
             realized_today += realized
@@ -93,7 +112,7 @@ def paper_book(mode: str = "paper") -> Dict[str, Any]:
     positions: Dict[str, Any] = {}
     for sym, dq in lots.items():
         tot_qty = sum(l[0] for l in dq)
-        if abs(tot_qty) <= 1e-9:
+        if abs(tot_qty) <= _EPS:
             continue
         cost = sum(l[0] * l[1] for l in dq)
         positions[sym] = {

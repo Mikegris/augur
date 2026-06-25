@@ -57,7 +57,8 @@ def _set_state(order_id: int, to: str, **extra) -> bool:
     frm = row.get("state")
     if frm == to and to != "partially_filled":
         if extra:
-            aj_db.update("aj_orders", order_id, **extra)
+            # compare-and-set so we don't clobber a concurrent terminal write
+            aj_db.update_if("aj_orders", order_id, "state", frm, **extra)
         return True
     if not valid_transition(frm, to):
         log.warning("illegal order transition %s -> %s (order %s)", frm, to, order_id)
@@ -66,8 +67,14 @@ def _set_state(order_id: int, to: str, **extra) -> bool:
     cols["state"] = to
     if to in _TERMINAL:
         cols["terminal_at"] = aj_db.utc_now_iso()
-    aj_db.update("aj_orders", order_id, **cols)
-    return True
+    # Conditional on the state we validated against — if another thread already
+    # transitioned this order (e.g. reconcile vs cancel), we lose and return
+    # False rather than silently overwriting a terminal state.
+    ok = aj_db.update_if("aj_orders", order_id, "state", frm, **cols)
+    if not ok:
+        log.warning("order %s state changed under transition %s->%s (lost race)",
+                    order_id, frm, to)
+    return ok
 
 
 # ── execute one accepted proposal (§12.2 - row before submit) ─────────────────
@@ -89,15 +96,33 @@ def execute_trade(proposal: Dict[str, Any], decision: Dict[str, Any],
     limit_price = proposal.get("limit_price")
     mode = decision.get("mode") or "paper"
     venue = decision.get("venue") or aj_config.get_config().get("default_broker") or "paper"
-    client_order_id = str(uuid.uuid4())          # idempotency key (§12.4)
+    # Idempotency key (§12.4): DETERMINISTIC per proposal so the UNIQUE
+    # constraint on aj_orders.client_order_id dedups a double-submit of the same
+    # proposal (a double-clicked /approve, or operator+route racing) at the DB
+    # level — exactly one order can ever exist for a proposal. Ad-hoc calls with
+    # no proposal id fall back to a random uuid.
+    pid = proposal.get("id")
+    client_order_id = "ajp-{}".format(pid) if pid is not None else str(uuid.uuid4())
 
-    # 1) write 'new' BEFORE submit
-    order_id = aj_db.insert(
-        "aj_orders", proposal_id=proposal.get("id"), client_order_id=client_order_id,
-        broker=venue, mode=mode, account_ref=proposal.get("account_ref"),
-        symbol=symbol, side=side, qty=qty, order_type=order_type,
-        limit_price=limit_price, state="new", filled_qty=0, fees_usd=0,
-        created_at=aj_db.utc_now_iso())
+    # 1) write 'new' BEFORE submit. A UNIQUE violation means this proposal
+    # already produced an order — return that, never a second submit.
+    try:
+        order_id = aj_db.insert(
+            "aj_orders", proposal_id=pid, client_order_id=client_order_id,
+            broker=venue, mode=mode, account_ref=proposal.get("account_ref"),
+            symbol=symbol, side=side, qty=qty, order_type=order_type,
+            limit_price=limit_price, state="new", filled_qty=0, fees_usd=0,
+            created_at=aj_db.utc_now_iso())
+    except Exception as e:
+        existing = aj_db.query(
+            "SELECT id, state FROM aj_orders WHERE client_order_id=?", (client_order_id,))
+        if existing:
+            log.warning("duplicate submit blocked for proposal %s (order %s)",
+                        pid, existing[0]["id"])
+            return {"ok": False, "order_id": existing[0]["id"],
+                    "state": existing[0]["state"],
+                    "reason": "duplicate proposal submission (idempotency)"}
+        raise
     aj_db.audit("order", {"order_id": order_id, "symbol": symbol, "side": side,
                           "qty": qty, "mode": mode, "venue": venue,
                           "client_order_id": client_order_id},
@@ -143,6 +168,16 @@ def _apply_broker_result(order_id: int, res: Dict[str, Any],
     # If broker says filled but we recorded partials, trust fill aggregates.
     if agg["filled_qty"] > 0 and state == "accepted":
         state = "partially_filled"
+    # If the broker LABELS it filled but our recorded fills are short of the
+    # order qty, don't accept the terminal 'filled' — keep it reconcilable so a
+    # later poll can pull the missing fills (a terminal order is never revisited
+    # by _resolve_open_orders).
+    try:
+        order_qty = float((aj_db.get_row("aj_orders", order_id) or {}).get("qty") or 0)
+    except Exception:
+        order_qty = 0.0
+    if state == "filled" and order_qty > 0 and agg["filled_qty"] + 1e-6 < order_qty:
+        state = "partially_filled" if agg["filled_qty"] > 0 else "unknown"
     _set_state(order_id, state, broker_order_id=boid,
                avg_fill_price=agg["avg_fill_price"], filled_qty=agg["filled_qty"],
                fees_usd=agg["fees_usd"])
@@ -164,17 +199,28 @@ def _record_fill(order_id: int, fill: Dict[str, Any], cycle_id: Optional[str]) -
     # Idempotent on broker_fill_id: a reconciliation poll that re-reports the
     # same fill must not double-count it (live brokers report cumulative fills).
     bfid = fill.get("broker_fill_id")
+    qv = float(fill.get("qty") or 0)
+    pv = float(fill.get("price") or 0)
+    fv = float(fill.get("fees_usd") or 0)
+    at = fill.get("filled_at") or aj_db.utc_now_iso()
     if bfid:
         dup = aj_db.query(
             "SELECT id FROM aj_fills WHERE order_id=? AND broker_fill_id=?",
             (order_id, bfid))
         if dup:
             return int(dup[0]["id"])
+    else:
+        # No broker fill id — dedup on the natural key so an id-less fill
+        # re-reported by reconciliation isn't double-counted (the exact case the
+        # original guard skipped).
+        dup = aj_db.query(
+            "SELECT id FROM aj_fills WHERE order_id=? AND broker_fill_id IS NULL "
+            "AND qty=? AND price=? AND filled_at=?", (order_id, qv, pv, at))
+        if dup:
+            return int(dup[0]["id"])
     fid = aj_db.insert(
         "aj_fills", order_id=order_id, broker_fill_id=bfid,
-        qty=float(fill.get("qty") or 0), price=float(fill.get("price") or 0),
-        fees_usd=float(fill.get("fees_usd") or 0),
-        filled_at=fill.get("filled_at") or aj_db.utc_now_iso())
+        qty=qv, price=pv, fees_usd=fv, filled_at=at)
     aj_db.audit("fill", {"order_id": order_id, "qty": fill.get("qty"),
                          "price": fill.get("price"), "fees": fill.get("fees_usd")},
                 cycle_id=cycle_id, ref_id=order_id)
@@ -212,6 +258,10 @@ def reconcile(broker: Optional[aj_broker.BrokerClient] = None,
     resolved = _resolve_open_orders(broker, cycle_id)
 
     status = "match"
+    # Case-fold so a broker reporting mode 'LIVE' still triggers the live halt;
+    # default to treating an uncertain mode as live (fail-closed) for the halt
+    # decision below.
+    is_live = str(getattr(broker, "mode", "")).strip().lower() == "live"
     detail: Dict[str, Any] = {"resolved": resolved, "scopes": {}}
     try:
         local = {p["symbol"].upper(): float(p["qty"]) for p in _local_positions(broker)}
@@ -226,14 +276,23 @@ def reconcile(broker: Optional[aj_broker.BrokerClient] = None,
         if divergences:
             status = "divergence"
             # §20.3 — a live divergence implying an unexpected position halts.
-            if broker.mode == "live":
+            if is_live:
                 import aj_risk
                 aj_risk.halt("reconciliation divergence (live): {}".format(divergences),
                              caps={"divergences": divergences})
     except Exception as e:
+        # A live broker that errors on positions() is the MOST likely signal
+        # something is wrong — halt fail-closed rather than leave trading on.
         log.exception("reconcile positions failed")
         detail["error"] = str(e)
         status = "divergence"
+        if is_live:
+            try:
+                import aj_risk
+                aj_risk.halt("reconciliation error (live): {}".format(str(e)[:120]),
+                             caps={"error": str(e)[:200]})
+            except Exception:
+                log.exception("halt-on-recon-error failed")
 
     rid = aj_db.insert("aj_recon", ts=aj_db.utc_now_iso(),
                        scope="all", status=status,

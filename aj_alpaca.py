@@ -98,6 +98,12 @@ class AlpacaBroker(BrokerClient):
 
     # ── BrokerClient ──────────────────────────────────────────────────────────
     def submit(self, order: Dict[str, Any]) -> Dict[str, Any]:
+        # Crypto needs the BTC/USD pair format + gtc/ioc TIF, which this equity
+        # path doesn't model — reject rather than mis-route a malformed order.
+        if str(order.get("asset_type") or "").lower() == "crypto":
+            return {"broker_order_id": None, "state": "rejected", "filled_qty": 0.0,
+                    "avg_fill_price": None, "fees_usd": 0.0, "fills": [],
+                    "raw": {"reason": "alpaca adapter does not support crypto yet"}}
         body = {
             "symbol": str(order.get("symbol") or "").upper(),
             "qty": str(order.get("qty")),
@@ -109,14 +115,24 @@ class AlpacaBroker(BrokerClient):
         if body["type"] == "limit":
             body["limit_price"] = str(order.get("limit_price"))
         data = self._request("POST", "/v2/orders", body)
-        return self._to_result(data, with_fills=False)
+        res = self._to_result(data, with_fills=False)
+        # If Alpaca already reports fills at submit (fast market order), pull
+        # them now so the book reflects the trade immediately instead of being
+        # marked 'filled' with zero recorded fills until a reconcile poll.
+        if res.get("filled_qty", 0) > 0 and res.get("broker_order_id"):
+            res["fills"] = self._fills_for(res["broker_order_id"])
+        return res
 
     def cancel(self, broker_order_id: str) -> Dict[str, Any]:
         try:
             self._request("DELETE", "/v2/orders/{}".format(broker_order_id))
-        except Exception:
-            log.debug("alpaca cancel failed for %s", broker_order_id, exc_info=True)
-        return {"broker_order_id": broker_order_id, "state": "canceled"}
+            return {"broker_order_id": broker_order_id, "state": "canceled"}
+        except Exception as e:
+            # Do NOT assert 'canceled' on failure — a still-live order would be
+            # mistaken for canceled. Mark unknown; reconciliation confirms truth.
+            log.warning("alpaca cancel failed for %s: %s", broker_order_id, e)
+            return {"broker_order_id": broker_order_id, "state": "unknown",
+                    "error": str(e)[:120]}
 
     def get_order(self, broker_order_id: str) -> Dict[str, Any]:
         data = self._request("GET", "/v2/orders/{}".format(broker_order_id))
@@ -158,7 +174,9 @@ class AlpacaBroker(BrokerClient):
             out.append({
                 "qty": float(a.get("qty") or 0),
                 "price": float(a.get("price") or 0),
-                "fees_usd": 0.0,
+                # capture any fee the activity reports (crypto venues do) so
+                # live P&L isn't optimistic; 0 for commission-free equities.
+                "fees_usd": float(a.get("fee") or a.get("fees") or 0),
                 "broker_fill_id": a.get("id"),
                 "filled_at": a.get("transaction_time") or aj_db.utc_now_iso(),
             })

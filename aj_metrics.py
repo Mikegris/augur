@@ -34,8 +34,9 @@ def cumulative_pnl(mode: str = "paper") -> Dict[str, Any]:
             unreal += (mark - p["avg_cost"]) * p["qty"]
     except Exception:
         log.debug("cumulative_pnl unrealized failed", exc_info=True)
+    unreal = aj_db.money(unreal)
     return {"realized_total": book["realized_total"],
-            "unrealized_open": aj_db.money(unreal),
+            "unrealized_open": unreal,
             "total": aj_db.money(book["realized_total"] + unreal),
             "fees_total": book["fees_total"]}
 
@@ -100,7 +101,7 @@ def alerts() -> List[Dict[str, str]]:
         gs = gate_stats()
         if gs.get("halt"):
             out.append({"level": "critical", "message": "{} halt event(s) today".format(gs["halt"])})
-        unknown = order_stats()["by_state"].get("unknown", 0)
+        unknown = os_["by_state"].get("unknown", 0)   # reuse os_, no re-query
         if unknown:
             out.append({"level": "critical", "message": "{} order(s) in UNKNOWN state".format(unknown)})
     except Exception:

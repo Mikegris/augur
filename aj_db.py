@@ -144,9 +144,38 @@ _DDL = [
 
 # ── migrations (§6) ───────────────────────────────────────────────────────────
 
+def get_setting_raw(key: str) -> Optional[str]:
+    """Read one settings value DIRECTLY from the table, bypassing both the 5s
+    settings cache AND the get_settings() `__`-prefix filter. Control-plane keys
+    (the operator lease, the session-open P&L snapshot, the schema version) MUST
+    round-trip even though get_settings() hides `__` keys — reading them through
+    get_settings() silently returns None, which broke the lease lock and the
+    daily-loss unrealized snapshot (both fail-open). Always use this for those."""
+    try:
+        row = db.get_conn().execute(
+            "SELECT value FROM settings WHERE key=?", (key,)).fetchone()
+        return row["value"] if row else None
+    except Exception:
+        return None
+
+
+def set_setting_raw(key: str, value: str) -> None:
+    """Write a single settings value directly + invalidate the cache. Mirrors
+    set_setting but usable for `__` control-plane keys."""
+    with db._write_lock:
+        conn = db.get_conn()
+        conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?,?)",
+                     (key, str(value)))
+        conn.commit()
+    try:
+        db._invalidate_settings_cache()
+    except Exception:
+        pass
+
+
 def _applied_version() -> int:
     try:
-        v = db.get_settings().get(_SCHEMA_KEY)
+        v = get_setting_raw(_SCHEMA_KEY)
         return int(v) if v is not None else 0
     except Exception:
         return 0
@@ -249,13 +278,13 @@ def _us_market_holidays(year: int) -> set:
         c = _cal.Calendar()
         days = [d for d in c.itermonthdates(year, month)
                 if d.month == month and d.weekday() == weekday]
-        return days[n - 1]
+        return days[min(n - 1, len(days) - 1)] if days else None
 
     def _last_weekday(month, weekday):
         c = _cal.Calendar()
         days = [d for d in c.itermonthdates(year, month)
                 if d.month == month and d.weekday() == weekday]
-        return days[-1]
+        return days[-1] if days else None
 
     hols = set()
     hols.add(_observed(1, 1))                       # New Year's Day
@@ -267,7 +296,10 @@ def _us_market_holidays(year: int) -> set:
     hols.add(_nth_weekday(9, 0, 1))                 # Labor (1st Mon Sep)
     hols.add(_nth_weekday(11, 3, 4))                # Thanksgiving (4th Thu Nov)
     hols.add(_observed(12, 25))                     # Christmas
-    return hols
+    # Keep only same-year dates: an observed shift can push Jan-1-on-Saturday
+    # back to Dec-31 of the prior year, which market_session (called with
+    # local.year) could never match anyway. Drop None and cross-year entries.
+    return {h for h in hols if h is not None and h.year == year}
 
 
 def market_session(dt: Optional[datetime] = None) -> str:
@@ -348,7 +380,10 @@ class SingleInstanceLock:
         key = "__aj_lease_{}".format(self.name)
         now = time.time()
         with db._write_lock:
-            cur = db.get_settings().get(key)
+            # MUST read the raw row: get_settings() hides `__` keys, so reading
+            # the lease through it always returned None and the lock never
+            # excluded anything (fail-open). Read directly.
+            cur = get_setting_raw(key)
             if cur:
                 try:
                     held_at = float(str(cur).split(":")[0])
@@ -356,7 +391,10 @@ class SingleInstanceLock:
                         return False
                 except Exception:
                     pass
-            db.set_setting(key, "{}:{}".format(now, os.getpid()))
+            conn = db.get_conn()
+            conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?,?)",
+                         (key, "{}:{}".format(now, os.getpid())))
+            conn.commit()
         self._have = True
         return True
 
@@ -371,7 +409,11 @@ class SingleInstanceLock:
         except Exception:
             pass
         try:
-            db.set_setting("__aj_lease_{}".format(self.name), "")
+            with db._write_lock:
+                conn = db.get_conn()
+                conn.execute("DELETE FROM settings WHERE key=?",
+                             ("__aj_lease_{}".format(self.name),))
+                conn.commit()
         except Exception:
             pass
         self._have = False
@@ -484,18 +526,28 @@ def verify_audit_chain() -> Dict[str, Any]:
     rows = conn.execute(
         "SELECT id, ts, kind, ref_id, actor, payload_json, prev_hash, row_hash "
         "FROM aj_audit ORDER BY id ASC").fetchall()
-    prev = None
-    for r in rows:
+    prev_row_hash = None     # the previous row's row_hash
+    for i, r in enumerate(rows):
+        stored_prev = r["prev_hash"] or None
+        # Linkage: each row's prev_hash MUST equal the prior row's row_hash. The
+        # FIRST row must start the chain (null prev_hash) — a non-null prev_hash
+        # on row 0 means a contiguous prefix was deleted.
+        if i == 0:
+            if stored_prev is not None:
+                return {"ok": False, "broken_at": r["id"],
+                        "reason": "chain does not start cleanly (prefix deleted?)"}
+        elif stored_prev != prev_row_hash:
+            return {"ok": False, "broken_at": r["id"], "reason": "prev_hash linkage broken"}
+        # Recompute row_hash from the STORED prev_hash so any edit to prev_hash
+        # is caught here (row_hash binds it).
         material = "{}|{}|{}|{}|{}|{}".format(
-            prev or "", r["ts"], r["kind"],
+            stored_prev or "", r["ts"], r["kind"],
             r["ref_id"] if r["ref_id"] is not None else "",
             r["actor"] or "", r["payload_json"])
         expect = hashlib.sha256(material.encode("utf-8")).hexdigest()
-        if r["prev_hash"] != (prev or None) and not (prev is None and not r["prev_hash"]):
-            return {"ok": False, "broken_at": r["id"], "reason": "prev_hash mismatch"}
         if expect != r["row_hash"]:
             return {"ok": False, "broken_at": r["id"], "reason": "row_hash mismatch"}
-        prev = r["row_hash"]
+        prev_row_hash = r["row_hash"]
     return {"ok": True, "rows": len(rows)}
 
 
@@ -522,6 +574,24 @@ def update(table: str, row_id: int, **cols) -> None:
         conn.execute("UPDATE {} SET {} WHERE id=?".format(table, sets),
                      tuple(cols.values()) + (row_id,))
         conn.commit()
+
+
+def update_if(table: str, row_id: int, where_col: str, where_val: Any,
+              **cols) -> bool:
+    """Conditional UPDATE: applies cols only if `where_col` still equals
+    `where_val` (compare-and-set). Returns True iff a row was updated. Used to
+    make order-state transitions race-safe — a concurrent writer that already
+    moved the state wins, and this caller is told it lost (rowcount 0)."""
+    if not cols:
+        return False
+    sets = ",".join("{}=?".format(k) for k in cols)
+    with db._write_lock:
+        conn = db.get_conn()
+        cur = conn.execute(
+            "UPDATE {} SET {} WHERE id=? AND {}=?".format(table, sets, where_col),
+            tuple(cols.values()) + (row_id, where_val))
+        conn.commit()
+        return cur.rowcount > 0
 
 
 def get_row(table: str, row_id: int) -> Optional[Dict[str, Any]]:
