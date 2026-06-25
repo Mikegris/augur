@@ -4210,11 +4210,13 @@ async function loadTradingView() {
   const el = document.getElementById('view-trading');
   if (!el) return;
   el.innerHTML = '<div class="loading"><div class="spinner"></div> Loading trading agent…</div>';
-  let s;
-  try { s = await API.get('/api/aj/status'); }
+  let s, cfg;
+  try {
+    s = await API.get('/api/aj/status');
+    cfg = await API.get('/api/aj/config');   // FULL config — status returns only a subset
+  }
   catch (e) { el.innerHTML = `<div class="empty-state"><span>Trading agent unavailable: ${_esc(e.message)}</span></div>`; return; }
 
-  const cfg = s.config || {};
   const pnl = s.day_pnl || {};
   const cum = s.cumulative_pnl || {};
   const orders = s.orders || {};
@@ -4255,20 +4257,49 @@ async function loadTradingView() {
       <div class="panel"><div class="panel-body"><div class="muted">Fill rate</div><div style="font-size:22px">${orders.fill_rate == null ? '—' : Math.round(orders.fill_rate * 100) + '%'}</div></div></div>
     </div>
 
-    <div class="panel">
-      <div class="panel-header"><span class="panel-title">RISK CONFIG (fail-closed)</span></div>
-      <div class="panel-body" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:10px">
-        <label class="muted">Master trading<br><select id="aj-cfg-trading_enabled"><option value="false"${!enabled?' selected':''}>OFF</option><option value="true"${enabled?' selected':''}>ON (paper)</option></select></label>
-        <label class="muted">Symbol allowlist (comma)<br><input id="aj-cfg-symbol_allowlist" value="${_esc(allowlist)}" placeholder="NVDA, AAPL"></label>
-        <label class="muted">Allow ANY symbol (off allowlist)<br><select id="aj-cfg-allow_any_symbol"><option value="false"${!cfg.allow_any_symbol?' selected':''}>NO (allowlist only)</option><option value="true"${cfg.allow_any_symbol?' selected':''}>YES (open universe)</option></select></label>
-        <label class="muted">Max order notional $<br><input id="aj-cfg-max_order_notional_usd" type="number" value="${_esc(String(cfg.max_order_notional_usd || 0))}"></label>
-        <label class="muted">Max trades / day<br><input id="aj-cfg-max_trades_per_day" type="number" value="${_esc(String(cfg.max_trades_per_day || 0))}"></label>
-        <label class="muted">Max daily loss $<br><input id="aj-cfg-max_daily_loss_usd" type="number" value="${_esc(String(cfg.max_daily_loss_usd || 0))}"></label>
-        <label class="muted">Default broker<br><input id="aj-cfg-default_broker" value="${_esc(cfg.default_broker || 'paper')}"></label>
-        <label class="muted">Auto-approve paper<br><select id="aj-cfg-auto_approve_paper"><option value="true"${cfg.auto_approve_paper?' selected':''}>YES</option><option value="false"${!cfg.auto_approve_paper?' selected':''}>NO</option></select></label>
-      </div>
-      <div class="panel-body" style="padding-top:0"><button class="btn btn-sm" id="aj-save-cfg">SAVE CONFIG</button> <span class="muted" style="font-size:11px">Live trading is intentionally not editable here — it requires CLI + VERIFY gates.</span></div>
-    </div>
+    ${(() => {
+      const yn = (id, v, yes, no) => `<select id="${id}"><option value="true"${v?' selected':''}>${yes||'YES'}</option><option value="false"${!v?' selected':''}>${no||'NO'}</option></select>`;
+      const num = (id, v, step) => `<input id="${id}" type="number"${step?` step="${step}"`:''} value="${_esc(String(v == null ? '' : v))}">`;
+      const txt = (id, v, ph) => `<input id="${id}" value="${_esc(String(v == null ? '' : v))}"${ph?` placeholder="${ph}"`:''}>`;
+      const sess = (cfg.session_whitelist || ['regular']).join(', ');
+      const grid = 'display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:10px';
+      return `
+      <div class="panel">
+        <div class="panel-header"><span class="panel-title">CONFIG — UNIVERSE & SWITCHES</span></div>
+        <div class="panel-body" style="${grid}">
+          <label class="muted">Master trading<br>${yn('aj-cfg-trading_enabled', enabled, 'ON (paper)', 'OFF')}</label>
+          <label class="muted">Symbol allowlist (comma)<br>${txt('aj-cfg-symbol_allowlist', allowlist, 'NVDA, AAPL')}</label>
+          <label class="muted">Allow ANY symbol (open universe)<br>${yn('aj-cfg-allow_any_symbol', cfg.allow_any_symbol, 'YES (any quotable)', 'NO (allowlist only)')}</label>
+          <label class="muted">Scan universe max (open mode)<br>${num('aj-cfg-scan_universe_max', cfg.scan_universe_max)}</label>
+        </div>
+        <div class="panel-header"><span class="panel-title">CONFIG — RISK LIMITS (fail-closed)</span></div>
+        <div class="panel-body" style="${grid}">
+          <label class="muted">Max order notional $<br>${num('aj-cfg-max_order_notional_usd', cfg.max_order_notional_usd)}</label>
+          <label class="muted">Max trades / day<br>${num('aj-cfg-max_trades_per_day', cfg.max_trades_per_day)}</label>
+          <label class="muted">Max daily loss $ (HALT)<br>${num('aj-cfg-max_daily_loss_usd', cfg.max_daily_loss_usd)}</label>
+          <label class="muted">Daily-loss basis<br><select id="aj-cfg-daily_loss_basis"><option value="realized_plus_unrealized"${cfg.daily_loss_basis!=='realized'?' selected':''}>realized + unrealized</option><option value="realized"${cfg.daily_loss_basis==='realized'?' selected':''}>realized only</option></select></label>
+          <label class="muted">Halt re-arm<br><select id="aj-cfg-halt_rearm"><option value="manual"${cfg.halt_rearm!=='session_open'?' selected':''}>manual</option><option value="session_open"${cfg.halt_rearm==='session_open'?' selected':''}>session_open</option></select></label>
+          <label class="muted">Session whitelist (comma)<br>${txt('aj-cfg-session_whitelist', sess, 'regular, premarket')}</label>
+        </div>
+        <div class="panel-header"><span class="panel-title">CONFIG — STRATEGY (how it decides)</span></div>
+        <div class="panel-body" style="${grid}">
+          <label class="muted">Forecast horizon (trading days)<br>${num('aj-cfg-forecast_horizon_days', cfg.forecast_horizon_days)}</label>
+          <label class="muted">Buy threshold (prob-up ≥)<br>${num('aj-cfg-buy_prob_threshold', cfg.buy_prob_threshold, '0.01')}</label>
+          <label class="muted">Sell threshold (prob-up ≤)<br>${num('aj-cfg-sell_prob_threshold', cfg.sell_prob_threshold, '0.01')}</label>
+          <label class="muted">Min edge (pct points)<br>${num('aj-cfg-min_edge_pct_pts', cfg.min_edge_pct_pts, '0.5')}</label>
+          <label class="muted">Order size target $ (0 = ½ cap)<br>${num('aj-cfg-order_notional_target_usd', cfg.order_notional_target_usd)}</label>
+          <label class="muted">LLM thesis synthesis<br>${yn('aj-cfg-use_llm_synthesis', cfg.use_llm_synthesis)}</label>
+        </div>
+        <div class="panel-header"><span class="panel-title">CONFIG — EXECUTION (paper fill model)</span></div>
+        <div class="panel-body" style="${grid}">
+          <label class="muted">Default broker<br>${txt('aj-cfg-default_broker', cfg.default_broker || 'paper')}</label>
+          <label class="muted">Auto-approve paper<br>${yn('aj-cfg-auto_approve_paper', cfg.auto_approve_paper)}</label>
+          <label class="muted">Paper slippage (bps)<br>${num('aj-cfg-paper_slippage_bps', cfg.paper_slippage_bps, '0.5')}</label>
+          <label class="muted">Paper spread fraction<br>${num('aj-cfg-paper_spread_fraction', cfg.paper_spread_fraction, '0.1')}</label>
+        </div>
+        <div class="panel-body" style="padding-top:0"><button class="btn btn-sm" id="aj-save-cfg">SAVE CONFIG</button> <span class="muted" style="font-size:11px">Live trading is intentionally NOT editable here — it requires the CLI + VERIFY gates.</span></div>
+      </div>`;
+    })()}
 
     <div class="panel"><div class="panel-header"><span class="panel-title">ALERTS</span></div><div class="panel-body">${alerts}</div></div>
 
@@ -4297,16 +4328,36 @@ async function loadTradingView() {
   });
   const saveBtn = document.getElementById('aj-save-cfg');
   if (saveBtn) saveBtn.addEventListener('click', async () => {
-    const body = {
-      trading_enabled: document.getElementById('aj-cfg-trading_enabled').value === 'true',
-      symbol_allowlist: document.getElementById('aj-cfg-symbol_allowlist').value.split(',').map(x => x.trim()).filter(Boolean),
-      allow_any_symbol: document.getElementById('aj-cfg-allow_any_symbol').value === 'true',
-      max_order_notional_usd: Number(document.getElementById('aj-cfg-max_order_notional_usd').value) || 0,
-      max_trades_per_day: Number(document.getElementById('aj-cfg-max_trades_per_day').value) || 0,
-      max_daily_loss_usd: Number(document.getElementById('aj-cfg-max_daily_loss_usd').value) || 0,
-      default_broker: document.getElementById('aj-cfg-default_broker').value.trim() || 'paper',
-      auto_approve_paper: document.getElementById('aj-cfg-auto_approve_paper').value === 'true',
+    // Defensive readers — a missing field is skipped, never throws the save.
+    const el = (id) => document.getElementById(id);
+    const vBool = (id) => { const e = el(id); return e ? (e.value === 'true') : undefined; };
+    const vNum = (id) => { const e = el(id); return e ? (Number(e.value) || 0) : undefined; };
+    const vStr = (id) => { const e = el(id); return e ? e.value.trim() : undefined; };
+    const vList = (id) => { const e = el(id); return e ? e.value.split(',').map(x => x.trim()).filter(Boolean) : undefined; };
+    const raw = {
+      trading_enabled: vBool('aj-cfg-trading_enabled'),
+      symbol_allowlist: vList('aj-cfg-symbol_allowlist'),
+      allow_any_symbol: vBool('aj-cfg-allow_any_symbol'),
+      scan_universe_max: vNum('aj-cfg-scan_universe_max'),
+      max_order_notional_usd: vNum('aj-cfg-max_order_notional_usd'),
+      max_trades_per_day: vNum('aj-cfg-max_trades_per_day'),
+      max_daily_loss_usd: vNum('aj-cfg-max_daily_loss_usd'),
+      daily_loss_basis: vStr('aj-cfg-daily_loss_basis'),
+      halt_rearm: vStr('aj-cfg-halt_rearm'),
+      session_whitelist: vList('aj-cfg-session_whitelist'),
+      forecast_horizon_days: vNum('aj-cfg-forecast_horizon_days'),
+      buy_prob_threshold: vNum('aj-cfg-buy_prob_threshold'),
+      sell_prob_threshold: vNum('aj-cfg-sell_prob_threshold'),
+      min_edge_pct_pts: vNum('aj-cfg-min_edge_pct_pts'),
+      order_notional_target_usd: vNum('aj-cfg-order_notional_target_usd'),
+      use_llm_synthesis: vBool('aj-cfg-use_llm_synthesis'),
+      default_broker: vStr('aj-cfg-default_broker') || 'paper',
+      auto_approve_paper: vBool('aj-cfg-auto_approve_paper'),
+      paper_slippage_bps: vNum('aj-cfg-paper_slippage_bps'),
+      paper_spread_fraction: vNum('aj-cfg-paper_spread_fraction'),
     };
+    const body = {};
+    Object.keys(raw).forEach(k => { if (raw[k] !== undefined) body[k] = raw[k]; });
     try { await API.post('/api/aj/config', body); _ajToast('◉ Config saved'); loadTradingView(); }
     catch (e) { _ajToast('Save failed: ' + e.message, false); }
   });
