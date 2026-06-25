@@ -128,6 +128,72 @@ def paper_book(mode: str = "paper") -> Dict[str, Any]:
             "fees_today": aj_db.money(fees_today)}
 
 
+def realized_trades(mode: str = "paper") -> List[Dict[str, Any]]:
+    """Replay fills FIFO and emit ONE record per closing trade — a sell that
+    consumed long lots, or a buy that covered shorts — with its realized P&L
+    (incl fees). Open lots are not emitted. Feeds win-rate + per-symbol P&L.
+    Separate pass from paper_book() to keep that hot path untouched."""
+    from collections import defaultdict, deque
+    lots: Dict[str, deque] = defaultdict(deque)
+    out: List[Dict[str, Any]] = []
+    try:
+        rows = aj_db.query(
+            "SELECT o.symbol AS symbol, o.side AS side, f.qty AS qty, "
+            "f.price AS price, f.fees_usd AS fees, f.filled_at AS filled_at "
+            "FROM aj_fills f JOIN aj_orders o ON f.order_id = o.id "
+            "WHERE o.mode = ? ORDER BY f.filled_at ASC, f.id ASC", (mode,))
+    except Exception:
+        return out
+    for r in rows:
+        sym = (r.get("symbol") or "").upper()
+        side = (r.get("side") or "").lower()
+        qty = float(r.get("qty") or 0)
+        price = float(r.get("price") or 0)
+        fees = float(r.get("fees") or 0)
+        dq = lots[sym]
+        closed_pl = 0.0
+        closed_qty = 0.0
+        if side == "buy":
+            remaining = qty
+            while remaining > _EPS and dq and dq[0][0] < 0:
+                lot = dq[0]
+                take = min(remaining, -lot[0])
+                closed_pl += (lot[1] - price) * take
+                closed_qty += take
+                lot[0] += take
+                remaining -= take
+                if lot[0] >= -_EPS:
+                    dq.popleft()
+            if remaining > _EPS:
+                dq.append([remaining, price])
+        elif side == "sell":
+            remaining = qty
+            while remaining > _EPS and dq and dq[0][0] > 0:
+                lot = dq[0]
+                take = min(remaining, lot[0])
+                closed_pl += (price - lot[1]) * take
+                closed_qty += take
+                lot[0] -= take
+                remaining -= take
+                if lot[0] <= _EPS:
+                    dq.popleft()
+            if remaining > _EPS:
+                dq.append([-remaining, price])
+        if closed_qty > _EPS:
+            net = aj_db.money(closed_pl - fees)
+            out.append({"symbol": sym, "side": side, "qty": closed_qty,
+                        "realized": net, "price": price,
+                        "filled_at": r.get("filled_at"), "win": net > 0})
+    return out
+
+
+def realized_by_symbol(mode: str = "paper") -> Dict[str, float]:
+    agg: Dict[str, float] = {}
+    for t in realized_trades(mode):
+        agg[t["symbol"]] = aj_db.money(agg.get(t["symbol"], 0.0) + t["realized"])
+    return agg
+
+
 def positions_list(mode: str = "paper") -> List[Dict[str, Any]]:
     book = paper_book(mode)
     out = []

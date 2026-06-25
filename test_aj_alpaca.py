@@ -10,6 +10,11 @@ import sys
 import tempfile
 
 os.environ["AUGUR_DB_PATH"] = tempfile.mktemp(suffix="_ajalpaca.db")
+# Isolate the secrets master key PER PROCESS — otherwise every temp-DB test
+# shares one .aj_secret_key in $TMPDIR and a key left by another run can be
+# inconsistent with this run's stored ciphertext (flaky lease failures).
+from cryptography.fernet import Fernet                    # noqa: E402
+os.environ["AUGUR_SECRETS_KEY"] = Fernet.generate_key().decode()
 
 import database as db          # noqa: E402
 import aj_db                    # noqa: E402

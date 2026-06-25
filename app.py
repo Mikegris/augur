@@ -3458,6 +3458,43 @@ def aj_approve_route(pid):
         return _err(e)
 
 
+@app.route("/api/aj/analytics", methods=["GET"])
+def aj_analytics_route():
+    try:
+        import aj_analytics
+        return jsonify(aj_analytics.summary())
+    except Exception as e:
+        return _err(e)
+
+
+@app.route("/api/aj/journal.csv", methods=["GET"])
+def aj_journal_route():
+    try:
+        import aj_analytics
+        csv_text = aj_analytics.journal_csv()
+        return Response(csv_text, mimetype="text/csv",
+                        headers={"Content-Disposition": "attachment; filename=aj_trade_journal.csv",
+                                 "Cache-Control": "no-store"})
+    except Exception as e:
+        return _err(e)
+
+
+@app.route("/api/aj/preset", methods=["POST"])
+def aj_preset_route():
+    """Apply a risk/strategy preset (conservative|moderate|aggressive)."""
+    try:
+        import aj_config
+        data = request.get_json(silent=True) or {}
+        name = str(data.get("name") or "")
+        result = aj_config.apply_preset(name)
+        if result is None:
+            return jsonify({"error": "unknown preset",
+                            "presets": list(aj_config.PRESETS.keys())}), 400
+        return jsonify({"ok": True, "preset": name, "config": result})
+    except Exception as e:
+        return _err(e)
+
+
 @app.route("/api/aj/voice", methods=["POST"])
 def aj_voice_route():
     """Spoken trading command (§18). Read intents run; high-risk actions return

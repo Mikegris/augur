@@ -112,6 +112,31 @@ def cmd_verify_pass(argv):
     _print({"gate": gate, "status": "pass"})
 
 
+def cmd_analytics(argv):
+    import aj_db, aj_analytics
+    aj_db.aj_init()
+    _print(aj_analytics.summary())
+
+
+def cmd_journal(argv):
+    """Print the trade journal as CSV to stdout."""
+    import aj_db, aj_analytics
+    aj_db.aj_init()
+    sys.stdout.write(aj_analytics.journal_csv())
+
+
+def cmd_preset(argv):
+    """Apply a risk/strategy preset. Usage: preset conservative|moderate|aggressive"""
+    import aj_db, aj_config
+    aj_db.aj_init()
+    name = argv[0] if argv else ""
+    r = aj_config.apply_preset(name)
+    if r is None:
+        _print({"error": "unknown preset", "presets": list(aj_config.PRESETS.keys())})
+    else:
+        _print({"preset": name, "applied": True})
+
+
 def cmd_verify(argv):
     import aj_db, database as dbase
     aj_db.aj_init()
@@ -133,6 +158,7 @@ _CMDS = {
     "run": cmd_run, "status": cmd_status, "kill": cmd_kill, "rearm": cmd_rearm,
     "recon": cmd_recon, "config": cmd_config, "verify": cmd_verify,
     "secret": cmd_secret, "verify-pass": cmd_verify_pass,
+    "analytics": cmd_analytics, "journal": cmd_journal, "preset": cmd_preset,
 }
 
 

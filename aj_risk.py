@@ -27,6 +27,17 @@ import re
 _CRYPTO_SUFFIX = "-USD"
 
 
+def _held_qty(symbol: str) -> float:
+    """Current paper-book quantity for a symbol (0 if flat). Used to permit
+    risk-reducing sells of held positions past the allowlist."""
+    try:
+        import aj_positions
+        book = aj_positions.paper_book()
+        return float((book.get("positions") or {}).get(symbol.upper(), {}).get("qty") or 0)
+    except Exception:
+        return 0.0
+
+
 def _trading_enabled_fresh() -> bool:
     """Uncached read of the master switch — a kill/halt on another thread (or
     mid-evaluation) must be seen immediately, not up to 5s later through the
@@ -399,11 +410,16 @@ def evaluate(proposal: Dict[str, Any]) -> RiskDecision:
         # daily-loss, IPS) still binds — this is a deliberate, opt-in loosening
         # of one rail, never a removal of the gate.
         allow = cfg.get("symbol_allowlist") or []
-        if not cfg.get("allow_any_symbol"):
+        # A SELL of a currently-held position is risk-reducing — always permit
+        # it past the allowlist (you can always close what you hold; exits and
+        # stop-losses must never be blocked by a since-narrowed allowlist).
+        held_now = _held_qty(symbol)
+        closing_sell = side == "sell" and held_now > 0
+        if not cfg.get("allow_any_symbol") and not closing_sell:
             if symbol not in allow:
                 _record("block", "symbol not in allowlist", caps, None, pid)
                 return RiskDecision(decision="block", reason="{} not in symbol allowlist".format(symbol))
-        else:
+        elif cfg.get("allow_any_symbol"):
             if not _VALID_SYMBOL.match(symbol):
                 _record("block", "open-universe: invalid symbol", caps, None, pid)
                 return RiskDecision(decision="block", reason="invalid symbol {}".format(symbol))
@@ -451,6 +467,18 @@ def evaluate(proposal: Dict[str, Any]) -> RiskDecision:
         if ips:
             _record("block", ips, caps, None, pid)
             return RiskDecision(decision="block", reason=ips)
+
+        # Step 6b — enhanced opt-in gates (max positions, per-symbol weight,
+        # per-symbol daily cap, time-of-day, slippage, risk-off VIX). No-ops
+        # when their config is 0/disabled; fail-closed on error.
+        try:
+            import aj_rules
+            ereason = aj_rules.enhanced_gate(symbol, side, qty, price, cfg)
+        except Exception as e:
+            ereason = "enhanced gate import error (fail-closed): {}".format(str(e)[:80])
+        if ereason:
+            _record("block", ereason, caps, None, pid)
+            return RiskDecision(decision="block", reason=ereason)
 
         # Step 7 — daily loss => HALT
         pnl = compute_day_pnl(cfg.get("daily_loss_basis"))

@@ -32,7 +32,7 @@ import database as db
 log = logging.getLogger("augur.aj_db")
 
 # ── schema version target (bump when adding a numbered migration step) ────────
-AJ_SCHEMA_TARGET = 1
+AJ_SCHEMA_TARGET = 2
 _SCHEMA_KEY = "aj_schema_version"
 
 # ── DDL (§5). CREATE TABLE IF NOT EXISTS is safe to re-run; column ADDs go
@@ -141,6 +141,39 @@ _DDL = [
     )""",
 ]
 
+# Migration step 2 (v3.x enhancements): analytics + per-position state. Additive.
+_DDL_V2 = [
+    """CREATE TABLE IF NOT EXISTS aj_equity (
+        id             INTEGER PRIMARY KEY,
+        ts             TEXT NOT NULL,
+        date           TEXT NOT NULL,
+        realized_usd   REAL,
+        unrealized_usd REAL,
+        equity_usd     REAL,
+        day_pnl_usd    REAL
+    )""",
+    "CREATE INDEX IF NOT EXISTS idx_aj_equity_date ON aj_equity(date)",
+    """CREATE TABLE IF NOT EXISTS aj_cycle_log (
+        id           INTEGER PRIMARY KEY,
+        cycle_id     TEXT,
+        ts           TEXT NOT NULL,
+        mode         TEXT,
+        session      TEXT,
+        n_proposals  INTEGER,
+        n_executed   INTEGER,
+        summary_json TEXT
+    )""",
+    "CREATE INDEX IF NOT EXISTS idx_aj_cycle_log_ts ON aj_cycle_log(ts)",
+    """CREATE TABLE IF NOT EXISTS aj_position_state (
+        symbol       TEXT PRIMARY KEY,
+        opened_at    TEXT,
+        peak_mark    REAL,
+        last_mark    REAL,
+        updated_at   TEXT,
+        last_exit_at TEXT
+    )""",
+]
+
 
 # ── migrations (§6) ───────────────────────────────────────────────────────────
 
@@ -201,7 +234,14 @@ def aj_migrate() -> int:
                 cur.execute(stmt)
             conn.commit()
             current = 1
-        db.set_setting(_SCHEMA_KEY, str(current))
+        # Step 2 — analytics + position-state tables (additive only).
+        if current < 2:
+            cur = conn.cursor()
+            for stmt in _DDL_V2:
+                cur.execute(stmt)
+            conn.commit()
+            current = 2
+        set_setting_raw(_SCHEMA_KEY, str(current))
         log.info("aj_migrate: schema at version %d", current)
         return current
 

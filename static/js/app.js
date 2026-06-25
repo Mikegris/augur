@@ -4321,9 +4321,39 @@ async function loadTradingView() {
           <label class="muted">Paper slippage (bps)<br>${num('aj-cfg-paper_slippage_bps', cfg.paper_slippage_bps, '0.5')}</label>
           <label class="muted">Paper spread fraction<br>${num('aj-cfg-paper_spread_fraction', cfg.paper_spread_fraction, '0.1')}</label>
         </div>
-        <div class="panel-body" style="padding-top:0"><button class="btn btn-sm" id="aj-save-cfg">SAVE CONFIG</button> <span class="muted" style="font-size:11px">Live trading is intentionally NOT editable here — it requires the CLI + VERIFY gates.</span></div>
+        <div class="panel-header"><span class="panel-title">CONFIG — ENHANCEMENTS</span></div>
+        <div class="panel-body" style="${grid}">
+          <label class="muted">Conviction sizing<br>${yn('aj-cfg-conviction_sizing', cfg.conviction_sizing)}</label>
+          <label class="muted">Min order notional $<br>${num('aj-cfg-min_order_notional_usd', cfg.min_order_notional_usd)}</label>
+          <label class="muted">Entry order type<br><select id="aj-cfg-entry_order_type"><option value="market"${cfg.entry_order_type!=='limit'?' selected':''}>market</option><option value="limit"${cfg.entry_order_type==='limit'?' selected':''}>limit</option></select></label>
+          <label class="muted">Limit offset (bps)<br>${num('aj-cfg-entry_limit_offset_bps', cfg.entry_limit_offset_bps, '1')}</label>
+          <label class="muted">Order TTL (cycles)<br>${num('aj-cfg-order_ttl_cycles', cfg.order_ttl_cycles)}</label>
+          <label class="muted">Take-profit %<br>${num('aj-cfg-take_profit_pct', cfg.take_profit_pct, '0.5')}</label>
+          <label class="muted">Stop-loss %<br>${num('aj-cfg-stop_loss_pct', cfg.stop_loss_pct, '0.5')}</label>
+          <label class="muted">Trailing stop %<br>${num('aj-cfg-trailing_stop_pct', cfg.trailing_stop_pct, '0.5')}</label>
+          <label class="muted">Re-entry cooldown (min)<br>${num('aj-cfg-exit_cooldown_min', cfg.exit_cooldown_min)}</label>
+          <label class="muted">Max open positions<br>${num('aj-cfg-max_open_positions', cfg.max_open_positions)}</label>
+          <label class="muted">Max symbol weight %<br>${num('aj-cfg-max_symbol_weight_pct', cfg.max_symbol_weight_pct, '0.5')}</label>
+          <label class="muted">Max trades/symbol/day<br>${num('aj-cfg-max_trades_per_symbol_per_day', cfg.max_trades_per_symbol_per_day)}</label>
+          <label class="muted">Skip first N min<br>${num('aj-cfg-trade_skip_open_min', cfg.trade_skip_open_min)}</label>
+          <label class="muted">Skip last N min<br>${num('aj-cfg-trade_skip_close_min', cfg.trade_skip_close_min)}</label>
+          <label class="muted">Max slippage (bps)<br>${num('aj-cfg-max_slippage_bps', cfg.max_slippage_bps, '0.5')}</label>
+          <label class="muted">Risk-off VIX (skip buys above)<br>${num('aj-cfg-risk_off_vix', cfg.risk_off_vix, '0.5')}</label>
+          <label class="muted">Dry-run (preview only)<br>${yn('aj-cfg-dry_run', cfg.dry_run)}</label>
+          <label class="muted">Notify on fills<br>${yn('aj-cfg-notify_fills', cfg.notify_fills)}</label>
+        </div>
+        <div class="panel-body" style="padding-top:0;display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+          <button class="btn btn-sm" id="aj-save-cfg">SAVE CONFIG</button>
+          <span class="muted" style="font-size:11px">Presets:</span>
+          <button class="btn btn-sm aj-preset" data-p="conservative">Conservative</button>
+          <button class="btn btn-sm aj-preset" data-p="moderate">Moderate</button>
+          <button class="btn btn-sm aj-preset" data-p="aggressive">Aggressive</button>
+          <span class="muted" style="font-size:11px">Live trading is NOT editable here — CLI + VERIFY gates only.</span>
+        </div>
       </div>`;
     })()}
+
+    <div class="panel"><div class="panel-header"><span class="panel-title">ANALYTICS</span></div><div class="panel-body" id="aj-analytics"><div class="muted">loading…</div></div></div>
 
     <div class="panel"><div class="panel-header"><span class="panel-title">ALERTS</span></div><div class="panel-body">${alerts}</div></div>
 
@@ -4390,6 +4420,25 @@ async function loadTradingView() {
       auto_approve_paper: vBool('aj-cfg-auto_approve_paper'),
       paper_slippage_bps: vNum('aj-cfg-paper_slippage_bps'),
       paper_spread_fraction: vNum('aj-cfg-paper_spread_fraction'),
+      // enhancements
+      conviction_sizing: vBool('aj-cfg-conviction_sizing'),
+      min_order_notional_usd: vNum('aj-cfg-min_order_notional_usd'),
+      entry_order_type: vStr('aj-cfg-entry_order_type'),
+      entry_limit_offset_bps: vNum('aj-cfg-entry_limit_offset_bps'),
+      order_ttl_cycles: vNum('aj-cfg-order_ttl_cycles'),
+      take_profit_pct: vNum('aj-cfg-take_profit_pct'),
+      stop_loss_pct: vNum('aj-cfg-stop_loss_pct'),
+      trailing_stop_pct: vNum('aj-cfg-trailing_stop_pct'),
+      exit_cooldown_min: vNum('aj-cfg-exit_cooldown_min'),
+      max_open_positions: vNum('aj-cfg-max_open_positions'),
+      max_symbol_weight_pct: vNum('aj-cfg-max_symbol_weight_pct'),
+      max_trades_per_symbol_per_day: vNum('aj-cfg-max_trades_per_symbol_per_day'),
+      trade_skip_open_min: vNum('aj-cfg-trade_skip_open_min'),
+      trade_skip_close_min: vNum('aj-cfg-trade_skip_close_min'),
+      max_slippage_bps: vNum('aj-cfg-max_slippage_bps'),
+      risk_off_vix: vNum('aj-cfg-risk_off_vix'),
+      dry_run: vBool('aj-cfg-dry_run'),
+      notify_fills: vBool('aj-cfg-notify_fills'),
     };
     const body = {};
     Object.keys(raw).forEach(k => { if (raw[k] !== undefined) body[k] = raw[k]; });
@@ -4416,6 +4465,39 @@ async function loadTradingView() {
         `<tr><td>${_esc(o.symbol)}</td><td>${_esc(o.side)}</td><td>${_esc(String(o.qty || ''))}</td><td>${_esc(o.state)}</td><td>${o.avg_fill_price ? _ajMoney(o.avg_fill_price) : '—'}</td><td>${_esc(o.mode)}</td></tr>`).join('')}</tbody></table>` : '<div class="muted">No orders yet.</div>';
     }
   } catch (e) {}
+
+  // preset buttons
+  document.querySelectorAll('.aj-preset').forEach(btn => btn.addEventListener('click', async () => {
+    const name = btn.getAttribute('data-p');
+    if (!(await _ajConfirm('Apply the "' + name + '" preset? (overwrites risk + strategy config; not your switches/allowlist)'))) return;
+    try { await API.post('/api/aj/preset', { name }); _ajToast('◉ Applied ' + name + ' preset'); loadTradingView(); }
+    catch (e) { _ajToast('Preset failed: ' + (e.message || e), false); }
+  }));
+
+  // analytics panel (best-effort)
+  try {
+    const a = await API.get('/api/aj/analytics');
+    const aEl = document.getElementById('aj-analytics');
+    if (aEl) {
+      const ts = a.trade_stats || {}; const sh = a.sharpe || {};
+      const attr = (a.attribution || []).slice(0, 8);
+      const eq = a.equity_curve || [];
+      const lastEq = eq.length ? eq[eq.length - 1].equity_usd : null;
+      const statline = `<div style="display:flex;gap:18px;flex-wrap:wrap;margin-bottom:10px">
+        <span class="muted">Trades <b style="color:var(--text-primary)">${ts.trades || 0}</b></span>
+        <span class="muted">Win rate <b style="color:var(--text-primary)">${ts.win_rate == null ? '—' : Math.round(ts.win_rate * 100) + '%'}</b></span>
+        <span class="muted">Profit factor <b style="color:var(--text-primary)">${ts.profit_factor == null ? '—' : ts.profit_factor}</b></span>
+        <span class="muted">Net <b style="color:${(ts.net || 0) >= 0 ? 'var(--green)' : 'var(--red)'}">${_ajMoney(ts.net)}</b></span>
+        <span class="muted">Sharpe <b style="color:var(--text-primary)">${sh.sharpe == null ? '—' : sh.sharpe}</b></span>
+        <span class="muted">Equity <b style="color:var(--text-primary)">${lastEq == null ? '—' : _ajMoney(lastEq)}</b></span>
+      </div>`;
+      const attrTable = attr.length ? `<table class="data-table" style="width:100%"><thead><tr><th>Symbol</th><th>Realized</th><th>Unrealized</th><th>Total</th></tr></thead><tbody>${attr.map(d =>
+        `<tr><td>${_esc(d.symbol)}</td><td>${_ajMoney(d.realized)}</td><td>${_ajMoney(d.unrealized)}</td><td style="color:${(d.total || 0) >= 0 ? 'var(--green)' : 'var(--red)'}">${_ajMoney(d.total)}</td></tr>`).join('')}</tbody></table>` : '<div class="muted">No closed trades yet.</div>';
+      aEl.innerHTML = statline + attrTable + '<div style="margin-top:8px"><a href="/api/aj/journal.csv" class="btn btn-sm">⬇ Export trade journal (CSV)</a></div>';
+    }
+  } catch (e) {
+    const aEl = document.getElementById('aj-analytics'); if (aEl) aEl.innerHTML = '<div class="muted">Analytics unavailable.</div>';
+  }
 }
 
 const VIEW_LOADERS = {

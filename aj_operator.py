@@ -149,37 +149,24 @@ def _judge(symbol: str, fc: Dict[str, Any], cfg: Dict[str, Any],
 
 # ── size ──────────────────────────────────────────────────────────────────────
 
-def _size(symbol: str, side: str, cfg: Dict[str, Any], held_qty: float) -> Optional[Dict[str, Any]]:
-    # Thread asset_type so a crypto symbol surfaced via the open universe is
-    # priced off SYM-USD, not the bare (possibly unrelated) equity ticker.
-    price = aj_risk._order_price(symbol, "market", None, aj_positions.infer_asset_type(symbol))
-    if price is None or price <= 0:
-        return None
-    max_notional = aj_db.money(cfg.get("max_order_notional_usd") or 0)
-    target = aj_db.money(cfg.get("order_notional_target_usd") or 0)
-    if target <= 0:
-        target = aj_db.money(max_notional * 0.5)   # default: half the per-order cap
-    target = min(target, max_notional)
-    if target <= 0:
-        return None
-    if side == "sell":
-        # never sell more than we hold (paper book)
-        qty = min(held_qty, target / price) if held_qty > 0 else 0
-    else:
-        qty = target / price
-    if qty <= 0:
-        return None
-    return {"qty": qty, "price": price, "notional": aj_db.money(qty * price)}
+def _size(symbol: str, side: str, cfg: Dict[str, Any], held_qty: float,
+          decision: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, Any]]:
+    # Conviction sizing, min-notional floor, and limit-vs-market entry all live
+    # in aj_strategy (enhancements ①②③).
+    import aj_strategy
+    return aj_strategy.size_order(symbol, side, cfg, held_qty, decision)
 
 
 # ── propose + gate + execute ──────────────────────────────────────────────────
 
 def _propose_and_execute(cycle_id: str, symbol: str, decision: Dict[str, Any],
                          sizing: Dict[str, Any], cfg: Dict[str, Any]) -> Dict[str, Any]:
+    order_type = sizing.get("order_type") or "market"
+    limit_price = sizing.get("limit_price")
     pid = aj_db.insert(
         "aj_proposals", created_at=aj_db.utc_now_iso(), cycle_id=cycle_id,
         symbol=symbol, side=decision["side"], qty=sizing["qty"],
-        notional_usd=sizing["notional"], order_type="market", limit_price=None,
+        notional_usd=sizing["notional"], order_type=order_type, limit_price=limit_price,
         thesis=decision.get("thesis"), forecast_id=decision.get("forecast_id"),
         status="proposed")
     aj_db.audit("proposal", {"proposal_id": pid, "symbol": symbol,
@@ -188,7 +175,7 @@ def _propose_and_execute(cycle_id: str, symbol: str, decision: Dict[str, Any],
                 cycle_id=cycle_id, ref_id=pid)
 
     proposal = {"id": pid, "symbol": symbol, "side": decision["side"],
-                "qty": sizing["qty"], "order_type": "market", "limit_price": None}
+                "qty": sizing["qty"], "order_type": order_type, "limit_price": limit_price}
     rd = aj_risk.evaluate(proposal)
     if rd.get("decision") != "pass":
         # The proposal CHECK constraint allows only proposed/blocked/approved/
@@ -210,11 +197,47 @@ def _propose_and_execute(cycle_id: str, symbol: str, decision: Dict[str, Any],
                     cycle_id=cycle_id, ref_id=pid)
         return {"proposal_id": pid, "result": "approved_pending", "mode": mode}
 
+    # ⑮ dry-run: proposal passed the gate but we never execute (preview mode).
+    if cfg.get("dry_run"):
+        aj_db.update("aj_proposals", pid, status="approved", risk_reason="dry-run (not executed)")
+        aj_db.audit("approval", {"proposal_id": pid, "mode": mode, "dry_run": True},
+                    cycle_id=cycle_id, ref_id=pid)
+        return {"proposal_id": pid, "result": "dry_run", "would_execute": True}
+
     aj_db.audit("approval", {"proposal_id": pid, "mode": mode,
                              "required": False, "decision": "auto"},
                 cycle_id=cycle_id, ref_id=pid)
     ex = aj_execution.execute_trade(proposal, rd, cycle_id=cycle_id)
+    # ㉕ fill notification (best-effort)
+    if ex.get("filled_qty"):
+        try:
+            import aj_analytics
+            aj_analytics.notify_fill(symbol, decision["side"], ex["filled_qty"],
+                                     ex.get("avg_fill_price") or sizing["price"])
+        except Exception:
+            pass
     return {"proposal_id": pid, "result": "executed", "exec": ex}
+
+
+def _process_exits(cycle_id: str, cfg: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Execute take-profit / stop-loss / trailing-stop sells (⑤⑥⑦) before the
+    scan. Each exit sell still passes the risk gate (held-sells are permitted
+    past the allowlist)."""
+    import aj_rules
+    out: List[Dict[str, Any]] = []
+    for sig in aj_rules.exit_signals(cfg):
+        decision = {"side": "sell", "thesis": "exit: " + sig["reason"], "edge_pts": 0.0}
+        mark = float(sig.get("mark") or 0)
+        qty = float(sig.get("qty") or 0)
+        if mark <= 0 or qty <= 0:
+            continue
+        sizing = {"qty": qty, "price": mark, "notional": aj_db.money(qty * mark),
+                  "order_type": "market", "limit_price": None}
+        r = _propose_and_execute(cycle_id, sig["symbol"], decision, sizing, cfg)
+        r["symbol"] = sig["symbol"]
+        r["exit_reason"] = sig["reason"]
+        out.append(r)
+    return out
 
 
 # ── the cycle ─────────────────────────────────────────────────────────────────
@@ -244,12 +267,38 @@ def run_once(mode: str = "paper") -> Dict[str, Any]:
 
         cfg = aj_config.get_config()
         horizon = int(cfg.get("forecast_horizon_days") or 20)
+
+        # Enhancement housekeeping BEFORE proposing:
+        try:
+            import aj_rules
+            aj_rules.update_position_state()            # peak/last marks, aging
+            summary["expired_orders"] = aj_rules.expire_stale_orders(cfg)  # ④ TTL
+            # ⑤⑥⑦ exit rules — close paper longs hitting TP/SL/trailing first
+            summary["exits"] = _process_exits(cycle_id, cfg)
+        except Exception:
+            log.exception("enhancement housekeeping failed (non-fatal)")
+            summary["exits"] = []
+        # don't re-open a name we just exited in the same cycle (avoid churn)
+        _exited = {e.get("symbol") for e in (summary.get("exits") or [])
+                   if e.get("result") == "executed"}
+
         book = aj_positions.paper_book()
         held = {s: p["qty"] for s, p in book["positions"].items()}
 
         # scan -> forecast -> judge -> size -> propose -> gate -> execute
         for symbol in _scan_universe():
             try:
+                if symbol in _exited:
+                    summary["proposals"].append({"symbol": symbol, "result": "just_exited"})
+                    continue
+                # ⑧ skip a symbol in re-entry cooldown after a recent exit
+                try:
+                    import aj_rules as _r
+                    if _r.in_cooldown(symbol, cfg):
+                        summary["proposals"].append({"symbol": symbol, "result": "cooldown"})
+                        continue
+                except Exception:
+                    pass
                 fc = _forecast(symbol, horizon)
                 if not fc or not fc.get("ensemble"):
                     summary["proposals"].append({"symbol": symbol, "result": "no_signal"})
@@ -258,7 +307,7 @@ def run_once(mode: str = "paper") -> Dict[str, Any]:
                 if not decision:
                     summary["proposals"].append({"symbol": symbol, "result": "no_edge"})
                     continue
-                sizing = _size(symbol, decision["side"], cfg, held.get(symbol, 0.0))
+                sizing = _size(symbol, decision["side"], cfg, held.get(symbol, 0.0), decision)
                 if not sizing:
                     summary["proposals"].append({"symbol": symbol, "result": "unsizable"})
                     continue
@@ -284,6 +333,16 @@ def run_once(mode: str = "paper") -> Dict[str, Any]:
         except Exception:
             log.debug("score_due_forecasts failed", exc_info=True)
             summary["scored"] = None
+
+        # Enhancement analytics: snapshot equity (⑯), refresh position state,
+        # and log the cycle (㉒) — all best-effort, never fatal.
+        try:
+            import aj_rules, aj_analytics
+            aj_rules.update_position_state()
+            summary["equity"] = aj_analytics.snapshot_equity()
+            aj_analytics.log_cycle(summary)
+        except Exception:
+            log.debug("cycle analytics failed", exc_info=True)
 
         aj_db.close_cycle(cycle_id, "completed")
         aj_db.audit("disconnect", {"cycle_id": cycle_id, "status": "completed"},

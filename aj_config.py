@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 import database as db
 
@@ -51,18 +51,48 @@ DEFAULTS: Dict[str, Any] = {
     "order_notional_target_usd": 0.0,  # 0 => half of max_order_notional_usd
     "use_llm_synthesis":      False,   # off => deterministic rule-based thesis
     "scan_universe_max":      25,      # cap symbols/cycle in open-universe mode
+    # ── 25 enhancements (all opt-in; 0/false = disabled) ─────────────────────
+    # sizing & entry
+    "conviction_sizing":      False,   # scale order size by edge strength
+    "min_order_notional_usd": 0.0,     # skip dust orders below this
+    "entry_order_type":       "market",  # or "limit"
+    "entry_limit_offset_bps": 0.0,     # limit placed this far through the quote
+    "order_ttl_cycles":       0,       # expire resting limit orders after N cycles
+    # exit rules
+    "take_profit_pct":        0.0,     # auto-sell a paper long up this %
+    "stop_loss_pct":          0.0,     # auto-sell a paper long down this %
+    "trailing_stop_pct":      0.0,     # exit on drawdown from peak mark
+    "exit_cooldown_min":      0,       # no re-entry of a symbol for N min after exit
+    # extra gates
+    "max_open_positions":     0,       # cap simultaneous open paper positions
+    "max_symbol_weight_pct":  0.0,     # cap any one name's % of the paper book
+    "max_trades_per_symbol_per_day": 0,
+    "trade_skip_open_min":    0,       # skip first N min of the regular session
+    "trade_skip_close_min":   0,       # skip last N min of the regular session
+    "max_slippage_bps":       0.0,     # reject a paper fill exceeding this slippage
+    "risk_off_vix":           0.0,     # skip NEW buys when VIX is above this
+    "dry_run":                False,   # propose + gate but NEVER execute (preview)
+    "notify_fills":           False,   # macOS notification on a fill
 }
 
 _BOOL_KEYS = {"trading_enabled", "live_trading_enabled", "robinhood_enabled",
-              "auto_approve_paper", "use_llm_synthesis", "allow_any_symbol"}
+              "auto_approve_paper", "use_llm_synthesis", "allow_any_symbol",
+              "conviction_sizing", "dry_run", "notify_fills"}
 _LIST_KEYS = {"symbol_allowlist", "session_whitelist"}
 _FLOAT_KEYS = {"max_order_notional_usd", "max_daily_loss_usd",
                "paper_slippage_bps", "paper_spread_fraction", "fee_bps",
                "min_fee_usd", "crypto_fee_bps", "buy_prob_threshold",
                "sell_prob_threshold", "min_edge_pct_pts",
-               "order_notional_target_usd"}
-_INT_KEYS = {"max_trades_per_day", "forecast_horizon_days", "scan_universe_max"}
-_STR_KEYS = {"daily_loss_basis", "halt_rearm", "default_broker"}
+               "order_notional_target_usd",
+               "min_order_notional_usd", "entry_limit_offset_bps",
+               "take_profit_pct", "stop_loss_pct", "trailing_stop_pct",
+               "max_symbol_weight_pct", "max_slippage_bps", "risk_off_vix"}
+_INT_KEYS = {"max_trades_per_day", "forecast_horizon_days", "scan_universe_max",
+             "order_ttl_cycles", "exit_cooldown_min", "max_open_positions",
+             "max_trades_per_symbol_per_day", "trade_skip_open_min",
+             "trade_skip_close_min"}
+_STR_KEYS = {"daily_loss_basis", "halt_rearm", "default_broker",
+             "entry_order_type"}
 
 _PREFIX = "aj_"
 _VALID_LOSS_BASIS = ("realized_plus_unrealized", "realized")
@@ -153,6 +183,8 @@ def get_config() -> Dict[str, Any]:
         cfg["halt_rearm"] = "manual"
     if str(cfg["default_broker"]).lower() not in _valid_brokers():
         cfg["default_broker"] = "paper"   # unknown venue => safe internal paper
+    if str(cfg.get("entry_order_type")).lower() not in ("market", "limit"):
+        cfg["entry_order_type"] = "market"
     cfg["session_whitelist"] = [s.lower() for s in cfg["session_whitelist"]
                                 if s.lower() in _TRADABLE_SESSIONS] or ["regular"]
     # numeric guards: caps/counts can never be negative; probs clamp to [0,1].
@@ -194,6 +226,47 @@ def set_config(partial: Dict[str, Any]) -> Dict[str, Any]:
             continue
         db.set_setting(_PREFIX + key, _serialize(key, value))
     return get_config()
+
+
+# ── ㉓ config presets ─────────────────────────────────────────────────────────
+# Risk + strategy bundles. Deliberately DO NOT touch trading_enabled,
+# live_trading_enabled, robinhood_enabled, or symbol_allowlist — the operator
+# always controls those explicitly.
+PRESETS: Dict[str, Dict[str, Any]] = {
+    "conservative": {
+        "max_order_notional_usd": 500, "max_trades_per_day": 3,
+        "max_daily_loss_usd": 200, "buy_prob_threshold": 0.62,
+        "sell_prob_threshold": 0.40, "min_edge_pct_pts": 6.0,
+        "max_open_positions": 3, "stop_loss_pct": 5.0, "take_profit_pct": 10.0,
+        "trailing_stop_pct": 4.0, "exit_cooldown_min": 60,
+        "conviction_sizing": True, "min_order_notional_usd": 50.0,
+    },
+    "moderate": {
+        "max_order_notional_usd": 1000, "max_trades_per_day": 5,
+        "max_daily_loss_usd": 500, "buy_prob_threshold": 0.55,
+        "sell_prob_threshold": 0.45, "min_edge_pct_pts": 3.0,
+        "max_open_positions": 6, "stop_loss_pct": 8.0, "take_profit_pct": 15.0,
+        "trailing_stop_pct": 6.0, "exit_cooldown_min": 30,
+        "conviction_sizing": True, "min_order_notional_usd": 50.0,
+    },
+    "aggressive": {
+        "max_order_notional_usd": 2500, "max_trades_per_day": 10,
+        "max_daily_loss_usd": 1500, "buy_prob_threshold": 0.52,
+        "sell_prob_threshold": 0.48, "min_edge_pct_pts": 1.5,
+        "max_open_positions": 12, "stop_loss_pct": 12.0, "take_profit_pct": 25.0,
+        "trailing_stop_pct": 10.0, "exit_cooldown_min": 0,
+        "conviction_sizing": True, "min_order_notional_usd": 0.0,
+    },
+}
+
+
+def apply_preset(name: str) -> Optional[Dict[str, Any]]:
+    """Apply a risk/strategy preset. Returns the full config, or None if the
+    preset name is unknown."""
+    p = PRESETS.get(str(name or "").lower())
+    if not p:
+        return None
+    return set_config(dict(p))
 
 
 def get(key: str) -> Any:

@@ -30,7 +30,14 @@ _PREFIX = "__aj_sec_"
 
 
 def _key_file() -> str:
-    base = os.path.dirname(db.DB_PATH) or "."
+    # Follow the RESOLVED db path (realpath) so the desktop app and the browser
+    # version — which reach the same wealth.db through a symlink at different
+    # paths — share ONE key file and can decrypt each other's stored secrets.
+    try:
+        resolved = os.path.realpath(db.DB_PATH)
+    except Exception:
+        resolved = db.DB_PATH
+    base = os.path.dirname(resolved) or "."
     return os.path.join(base, ".aj_secret_key")
 
 
