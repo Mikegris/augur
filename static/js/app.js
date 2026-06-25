@@ -4353,6 +4353,7 @@ async function loadTradingView() {
       </div>`;
     })()}
 
+    <div class="panel"><div class="panel-header"><span class="panel-title">◉ AGENT PAPER POSITIONS</span> <span class="muted" id="aj-pos-summary" style="font-size:11px"></span></div><div class="panel-body" id="aj-positions-panel"><div class="muted">loading…</div></div></div>
     <div class="panel"><div class="panel-header"><span class="panel-title">ANALYTICS</span></div><div class="panel-body" id="aj-analytics"><div class="muted">loading…</div></div></div>
 
     <div class="panel"><div class="panel-header"><span class="panel-title">ALERTS</span></div><div class="panel-body">${alerts}</div></div>
@@ -4477,6 +4478,16 @@ async function loadTradingView() {
   // analytics panel (best-effort)
   try {
     const a = await API.get('/api/aj/analytics');
+    // ── agent paper positions table ──
+    const pd = a.positions || {};
+    const posRows = pd.positions || [];
+    const ppEl = document.getElementById('aj-positions-panel');
+    const sumEl = document.getElementById('aj-pos-summary');
+    if (sumEl) sumEl.textContent = posRows.length ? (posRows.length + ' positions · MV ' + _ajMoney(pd.total_market_value) + ' · unreal ' + _ajMoney(pd.total_unrealized)) : '';
+    if (ppEl) {
+      ppEl.innerHTML = posRows.length ? `<table class="data-table" style="width:100%"><thead><tr><th>Symbol</th><th>Qty</th><th>Avg cost</th><th>Price</th><th>Mkt value</th><th>Unreal P&L</th><th>%</th><th>Weight</th><th>Age</th></tr></thead><tbody>${posRows.map(p =>
+        `<tr><td><b>${_esc(p.symbol)}</b></td><td>${_esc(String(p.qty))}</td><td>${_ajMoney(p.avg_cost)}</td><td>${_ajMoney(p.mark)}</td><td>${_ajMoney(p.market_value)}</td><td style="color:${(p.unrealized||0)>=0?'var(--green)':'var(--red)'}">${_ajMoney(p.unrealized)}</td><td style="color:${(p.unrealized_pct||0)>=0?'var(--green)':'var(--red)'}">${p.unrealized_pct>=0?'+':''}${_esc(String(p.unrealized_pct))}%</td><td>${_esc(String(p.weight_pct))}%</td><td>${p.age_days==null?'—':_esc(String(p.age_days))+'d'}</td></tr>`).join('')}</tbody></table>` : '<div class="muted">No paper positions yet — the agent opens positions when it buys (run a cycle during market hours).</div>';
+    }
     const aEl = document.getElementById('aj-analytics');
     if (aEl) {
       const ts = a.trade_stats || {}; const sh = a.sharpe || {};

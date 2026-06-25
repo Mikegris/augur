@@ -206,9 +206,47 @@ def notify_fill(symbol: str, side: str, qty: float, price: float) -> None:
         log.debug("notify_fill failed", exc_info=True)
 
 
+def positions_detail() -> Dict[str, Any]:
+    """The agent's current PAPER positions, enriched per stock: quantity, avg
+    cost, current mark, market value, unrealized P&L (+%), book weight %, and
+    holding age. This is the agent's portfolio view (separate from your real
+    holdings)."""
+    import aj_positions
+    import aj_risk
+    import aj_rules
+    book = aj_positions.paper_book()
+    positions = book.get("positions") or {}
+    marks = aj_risk._marks(list(positions.keys()))
+    rows = []
+    total_mv = 0.0
+    for sym, p in positions.items():
+        qty = float(p.get("qty") or 0)
+        avg = float(p.get("avg_cost") or 0)
+        mark = marks.get(sym)
+        if mark is None:
+            mark = avg
+        mv = qty * mark
+        total_mv += mv
+        unreal = (mark - avg) * qty
+        rows.append({
+            "symbol": sym, "qty": round(qty, 4), "avg_cost": round(avg, 2),
+            "mark": round(mark, 2), "market_value": aj_db.money(mv),
+            "unrealized": aj_db.money(unreal),
+            "unrealized_pct": round((mark - avg) / avg * 100, 2) if avg > 0 else 0.0,
+            "age_days": aj_rules.position_age_days(sym),
+            "asset_type": p.get("asset_type") or "stock"})
+    for r in rows:
+        r["weight_pct"] = round(r["market_value"] / total_mv * 100, 1) if total_mv > 0 else 0.0
+    rows.sort(key=lambda x: -x["market_value"])
+    return {"positions": rows, "count": len(rows),
+            "total_market_value": aj_db.money(total_mv),
+            "total_unrealized": aj_db.money(sum(r["unrealized"] for r in rows))}
+
+
 def summary() -> Dict[str, Any]:
     """One bundle for the analytics route / CLI / UI."""
-    return {"equity_curve": equity_curve(60),
+    return {"positions": positions_detail(),
+            "equity_curve": equity_curve(60),
             "attribution": attribution(),
             "trade_stats": trade_stats(),
             "sharpe": sharpe_like(),

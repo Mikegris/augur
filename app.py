@@ -3467,6 +3467,16 @@ def aj_analytics_route():
         return _err(e)
 
 
+@app.route("/api/aj/positions", methods=["GET"])
+def aj_positions_route():
+    """The agent's current paper positions with per-stock analytics."""
+    try:
+        import aj_analytics
+        return jsonify(aj_analytics.positions_detail())
+    except Exception as e:
+        return _err(e)
+
+
 @app.route("/api/aj/journal.csv", methods=["GET"])
 def aj_journal_route():
     try:

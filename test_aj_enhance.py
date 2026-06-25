@@ -210,6 +210,17 @@ def test_sharpe_needs_history():
     assert aj_analytics.sharpe_like()["sharpe"] is not None
 
 
+def test_positions_detail():
+    _reset(); _quotes({"NVDA": 900}); _full()
+    _fill("NVDA", "buy", 10, 800.0)
+    aj_rules.update_position_state()
+    pd = aj_analytics.positions_detail()
+    assert pd["count"] == 1
+    p = pd["positions"][0]
+    assert p["symbol"] == "NVDA" and p["mark"] == 900 and p["unrealized"] == 1000.0
+    assert p["unrealized_pct"] == 12.5 and p["weight_pct"] == 100.0
+
+
 def test_position_aging():
     _reset(); _quotes({"NVDA": 800}); _full()
     _fill("NVDA", "buy", 5, 800.0)
