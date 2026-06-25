@@ -1,0 +1,36 @@
+# AJTA risk config template (AJTA-SPEC-1.0 §11.1, Appendix D).
+# AUTHORITATIVE STORE IS `settings` (keys prefixed aj_). This file documents the
+# shape + the SAFE DEFAULTS. Every default is the blocking/safest value: a config
+# that has never been touched can place NO order, paper or live.
+#
+# Apply with:  python aj_cli.py config --set key=value [...]
+
+trading_enabled:        false   # master switch
+live_trading_enabled:   false   # paper forced unless true
+robinhood_enabled:      false   # third gate for the RH venue
+symbol_allowlist:       []      # EMPTY = nothing tradable (fail-closed)
+max_order_notional_usd: 0       # 0 = block all (must be > 0 to trade)
+max_trades_per_day:     0       # 0 = block all
+max_daily_loss_usd:     0       # 0 = halt immediately (must be set)
+daily_loss_basis:       realized_plus_unrealized   # or: realized
+halt_rearm:             manual                      # or: session_open
+session_whitelist:      [regular]                   # premarket|regular|afterhours
+
+# execution (paper-first)
+default_broker:         paper
+auto_approve_paper:     true    # paper MAY auto-approve; LIVE NEVER auto-executes
+
+# paper fill model (§12.5) — keeps paper P&L from being optimistic
+paper_slippage_bps:     2.0
+paper_spread_fraction:  0.5
+fee_bps:                0.0     # commission-free equities
+min_fee_usd:            0.0
+crypto_fee_bps:         10.0
+
+# operator decision tunables (§19 scan->judge->size)
+forecast_horizon_days:  20
+buy_prob_threshold:     0.55
+sell_prob_threshold:    0.45
+min_edge_pct_pts:       3.0
+order_notional_target_usd: 0.0  # 0 => half of max_order_notional_usd
+use_llm_synthesis:      false   # off => deterministic rule-based thesis

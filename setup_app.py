@@ -8,6 +8,8 @@ Usage:
 Produces dist/AUGUR.app — a self-contained macOS bundle.
 """
 
+import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -15,11 +17,41 @@ from setuptools import setup
 
 HERE = Path(__file__).parent
 
+
+def _resolve_version() -> str:
+    """Single source of truth for the bundle version (CFBundleShortVersionString
+    — what desktop.py's update check compares against):
+        AUGUR_BUILD_VERSION env (CI sets it from the git tag)
+        → APP_VERSION in app.py
+        → "0.0.0" fallback.
+    app.py is parsed by regex, NOT imported, because importing it spins up
+    background threads (cache warmer) at import time."""
+    env = os.environ.get("AUGUR_BUILD_VERSION", "").strip().lstrip("v")
+    if env:
+        return env
+    try:
+        txt = (HERE / "app.py").read_text(encoding="utf-8", errors="ignore")
+        m = re.search(r'^APP_VERSION\s*=\s*["\']([^"\']+)["\']', txt, re.M)
+        if m:
+            return m.group(1)
+    except Exception:
+        pass
+    return "0.0.0"
+
+
+VERSION = _resolve_version()
+
 # Project modules that app.py imports — list them explicitly so py2app's
 # modulefinder doesn't miss any (it walks the import graph from desktop.py,
 # but optional `try: import …` blocks can confuse static analysis).
 LOCAL_MODULES = [
     "app",
+    # AJTA trading agent (v3.0) — imported lazily inside routes, so list them
+    # explicitly or py2app's modulefinder drops them and /api/aj/* 500s.
+    "aj_db", "aj_config", "aj_risk", "aj_positions", "aj_broker",
+    "aj_execution", "aj_routing", "aj_operator", "aj_metrics", "aj_mcp_read",
+    "aj_cli", "aj_secrets", "aj_alpaca", "aj_eval",
+    "aj_opencode", "aj_voice", "aj_langfuse",
     "ai_summarizer",
     "alt_data_engine",
     "alt_signals",
@@ -143,8 +175,8 @@ PLIST = {
     "CFBundleName":            "AUGUR",
     "CFBundleDisplayName":     "AUGUR",
     "CFBundleIdentifier":      "com.augur.wealth",
-    "CFBundleShortVersionString": "0.4.3",
-    "CFBundleVersion":         "0.4.3",
+    "CFBundleShortVersionString": VERSION,
+    "CFBundleVersion":         VERSION,
     "LSMinimumSystemVersion":  "10.13",
     "NSHighResolutionCapable": True,
     # We want a Dock icon + menubar; LSUIElement=0 keeps the app visible.

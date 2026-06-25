@@ -118,6 +118,11 @@
       <div class="loading"><div class="spinner"></div></div>
     </div>
 
+    <!-- TRADING AGENT (AJTA) -->
+    <div id="view-trading" class="view">
+      <div class="loading"><div class="spinner"></div></div>
+    </div>
+
     <!-- PORTFOLIO -->
     <div id="view-portfolio" class="view">
       <div class="loading"><div class="spinner"></div></div>
@@ -337,7 +342,7 @@
   <footer id="statusbar">
     <div class="status-item">
       <span class="status-key">SYS:</span>
-      <span class="status-val green">AUGUR v2.3.0</span>
+      <span class="status-val green">AUGUR v{{ app_version }}</span>
     </div>
     <div class="status-item">
       <span class="status-key">DATA:</span>
@@ -679,8 +684,8 @@
 
 <!-- Scripts -->
 <script defer src="/static/js/charts.js?v=3"></script>
-<script defer src="/static/js/app.js?v=20"></script>
-<script defer src="/static/js/jarvis.js?v=21"></script>
+<script defer src="/static/js/app.js?v=22"></script>
+<script defer src="/static/js/jarvis.js?v=22"></script>
 
 <!-- v0.2.0 research modules — each registers window.render* globals. Loaded
      after app.js so they can read State / API / fmt helpers if needed. -->

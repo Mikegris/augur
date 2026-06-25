@@ -80,6 +80,12 @@ function pass(what) { console.log(`  ✓ ${what}`); }
       if (!el) return { ok: false, why: 'view container missing' };
       if (!el.classList.contains('active')) return { ok: false, why: 'not activated' };
       if (el.innerHTML.trim().length < 40) return { ok: false, why: 'rendered nearly empty' };
+      // A view still showing ONLY a bare spinner with no text means its loader
+      // never ran — typically the case is missing from navigate()'s switch.
+      const txt = (el.innerText || el.textContent || '').replace(/\s+/g, '');
+      if (txt.length === 0 && /spinner/.test(el.innerHTML)) {
+        return { ok: false, why: 'loader never populated (bare spinner) — wired into navigate()?' };
+      }
       return { ok: true };
     }, v);
     if (!state.ok) fail(v, state.why);

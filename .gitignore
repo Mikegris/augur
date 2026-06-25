@@ -20,6 +20,7 @@ ENV/
 wealth.db
 wealth.db-shm
 wealth.db-wal
+wealth.db.*
 *.db
 *.db-shm
 *.db-wal

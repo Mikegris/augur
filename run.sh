@@ -4,12 +4,41 @@
 
 set -e
 cd "$(dirname "$0")"
+SELF="$PWD/$(basename "$0")"
 
 echo ""
 echo "╔══════════════════════════════════════════════════╗"
 echo "║   AUGUR // WEALTH INTELLIGENCE SYSTEM            ║"
 echo "╚══════════════════════════════════════════════════╝"
 echo ""
+
+# ── self-update ───────────────────────────────────────────────────────────────
+# Fast-forward the current branch to its pushed upstream so each launch runs the
+# latest version, then relaunch (in case run.sh itself changed). Safe + quiet:
+# skipped when opted out, not a git checkout, no upstream, a dirty working tree,
+# or offline; never clobbers local work (--ff-only only). Opt out with
+# AUGUR_NO_SELF_UPDATE=1. AUGUR_SELF_UPDATED guards against a relaunch loop.
+if [ "${AUGUR_NO_SELF_UPDATE:-0}" != "1" ] && [ "${AUGUR_SELF_UPDATED:-0}" != "1" ] \
+   && command -v git >/dev/null 2>&1 \
+   && git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+  if [ -n "$(git status --porcelain 2>/dev/null)" ]; then
+    echo "► Local changes present — skipping auto-update (commit or 'git pull' yourself)."
+  elif git rev-parse --abbrev-ref '@{u}' >/dev/null 2>&1; then
+    echo "► Checking for updates ..."
+    if git -c gc.auto=0 fetch --quiet --prune origin 2>/dev/null \
+       && [ "$(git rev-parse @ 2>/dev/null)" != "$(git rev-parse '@{u}' 2>/dev/null)" ]; then
+      if git merge --ff-only --quiet '@{u}' 2>/dev/null; then
+        echo "✓ Updated to $(git rev-parse --short @) — relaunching."
+        export AUGUR_SELF_UPDATED=1
+        exec "$SELF" "$@"
+      else
+        echo "⚠ Branch diverged from upstream — skipping auto-update (resolve manually)."
+      fi
+    else
+      echo "✓ Up to date."
+    fi
+  fi
+fi
 
 # Bootstrap if venv missing
 if [ ! -d "venv" ]; then

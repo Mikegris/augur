@@ -7,6 +7,33 @@ Uses Flask test client — no live server needed.
 import sys, os, json
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+# ── DB isolation ─────────────────────────────────────────────────────────────
+# This suite exercises mutating routes (/api/portfolio/add, /api/transactions
+# /add, etc.) which previously wrote fixtures (TEST/AAPL @150) straight into
+# the user's real wealth.db — it has no teardown, so every run leaked. Clone
+# the DB to a tempfile (WAL-safe, mirrors test_e2e.clone_db) and point the app
+# at it via AUGUR_DB_PATH BEFORE database/app import, so the real book is never
+# touched. The clone is removed at exit.
+import atexit, sqlite3, tempfile
+
+
+def _clone_db(src="wealth.db"):
+    fd, dst = tempfile.mkstemp(prefix="augur_phase5_", suffix=".db")
+    os.close(fd)
+    if os.path.exists(src):
+        s = sqlite3.connect(src)
+        d = sqlite3.connect(dst)
+        with d:
+            s.backup(d)
+        s.close()
+        d.close()
+    return dst
+
+
+_TEST_DB = _clone_db()
+os.environ["AUGUR_DB_PATH"] = _TEST_DB
+atexit.register(lambda: os.path.exists(_TEST_DB) and os.unlink(_TEST_DB))
+
 # Suppress noisy loggers
 import logging
 logging.disable(logging.WARNING)

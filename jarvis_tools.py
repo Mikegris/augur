@@ -858,6 +858,63 @@ def _t_add_watchlist(args):
     return {"status": "added", "label": "{} added to watchlist".format(sym)}
 
 
+# Portfolio mutations — the only tools that touch the user's holdings/ledger.
+# Like every mutating tool they execute ONLY through execute_mutating after an
+# explicit confirm; the numeric guards here mirror app.py's /api/portfolio/add
+# and /api/transactions/add routes so the agent path is held to the same bounds
+# as the manual UI.
+_ASSET_TYPES = ("stock", "etf", "crypto", "fund", "bond", "cash", "other")
+
+
+def _trade_shares(args) -> float:
+    n = _num_arg(args.get("shares"))
+    if n is None or n <= 0 or n >= 1e12:
+        raise ValueError("shares must be a number > 0")
+    return n
+
+
+def _trade_price(args, field: str = "price") -> float:
+    p = _num_arg(args.get(field))
+    if p is None or p < 0 or p >= 10_000_000:
+        raise ValueError("{} must be a number >= 0".format(field))
+    return p
+
+
+def _t_add_holding(args):
+    """Open or add to a holding: writes the position AND logs a BUY in the
+    transaction ledger, exactly like /api/portfolio/add."""
+    import database as db
+    sym = _sym(args)
+    shares = _trade_shares(args)
+    price = _trade_price(args)
+    asset_type = str(args.get("asset_type") or "stock").strip().lower()
+    if asset_type not in _ASSET_TYPES:
+        asset_type = "stock"
+    row_id = db.add_position(symbol=sym, name=str(args.get("name") or ""),
+                             shares=shares, avg_cost=price, asset_type=asset_type)
+    try:
+        db.add_transaction(symbol=sym, action="BUY", shares=shares, price=price)
+    except Exception as e:  # the position is recorded; ledger is best-effort
+        log.debug("add_holding ledger write failed for %s: %s", sym, e)
+    return {"status": "added", "id": row_id,
+            "label": "Bought {:g} {} @ ${:,.2f}".format(shares, sym, price)}
+
+
+def _t_record_trade(args):
+    """Log a BUY or SELL in the transaction ledger (the trade journal) without
+    altering position rows — mirrors /api/transactions/add."""
+    import database as db
+    sym = _sym(args)
+    side = str(args.get("side") or args.get("action") or "").strip().upper()
+    if side not in ("BUY", "SELL"):
+        raise ValueError("side must be 'BUY' or 'SELL'")
+    shares = _trade_shares(args)
+    price = _trade_price(args)
+    db.add_transaction(symbol=sym, action=side, shares=shares, price=price)
+    return {"status": "logged",
+            "label": "Logged {} {:g} {} @ ${:,.2f}".format(side, shares, sym, price)}
+
+
 # Watch condition vocabulary — mirrors jarvis_watches, but kept local so
 # proposal validation/labels still work when that module can't import.
 _WATCH_METRICS = ("price", "change_pct", "vix", "book_day_pct")
@@ -1286,6 +1343,25 @@ TOOLS: Dict[str, Dict[str, Any]] = {
         "description": "Add a symbol to the user's watchlist. The user must confirm before this executes.",
         "parameters": _p(dict(_SYM_PROP), ["symbol"]),
     },
+    "add_holding": {
+        "fn": _t_add_holding, "mutating": True,
+        "description": "Record a BUY in the user's portfolio: opens or adds to a holding and logs the trade. Use when the user says they bought/acquired shares (e.g. 'I bought 10 NVDA at 800'). The user must confirm before this executes.",
+        "parameters": _p(dict(_SYM_PROP,
+                              shares={"type": "number", "description": "Number of shares/units, > 0"},
+                              price={"type": "number", "description": "Purchase price per share/unit"},
+                              asset_type={"type": "string", "enum": list(_ASSET_TYPES),
+                                          "description": "Asset class; defaults to stock"}),
+                         ["symbol", "shares", "price"]),
+    },
+    "record_trade": {
+        "fn": _t_record_trade, "mutating": True,
+        "description": "Log a BUY or SELL in the user's trade journal without changing position rows. Use for recording a sale or an additional fill (e.g. 'log a sell of 3 TSLA at 250'). The user must confirm before this executes.",
+        "parameters": _p(dict(_SYM_PROP,
+                              side={"type": "string", "enum": ["BUY", "SELL"]},
+                              shares={"type": "number", "description": "Number of shares/units, > 0"},
+                              price={"type": "number", "description": "Execution price per share/unit"}),
+                         ["symbol", "side", "shares", "price"]),
+    },
     "add_watch": {
         "fn": _t_add_watch, "mutating": True,
         "description": "Create a conditional watch that fires when ALL its conditions hold at once — e.g. 'NVDA price > 200 AND VIX > 25'. 1-4 conditions; metrics: price and change_pct (both need a symbol), vix, book_day_pct (portfolio day move). The user must confirm before this executes.",
@@ -1356,6 +1432,21 @@ def valid_proposal_args(name: str, args: Dict[str, Any]) -> bool:
         return 0 < price < 10_000_000
     if name == "add_to_watchlist":
         return bool(str(args.get("symbol") or "").strip())
+    if name in ("add_holding", "record_trade"):
+        sym = str(args.get("symbol") or "").strip().upper()
+        if not _SYM_RE.match(sym):
+            return False
+        shares = _num_arg(args.get("shares"))
+        if shares is None or not (0 < shares < 1e12):
+            return False
+        price = _num_arg(args.get("price"))
+        if price is None or not (0 <= price < 10_000_000):
+            return False
+        if name == "record_trade":
+            side = str(args.get("side") or args.get("action") or "").strip().upper()
+            if side not in ("BUY", "SELL"):
+                return False
+        return True
     if name == "add_watch":
         if not str(args.get("name") or "").strip():
             return False
@@ -1412,6 +1503,20 @@ def proposal_label(name: str, args: Dict[str, Any]) -> str:
             str(args.get("symbol", "")).upper(), args.get("alert_type"), args.get("price"))
     if name == "add_to_watchlist":
         return "Add {} to watchlist".format(str(args.get("symbol", "")).upper())
+    if name == "add_holding":
+        sh, pr = _num_arg(args.get("shares")), _num_arg(args.get("price"))
+        return "Buy {} {} @ {}".format(
+            "{:g}".format(sh) if sh is not None else args.get("shares"),
+            str(args.get("symbol", "")).upper(),
+            "${:,.2f}".format(pr) if pr is not None else args.get("price"))
+    if name == "record_trade":
+        sh, pr = _num_arg(args.get("shares")), _num_arg(args.get("price"))
+        side = str(args.get("side") or args.get("action") or "").upper()
+        return "Log {} {} {} @ {}".format(
+            side,
+            "{:g}".format(sh) if sh is not None else args.get("shares"),
+            str(args.get("symbol", "")).upper(),
+            "${:,.2f}".format(pr) if pr is not None else args.get("price"))
     if name == "add_watch":
         return _watch_label(args if isinstance(args, dict) else {})
     if name == "set_policy_rule":

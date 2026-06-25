@@ -1,0 +1,25 @@
+# AJTA model routing table (AJTA-SPEC-1.0 §10, Appendix B).
+# Documents the rules enforced in code by aj_routing.py. Ordered; first match
+# wins; quality_floor enforced AFTER match; escalation bounded (<=1).
+#
+# NORMATIVE invariants (enforced in aj_routing.route):
+#  - sensitivity: private  => local: true  (MUST NOT egress). If no local model
+#    is reachable, the call FAILS (ok=false) rather than falling to a cloud model.
+#  - every call emits an aj_routing telemetry row.
+#  - a quality_floor unmet by all available models fails the step (no trade).
+
+rules:
+  - match: { sensitivity: private }      # holdings / P&L / account ids
+    route: { local: true }               # Ollama only
+    quality_floor: 1.0
+    escalation_max: 1
+
+  - match: { role: [scan, forecast, judge, redteam, size] }
+    route: { provider: chat_any }        # OpenAI when keyed+budget, else Ollama
+    quality_floor: 1.0
+    escalation_max: 1
+
+  - match: {}                            # default
+    route: { provider: chat_any }
+    quality_floor: 0.0
+    escalation_max: 1
