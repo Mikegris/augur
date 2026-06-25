@@ -4253,34 +4253,69 @@ async function loadTradingView() {
 
   const allowlist = (cfg.symbol_allowlist || []).join(', ');
 
+  const cumPos = (s.cumulative_pnl || {}).total || 0;
   el.innerHTML = `
-    <div class="view-header">
-      <h1>◉ TRADING AGENT <span class="muted" style="font-size:13px">AJTA v${_esc(s.version || '3.0.0')}</span></h1>
-      <div class="view-actions">
-        <button class="btn btn-sm" id="aj-run">▶ RUN CYCLE (paper)</button>
-        <button class="btn btn-sm" id="aj-kill" style="background:var(--red);color:#fff;border-color:var(--red)">■ KILL SWITCH</button>
-        ${halted ? '<button class="btn btn-sm" id="aj-rearm">↻ RE-ARM</button>' : ''}
+    <div class="aj-hero">
+      <div class="aj-hero-left">
+        <div class="aj-hero-title">◉ TRADING AGENT <span class="aj-hero-ver">AJTA v${_esc(s.version || '3.0.0')}</span></div>
+        <div class="aj-hero-pills">
+          ${_ajPill(enabled ? 'TRADING ON' : 'TRADING OFF', enabled, enabled ? 'green' : 'amber')}
+          ${_ajPill(live ? 'LIVE ENABLED' : 'PAPER ONLY', !live, live ? 'red' : 'green')}
+          ${_ajPill('session: ' + _esc(s.session || '—'), true, 'blue')}
+          ${halted ? _ajPill('HALTED', true, 'red') : ''}
+          ${_ajPill('chain ' + ((s.audit_chain || {}).ok ? 'OK' : 'BROKEN'), (s.audit_chain || {}).ok, (s.audit_chain || {}).ok ? 'green' : 'red')}
+        </div>
+      </div>
+      <div class="aj-hero-right">
+        <div class="aj-hero-pnl">
+          <div class="muted" style="font-size:10px;letter-spacing:.05em">CUMULATIVE P&L</div>
+          <div class="aj-hero-pnl-val" style="color:${cumPos>=0?'var(--green)':'var(--red)'}">${_ajMoney(cumPos)}</div>
+        </div>
+        <div class="aj-hero-actions">
+          <button class="btn btn-sm" id="aj-run">▶ RUN CYCLE</button>
+          <button class="btn btn-sm" id="aj-kill" style="background:var(--red);color:#fff;border-color:var(--red)">■ KILL</button>
+          ${halted ? '<button class="btn btn-sm" id="aj-rearm">↻ RE-ARM</button>' : ''}
+          <button class="btn btn-sm btn-ghost" id="aj-refresh" title="Refresh">↻</button>
+        </div>
       </div>
     </div>
 
-    <div class="panel" style="border-left:3px solid ${enabled ? 'var(--green)' : 'var(--amber)'}">
-      <div class="panel-body" style="display:flex;align-items:center;flex-wrap:wrap;gap:8px">
-        ${_ajPill(enabled ? 'TRADING ON' : 'TRADING OFF', enabled, enabled ? 'green' : 'amber')}
-        ${_ajPill(live ? 'LIVE ENABLED' : 'PAPER ONLY', !live, live ? 'red' : 'green')}
-        ${_ajPill('session: ' + _esc(s.session || '—'), true, 'blue')}
-        ${halted ? _ajPill('HALTED', true, 'red') : ''}
-        ${_ajPill('chain ' + ((s.audit_chain || {}).ok ? 'OK' : 'BROKEN'), (s.audit_chain || {}).ok, (s.audit_chain || {}).ok ? 'green' : 'red')}
-        <span class="muted" style="margin-left:auto;font-size:11px">${enabled ? '' : 'Fail-closed: configure caps + allowlist to trade (paper).'}</span>
+    <div class="aj-tabs">
+      <button class="aj-tab active" data-pane="dashboard">Dashboard</button>
+      <button class="aj-tab" data-pane="positions">Positions</button>
+      <button class="aj-tab" data-pane="config">Config</button>
+      <button class="aj-tab" data-pane="analytics">Analytics</button>
+      <button class="aj-tab" data-pane="activity">Activity</button>
+    </div>
+
+    <div class="aj-pane active" data-pane="dashboard">
+      ${enabled ? '' : '<div class="panel" style="border-left:3px solid var(--amber)"><div class="panel-body muted" style="font-size:12px">Fail-closed: set an allowlist + caps in <b>Config</b> to trade (paper).</div></div>'}
+      <div class="kpi-grid" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;margin-bottom:12px">
+        <div class="panel"><div class="panel-body"><div class="muted">Day P&L (paper)</div><div style="font-size:22px;color:${(pnl.day_pnl||0)>=0?'var(--green)':'var(--red)'}">${_ajMoney(pnl.day_pnl)}</div></div></div>
+        <div class="panel"><div class="panel-body"><div class="muted">Cumulative P&L</div><div style="font-size:22px;color:${(cum.total||0)>=0?'var(--green)':'var(--red)'}">${_ajMoney(cum.total)}</div></div></div>
+        <div class="panel"><div class="panel-body"><div class="muted">Positions</div><div style="font-size:22px" id="aj-kpi-positions">—</div></div></div>
+        <div class="panel"><div class="panel-body"><div class="muted">Win rate</div><div style="font-size:22px" id="aj-kpi-winrate">—</div></div></div>
+        <div class="panel"><div class="panel-body"><div class="muted">Open orders</div><div style="font-size:22px">${_esc(String(orders.open || 0))}</div></div></div>
+        <div class="panel"><div class="panel-body"><div class="muted">Fill rate</div><div style="font-size:22px">${orders.fill_rate == null ? '—' : Math.round(orders.fill_rate * 100) + '%'}</div></div></div>
       </div>
+      <div class="panel"><div class="panel-header"><span class="panel-title">EQUITY CURVE</span></div><div class="panel-body" style="height:240px"><canvas id="aj-equity-chart"></canvas></div></div>
+      <div class="panel"><div class="panel-header"><span class="panel-title">ALERTS</span></div><div class="panel-body">${alerts}</div></div>
     </div>
 
-    <div class="kpi-grid" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;margin:12px 0">
-      <div class="panel"><div class="panel-body"><div class="muted">Day P&L (paper)</div><div style="font-size:22px;color:${(pnl.day_pnl||0)>=0?'var(--green)':'var(--red)'}">${_ajMoney(pnl.day_pnl)}</div></div></div>
-      <div class="panel"><div class="panel-body"><div class="muted">Cumulative P&L</div><div style="font-size:22px;color:${(cum.total||0)>=0?'var(--green)':'var(--red)'}">${_ajMoney(cum.total)}</div></div></div>
-      <div class="panel"><div class="panel-body"><div class="muted">Open orders</div><div style="font-size:22px">${_esc(String(orders.open || 0))}</div></div></div>
-      <div class="panel"><div class="panel-body"><div class="muted">Fill rate</div><div style="font-size:22px">${orders.fill_rate == null ? '—' : Math.round(orders.fill_rate * 100) + '%'}</div></div></div>
+    <div class="aj-pane" data-pane="positions">
+      <div class="panel"><div class="panel-header"><span class="panel-title">◉ AGENT PAPER POSITIONS</span> <span class="muted" id="aj-pos-summary" style="font-size:11px"></span></div><div class="panel-body" id="aj-positions-panel"><div class="muted">loading…</div></div></div>
     </div>
 
+    <div class="aj-pane" data-pane="analytics">
+      <div class="panel"><div class="panel-header"><span class="panel-title">ANALYTICS</span></div><div class="panel-body" id="aj-analytics"><div class="muted">loading…</div></div></div>
+    </div>
+
+    <div class="aj-pane" data-pane="activity">
+      <div class="panel"><div class="panel-header"><span class="panel-title">RECENT PROPOSALS</span></div><div class="panel-body" id="aj-proposals"><div class="muted">loading…</div></div></div>
+      <div class="panel"><div class="panel-header"><span class="panel-title">RECENT ORDERS</span></div><div class="panel-body" id="aj-orders"><div class="muted">loading…</div></div></div>
+    </div>
+
+    <div class="aj-pane" data-pane="config">
     ${(() => {
       const yn = (id, v, yes, no) => `<select id="${id}"><option value="true"${v?' selected':''}>${yes||'YES'}</option><option value="false"${!v?' selected':''}>${no||'NO'}</option></select>`;
       const num = (id, v, step) => `<input id="${id}" type="number"${step?` step="${step}"`:''} value="${_esc(String(v == null ? '' : v))}">`;
@@ -4352,15 +4387,17 @@ async function loadTradingView() {
         </div>
       </div>`;
     })()}
-
-    <div class="panel"><div class="panel-header"><span class="panel-title">◉ AGENT PAPER POSITIONS</span> <span class="muted" id="aj-pos-summary" style="font-size:11px"></span></div><div class="panel-body" id="aj-positions-panel"><div class="muted">loading…</div></div></div>
-    <div class="panel"><div class="panel-header"><span class="panel-title">ANALYTICS</span></div><div class="panel-body" id="aj-analytics"><div class="muted">loading…</div></div></div>
-
-    <div class="panel"><div class="panel-header"><span class="panel-title">ALERTS</span></div><div class="panel-body">${alerts}</div></div>
-
-    <div class="panel"><div class="panel-header"><span class="panel-title">RECENT PROPOSALS</span></div><div class="panel-body" id="aj-proposals"><div class="muted">loading…</div></div></div>
-    <div class="panel"><div class="panel-header"><span class="panel-title">RECENT ORDERS</span></div><div class="panel-body" id="aj-orders"><div class="muted">loading…</div></div></div>
+    </div>
   `;
+
+  // tab switching
+  el.querySelectorAll('.aj-tab').forEach(t => t.addEventListener('click', () => {
+    const pane = t.getAttribute('data-pane');
+    el.querySelectorAll('.aj-tab').forEach(x => x.classList.toggle('active', x === t));
+    el.querySelectorAll('.aj-pane').forEach(p => p.classList.toggle('active', p.getAttribute('data-pane') === pane));
+  }));
+  const refreshBtn = document.getElementById('aj-refresh');
+  if (refreshBtn) refreshBtn.addEventListener('click', () => loadTradingView());
 
   // wire actions
   const killBtn = document.getElementById('aj-kill');
@@ -4478,6 +4515,17 @@ async function loadTradingView() {
   // analytics panel (best-effort)
   try {
     const a = await API.get('/api/aj/analytics');
+    // ── equity chart + dashboard KPIs ──
+    const eqRows = a.equity_curve || [];
+    if (eqRows.length >= 2 && typeof ChartEngine !== 'undefined' && ChartEngine.createEquityChart) {
+      ChartEngine.createEquityChart('aj-equity-chart', eqRows.map(r => r.date), eqRows.map(r => Number(r.equity_usd)));
+    } else {
+      const cc = document.getElementById('aj-equity-chart');
+      if (cc && cc.parentNode) cc.parentNode.innerHTML = '<div class="muted" style="padding:20px;text-align:center">No equity history yet — each cycle adds a point.</div>';
+    }
+    const ts2 = a.trade_stats || {};
+    const kw = document.getElementById('aj-kpi-winrate'); if (kw) kw.textContent = ts2.win_rate == null ? '—' : Math.round(ts2.win_rate * 100) + '%';
+    const kp = document.getElementById('aj-kpi-positions'); if (kp) kp.textContent = (a.positions || {}).count != null ? String((a.positions).count) : '—';
     // ── agent paper positions table ──
     const pd = a.positions || {};
     const posRows = pd.positions || [];

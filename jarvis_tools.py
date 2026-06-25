@@ -858,6 +858,56 @@ def _t_add_watchlist(args):
     return {"status": "added", "label": "{} added to watchlist".format(sym)}
 
 
+# ── AJTA autonomous trading-agent ACTIONS (confirm-gated, paper-first) ───────
+# These run ONLY through execute_mutating after an explicit user confirm. They
+# drive the agent's OWN paper book/ops — they never touch the user's real
+# portfolio. run_once is paper by default; live remains gated/fail-closed in
+# the execution layer regardless of what is requested here.
+
+_AJ_PRESETS = ("conservative", "moderate", "aggressive")
+
+
+def _t_agent_run_cycle(args):
+    import aj_operator
+    result = aj_operator.run_once("paper")
+    if isinstance(result, dict) and result.get("ok") is False \
+            and "running" in str(result.get("reason", "")):
+        return {"status": "skipped", "label": "Agent cycle already running",
+                "detail": result}
+    props = (result or {}).get("proposals") or []
+    executed = sum(1 for p in props if isinstance(p, dict) and p.get("result") == "executed")
+    return {"status": "ran", "label": "Ran agent cycle — {} proposal(s), {} executed".format(
+        len(props), executed), "detail": result}
+
+
+def _t_agent_halt(args):
+    import aj_risk
+    reason = str(args.get("reason") or "halt via Jarvis")[:200]
+    r = aj_risk.kill_switch(reason)
+    return {"status": "halted", "label": "Trading agent HALTED (kill switch on)", "detail": r}
+
+
+def _t_agent_rearm(args):
+    import aj_risk
+    r = aj_risk.rearm(actor="jarvis")
+    return {"status": "rearmed", "label": "Trading agent re-armed (kill switch cleared)",
+            "detail": r}
+
+
+def _t_agent_set_preset(args):
+    import aj_config
+    name = str(args.get("preset") or args.get("name") or "").strip().lower()
+    if name not in _AJ_PRESETS:
+        raise ValueError("preset must be one of: {}".format(", ".join(_AJ_PRESETS)))
+    cfg = aj_config.apply_preset(name)
+    if cfg is None:
+        raise ValueError("unknown preset '{}'".format(name))
+    return {"status": "applied", "label": "Applied '{}' risk preset to the trading agent".format(name),
+            "config": {k: cfg.get(k) for k in (
+                "max_order_notional_usd", "max_trades_per_day", "max_daily_loss_usd",
+                "stop_loss_pct", "take_profit_pct")}}
+
+
 # Portfolio mutations — the only tools that touch the user's holdings/ledger.
 # Like every mutating tool they execute ONLY through execute_mutating after an
 # explicit confirm; the numeric guards here mirror app.py's /api/portfolio/add
@@ -1038,6 +1088,116 @@ def _p(props: Dict[str, Any], required: Optional[List[str]] = None) -> Dict[str,
 
 _SYM_PROP = {"symbol": {"type": "string", "description": "Ticker symbol, e.g. NVDA"}}
 
+
+# ── AJTA autonomous trading-agent reads (v3.1) ───────────────────────────────
+# Compact, LLM-friendly views of the AUGUR-Jarvis Trading Agent (AJTA). This is
+# the agent's OWN paper book and operations — entirely separate from the user's
+# real portfolio. Read-only; never touches the gate/execution path.
+
+def _t_agent_status(args):
+    import aj_metrics
+    s = aj_metrics.status()
+    cfg = s.get("config") or {}
+    orders = s.get("orders") or {}
+    pnl = s.get("day_pnl") or {}
+    cum = s.get("cumulative_pnl") or {}
+    try:
+        import aj_risk
+        trades_today = aj_risk._trades_today()
+    except Exception:
+        trades_today = None
+    return {
+        "trading_enabled": s.get("trading_enabled"),
+        "mode": "live" if s.get("live_trading_enabled") else "paper",
+        "session": s.get("session"),
+        "halted": s.get("halted"),
+        "day_pnl_usd": pnl.get("day_pnl"),
+        "cumulative_pnl_usd": cum.get("total"),
+        "realized_total_usd": cum.get("realized_total"),
+        "unrealized_open_usd": cum.get("unrealized_open"),
+        "open_orders": orders.get("open"),
+        "fill_rate": orders.get("fill_rate"),
+        "trades_today": trades_today,
+        "max_trades_per_day": cfg.get("max_trades_per_day"),
+        "allowlist": cfg.get("symbol_allowlist"),
+        "max_order_notional_usd": cfg.get("max_order_notional_usd"),
+        "max_daily_loss_usd": cfg.get("max_daily_loss_usd"),
+        "alerts": s.get("alerts"),
+        "audit_chain_ok": (s.get("audit_chain") or {}).get("ok"),
+    }
+
+
+def _t_agent_positions(args):
+    import aj_analytics
+    d = aj_analytics.positions_detail()
+    rows = d.get("positions") or []
+    return {
+        "count": d.get("count"),
+        "total_market_value_usd": d.get("total_market_value"),
+        "total_unrealized_usd": d.get("total_unrealized"),
+        "positions": [{
+            "symbol": r.get("symbol"), "qty": r.get("qty"),
+            "avg_cost": r.get("avg_cost"), "mark": r.get("mark"),
+            "market_value_usd": r.get("market_value"),
+            "unrealized_usd": r.get("unrealized"),
+            "unrealized_pct": r.get("unrealized_pct"),
+            "weight_pct": r.get("weight_pct"), "age_days": r.get("age_days"),
+        } for r in rows[:30]],
+    }
+
+
+def _t_agent_performance(args):
+    import aj_analytics
+    ts = aj_analytics.trade_stats()
+    attrib = aj_analytics.attribution()
+    sharpe = aj_analytics.sharpe_like()
+    curve = aj_analytics.equity_curve(30)
+    eq_first = curve[0].get("equity_usd") if curve else None
+    eq_last = curve[-1].get("equity_usd") if curve else None
+    return {
+        "trades_closed": ts.get("trades"),
+        "win_rate": ts.get("win_rate"),
+        "wins": ts.get("wins"), "losses": ts.get("losses"),
+        "avg_win_usd": ts.get("avg_win"), "avg_loss_usd": ts.get("avg_loss"),
+        "profit_factor": ts.get("profit_factor"),
+        "net_realized_usd": ts.get("net"),
+        "sharpe_like": sharpe.get("sharpe"),
+        "equity_points": len(curve),
+        "equity_start_usd": eq_first, "equity_latest_usd": eq_last,
+        "top_contributors": [{"symbol": a.get("symbol"), "total_usd": a.get("total"),
+                              "realized_usd": a.get("realized"),
+                              "unrealized_usd": a.get("unrealized")}
+                             for a in attrib[:5]],
+        "top_detractors": [{"symbol": a.get("symbol"), "total_usd": a.get("total")}
+                           for a in attrib[-3:] if a.get("total", 0) < 0],
+        "note": "Agent's PAPER trading performance — separate from your real portfolio.",
+    }
+
+
+def _t_agent_activity(args):
+    import aj_db
+    limit = _safe_int_local(args.get("limit"), 10)
+    props = aj_db.query(
+        "SELECT id, symbol, side, qty, notional_usd, status, created_at FROM aj_proposals "
+        "ORDER BY id DESC LIMIT ?", (limit,))
+    orders = aj_db.query(
+        "SELECT id, symbol, side, qty, state, mode, broker, avg_fill_price, created_at "
+        "FROM aj_orders ORDER BY id DESC LIMIT ?", (limit,))
+    return {
+        "recent_proposals": props,
+        "recent_orders": orders,
+        "note": "What the agent has proposed/executed recently (paper book).",
+    }
+
+
+def _safe_int_local(v, default):
+    try:
+        n = int(v)
+        return n if n > 0 else default
+    except (TypeError, ValueError):
+        return default
+
+
 TOOLS: Dict[str, Dict[str, Any]] = {
     # ── OPEN-WORLD research (no ticker / portfolio needed) ──────────────────
     "web_research": {
@@ -1081,6 +1241,27 @@ TOOLS: Dict[str, Dict[str, Any]] = {
         "mutating": False,
         "description": "Technical BREADTH of the whole equity book: weighted momentum, % of names above their 50-day average, count near 52-week highs, count in deep (25%+) drawdowns, concentration (HHI), and an overall constructive/mixed/defensive tone. Use for 'how healthy/strong is my portfolio technically', 'breadth of my book'.",
         "parameters": _p({}),
+    },
+    # ── v3.1 AUTONOMOUS TRADING AGENT (AJTA) reads ──────────────────────────
+    "trading_agent_status": {
+        "fn": _t_agent_status, "mutating": False,
+        "description": "Use for 'how is the trading agent / is the agent running / is it trading / what's its P&L / is it halted': operational status of the AUTONOMOUS AI trading agent (AJTA) — paper/live mode, enabled, market session, halted/kill state, day & cumulative paper P&L, open orders, trades used today vs cap, allowlist and risk caps. This is the AGENT's own activity, SEPARATE from the user's real portfolio.",
+        "parameters": _p({}),
+    },
+    "trading_agent_positions": {
+        "fn": _t_agent_positions, "mutating": False,
+        "description": "Use for 'what is the trading agent holding / what's in the agent's portfolio / the agent's positions': the agent's current PAPER positions with qty, avg cost, mark, market value, unrealized P&L (+%), book weight, and holding age. This is the AGENT's paper book, NOT the user's real holdings.",
+        "parameters": _p({}),
+    },
+    "trading_agent_performance": {
+        "fn": _t_agent_performance, "mutating": False,
+        "description": "Use for 'how is the agent performing / its win rate / is it making money / agent profit factor / which names is the agent winning on': the agent's PAPER track record — win rate, wins/losses, avg win/loss, profit factor, net realized, Sharpe-like, equity trend, and per-symbol P&L attribution (top contributors/detractors).",
+        "parameters": _p({}),
+    },
+    "trading_agent_activity": {
+        "fn": _t_agent_activity, "mutating": False,
+        "description": "Use for 'what has the agent been doing / recent agent trades / its latest proposals or orders': the agent's most recent proposals and orders (paper). Read-only history of agent actions.",
+        "parameters": _p({"limit": {"type": "integer", "description": "How many recent items (default 10, max 25)"}}),
     },
     "deep_dossier": {
         "fn": lambda args: __import__("jarvis").deep_dossier(str(args.get("symbol") or "")),
@@ -1392,6 +1573,27 @@ TOOLS: Dict[str, Dict[str, Any]] = {
             "text": {"type": "string", "description": "Alternative: the rule in plain English, e.g. 'max position 10%'"},
         }),
     },
+    # ── mutating: AUTONOMOUS TRADING AGENT (AJTA) actions — paper-first ───────
+    "trading_agent_run_cycle": {
+        "fn": _t_agent_run_cycle, "mutating": True,
+        "description": "Run ONE cycle of the autonomous trading agent (paper): it scans, proposes, gates, and executes paper trades. Use when the user says 'run the trading agent', 'trigger a cycle', 'have the agent trade now'. The user must confirm first. Paper only — never places real-money orders.",
+        "parameters": _p({}),
+    },
+    "trading_agent_halt": {
+        "fn": _t_agent_halt, "mutating": True,
+        "description": "HALT the autonomous trading agent by engaging its kill switch — stops it from placing any further trades until re-armed. Use for 'stop/halt/pause the trading agent', 'kill the agent', 'shut it down'. The user must confirm first.",
+        "parameters": _p({"reason": {"type": "string", "description": "Optional short reason"}}),
+    },
+    "trading_agent_rearm": {
+        "fn": _t_agent_rearm, "mutating": True,
+        "description": "Re-arm the autonomous trading agent — clears the kill switch so it can trade (paper) again after a halt. Use for 're-arm/resume/restart the trading agent', 'clear the kill switch'. The user must confirm first.",
+        "parameters": _p({}),
+    },
+    "trading_agent_set_preset": {
+        "fn": _t_agent_set_preset, "mutating": True,
+        "description": "Set the trading agent's RISK preset: 'conservative', 'moderate', or 'aggressive' — adjusts its order size, trades/day, daily-loss cap, and stop/take-profit levels. Use for 'make the agent more conservative/aggressive', 'set the agent to moderate risk'. The user must confirm first.",
+        "parameters": _p({"preset": {"type": "string", "enum": list(_AJ_PRESETS)}}, ["preset"]),
+    },
 }
 
 
@@ -1492,6 +1694,10 @@ def valid_proposal_args(name: str, args: Dict[str, Any]) -> bool:
             if not (lo <= val <= hi):
                 return False
         return True
+    if name == "trading_agent_set_preset":
+        return str(args.get("preset") or args.get("name") or "").strip().lower() in _AJ_PRESETS
+    # trading_agent_run_cycle / halt / rearm take no required args — always
+    # well-formed enough to offer a confirm.
     return True
 
 
@@ -1527,6 +1733,15 @@ def proposal_label(name: str, args: Dict[str, Any]) -> str:
                 kind, "{:g}".format(v) if v is not None else args.get("value"))
         return 'Set policy rule: "{}"'.format(
             str(args.get("text") or "").strip()[:140])
+    if name == "trading_agent_run_cycle":
+        return "Run a trading-agent cycle (paper)"
+    if name == "trading_agent_halt":
+        return "Halt the trading agent (kill switch)"
+    if name == "trading_agent_rearm":
+        return "Re-arm the trading agent"
+    if name == "trading_agent_set_preset":
+        return "Set trading-agent risk preset: {}".format(
+            str(args.get("preset") or args.get("name") or "").strip().lower() or "?")
     return "{} {}".format(name, json.dumps(args))
 
 

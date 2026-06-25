@@ -149,6 +149,101 @@ def test_ask_routes_navigate_and_trade(monkeypatch=None):
     print("  [OK] ask() routes navigate->auto action and trade->proposal")
 
 
+# ── v3.1 autonomous trading-agent (AJTA) integration ─────────────────────────
+
+def test_agent_read_tools_registered():
+    for n in ("trading_agent_status", "trading_agent_positions",
+              "trading_agent_performance", "trading_agent_activity"):
+        assert n in jt.TOOLS, n
+        assert not jt.is_mutating(n), n + " must be read-only"
+    print("  [OK] 4 agent read tools registered (non-mutating)")
+
+
+def test_agent_action_tools_registered():
+    for n in ("trading_agent_run_cycle", "trading_agent_halt",
+              "trading_agent_rearm", "trading_agent_set_preset"):
+        assert n in jt.TOOLS, n
+        assert jt.is_mutating(n), n + " must be confirm-gated"
+    print("  [OK] 4 agent action tools registered (mutating)")
+
+
+def test_agent_read_tools_shapes():
+    s = jt.TOOLS["trading_agent_status"]["fn"]({})
+    for k in ("trading_enabled", "mode", "cumulative_pnl_usd", "trades_today"):
+        assert k in s, k
+    assert s["mode"] in ("paper", "live")
+    p = jt.TOOLS["trading_agent_positions"]["fn"]({})
+    assert "count" in p and "positions" in p and isinstance(p["positions"], list)
+    perf = jt.TOOLS["trading_agent_performance"]["fn"]({})
+    assert "win_rate" in perf and "trades_closed" in perf
+    act = jt.TOOLS["trading_agent_activity"]["fn"]({"limit": 3})
+    assert "recent_orders" in act and "recent_proposals" in act
+    print("  [OK] agent read tools return expected shapes")
+
+
+def test_agent_preset_validation_and_labels():
+    ok = jt.valid_proposal_args
+    assert ok("trading_agent_set_preset", {"preset": "moderate"})
+    assert ok("trading_agent_set_preset", {"preset": "AGGRESSIVE"})
+    assert not ok("trading_agent_set_preset", {"preset": "yolo"})
+    assert not ok("trading_agent_set_preset", {})
+    # run/halt/rearm take no required args
+    assert ok("trading_agent_run_cycle", {})
+    assert ok("trading_agent_halt", {})
+    assert ok("trading_agent_rearm", {})
+    assert jt.proposal_label("trading_agent_halt", {}) == "Halt the trading agent (kill switch)"
+    assert "conservative" in jt.proposal_label(
+        "trading_agent_set_preset", {"preset": "conservative"})
+    print("  [OK] agent preset validation + action labels")
+
+
+def test_agent_read_tools_blocked_from_mutating_gate():
+    # a read tool must be rejected by execute_mutating, and an action tool by
+    # execute_read — the two gates are mutually exclusive.
+    assert jt.execute_mutating("trading_agent_status", {}).get("error")
+    import json as _json
+    blocked = _json.loads(jt.execute_read("trading_agent_halt", {}))
+    assert blocked.get("error"), blocked
+    print("  [OK] read/mutate gates keep agent tools on their own side")
+
+
+def test_ask_routes_agent_questions_to_reads():
+    for q in ("how is the trading agent doing", "is the trading agent running",
+              "what is the trading agent holding", "what's the trading agent's win rate",
+              "what has the trading agent been doing lately"):
+        r = jarvis.ask(q, persist=False)
+        assert r.get("intent") == "trading_agent", (q, r.get("intent"))
+        assert r.get("proposal") is None, q
+        assert r.get("answer"), q
+    print("  [OK] agent questions route to read intent, no proposal")
+
+
+def test_ask_routes_agent_commands_to_proposals():
+    cases = {
+        "run the trading agent": "trading_agent_run_cycle",
+        "halt the trading agent": "trading_agent_halt",
+        "re-arm the trading agent": "trading_agent_rearm",
+        "make the trading agent more aggressive": "trading_agent_set_preset",
+        "set the trading agent to conservative": "trading_agent_set_preset",
+    }
+    for q, tool in cases.items():
+        r = jarvis.ask(q, persist=False)
+        assert r.get("intent") == "action", (q, r.get("intent"))
+        p = r.get("proposal") or {}
+        assert p.get("tool") == tool, (q, p.get("tool"))
+        # the emitted proposal must pass server-side re-validation
+        assert jt.valid_proposal_args(p["tool"], p.get("args") or {}), (q, p)
+    print("  [OK] agent commands route to confirm proposals (server-valid)")
+
+
+def test_agent_commands_dont_hijack_real_portfolio_trades():
+    # "buy 10 NVDA at 800" is a REAL-portfolio trade, not an agent command —
+    # the trading-agent gate must not swallow it.
+    r = jarvis.ask("buy 10 NVDA at 800", persist=False)
+    assert r.get("proposal", {}).get("tool") == "add_holding", r
+    print("  [OK] real-portfolio trade capture unaffected by agent routing")
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     print("jarvis_actions — {} tests".format(len(fns)))

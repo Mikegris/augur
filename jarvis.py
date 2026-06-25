@@ -251,6 +251,22 @@ def _llm_context_snapshot() -> str:
             _fmt_pct(regime.get("spx_pct")), _fmt_pct(regime.get("ndx_pct")),
             "{:.1f}".format(regime["vix"]) if regime.get("vix") is not None else "—",
             regime.get("regime") or "—"))
+    # Autonomous trading agent (AJTA) — its own PAPER book, separate from the
+    # user's real portfolio above. Keeps Jarvis aware the agent exists so it can
+    # speak to it without the user prefixing every question.
+    try:
+        import jarvis_tools as jt
+        a = jt._t_agent_status({})
+        state = "HALTED" if a.get("halted") else ("trading" if a.get("trading_enabled") else "idle")
+        lines.append(
+            "Trading agent (AJTA, {} book — NOT the user's real portfolio): "
+            "{}; day P&L {}; cumulative {}; {}/{} trades today. Use the "
+            "trading_agent_* tools for its positions/performance/activity.".format(
+                a.get("mode"), state, _fmt_usd(a.get("day_pnl_usd")),
+                _fmt_usd(a.get("cumulative_pnl_usd")), a.get("trades_today"),
+                a.get("max_trades_per_day")))
+    except Exception:
+        pass
     return "\n".join(lines) if lines else "(no local data available)"
 
 
@@ -3065,9 +3081,12 @@ _HELP_ANSWER = (
     "“what did I buy recently”, “am I beating the market”, “how much crypto do "
     "I have”, “my watchlist”, “any ideas”, “momentum on NVDA”, “how healthy is "
     "my portfolio”, “what's moving”, “should I rebalance”, “dossier on AAPL”, or "
-    "“claude, <any open-ended question>” to investigate live. I can also take "
-    "actions: “buy 10 NVDA at 800” or “sell 3 TSLA at 250” to update your "
-    "portfolio (you confirm first), and “take me to my watchlist” or “open the "
+    "“claude, <any open-ended question>” to investigate live. I keep an eye on "
+    "the autonomous trading agent too — ask “how's the trading agent doing”, "
+    "“what is the trading agent holding”, or “what's the agent's win rate”. I "
+    "can also take actions: “buy 10 NVDA at 800” or “sell 3 TSLA at 250” to "
+    "update your portfolio (you confirm first), “run the trading agent” or "
+    "“halt the trading agent”, and “take me to my watchlist” or “open the "
     "forecast for AAPL” to navigate the app for you — or just tell me something "
     "to remember and I'll keep it."
 )
@@ -3624,6 +3643,12 @@ _REBAL_RE = re.compile(
     r"\b(rebalance|re-balance|what (?:should i|to) trim|\btrim\b|overweight|"
     r"too concentrated|reduce my position)\b", re.IGNORECASE)
 _CONC_GUARDRAIL_PCT = 25.0  # single-name weight above which we flag a trim
+# Autonomous trading agent (AJTA) — distinct from Jarvis itself and from the
+# user's real portfolio. Requires an explicit trading-agent referent so plain
+# "the agent" (= Jarvis) doesn't divert here.
+_TRADING_AGENT_RE = re.compile(
+    r"\b(trading agent|trade agent|trading bot|trade bot|auto[- ]?trader|"
+    r"autonomous (?:trad\w+|agent)|ajta|ai trader|the bot)\b", re.IGNORECASE)
 
 
 def _priced_weights():
@@ -3758,6 +3783,134 @@ def _answer_portfolio_health():
         parts.append("{} in a 25%+ drawdown".format(h["in_deep_drawdown"]))
     return {"answer": ", ".join(parts) + ".", "data": h,
             "action": {"view": "analytics"}}
+
+
+def _answer_trading_agent(ql: str) -> Dict[str, Any]:
+    """Natural-language reads of the AUTONOMOUS trading agent (AJTA) — its own
+    paper book and operations, separate from the user's real portfolio. Routes
+    among status / positions / performance / activity by phrasing."""
+    import jarvis_tools as jt
+    action = {"view": "trading"}
+    try:
+        # ── what's it holding ────────────────────────────────────────────────
+        if any(w in ql for w in ("holding", "hold", "position", "own", "in the book",
+                                 "what's it in", "whats it in", "book", "portfolio")):
+            d = jt._t_agent_positions({})
+            n = d.get("count") or 0
+            if not n:
+                return {"answer": "The trading agent isn't holding any paper positions "
+                                  "right now.", "data": d, "action": action}
+            top = d.get("positions") or []
+            names = ", ".join("{} ({})".format(p["symbol"], _fmt_usd(p["market_value_usd"]))
+                              for p in top[:5])
+            ans = ("The agent holds {} paper position{} worth {} (unrealized {}). "
+                   "Top: {}.".format(n, "" if n == 1 else "s",
+                                     _fmt_usd(d.get("total_market_value_usd")),
+                                     _fmt_usd(d.get("total_unrealized_usd")), names))
+            return {"answer": ans, "data": d, "action": action}
+        # ── how's it performing ──────────────────────────────────────────────
+        if any(w in ql for w in ("win rate", "winrate", "perform", "profit", "making money",
+                                 "track record", "how is it doing", "how's it doing",
+                                 "sharpe", "returns", "best", "worst")):
+            d = jt._t_agent_performance({})
+            n = d.get("trades_closed") or 0
+            if not n:
+                return {"answer": "The agent hasn't closed any paper trades yet, so there's "
+                                  "no win rate to report. It's been accumulating positions "
+                                  "(see its unrealized P&L on the Trading tab).",
+                        "data": d, "action": action}
+            wr = d.get("win_rate")
+            pf = d.get("profit_factor")
+            parts = ["The agent has closed {} paper trade{}".format(n, "" if n == 1 else "s")]
+            if wr is not None:
+                parts.append("{:.0f}% win rate".format(wr * 100))
+            if pf is not None:
+                parts.append("profit factor {}".format(pf))
+            parts.append("net realized {}".format(_fmt_usd(d.get("net_realized_usd"))))
+            tc = d.get("top_contributors") or []
+            tail = ""
+            if tc:
+                tail = " Top contributor: {} ({}).".format(tc[0]["symbol"],
+                                                           _fmt_usd(tc[0]["total_usd"]))
+            return {"answer": ", ".join(parts) + "." + tail, "data": d, "action": action}
+        # ── what's it been doing ─────────────────────────────────────────────
+        if any(w in ql for w in ("recent", "lately", "been doing", "activity", "latest",
+                                 "proposal", "order", "trades", "did it", "has it")):
+            d = jt._t_agent_activity({"limit": 5})
+            orders = d.get("recent_orders") or []
+            if not orders:
+                return {"answer": "The agent hasn't placed any orders yet.",
+                        "data": d, "action": action}
+            recent = "; ".join("{} {:g} {} ({})".format(
+                o.get("side", "").upper(), float(o.get("qty") or 0), o.get("symbol"),
+                o.get("state")) for o in orders[:4])
+            return {"answer": "Recent agent orders — {}.".format(recent),
+                    "data": d, "action": action}
+        # ── status (default) ─────────────────────────────────────────────────
+        s = jt._t_agent_status({})
+        state = "halted (kill switch on)" if s.get("halted") else (
+            "trading" if s.get("trading_enabled") else "idle (fail-closed)")
+        parts = ["The trading agent is {} in {} mode".format(state, s.get("mode"))]
+        if s.get("session"):
+            parts.append("market session: {}".format(s.get("session")))
+        if s.get("day_pnl_usd") is not None:
+            parts.append("day P&L {}".format(_fmt_usd(s.get("day_pnl_usd"))))
+        if s.get("cumulative_pnl_usd") is not None:
+            parts.append("cumulative {}".format(_fmt_usd(s.get("cumulative_pnl_usd"))))
+        if s.get("trades_today") is not None:
+            parts.append("{}/{} trades used today".format(
+                s.get("trades_today"), s.get("max_trades_per_day")))
+        return {"answer": ", ".join(parts) + ".", "data": s, "action": action}
+    except Exception as e:
+        log.debug("trading_agent answer failed", exc_info=True)
+        return {"answer": "Couldn't read the trading agent just now ({}). The Trading "
+                          "tab has the live view.".format(e), "action": action}
+
+
+_AGENT_RUN_RE = re.compile(r"\b(run|trigger|start|execute|fire|kick off|trade now)\b", re.IGNORECASE)
+_AGENT_HALT_RE = re.compile(r"\b(halt|stop|pause|kill|shut\s*(?:down|it)?|disable|turn off|freeze)\b", re.IGNORECASE)
+_AGENT_REARM_RE = re.compile(r"\b(re-?arm|resume|restart|reactivate|unfreeze|turn (?:it )?back on|clear the kill)\b", re.IGNORECASE)
+
+
+def _answer_trading_agent_action(ql: str) -> Optional[Dict[str, Any]]:
+    """Confirm-gated COMMANDS to the trading agent (run a cycle / halt / re-arm /
+    set risk preset). Returns a proposal payload the user confirms, or None when
+    the phrasing is a question rather than a command. Caller has already gated on
+    _TRADING_AGENT_RE so we know the agent is the subject."""
+    import jarvis_tools
+    tool: Optional[str] = None
+    args: Dict[str, Any] = {}
+    # Risk preset — "make the agent more aggressive", "set it to conservative".
+    if "aggressive" in ql:
+        tool, args = "trading_agent_set_preset", {"preset": "aggressive"}
+    elif "conservative" in ql:
+        tool, args = "trading_agent_set_preset", {"preset": "conservative"}
+    elif re.search(r"\bmoderate\b", ql):
+        tool, args = "trading_agent_set_preset", {"preset": "moderate"}
+    # Re-arm BEFORE halt — "resume/restart" must not match the halt verbs, and
+    # "turn it back on" contains no halt word anyway.
+    elif _AGENT_REARM_RE.search(ql):
+        tool = "trading_agent_rearm"
+    elif _AGENT_HALT_RE.search(ql):
+        tool = "trading_agent_halt"
+    elif _AGENT_RUN_RE.search(ql):
+        tool = "trading_agent_run_cycle"
+    if not tool:
+        return None
+    try:
+        if not jarvis_tools.valid_proposal_args(tool, args):
+            return None
+        label = jarvis_tools.proposal_label(tool, args)
+    except Exception:
+        return None
+    verb = {"trading_agent_run_cycle": "run one paper cycle now",
+            "trading_agent_halt": "halt the agent (kill switch)",
+            "trading_agent_rearm": "re-arm the agent",
+            "trading_agent_set_preset": "switch the agent's risk preset"}.get(tool, "do that")
+    return {"answer": "Confirm and I'll {} — paper only, nothing touches your real "
+                      "portfolio.".format(verb),
+            "proposal": {"tool": tool, "args": args, "label": label},
+            "action": {"view": "trading"}}
 
 
 def _dossier_forecast(symbol):
@@ -4271,6 +4424,16 @@ def ask(query: str, history: Any = None, conversation_id: Any = None,
         trade = _answer_trade(q)
         if trade is not None:
             return done("action", trade)
+        # Autonomous trading agent (AJTA) — its OWN paper book/ops, separate from
+        # the user's real portfolio. High precedence so "what is the trading
+        # agent holding" doesn't get swallowed by the portfolio intents below.
+        # A COMMAND ("run/halt/re-arm the trading agent", "make it aggressive")
+        # becomes a confirm proposal; a question becomes a read.
+        if _TRADING_AGENT_RE.search(ql):
+            act = _answer_trading_agent_action(ql)
+            if act is not None:
+                return done("action", act)
+            return done("trading_agent", _answer_trading_agent(ql))
         # Deep knowledge: "what is gamma exposure" / "explain p/e". Before
         # the market/quote intents ("what is the vix" should TEACH, not just
         # quote a level) but only when no symbol is in play — "what is

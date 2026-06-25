@@ -319,5 +319,45 @@ const ChartEngine = (() => {
     ctx.fill();
   }
 
-  return { createPriceChart, createAllocationChart, createPnlChart, drawSparkline, addSMAOverlay, destroyChart, registerChart };
+  // Equity-curve line chart (trading agent). Filled area, green/red by trend.
+  function createEquityChart(canvasId, labels, equity) {
+    const ctx = document.getElementById(canvasId);
+    if (!ctx || typeof Chart === 'undefined') return null;
+    if (ctx._chartInstance) { try { ctx._chartInstance.destroy(); } catch (e) {} }
+    const up = equity.length < 2 || equity[equity.length - 1] >= equity[0];
+    const line = up ? COLORS.green : COLORS.red;
+    const chart = new Chart(ctx, {
+      type: 'line',
+      data: {
+        labels,
+        datasets: [{
+          label: 'Equity', data: equity, borderColor: line,
+          backgroundColor: line + '22', borderWidth: 2, fill: true,
+          tension: 0.25, pointRadius: 0, pointHoverRadius: 4,
+        }],
+      },
+      options: {
+        responsive: true, maintainAspectRatio: false,
+        plugins: {
+          legend: { display: false },
+          tooltip: {
+            backgroundColor: '#0a2030', borderColor: '#1a4060', borderWidth: 1,
+            titleColor: line, bodyColor: COLORS.text,
+            titleFont: { family: 'JetBrains Mono', size: 11 },
+            bodyFont: { family: 'JetBrains Mono', size: 10 },
+            callbacks: { label: c => ' $' + (fmt && fmt.currency ? fmt.currency(c.parsed.y) : c.parsed.y) },
+          },
+        },
+        scales: {
+          x: { ticks: { color: COLORS.text, font: { family: 'JetBrains Mono', size: 9 }, maxTicksLimit: 8 }, grid: { color: COLORS.border } },
+          y: { ticks: { color: COLORS.text, font: { family: 'JetBrains Mono', size: 9 } }, grid: { color: COLORS.border } },
+        },
+      },
+    });
+    ctx._chartInstance = chart;
+    registerChart(canvasId, chart);
+    return chart;
+  }
+
+  return { createPriceChart, createAllocationChart, createPnlChart, createEquityChart, drawSparkline, addSMAOverlay, destroyChart, registerChart };
 })();

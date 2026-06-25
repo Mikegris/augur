@@ -3027,3 +3027,46 @@ input:focus, select:focus, textarea:focus {
   .jv-bubble, .jarvis-card, #search-results { box-shadow: none !important; }
   .toast { -webkit-backdrop-filter: none; backdrop-filter: none; }
 }
+
+/* ── Trading Agent UI (v3.1 overhaul) ───────────────────────────── */
+.aj-hero {
+  display: flex; justify-content: space-between; align-items: flex-start;
+  gap: 16px; flex-wrap: wrap; padding: 14px 18px; margin-bottom: 14px;
+  border: 1px solid var(--border); border-radius: 8px;
+  background: linear-gradient(180deg, rgba(80,160,255,0.05), transparent);
+}
+.aj-hero-title { font-size: 17px; font-weight: 600; letter-spacing: 0.04em; }
+.aj-hero-ver { font-size: 11px; color: var(--text-secondary); margin-left: 6px; font-weight: 400; }
+.aj-hero-pills { margin-top: 8px; display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
+.aj-hero-right { display: flex; align-items: center; gap: 18px; flex-wrap: wrap; }
+.aj-hero-pnl { text-align: right; }
+.aj-hero-pnl-label { font-size: 10px; color: var(--text-secondary); letter-spacing: 0.08em; text-transform: uppercase; }
+.aj-hero-pnl-val { font-size: 26px; font-weight: 700; font-family: 'JetBrains Mono', ui-monospace, monospace; line-height: 1.1; }
+.aj-hero-actions { display: flex; gap: 6px; flex-wrap: wrap; }
+.aj-tabs {
+  display: flex; gap: 2px; border-bottom: 1px solid var(--border);
+  margin-bottom: 16px; overflow-x: auto; scrollbar-width: none;
+}
+.aj-tabs::-webkit-scrollbar { display: none; }
+.aj-tab {
+  background: transparent; border: none; border-bottom: 2px solid transparent;
+  color: var(--text-secondary); padding: 9px 18px; cursor: pointer;
+  font-family: inherit; font-size: 12px; letter-spacing: 0.05em;
+  white-space: nowrap; text-transform: uppercase; transition: color 0.15s, border-color 0.15s;
+}
+.aj-tab:hover { color: var(--text-primary); }
+.aj-tab.active { color: var(--blue); border-bottom-color: var(--blue); }
+.aj-pane { display: none; }
+.aj-pane.active { display: block; animation: ajFade 0.2s ease; }
+.aj-kpi-grid {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 10px; margin-bottom: 14px;
+}
+.aj-kpi {
+  border: 1px solid var(--border); border-radius: 6px; padding: 12px 14px;
+  background: rgba(255,255,255,0.015);
+}
+.aj-kpi-label { font-size: 10px; color: var(--text-secondary); letter-spacing: 0.07em; text-transform: uppercase; }
+.aj-kpi-val { font-size: 20px; font-weight: 600; font-family: 'JetBrains Mono', ui-monospace, monospace; margin-top: 4px; }
+@keyframes ajFade { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
+@media (prefers-reduced-motion: reduce) { .aj-pane.active { animation: none; } }
