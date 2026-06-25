@@ -651,6 +651,7 @@ function navigate(view) {
   switch (view) {
     case 'overview':     loadOverview(); break;
     case 'jarvis':       if (window.Jarvis) Jarvis.loadView(); break;
+    case 'trading':      loadTradingView(); break;
     case 'portfolio':    loadPortfolio(); break;
     case 'markets':      loadMarkets(); break;
     case 'crypto':       loadCrypto(); break;
