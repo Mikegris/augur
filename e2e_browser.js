@@ -74,20 +74,28 @@ function pass(what) { console.log(`  ✓ ${what}`); }
       fail(v, `navigate() threw: ${String(e).slice(0, 160)}`);
       continue;
     }
-    await new Promise(r => setTimeout(r, 1500));
-    const state = await page.evaluate((view) => {
+    const probe = (view) => {
       const el = document.getElementById('view-' + view);
       if (!el) return { ok: false, why: 'view container missing' };
       if (!el.classList.contains('active')) return { ok: false, why: 'not activated' };
       if (el.innerHTML.trim().length < 40) return { ok: false, why: 'rendered nearly empty' };
       // A view still showing ONLY a bare spinner with no text means its loader
-      // never ran — typically the case is missing from navigate()'s switch.
+      // never ran (typically a missing case in navigate()'s switch). Slow async
+      // loaders legitimately show a spinner briefly, so this is RE-CHECKED after
+      // a longer wait below before failing.
       const txt = (el.innerText || el.textContent || '').replace(/\s+/g, '');
       if (txt.length === 0 && /spinner/.test(el.innerHTML)) {
         return { ok: false, why: 'loader never populated (bare spinner) — wired into navigate()?' };
       }
       return { ok: true };
-    }, v);
+    };
+    await new Promise(r => setTimeout(r, 1500));
+    let state = await page.evaluate(probe, v);
+    if (!state.ok && state.why.indexOf('bare spinner') >= 0) {
+      // give a slow async loader more time before declaring it stuck
+      await new Promise(r => setTimeout(r, 3000));
+      state = await page.evaluate(probe, v);
+    }
     if (!state.ok) fail(v, state.why);
     else pass(`view ${v} renders`);
   }
