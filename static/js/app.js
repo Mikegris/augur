@@ -4317,73 +4317,88 @@ async function loadTradingView() {
 
     <div class="aj-pane" data-pane="config">
     ${(() => {
-      const yn = (id, v, yes, no) => `<select id="${id}"><option value="true"${v?' selected':''}>${yes||'YES'}</option><option value="false"${!v?' selected':''}>${no||'NO'}</option></select>`;
-      const num = (id, v, step) => `<input id="${id}" type="number"${step?` step="${step}"`:''} value="${_esc(String(v == null ? '' : v))}">`;
+      const yn = (id, v, yes, no) => `<select id="${id}"><option value="true"${v?' selected':''}>${yes||'Yes'}</option><option value="false"${!v?' selected':''}>${no||'No'}</option></select>`;
+      const num = (id, v, step, unit) => `<div class="aj-input-wrap${unit?' aj-has-unit':''}"><input id="${id}" type="number"${step?` step="${step}"`:''} value="${_esc(String(v == null ? '' : v))}">${unit?`<span class="aj-input-unit">${unit}</span>`:''}</div>`;
       const txt = (id, v, ph) => `<input id="${id}" value="${_esc(String(v == null ? '' : v))}"${ph?` placeholder="${ph}"`:''}>`;
       const sess = (cfg.session_whitelist || ['regular']).join(', ');
-      const grid = 'display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:10px';
+      // One labelled field: title, control, and a plain-language hint.
+      const f = (label, control, hint) => `<label class="aj-field"><span class="aj-field-label">${label}</span>${control}${hint?`<span class="aj-field-hint">${hint}</span>`:''}</label>`;
+      // A collapsible group. `open` groups show by default; advanced ones start
+      // collapsed so the page isn't a wall of inputs.
+      const group = (title, desc, open, fields) =>
+        `<details class="aj-cfg-group"${open?' open':''}><summary><span class="aj-cfg-grp-title">${title}</span><span class="aj-cfg-grp-desc">${desc}</span><span class="aj-cfg-grp-chev">▾</span></summary><div class="aj-cfg-fields">${fields}</div></details>`;
       return `
-      <div class="panel">
-        <div class="panel-header"><span class="panel-title">CONFIG — UNIVERSE & SWITCHES</span></div>
-        <div class="panel-body" style="${grid}">
-          <label class="muted">Master trading<br>${yn('aj-cfg-trading_enabled', enabled, 'ON (paper)', 'OFF')}</label>
-          <label class="muted">Symbol allowlist (comma)<br>${txt('aj-cfg-symbol_allowlist', allowlist, 'NVDA, AAPL')}</label>
-          <label class="muted">Allow ANY symbol (open universe)<br>${yn('aj-cfg-allow_any_symbol', cfg.allow_any_symbol, 'YES (any quotable)', 'NO (allowlist only)')}</label>
-          <label class="muted">Scan universe max (open mode)<br>${num('aj-cfg-scan_universe_max', cfg.scan_universe_max)}</label>
+      <div class="aj-cfg">
+        <div class="aj-cfg-intro muted">All settings affect the agent's <b>paper</b> book only. Pick a preset to set sensible defaults, then fine-tune anything below. Changes apply when you press <b>Save</b>.</div>
+
+        <div class="aj-cfg-presets">
+          <div class="aj-cfg-presets-label">Quick setup — apply a risk profile:</div>
+          <div class="aj-cfg-preset-row">
+            <button class="btn aj-preset" data-p="conservative">🛡 Conservative<small>small size · tight stops · few trades</small></button>
+            <button class="btn aj-preset" data-p="moderate">⚖ Moderate<small>balanced size · standard stops</small></button>
+            <button class="btn aj-preset" data-p="aggressive">🚀 Aggressive<small>larger size · wider stops · more trades</small></button>
+          </div>
         </div>
-        <div class="panel-header"><span class="panel-title">CONFIG — RISK LIMITS (fail-closed)</span></div>
-        <div class="panel-body" style="${grid}">
-          <label class="muted">Max order notional $<br>${num('aj-cfg-max_order_notional_usd', cfg.max_order_notional_usd)}</label>
-          <label class="muted">Max trades / day<br>${num('aj-cfg-max_trades_per_day', cfg.max_trades_per_day)}</label>
-          <label class="muted">Max daily loss $ (HALT)<br>${num('aj-cfg-max_daily_loss_usd', cfg.max_daily_loss_usd)}</label>
-          <label class="muted">Daily-loss basis<br><select id="aj-cfg-daily_loss_basis"><option value="realized_plus_unrealized"${cfg.daily_loss_basis!=='realized'?' selected':''}>realized + unrealized</option><option value="realized"${cfg.daily_loss_basis==='realized'?' selected':''}>realized only</option></select></label>
-          <label class="muted">Halt re-arm<br><select id="aj-cfg-halt_rearm"><option value="manual"${cfg.halt_rearm!=='session_open'?' selected':''}>manual</option><option value="session_open"${cfg.halt_rearm==='session_open'?' selected':''}>session_open</option></select></label>
-          <label class="muted">Session whitelist (comma)<br>${txt('aj-cfg-session_whitelist', sess, 'regular, premarket')}</label>
-        </div>
-        <div class="panel-header"><span class="panel-title">CONFIG — STRATEGY (how it decides)</span></div>
-        <div class="panel-body" style="${grid}">
-          <label class="muted">Forecast horizon (trading days)<br>${num('aj-cfg-forecast_horizon_days', cfg.forecast_horizon_days)}</label>
-          <label class="muted">Buy threshold (prob-up ≥)<br>${num('aj-cfg-buy_prob_threshold', cfg.buy_prob_threshold, '0.01')}</label>
-          <label class="muted">Sell threshold (prob-up ≤)<br>${num('aj-cfg-sell_prob_threshold', cfg.sell_prob_threshold, '0.01')}</label>
-          <label class="muted">Min edge (pct points)<br>${num('aj-cfg-min_edge_pct_pts', cfg.min_edge_pct_pts, '0.5')}</label>
-          <label class="muted">Order size target $ (0 = ½ cap)<br>${num('aj-cfg-order_notional_target_usd', cfg.order_notional_target_usd)}</label>
-          <label class="muted">LLM thesis synthesis<br>${yn('aj-cfg-use_llm_synthesis', cfg.use_llm_synthesis)}</label>
-        </div>
-        <div class="panel-header"><span class="panel-title">CONFIG — EXECUTION (paper fill model)</span></div>
-        <div class="panel-body" style="${grid}">
-          <label class="muted">Default broker<br>${txt('aj-cfg-default_broker', cfg.default_broker || 'paper')}</label>
-          <label class="muted">Auto-approve paper<br>${yn('aj-cfg-auto_approve_paper', cfg.auto_approve_paper)}</label>
-          <label class="muted">Paper slippage (bps)<br>${num('aj-cfg-paper_slippage_bps', cfg.paper_slippage_bps, '0.5')}</label>
-          <label class="muted">Paper spread fraction<br>${num('aj-cfg-paper_spread_fraction', cfg.paper_spread_fraction, '0.1')}</label>
-        </div>
-        <div class="panel-header"><span class="panel-title">CONFIG — ENHANCEMENTS</span></div>
-        <div class="panel-body" style="${grid}">
-          <label class="muted">Conviction sizing<br>${yn('aj-cfg-conviction_sizing', cfg.conviction_sizing)}</label>
-          <label class="muted">Min order notional $<br>${num('aj-cfg-min_order_notional_usd', cfg.min_order_notional_usd)}</label>
-          <label class="muted">Entry order type<br><select id="aj-cfg-entry_order_type"><option value="market"${cfg.entry_order_type!=='limit'?' selected':''}>market</option><option value="limit"${cfg.entry_order_type==='limit'?' selected':''}>limit</option></select></label>
-          <label class="muted">Limit offset (bps)<br>${num('aj-cfg-entry_limit_offset_bps', cfg.entry_limit_offset_bps, '1')}</label>
-          <label class="muted">Order TTL (cycles)<br>${num('aj-cfg-order_ttl_cycles', cfg.order_ttl_cycles)}</label>
-          <label class="muted">Take-profit %<br>${num('aj-cfg-take_profit_pct', cfg.take_profit_pct, '0.5')}</label>
-          <label class="muted">Stop-loss %<br>${num('aj-cfg-stop_loss_pct', cfg.stop_loss_pct, '0.5')}</label>
-          <label class="muted">Trailing stop %<br>${num('aj-cfg-trailing_stop_pct', cfg.trailing_stop_pct, '0.5')}</label>
-          <label class="muted">Re-entry cooldown (min)<br>${num('aj-cfg-exit_cooldown_min', cfg.exit_cooldown_min)}</label>
-          <label class="muted">Max open positions<br>${num('aj-cfg-max_open_positions', cfg.max_open_positions)}</label>
-          <label class="muted">Max symbol weight %<br>${num('aj-cfg-max_symbol_weight_pct', cfg.max_symbol_weight_pct, '0.5')}</label>
-          <label class="muted">Max trades/symbol/day<br>${num('aj-cfg-max_trades_per_symbol_per_day', cfg.max_trades_per_symbol_per_day)}</label>
-          <label class="muted">Skip first N min<br>${num('aj-cfg-trade_skip_open_min', cfg.trade_skip_open_min)}</label>
-          <label class="muted">Skip last N min<br>${num('aj-cfg-trade_skip_close_min', cfg.trade_skip_close_min)}</label>
-          <label class="muted">Max slippage (bps)<br>${num('aj-cfg-max_slippage_bps', cfg.max_slippage_bps, '0.5')}</label>
-          <label class="muted">Risk-off VIX (skip buys above)<br>${num('aj-cfg-risk_off_vix', cfg.risk_off_vix, '0.5')}</label>
-          <label class="muted">Dry-run (preview only)<br>${yn('aj-cfg-dry_run', cfg.dry_run)}</label>
-          <label class="muted">Notify on fills<br>${yn('aj-cfg-notify_fills', cfg.notify_fills)}</label>
-        </div>
-        <div class="panel-body" style="padding-top:0;display:flex;gap:8px;align-items:center;flex-wrap:wrap">
-          <button class="btn btn-sm" id="aj-save-cfg">SAVE CONFIG</button>
-          <span class="muted" style="font-size:11px">Presets:</span>
-          <button class="btn btn-sm aj-preset" data-p="conservative">Conservative</button>
-          <button class="btn btn-sm aj-preset" data-p="moderate">Moderate</button>
-          <button class="btn btn-sm aj-preset" data-p="aggressive">Aggressive</button>
-          <span class="muted" style="font-size:11px">Live trading is NOT editable here — CLI + VERIFY gates only.</span>
+
+        ${group('Master switch & universe', 'What the agent is allowed to trade', true,
+          f('Trading', yn('aj-cfg-trading_enabled', enabled, 'On (paper)', 'Off'), 'Master switch. When off, the agent never trades — no matter the other settings.') +
+          f('Symbol allowlist', txt('aj-cfg-symbol_allowlist', allowlist, 'NVDA, AAPL, …'), 'Comma-separated tickers it may trade. The only universe unless “open universe” is on.') +
+          f('Open universe', yn('aj-cfg-allow_any_symbol', cfg.allow_any_symbol, 'Yes — any quotable', 'No — allowlist only'), 'Let it trade any quotable symbol, not just the allowlist above.') +
+          f('Scan limit (open mode)', num('aj-cfg-scan_universe_max', cfg.scan_universe_max, null, 'symbols'), 'In open-universe mode, how many candidates to scan each cycle.')
+        )}
+
+        ${group('Risk limits', 'Hard guardrails — the agent fails closed if any are unset', true,
+          f('Max order size', num('aj-cfg-max_order_notional_usd', cfg.max_order_notional_usd, null, '$'), 'Largest single order, in dollars.') +
+          f('Max trades / day', num('aj-cfg-max_trades_per_day', cfg.max_trades_per_day, null, 'trades'), 'Hard daily cap across all symbols.') +
+          f('Daily loss → HALT', num('aj-cfg-max_daily_loss_usd', cfg.max_daily_loss_usd, null, '$'), 'If the day’s loss hits this, the agent halts itself.') +
+          f('Loss counts', `<select id="aj-cfg-daily_loss_basis"><option value="realized_plus_unrealized"${cfg.daily_loss_basis!=='realized'?' selected':''}>Realized + unrealized</option><option value="realized"${cfg.daily_loss_basis==='realized'?' selected':''}>Realized only</option></select>`, 'Whether open-position paper losses count toward the halt trigger.') +
+          f('Re-arm after halt', `<select id="aj-cfg-halt_rearm"><option value="manual"${cfg.halt_rearm!=='session_open'?' selected':''}>Manually</option><option value="session_open"${cfg.halt_rearm==='session_open'?' selected':''}>Next session open</option></select>`, 'How a halt clears — you re-arm it, or it auto-clears next session.') +
+          f('Trading sessions', txt('aj-cfg-session_whitelist', sess, 'regular, premarket'), 'Which sessions it may trade in (regular, premarket, afterhours).') +
+          f('Max open positions', num('aj-cfg-max_open_positions', cfg.max_open_positions, null, 'positions'), 'Most names it can hold at once.') +
+          f('Max weight / name', num('aj-cfg-max_symbol_weight_pct', cfg.max_symbol_weight_pct, '0.5', '%'), 'Cap on any single position’s share of the book.') +
+          f('Max trades / name / day', num('aj-cfg-max_trades_per_symbol_per_day', cfg.max_trades_per_symbol_per_day, null, 'trades'), 'Limits churn in one symbol per day.')
+        )}
+
+        ${group('How it decides (entry signals)', 'When the agent chooses to buy or sell', false,
+          f('Forecast horizon', num('aj-cfg-forecast_horizon_days', cfg.forecast_horizon_days, null, 'days'), 'Trading-day horizon the forecast targets.') +
+          f('Buy when P(up) ≥', num('aj-cfg-buy_prob_threshold', cfg.buy_prob_threshold, '0.01'), 'Buy only when the forecast probability of going up clears this (0–1).') +
+          f('Sell when P(up) ≤', num('aj-cfg-sell_prob_threshold', cfg.sell_prob_threshold, '0.01'), 'Exit when the up-probability falls to this or below (0–1).') +
+          f('Minimum edge', num('aj-cfg-min_edge_pct_pts', cfg.min_edge_pct_pts, '0.5', 'pts'), 'Required expected edge before acting, in percentage points.') +
+          f('Skip buys above VIX', num('aj-cfg-risk_off_vix', cfg.risk_off_vix, '0.5', 'VIX'), 'Pause new buys when market fear (VIX) is above this level.') +
+          f('LLM thesis', yn('aj-cfg-use_llm_synthesis', cfg.use_llm_synthesis), 'Use the language model to write each trade’s rationale.')
+        )}
+
+        ${group('Position sizing', 'How big each trade is', false,
+          f('Target order size', num('aj-cfg-order_notional_target_usd', cfg.order_notional_target_usd, null, '$'), 'Dollars per order. 0 = use half the max-order size above.') +
+          f('Conviction sizing', yn('aj-cfg-conviction_sizing', cfg.conviction_sizing), 'Scale order size up when the forecast is more confident.') +
+          f('Minimum order size', num('aj-cfg-min_order_notional_usd', cfg.min_order_notional_usd, null, '$'), 'Never place an order smaller than this.')
+        )}
+
+        ${group('Exits (protect profits, cap losses)', 'When to automatically close a position', false,
+          f('Take-profit', num('aj-cfg-take_profit_pct', cfg.take_profit_pct, '0.5', '%'), 'Auto-sell a winner once it’s up this much. 0 = off.') +
+          f('Stop-loss', num('aj-cfg-stop_loss_pct', cfg.stop_loss_pct, '0.5', '%'), 'Auto-sell a loser once it’s down this much. 0 = off.') +
+          f('Trailing stop', num('aj-cfg-trailing_stop_pct', cfg.trailing_stop_pct, '0.5', '%'), 'Exit if price falls this far from its peak. 0 = off.') +
+          f('Re-entry cooldown', num('aj-cfg-exit_cooldown_min', cfg.exit_cooldown_min, null, 'min'), 'Wait this long before buying a name again after exiting it.')
+        )}
+
+        ${group('Order placement & execution', 'How orders are sent and filled', false,
+          f('Broker', txt('aj-cfg-default_broker', cfg.default_broker || 'paper'), 'Execution venue. “paper” = simulated fills, no real money.') +
+          f('Auto-approve (paper)', yn('aj-cfg-auto_approve_paper', cfg.auto_approve_paper), 'Place paper proposals automatically, without a manual confirm step.') +
+          f('Entry order type', `<select id="aj-cfg-entry_order_type"><option value="market"${cfg.entry_order_type!=='limit'?' selected':''}>Market (fill now)</option><option value="limit"${cfg.entry_order_type==='limit'?' selected':''}>Limit (price-protected)</option></select>`, 'Market fills immediately; limit waits for your price.') +
+          f('Limit offset', num('aj-cfg-entry_limit_offset_bps', cfg.entry_limit_offset_bps, '1', 'bps'), 'How far from the quote to place a limit order, in basis points.') +
+          f('Order time-to-live', num('aj-cfg-order_ttl_cycles', cfg.order_ttl_cycles, null, 'cycles'), 'Cancel an unfilled order after this many cycles.') +
+          f('Max slippage', num('aj-cfg-max_slippage_bps', cfg.max_slippage_bps, '0.5', 'bps'), 'Reject a fill if slippage exceeds this (basis points).') +
+          f('Paper slippage', num('aj-cfg-paper_slippage_bps', cfg.paper_slippage_bps, '0.5', 'bps'), 'Simulated slippage added to paper fills, for realism.') +
+          f('Paper spread crossed', num('aj-cfg-paper_spread_fraction', cfg.paper_spread_fraction, '0.1'), 'Fraction of the bid/ask spread paid on a paper fill (0–1).') +
+          f('Skip after open', num('aj-cfg-trade_skip_open_min', cfg.trade_skip_open_min, null, 'min'), 'Avoid the volatile first N minutes after the open.') +
+          f('Skip before close', num('aj-cfg-trade_skip_close_min', cfg.trade_skip_close_min, null, 'min'), 'Avoid the last N minutes before the close.') +
+          f('Dry-run', yn('aj-cfg-dry_run', cfg.dry_run), 'Preview proposals only — place no orders at all.') +
+          f('Notify on fills', yn('aj-cfg-notify_fills', cfg.notify_fills), 'Show a macOS notification each time an order fills.')
+        )}
+
+        <div class="aj-cfg-savebar">
+          <button class="btn" id="aj-save-cfg">Save config</button>
+          <span class="muted aj-cfg-savenote">Live trading isn’t editable here — it’s gated behind the CLI + VERIFY checks.</span>
         </div>
       </div>`;
     })()}

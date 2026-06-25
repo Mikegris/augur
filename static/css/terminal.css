@@ -3070,3 +3070,80 @@ input:focus, select:focus, textarea:focus {
 .aj-kpi-val { font-size: 20px; font-weight: 600; font-family: 'JetBrains Mono', ui-monospace, monospace; margin-top: 4px; }
 @keyframes ajFade { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
 @media (prefers-reduced-motion: reduce) { .aj-pane.active { animation: none; } }
+
+/* ── Trading Agent — Config tab (v3.1 friendlier layout) ────────────── */
+.aj-cfg { max-width: 1100px; }
+.aj-cfg-intro {
+  font-size: 12px; line-height: 1.5; padding: 11px 14px; margin-bottom: 14px;
+  border: 1px solid var(--border); border-left: 3px solid var(--blue);
+  border-radius: 6px; background: rgba(80,160,255,0.04);
+}
+.aj-cfg-intro b { color: var(--text-primary); font-weight: 600; }
+
+/* Quick-setup presets — the easiest path, up top */
+.aj-cfg-presets { margin-bottom: 18px; }
+.aj-cfg-presets-label {
+  font-size: 11px; letter-spacing: 0.05em; text-transform: uppercase;
+  color: var(--text-secondary); margin-bottom: 8px;
+}
+.aj-cfg-preset-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 10px; }
+.btn.aj-preset {
+  display: flex; flex-direction: column; align-items: flex-start; gap: 3px;
+  text-align: left; padding: 11px 14px; height: auto; line-height: 1.25;
+  font-size: 13px; font-weight: 600; white-space: normal;
+}
+.btn.aj-preset small {
+  font-size: 10.5px; font-weight: 400; color: var(--text-secondary);
+  letter-spacing: 0.01em;
+}
+.btn.aj-preset:hover small { color: var(--text-primary); }
+
+/* Collapsible config groups */
+.aj-cfg-group {
+  border: 1px solid var(--border); border-radius: 7px;
+  margin-bottom: 10px; overflow: hidden; background: rgba(255,255,255,0.012);
+}
+.aj-cfg-group > summary {
+  list-style: none; cursor: pointer; padding: 12px 14px;
+  display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap;
+  user-select: none; transition: background 0.15s;
+}
+.aj-cfg-group > summary::-webkit-details-marker { display: none; }
+.aj-cfg-group > summary:hover { background: rgba(255,255,255,0.025); }
+.aj-cfg-grp-title { font-size: 13px; font-weight: 600; letter-spacing: 0.02em; }
+.aj-cfg-grp-desc { font-size: 11.5px; color: var(--text-secondary); flex: 1 1 auto; }
+.aj-cfg-grp-chev {
+  font-size: 11px; color: var(--text-secondary);
+  transition: transform 0.18s ease; margin-left: auto;
+}
+.aj-cfg-group[open] > summary > .aj-cfg-grp-chev { transform: rotate(180deg); }
+.aj-cfg-group[open] > summary { border-bottom: 1px solid var(--border); }
+.aj-cfg-fields {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
+  gap: 14px 16px; padding: 16px 14px;
+}
+
+/* A single labelled field with hint */
+.aj-field { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.aj-field-label { font-size: 12px; font-weight: 600; color: var(--text-primary); }
+.aj-field-hint { font-size: 10.5px; line-height: 1.4; color: var(--text-secondary); }
+.aj-field input, .aj-field select { width: 100%; box-sizing: border-box; }
+
+/* Numeric input with a trailing unit chip */
+.aj-input-wrap { position: relative; display: block; }
+.aj-input-wrap.aj-has-unit input { padding-right: 46px; }
+.aj-input-unit {
+  position: absolute; right: 9px; top: 50%; transform: translateY(-50%);
+  font-size: 10.5px; color: var(--text-secondary); pointer-events: none;
+  letter-spacing: 0.02em;
+}
+
+/* Sticky save bar */
+.aj-cfg-savebar {
+  position: sticky; bottom: 0; margin-top: 16px;
+  display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
+  padding: 12px 4px; border-top: 1px solid var(--border);
+  background: linear-gradient(180deg, transparent, var(--bg) 40%);
+}
+.aj-cfg-savebar .btn { font-weight: 600; }
+.aj-cfg-savenote { font-size: 11px; }
