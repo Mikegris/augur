@@ -180,6 +180,19 @@ def get_sweep():
             continue
         if status not in ok and status != 400:
             # 400 without required query params is acceptable API behavior.
+            # A non-5xx response that carries a JSON error envelope is graceful
+            # degradation — a locked gate (403), an upstream rate-limit/not-found
+            # (404/429/503) — not a crash. WARN rather than FAIL. A bodyless 4xx
+            # (e.g. a missing route's default 404) still FAILs, catching real
+            # regressions.
+            try:
+                env = json.loads(body)
+            except Exception:
+                env = None
+            if status < 500 and isinstance(env, dict) and env.get("error"):
+                record(WARN, "GET " + path, "HTTP {} envelope: {}".format(
+                    status, str(env.get("error"))[:80]))
+                continue
             record(FAIL, "GET " + path, "HTTP {} ({}ms)".format(status, ms))
             continue
         note = "{} {}ms".format(status, ms)
