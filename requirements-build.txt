@@ -4,3 +4,15 @@
 # py2app 0.28+ requires Python 3.10+ (uses importlib.resources._files).
 # Pin to 0.27 for Python 3.9 compatibility — bump this once we move to 3.10+.
 py2app>=0.27,<0.28
+
+# pywebview drives the desktop app's native window (desktop.py). It is a
+# build/runtime dep of the BUNDLE only — the web app (app.py) never imports it —
+# so it lives here, not in requirements.txt. py2app lists `webview` in its
+# packages= and fails the bundle with "No module named 'webview'" without it.
+# On macOS pywebview pulls the pyobjc WebKit/Cocoa backends automatically.
+pywebview>=6.2,<7
+
+# py2app 0.27 imports pkg_resources at load; setuptools 81+ dropped it, which
+# breaks the build with "No module named 'pkg_resources'". Pin below 81 so the
+# build is reproducible regardless of the runner's default setuptools.
+setuptools<81
