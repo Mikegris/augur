@@ -57,6 +57,8 @@ LOCAL_MODULES = [
     # v3.4 Analyst Council layer (lazy-imported in the operator/routes/personas)
     "aj_schemas", "aj_analysts", "aj_debate", "aj_council", "aj_memory",
     "aj_personas",
+    # v3.6 market screener + options (lazy-imported in the operator/risk/broker)
+    "aj_universe", "aj_options", "aj_analyst_util",
     "ai_summarizer",
     "alt_data_engine",
     "alt_signals",
