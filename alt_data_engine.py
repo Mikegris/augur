@@ -112,7 +112,7 @@ def _score_revenue_momentum(fundamentals):
     else:
         score = 20
 
-    if earn_growth is not None and rev_growth is not None and earn_growth > rev_growth:
+    if earn_growth is not None and earn_growth > rev_growth:
         score += 10  # margin expansion
     if profit_margin is not None and profit_margin > 20:
         score += 5  # high quality revenue

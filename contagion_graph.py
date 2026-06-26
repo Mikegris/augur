@@ -444,16 +444,39 @@ def _parse_company_mentions(text):
         if pct < 1 or pct > 100:
             continue
         # Look for a company name or ticker near this percentage
-        surrounding = _extract_context_window(text, m.start(), m.end(), window=400)
+        window = 400
+        ctx_start = max(0, m.start() - window)
+        surrounding = _extract_context_window(text, m.start(), m.end(), window=window)
+        pct_pos = m.start() - ctx_start  # the percentage's offset within `surrounding`
+        # Among the mentions appearing in the window, credit the percentage to the
+        # NEAREST one (by match position), not the first in dict-insertion order —
+        # a 'principal customers' paragraph can list several known names and the
+        # concentration belongs to whichever is closest to this percentage.
+        best_entry = None
+        best_dist = None
+        surrounding_lower = surrounding.lower()
         for ticker, entry in mentions.items():
-            # Check if this ticker/company name appears near the revenue mention
             name = entry["name"]
+            positions = []
             # word-boundary match — bare `ticker in surrounding` let 1-char
             # tickers (C, V, F, T) match inside unrelated words.
-            if re.search(r"\b" + re.escape(ticker) + r"\b", surrounding) or (name and name.lower() in surrounding.lower()):
-                entry["revenue_pct"] = pct
-                entry["_weight"] += 5.0  # Revenue concentration is very significant
-                break
+            for tm in re.finditer(r"\b" + re.escape(ticker) + r"\b", surrounding):
+                positions.append(tm.start())
+            if name:
+                nl = name.lower()
+                idx = surrounding_lower.find(nl)
+                while idx != -1:
+                    positions.append(idx)
+                    idx = surrounding_lower.find(nl, idx + 1)
+            if not positions:
+                continue
+            dist = min(abs(p - pct_pos) for p in positions)
+            if best_dist is None or dist < best_dist:
+                best_dist = dist
+                best_entry = entry
+        if best_entry is not None:
+            best_entry["revenue_pct"] = pct
+            best_entry["_weight"] += 5.0  # Revenue concentration is very significant
 
     # Clean up and sort by weight
     result = []

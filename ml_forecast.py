@@ -173,7 +173,10 @@ def _rf_predict(hist):
     # Binary target: 1 if positive, 0 if negative
     df["target"] = (df["fwd_ret_20d"] > 0).astype(int)
 
-    # Train on all rows that have a known forward return
+    # `df` already excludes rows whose 20-day forward return is unknown.
+    # Embargo the final 20 labelled rows as well: their label window is the
+    # freshest data and sits closest to the prediction date, so dropping them
+    # keeps the production training set a clean 20-bar margin behind today.
     train = df.iloc[:-20].dropna(subset=feature_cols + ["target"])
     if len(train) < 80:
         return None

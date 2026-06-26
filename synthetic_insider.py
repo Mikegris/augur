@@ -222,7 +222,11 @@ def _score_congress_cluster(symbol):
         # "Purchase" — neither key nor value ever matched, so this channel
         # scored 10 (no activity) for every symbol regardless of real flow.
         purchases = [t for t in trades if (t.get("txn_type_raw") or "") in ("P", "PE")]
-        sales = [t for t in trades if (t.get("txn_type_raw") or "").startswith("S")]
+        # Mirror congress.get_congress_summary's taxonomy so exchange variants
+        # ("S (Exchange)", "E (Exchange)") are classified as sells consistently
+        # across modules — startswith("S") would miss the "E (Exchange)" case.
+        sales = [t for t in trades if (t.get("txn_type_raw") or "")
+                 in ("S", "S (partial)", "SE", "S (Exchange)", "E (Exchange)")]
 
         n_purchases = len(purchases)
 

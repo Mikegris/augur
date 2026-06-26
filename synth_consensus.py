@@ -18,7 +18,7 @@ If a contributor's live track record (via :mod:`research_tracker`) has
 voice and persistent losers get demoted but never silenced.
 
 The final score is the weighted average squashed through a logistic-ish
-transform to a 0..100 scale: ``50 + 50 · tanh(weighted_avg · 2)``.  This
+transform to a 0..100 scale: ``50 + 50 · tanh(weighted_avg · 1.6)``.  This
 keeps the score from clipping aggressively at ±1 and gives the middle of
 the distribution good dynamic range.
 
@@ -195,6 +195,8 @@ def _dynamic_weight(name: str, static_w: float) -> Tuple[float, Optional[float],
         rec = research_tracker.get_track_record(tracker_name)
     except Exception as e:
         log.debug("tracker lookup failed for %s: %s", tracker_name, e)
+        return static_w, None, 0
+    if not isinstance(rec, dict):
         return static_w, None, 0
     n = int(rec.get("n_directional") or 0)
     hit = rec.get("hit_rate")

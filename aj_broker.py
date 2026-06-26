@@ -29,6 +29,15 @@ log = logging.getLogger("augur.aj_broker")
 # A nominal half-spread (bps) the paper model crosses; spread_fraction scales it.
 _PAPER_SPREAD_BPS = 4.0
 
+# Process-wide paper order book. get_broker() builds a fresh PaperBroker() on
+# every call, so per-instance order state would be lost the moment the
+# submitting instance is discarded (after execute_trade()'s finally-disconnect).
+# A later reconcile/cancel against a new instance must still find prior paper
+# orders — otherwise a parked order stays 'unknown' forever and a cancel of it
+# returns 'unknown' instead of canceling. Keep it module-level so all
+# PaperBroker instances in this process share one book.
+_PAPER_ORDERS: Dict[str, Dict[str, Any]] = {}
+
 
 class BrokerError(Exception):
     pass
@@ -86,7 +95,8 @@ class PaperBroker(BrokerClient):
 
     def __init__(self):
         super().__init__(mode="paper")
-        self._orders: Dict[str, Dict[str, Any]] = {}
+        # Share one process-wide order book across instances (see _PAPER_ORDERS).
+        self._orders = _PAPER_ORDERS
 
     # quote lookup (price only); crypto maps to SYM-USD
     def _quote(self, symbol: str, asset_type: str = "") -> Optional[float]:

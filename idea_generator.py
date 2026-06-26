@@ -1097,6 +1097,7 @@ def _compute_peers(symbol: str, sector: Optional[str]):
 
     # Aggregate verdict: count metrics where pick is in top half
     top_half_count = sum(1 for r in ranks.values() if r["rank"] <= max(1, r["of"] // 2))
+    top_half_pct = None
     if ranks:
         top_half_pct = top_half_count / len(ranks) * 100
         if top_half_pct >= 70:
@@ -1117,7 +1118,7 @@ def _compute_peers(symbol: str, sector: Optional[str]):
         "rows": rows,
         "ranks": ranks,
         "verdict": verdict,
-        "top_half_pct": round(top_half_pct, 1) if ranks else None,
+        "top_half_pct": round(top_half_pct, 1) if top_half_pct is not None else None,
     }
 
 

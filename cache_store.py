@@ -626,8 +626,13 @@ def cache_set(key, value, ttl: float, allow_empty: bool = False,
                 # Legacy 2-tuples (unlikely after the in-place hydration in
                 # cache_get) fall back to expiry as the access proxy.
                 def _lru_key(kv):
+                    # 3-tuples sort by real last_access; legacy 2-tuples have
+                    # no last_access, and their t[1] is an *expiry* (a
+                    # different clock) — mixing the two could evict a hot
+                    # 3-tuple before a stale 2-tuple. Anchor 2-tuples to 0.0
+                    # so they always sort oldest and get evicted first.
                     t = kv[1]
-                    return t[2] if len(t) >= 3 else t[1]
+                    return t[2] if len(t) >= 3 else 0.0
                 ordered = sorted(_mem.items(), key=_lru_key)
                 for kk, _ in ordered[: len(_mem) - _MEM_EVICT_TARGET]:
                     _mem.pop(kk, None)
@@ -720,7 +725,11 @@ def coalesce(key, ttl: float, fetch_fn: Callable[[], Any]) -> Any:
             _inflight[k] = (ev, time.time())
             owner = True
 
-    if not owner:
+    # Bounded re-claim loop: a single timed-out waiter must never block
+    # forever (the original "better stale-shadow than blocking" guarantee), so
+    # after a couple of wait/re-claim cycles we give up and fetch ourselves.
+    reclaim_budget = 2
+    while not owner:
         # Wait for the in-flight fetch to finish, in slices, re-checking that
         # the owner is still alive. A flat 15s gave up while the expensive
         # fetches this exists to protect (cluster/divmap/SEC, 30-90s) were
@@ -737,7 +746,27 @@ def coalesce(key, ttl: float, fetch_fn: Callable[[], Any]) -> Any:
         cached = cache_get(key)
         if cached is not None:
             return cached
-        # Fall through and fetch — better stale-shadow than blocking forever.
+        if reclaim_budget <= 0:
+            break  # don't block forever — fall through and fetch ourselves
+        reclaim_budget -= 1
+        # Owner gave us nothing (still running past the deadline, reaped, or
+        # finished with a failure that wasn't cached). Instead of every timed-
+        # out waiter stampeding fetch_fn in parallel — the exact thing coalesce
+        # exists to prevent on the 60-90s SEC/cluster fetches — re-claim the
+        # slot under the lock. The FIRST late waiter installs a fresh Event and
+        # becomes owner (so it caches the result and repopulates _inflight);
+        # any other late waiter finds that live slot and loops back to wait on
+        # it rather than duplicating the upstream call.
+        with _inflight_lock:
+            entry = _inflight.get(k)
+            if entry is None:
+                ev = threading.Event()
+                _inflight[k] = (ev, time.time())
+                owner = True
+            else:
+                ev, _claimed_at = entry
+        # If we didn't become owner here, `ev` now points at the live slot and
+        # the while-loop re-waits on it.
 
     try:
         value = fetch_fn()

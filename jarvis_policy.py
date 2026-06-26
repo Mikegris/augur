@@ -230,8 +230,11 @@ def _pick(nums: List[Dict[str, Any]], pct: Optional[bool] = None,
                     continue  # "$5,000" is never a percent
                 if not strict and not pct and n["pct"]:
                     continue  # "25%" is never a count/dollar amount
-            if usd is not None and strict and n["usd"] != usd:
-                continue
+            if usd is not None:
+                if strict and n["usd"] != usd:
+                    continue
+                if not strict and usd is False and n["usd"]:
+                    continue  # a $-/k-marked number is never a plain count
             if not (lo <= n["value"] <= hi):
                 continue
             return n["value"]
@@ -392,15 +395,18 @@ def check_proposal(tool: Any, args: Any) -> Optional[str]:
                     if r.get("kind") == "max_single_buy_usd"), None)
         if cap is None or not isinstance(args, dict):
             return None
-        for field in _AMOUNT_FIELDS:
-            v = args.get(field)
+        def _coerce(v):
             if v is None or isinstance(v, bool):
-                continue
+                return None
             try:
-                amt = float(str(v).replace(",", "").replace("$", "").strip())
+                a = float(str(v).replace(",", "").replace("$", "").strip())
             except (TypeError, ValueError):
-                continue
-            if not math.isfinite(amt):
+                return None
+            return a if math.isfinite(a) else None
+
+        for field in _AMOUNT_FIELDS:
+            amt = _coerce(args.get(field))
+            if amt is None:
                 continue
             # First amount-ish field decides — checking later fields too
             # would double-count (e.g. amount + market_value on one trade).
@@ -408,6 +414,16 @@ def check_proposal(tool: Any, args: Any) -> Optional[str]:
                 return ("policy: {} of ${:,.0f} exceeds your max single buy "
                         "of ${:,.0f}".format(str(tool or "this action"), amt, cap))
             return None
+        # Fallback: the real buy tools (add_holding/record_trade) carry
+        # shares + price rather than a pre-summed amount, so derive the
+        # notional from shares*price when no amount-ish field was present.
+        shares = _coerce(args.get("shares"))
+        price = _coerce(args.get("price"))
+        if shares is not None and price is not None:
+            amt = shares * price
+            if amt > cap:
+                return ("policy: {} of ${:,.0f} exceeds your max single buy "
+                        "of ${:,.0f}".format(str(tool or "this action"), amt, cap))
         return None
     except Exception:
         log.exception("check_proposal failed")

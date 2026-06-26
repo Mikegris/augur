@@ -106,6 +106,7 @@ def _parse_french_csv(raw: bytes, value_cols: List[str]) -> Dict[str, List[float
     lines = text.splitlines()
     out: Dict[str, List[float]] = {}
     started = False
+    nondate_run = 0  # consecutive non-date lines seen inside the daily block
     for raw_line in lines:
         line = raw_line.strip()
         if not line:
@@ -122,11 +123,20 @@ def _parse_french_csv(raw: bytes, value_cols: List[str]) -> Dict[str, List[float
                 vals = [float(parts[i + 1]) / 100.0 for i in range(len(value_cols))]
                 out[d] = vals
                 started = True
+                nondate_run = 0
             except (ValueError, IndexError):
                 continue
         else:
             if started:
-                break
+                # An ISOLATED unparseable row inside the daily block (e.g. a
+                # stray-space date) shouldn't truncate the entire factor
+                # history — skip it. Only a run of ≥2 consecutive non-date
+                # lines marks the real start of the next (monthly/annual)
+                # section, at which point we stop.
+                nondate_run += 1
+                if nondate_run >= 2:
+                    break
+                continue
     return out
 
 

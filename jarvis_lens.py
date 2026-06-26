@@ -278,13 +278,17 @@ def _position_review_uncached(symbol: str) -> Dict[str, Any]:
     f = {}
     q = {}
     if not is_crypto and safe_executor is not None:
-        f_res, q_res = safe_executor.parallel_map(
+        # Defensively coerce the result rather than unpacking into two names:
+        # a degenerate internal failure that returns None / a short list must
+        # fall back to the empty-dict behavior the serial path provides, not
+        # raise an uncaught ValueError/TypeError here.
+        results = safe_executor.parallel_map(
             lambda thunk: thunk(),
             [lambda: fetcher.get_fundamentals(symbol),
              lambda: fetcher.get_quote(quote_sym)],
-            max_workers=2, thread_name_prefix="lens-review")
-        f = f_res or {}
-        q = q_res or {}
+            max_workers=2, thread_name_prefix="lens-review") or [None, None]
+        f = (results[0] if len(results) > 0 else None) or {}
+        q = (results[1] if len(results) > 1 else None) or {}
     else:
         if not is_crypto:
             try:

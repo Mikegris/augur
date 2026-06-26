@@ -494,7 +494,14 @@ def add_position(symbol, name, shares, avg_cost, asset_type="stock", sector="", 
                 (symbol.upper(), asset_type)
             ).fetchone()
         if existing:
-            total_shares = existing["shares"] + shares
+            # Snap any float-dust residual already sitting on the existing
+            # position (e.g. 1e-13 left by a prior fractional sell) to exactly
+            # 0 BEFORE it contributes phantom shares to the weighted-average
+            # cost basis on a subsequent buy.
+            prior_shares = existing["shares"]
+            if abs(prior_shares) < 1e-9:
+                prior_shares = 0.0
+            total_shares = prior_shares + shares
             # Snap float-dust residuals (e.g. 1e-13 left by fractional-share
             # sells) to exactly 0 so the position reads flat instead of
             # carrying a tiny non-zero count that would yield a garbage
@@ -519,7 +526,7 @@ def add_position(symbol, name, shares, avg_cost, asset_type="stock", sector="", 
                     # avg so history reads sanely; shares==0 marks it flat.
                     new_avg = existing["avg_cost"]
             else:
-                total_cost = (existing["shares"] * existing["avg_cost"]) + (shares * avg_cost)
+                total_cost = (prior_shares * existing["avg_cost"]) + (shares * avg_cost)
                 new_avg = (total_cost / total_shares) if total_shares else 0.0
             conn.execute(
                 "UPDATE portfolio SET shares = ?, avg_cost = ?, name = ? WHERE id = ?",
@@ -648,7 +655,7 @@ def get_transactions(symbol=None, limit=100, account_id=None):
         params.append(account_id)
     where = (" WHERE " + " AND ".join(conditions)) if conditions else ""
     params.append(limit)
-    rows = conn.execute(base + where + " ORDER BY COALESCE(t.date, t.created_at) DESC, t.created_at DESC LIMIT ?", params).fetchall()
+    rows = conn.execute(base + where + " ORDER BY COALESCE(t.date, substr(t.created_at,1,10)) DESC, t.created_at DESC LIMIT ?", params).fetchall()
     return [dict(r) for r in rows]
 
 

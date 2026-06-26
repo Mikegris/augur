@@ -43,6 +43,7 @@ import re
 import math
 import threading
 import time
+import itertools
 from collections import deque
 from datetime import datetime, timezone
 
@@ -71,7 +72,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(me
 
 # Single source of truth for the app version — surfaced at /api/version and
 # in jarvis.health_snapshot().
-APP_VERSION = "3.3.0"
+APP_VERSION = "3.4.0"
 
 _TICKER_RE = re.compile(r"^[A-Z0-9][A-Z0-9.\-]{0,9}$")
 
@@ -105,6 +106,18 @@ def _err(e, msg="internal error", status=500):
 
 def _utc_now():
     return datetime.now(timezone.utc)
+
+def _market_date():
+    """Calendar date in the US market zone (America/New_York). The daily
+    portfolio snapshot is bucketed once per local trading day — keying it by
+    UTC would file an afternoon-ET snapshot under the next calendar day (UTC
+    rolls over ~19:00-20:00 ET), distorting the history/benchmark series.
+    Falls back to UTC if the tz database is unavailable."""
+    try:
+        from zoneinfo import ZoneInfo
+        return datetime.now(ZoneInfo("America/New_York")).strftime("%Y-%m-%d")
+    except Exception:
+        return _utc_now().strftime("%Y-%m-%d")
 
 def _portfolio_live_prices(holdings):
     """Live quotes for a holdings list in ONE batched fetch.
@@ -302,7 +315,7 @@ def _snapshot_worker():
 
                 total_pnl = total_value - total_cost
                 total_pnl_pct = (total_pnl / total_cost * 100) if total_cost else 0
-                today = _utc_now().strftime("%Y-%m-%d")
+                today = _market_date()
                 db.save_snapshot(
                     date=today,
                     total_value=round(total_value, 2),
@@ -336,7 +349,11 @@ def _snapshot_worker():
                             crypto_set.add(str(w["symbol"]).upper())
                 except Exception:
                     pass
-                alert_syms = list({a["symbol"] for a in active_alerts})
+                # Normalize to upper: prices/get_quotes_batch key on UPPER, so a
+                # legacy lower/mixed-case alert symbol would never match and the
+                # alert would silently never fire (defense-in-depth — inserts
+                # already uppercase).
+                alert_syms = list({str(a["symbol"]).upper() for a in active_alerts})
                 missing = [s for s in alert_syms if s not in prices]
                 if missing:
                     # Build the fetch query, mapping crypto symbols to -USD, and
@@ -357,7 +374,7 @@ def _snapshot_worker():
                         if pair in batch:
                             prices[bare] = batch[pair]
                 for alert in active_alerts:
-                    cur = (prices.get(alert["symbol"]) or {}).get("price")
+                    cur = (prices.get(str(alert["symbol"]).upper()) or {}).get("price")
                     if cur is None:
                         continue
                     ap = alert["price"]
@@ -823,6 +840,8 @@ def add_transaction():
         fees = float(data.get("fees", 0))
     except (TypeError, ValueError):
         return jsonify({"error": "shares, price, fees must be numeric"}), 400
+    if not (math.isfinite(shares) and math.isfinite(price) and math.isfinite(fees)):
+        return jsonify({"error": "shares, price, fees must be finite"}), 400
     db.add_transaction(
         symbol=data["symbol"],
         action=data["action"],
@@ -1343,7 +1362,7 @@ def portfolio_dividends():
 
     # Fill income weights
     for r in results:
-        r["income_weight"] = round(r["annual_income"] / total_annual_income * 100, 1) if total_annual_income else 0
+        r["income_weight"] = round(r["annual_income"] / total_annual_income * 100, 1) if total_annual_income > 0 else 0
 
     results.sort(key=lambda x: x["annual_income"], reverse=True)
 
@@ -1577,7 +1596,9 @@ def intel_feed():
 
     for filings in filing_lists:
         for f in filings or ():
-            acc = f["accession"]
+            acc = f.get("accession")
+            if not acc:
+                continue
             cached = db.get_cached_filing(acc) if not refresh else None
             if cached:
                 result.append({
@@ -2721,9 +2742,13 @@ def alt_social_pulse(symbol):
     # Hacker News mentions.
     if hn_sentiment:
         try:
-            hn = hn_sentiment.fetch_mentions(sym, hours=168)
+            # A None return (failure/short-circuit) must not AttributeError, and
+            # 'live' requires positive evidence — not merely the absence of an
+            # 'error' key.
+            hn = hn_sentiment.fetch_mentions(sym, hours=168) or {}
+            hn_live = (not hn.get("error")) and bool(hn.get("mention_count"))
             out["sources"]["hackernews"] = {
-                "status": "error" if hn.get("error") else "live",
+                "status": "live" if hn_live else "error" if hn.get("error") else "quiet",
                 "mention_count": hn.get("mention_count", 0),
                 "stats": hn.get("stats", {}),
                 "mentions": (hn.get("mentions") or [])[:5],
@@ -2734,9 +2759,12 @@ def alt_social_pulse(symbol):
     # Wikipedia attention.
     if wiki_attention:
         try:
-            w = wiki_attention.fetch_pageviews(sym, days=30)
+            # A None return must not AttributeError; 'live' requires actual
+            # data (non-empty stats or points), not just a missing 'error' key.
+            w = wiki_attention.fetch_pageviews(sym, days=30) or {}
+            w_live = (not w.get("error")) and bool(w.get("stats") or w.get("points"))
             out["sources"]["wikipedia"] = {
-                "status": "error" if w.get("error") else "live",
+                "status": "live" if w_live else "error" if w.get("error") else "quiet",
                 "stats": w.get("stats", {}),
                 "article": w.get("article"),
                 "article_url": w.get("article_url"),
@@ -3575,7 +3603,7 @@ def aj_config_route():
 def aj_proposals_route():
     try:
         import aj_db
-        limit = _safe_int(request.args.get("limit"), 50)
+        limit = max(1, _safe_int(request.args.get("limit"), 50))
         return jsonify({"proposals": aj_db.query(
             "SELECT * FROM aj_proposals ORDER BY id DESC LIMIT ?", (limit,))})
     except Exception as e:
@@ -3586,7 +3614,7 @@ def aj_proposals_route():
 def aj_orders_route():
     try:
         import aj_db
-        limit = _safe_int(request.args.get("limit"), 50)
+        limit = max(1, _safe_int(request.args.get("limit"), 50))
         return jsonify({"orders": aj_db.query(
             "SELECT * FROM aj_orders ORDER BY id DESC LIMIT ?", (limit,))})
     except Exception as e:
@@ -3597,7 +3625,7 @@ def aj_orders_route():
 def aj_audit_route():
     try:
         import aj_db
-        limit = _safe_int(request.args.get("limit"), 100)
+        limit = max(1, _safe_int(request.args.get("limit"), 100))
         rows = aj_db.query("SELECT * FROM aj_audit ORDER BY id DESC LIMIT ?", (limit,))
         return jsonify({"audit": rows, "chain": aj_db.verify_audit_chain()})
     except Exception as e:
@@ -3722,6 +3750,54 @@ def aj_analytics_route():
         return _err(e)
 
 
+@app.route("/api/aj/council/<symbol>", methods=["GET"])
+def aj_council_route(symbol):
+    """Run the Analyst Council for one symbol (inspection). Advisory only — this
+    never trades. Doubly gated: requires the VERIFY-COUNCIL gate (force=True
+    still checks it), so it can't spend on the council without acknowledgement.
+    Returns the decision + the per-analyst reports + debate transcript."""
+    if not _valid_ticker(symbol):
+        return jsonify({"error": "Invalid symbol"}), 400
+    try:
+        import aj_db, aj_council, aj_config
+        aj_db.aj_init()
+        if not aj_config.council_verify_passed():
+            return jsonify({"error": "VERIFY-COUNCIL gate not passed",
+                            "hint": "aj_cli verify-set council --force"}), 403
+        dec = aj_council.run(symbol.upper(), force=True)
+        conn = db.get_conn()
+        run = conn.execute(
+            "SELECT id FROM aj_council_runs WHERE symbol=? ORDER BY id DESC LIMIT 1",
+            (symbol.upper(),)).fetchone()
+        reports, turns = [], []
+        if run:
+            reports = [dict(r) for r in conn.execute(
+                "SELECT analyst, band, score, confidence, narrative FROM "
+                "aj_analyst_reports WHERE council_run_id=? ORDER BY id", (run["id"],)).fetchall()]
+            turns = [dict(t) for t in conn.execute(
+                "SELECT debate, role, round, content FROM aj_debate_turns "
+                "WHERE council_run_id=? ORDER BY id", (run["id"],)).fetchall()]
+        return jsonify({"decision": dec.to_audit(), "reports": reports, "debate": turns})
+    except Exception as e:
+        return _err(e)
+
+
+@app.route("/api/aj/council/recent", methods=["GET"])
+def aj_council_recent_route():
+    """Recent council decisions (queryable copy) for the UI panel."""
+    try:
+        import aj_db
+        aj_db.aj_init()
+        conn = db.get_conn()
+        rows = [dict(r) for r in conn.execute(
+            "SELECT ts, cycle_id, symbol, status, rating, action, conviction, "
+            "thesis, dissent, cost_usd, n_calls FROM aj_council_runs "
+            "ORDER BY id DESC LIMIT 50").fetchall()]
+        return jsonify({"runs": rows})
+    except Exception as e:
+        return _err(e)
+
+
 @app.route("/api/aj/positions", methods=["GET"])
 def aj_positions_route():
     """The agent's current paper positions with per-stock analytics."""
@@ -3791,6 +3867,10 @@ _JARVIS_ACT_WINDOW = 60  # …per rolling window, seconds
 # Two requests racing the check-prune-append could each read the deque under
 # the limit and both append, overshooting MAX. Guard the whole sequence.
 _JARVIS_ACT_LOCK = threading.Lock()
+# Monotonic counter (held under the lock) used to make every charged stamp
+# globally unique, so a refund's remove() can only ever delete the caller's
+# own entries even when two charges land on the same time.time() value.
+_JARVIS_ACT_SEQ = itertools.count()
 
 
 def _jarvis_act_charge(n):
@@ -3806,7 +3886,14 @@ def _jarvis_act_charge(n):
             _JARVIS_ACT_TIMES.popleft()
         if len(_JARVIS_ACT_TIMES) + n > _JARVIS_ACT_MAX:
             return []
-        stamps = [now] * n
+        # Make each stamp globally distinct (now + a monotonic µs-scale offset)
+        # so a concurrent refund's remove() can only delete the caller's OWN
+        # entries — two charges landing on the same time.time() value would
+        # otherwise let one refund delete the other's still-valid slot. The
+        # 1e-6 step is large enough to survive float64 precision at epoch-second
+        # magnitudes yet far below the rolling window, so the absolute-time
+        # pruning at the top of this function is unaffected.
+        stamps = [now + next(_JARVIS_ACT_SEQ) * 1e-6 for _ in range(n)]
         for t in stamps:
             _JARVIS_ACT_TIMES.append(t)
         return stamps
@@ -3861,11 +3948,15 @@ def jarvis_act_route():
         batch_fn = getattr(jarvis_tools, "execute_mutating_batch", None)
         if batch_fn is None:
             return jsonify({"error": "batch execution unavailable"}), 500
-        if not _jarvis_act_charge(len(actions)):
+        _stamps = _jarvis_act_charge(len(actions))
+        if not _stamps:
             return jsonify({"error": "rate limited"}), 429
         try:
             r = batch_fn(actions)
         except Exception as e:
+            # Nothing executed — refund the charged slots so a transient
+            # executor failure doesn't permanently drain the shared budget.
+            _jarvis_act_refund(_stamps)
             return _err(e)
         if not isinstance(r, dict):
             return jsonify({"error": "batch executor returned invalid result"}), 500
@@ -3884,11 +3975,15 @@ def jarvis_act_route():
     # Rate limit counts EXECUTIONS (checked after validation) so malformed
     # requests can't burn the budget of legitimate confirmations. Same charge
     # helper as the batch path, so the MAX boundary is identical.
-    if not _jarvis_act_charge(1):
+    _stamps = _jarvis_act_charge(1)
+    if not _stamps:
         return jsonify({"error": "rate limited"}), 429
     try:
         r = jarvis_tools.execute_mutating(tool, args)
     except Exception as e:
+        # Nothing executed — refund the charged slot so a transient failure
+        # doesn't permanently drain the shared budget.
+        _jarvis_act_refund(_stamps)
         return _err(e)
     if not isinstance(r, dict):
         return jsonify({"error": "tool returned invalid result"}), 500
@@ -4367,7 +4462,7 @@ def research_track_calls(signal_name):
     if not signal_name or not signal_name.replace("_", "").isalnum():
         return jsonify({"error": "Invalid signal name"}), 400
     try:
-        limit = _safe_int(request.args.get("limit"), 20)
+        limit = max(1, _safe_int(request.args.get("limit"), 20))
         calls = research_tracker.get_recent_calls(signal_name, limit=limit)
         return jsonify({"calls": calls, "signal_name": signal_name})
     except Exception as e:

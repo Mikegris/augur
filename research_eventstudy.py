@@ -60,6 +60,7 @@ Python 3.9 compatible.
 
 import datetime
 import logging
+import warnings
 from typing import List, Optional
 
 import numpy as np
@@ -508,8 +509,13 @@ def _compute(symbol: str, event_type: str, window_days: int,
     bench_mask = has_bench and np.array(
         [np.any(np.isfinite(row)) for row in bench_arr], dtype=bool)
     if has_bench and np.any(bench_mask):
-        bench_avg = np.nanmean(bench_arr[bench_mask], axis=0)
-        sym_avg_matched = np.nanmean(sym_arr[bench_mask], axis=0)
+        # An all-NaN column within the matched subset makes nanmean emit a
+        # benign "Mean of empty slice" RuntimeWarning and yield NaN; silence
+        # it (the NaN is the intended "no data here" sentinel).
+        with np.errstate(invalid="ignore"), warnings.catch_warnings():
+            warnings.simplefilter("ignore", RuntimeWarning)
+            bench_avg = np.nanmean(bench_arr[bench_mask], axis=0)
+            sym_avg_matched = np.nanmean(sym_arr[bench_mask], axis=0)
         abnormal = sym_avg_matched - bench_avg
     else:
         abnormal = np.full_like(avg, np.nan)

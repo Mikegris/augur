@@ -224,7 +224,11 @@ def prob_of_target(
             prob_term = float((terminal <= target_nav).mean())
             prob_touch = float((paths <= target_nav).any(axis=1).mean())
 
-    implied_return_pct = ((target_nav / initial_nav) - 1.0) * 100.0 if initial_nav else None
+    implied_return_pct = (
+        ((target_nav / initial_nav) - 1.0) * 100.0
+        if initial_nav and abs(initial_nav) > 1e-6
+        else None
+    )
     return {
         "target_nav": round(target_nav, 2),
         "initial_nav": round(initial_nav, 2),
@@ -421,8 +425,13 @@ def _simulate_paths_mvn(R: np.ndarray, weights: np.ndarray,
     # Ensure cov is at least 2D (single-asset case).
     if cov.ndim == 0:
         cov = np.array([[float(cov)]])
-    elif cov.ndim == 1:
-        cov = cov.reshape(1, 1)
+    else:
+        # np.cov on a (T, N) matrix always yields an (N, N) matrix for N > 1.
+        # atleast_2d is a harmless no-op there; it only matters for a stray
+        # 1-D variance vector, which it shapes to (1, N) so a malformed input
+        # fails loudly in multivariate_normal rather than being silently
+        # squashed to (1, 1) (which would drop assets).
+        cov = np.atleast_2d(cov)
     # Add a small ridge to keep the covariance positive-definite — without
     # this, near-collinear holdings (e.g. SPY + VOO) blow up Cholesky.
     ridge = 1e-12 * np.eye(cov.shape[0])

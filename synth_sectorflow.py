@@ -132,6 +132,12 @@ _SECTOR_LOOKUP_TTL = 24 * 3600
 
 CACHE_TTL = 600  # 10 min — bounded enough to feel live, long enough to dodge rate-limits
 
+# narrative_engine's dominant_narrative is a topic bucket (not a directional
+# label), so the composite's "BULL"/"BEAR" substring test can never match it.
+# Mirror synth_divmap's mapping so a fallback bucket still feeds the score.
+_NARRATIVE_BULL = {"GROWTH", "PROFITABILITY", "TURNAROUND", "M_AND_A"}
+_NARRATIVE_BEAR = {"REGULATORY", "SCANDAL"}
+
 
 # ─── small helpers ───────────────────────────────────────────────────
 
@@ -568,9 +574,9 @@ def _composite_score(row: Dict[str, Any]) -> float:
     if nv is not None:
         parts.append((0.08, _clip(nv / 2.0, -2, 2)))
     phase = (row.get("narrative_phase") or "").upper()
-    if "BULL" in phase:
+    if "BULL" in phase or phase in _NARRATIVE_BULL:
         parts.append((0.04, 1.0))
-    elif "BEAR" in phase:
+    elif "BEAR" in phase or phase in _NARRATIVE_BEAR:
         parts.append((0.04, -1.0))
 
     insider = row.get("insider_buy_ratio_30d")

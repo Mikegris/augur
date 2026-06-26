@@ -347,11 +347,15 @@ def _parse_ptr_pdf(pdf_bytes, member_name, doc_id, filing_year):
             txn_type = "E (Exchange)"
         else:
             # Look for isolated P or S after ticker
-            m = re.search(r"\]\s+(P|S|PE|SE)\b", after_ticker)
+            # Order alternation longest-first so the two-letter exercise codes
+            # PE/SE win over the single-letter P/S (regex alternation is ordered,
+            # not longest-match); otherwise an exercise can be mislabeled a plain
+            # buy/sell.
+            m = re.search(r"\]\s+(PE|SE|P|S)\b", after_ticker)
             if not m:
                 # Check in pre_date window after removing owner prefix
                 clean = re.sub(OWNER_RE, "", pre_date).strip()
-                m = re.search(r"\b(P|S|PE|SE)\b", clean[:100])
+                m = re.search(r"\b(PE|SE|P|S)\b", clean[:100])
             if m:
                 txn_type = m.group(1)
 

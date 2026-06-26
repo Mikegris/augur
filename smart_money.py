@@ -415,8 +415,32 @@ def _score_momentum(hist):
 
 # ── Component: SEC Filing Sentiment (0-10) ────────────────────────────────────
 
+# 8-K item codes mapped to a sentiment signal. get_recent_filings() returns
+# the raw item codes (e.g. "2.02,9.01") but never an 'ai_signal', so derive
+# the signal from the disclosed item codes — the codes are themselves the SEC's
+# structured classification of the event.
+_SEC_ITEM_SIGNAL = {
+    "1.01": "POSITIVE",   # Entry into Material Agreement
+    "1.02": "NEGATIVE",   # Termination of Material Agreement
+    "1.03": "BEARISH",    # Bankruptcy or Receivership
+    "2.01": "POSITIVE",   # Completion of Acquisition
+    # 2.02 (earnings) is directionally neutral on its own — leave NEUTRAL
+    "2.03": "NEGATIVE",   # Creation of Direct Financial Obligation
+    "2.05": "NEGATIVE",   # Departure of Directors / Officers
+    "2.06": "BEARISH",    # Material Impairments
+    "3.01": "BEARISH",    # Notice of Delisting
+    "4.01": "NEGATIVE",   # Changes in Certifying Accountant
+    "5.01": "NEGATIVE",   # Changes in Control
+    # 5.02 / 5.03 / 7.01 / 8.01 / 9.01 carry no inherent direction
+}
+
+
 def _score_sec_sentiment(symbol):
-    """Score based on recent SEC 8-K / 10-Q AI sentiment."""
+    """Score based on recent SEC 8-K item codes (0-10).
+
+    get_recent_filings() returns the SEC's structured 8-K item codes; we map
+    those to a directional signal rather than relying on a never-populated
+    'ai_signal' key (which would pin every symbol to a constant 5)."""
     try:
         from sec_edgar import get_recent_filings
         filings = get_recent_filings(symbol, limit=5)
@@ -429,8 +453,19 @@ def _score_sec_sentiment(symbol):
     signal_map = {"BULLISH": 10, "POSITIVE": 8, "NEUTRAL": 5, "NEGATIVE": 2, "BEARISH": 0}
     scores = []
     for f in filings:
-        sig = f.get("ai_signal", "NEUTRAL").upper()
-        scores.append(signal_map.get(sig, 5))
+        codes = [c.strip() for c in str(f.get("items", "")).split(",") if c.strip()]
+        # Pick the most extreme (furthest-from-neutral) signal among this
+        # filing's item codes so a single bankruptcy/impairment isn't diluted
+        # by neutral co-filed items.
+        filing_score = None
+        for c in codes:
+            sig = _SEC_ITEM_SIGNAL.get(c)
+            if sig is None:
+                continue
+            s = signal_map[sig]
+            if filing_score is None or abs(s - 5) > abs(filing_score - 5):
+                filing_score = s
+        scores.append(filing_score if filing_score is not None else 5)
 
     if not scores:
         return 5
@@ -681,10 +716,15 @@ def _compute_score_uncached(symbol):
         lambda fn: fn(), component_fns, max_workers=4,
         thread_name_prefix="sm-parts",
     )
-    insider_score, insider_txns = part[0] if part[0] is not None else (12, [])
+    # Guard arity, not just None: a malformed (non-2-tuple) slot degrades to
+    # the neutral default instead of raising ValueError and aborting the whole
+    # score, preserving the per-component fail-soft design.
+    _p0 = part[0]
+    insider_score, insider_txns = _p0 if isinstance(_p0, tuple) and len(_p0) == 2 else (12, [])
     options_score = part[1] if part[1] is not None else 8
     sec_score = part[2] if part[2] is not None else 5
-    ml_score, ml_detail = part[3] if part[3] is not None else (
+    _p3 = part[3]
+    ml_score, ml_detail = _p3 if isinstance(_p3, tuple) and len(_p3) == 2 else (
         10, {"signal": "N/A", "detail": "ML unavailable"})
 
     # CPU-only scorers over already-fetched data — no benefit from threads.

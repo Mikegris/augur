@@ -340,7 +340,10 @@ def _component_narrative(symbol: str, direction: str) -> Tuple[bool, str, str]:
 
     phase = (result.get("narrative_phase") or "").upper()
     dom = (result.get("dominant_narrative") or "").upper()
-    velocity = result.get("velocity_score") or 0
+    try:
+        velocity = float(result.get("velocity_score") or 0)
+    except (TypeError, ValueError):
+        velocity = 0.0
     in_active = phase in ACTIVE_PHASES
 
     if direction == "bullish":

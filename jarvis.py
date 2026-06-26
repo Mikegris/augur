@@ -78,7 +78,12 @@ def _et_now() -> datetime:
         from zoneinfo import ZoneInfo
         return datetime.now(ZoneInfo("America/New_York"))
     except Exception:
-        return datetime.now(timezone.utc) - timedelta(hours=5)
+        # Fallback only when zoneinfo is unavailable. Strip tzinfo so the
+        # result is a naive ET wall-clock value rather than a UTC-labelled
+        # datetime shifted by 5h — consumers read .hour/.minute/.weekday(),
+        # and a mislabelled tzinfo would mislead any %Z/tz-aware arithmetic.
+        # EST-only (no DST) — acceptable for greeting/market-phase wording.
+        return (datetime.now(timezone.utc) - timedelta(hours=5)).replace(tzinfo=None)
 
 
 def _market_phase(now_et: datetime) -> str:
@@ -931,7 +936,8 @@ def _debate_ask(query: str, symbol: Optional[str] = None) -> Optional[Dict[str, 
                     hi, lo = qd.get("fifty_two_week_high"), qd.get("fifty_two_week_low")
                     if hi and lo and hi > lo:
                         line += "; {:.0f}% of 52-week range".format(
-                            (qd["price"] - lo) / (hi - lo) * 100)
+                            max(0.0, min(100.0,
+                                (qd["price"] - lo) / (hi - lo) * 100)))
                     pack += "\n" + line
             except Exception:
                 pass
@@ -1028,8 +1034,8 @@ def _portfolio_pulse() -> Optional[Dict[str, Any]]:
     for r in rows:
         r["weight_pct"] = round(r["market_value"] / total_value * 100, 2) if total_value else 0
 
-    movers = [r for r in rows if r.get("day_change_pct") is not None]
-    movers.sort(key=lambda r: r["day_change_pct"])
+    movers = [r for r in rows if _finite(r.get("day_change_pct")) is not None]
+    movers.sort(key=lambda r: _finite(r["day_change_pct"]))
     total_pnl = total_value - total_cost
     # Percentage base covers only the positions whose day change was measured,
     # so partial coverage (some holdings priced but missing 'change') doesn't
@@ -1712,11 +1718,11 @@ def _ideas_line() -> Dict[str, Any]:
         pool = idea_pool_warmer.list_warmed_symbols()
     except Exception:
         pool = []
-    scored = [p for p in pool if p.get("composite_score") is not None]
+    scored = [p for p in pool if _finite(p.get("composite_score")) is not None]
     if scored:
-        top = max(scored, key=lambda p: p["composite_score"])
+        top = max(scored, key=lambda p: _finite(p["composite_score"]))
         return {"line": "{} pre-built theses warm and ready. Top of the stack: {} (score {:.0f}).".format(
-                    len(pool), top["symbol"], top["composite_score"]),
+                    len(pool), top["symbol"], _finite(top["composite_score"])),
                 "tone": "pos", "action": None}
     if pool:
         return {"line": "{} theses warming in the pool.".format(len(pool)),
@@ -2321,14 +2327,18 @@ def _answer_basis(symbol: str) -> Dict[str, Any]:
                 "action": {"view": "portfolio"}}
     shares = sum(h["shares"] for h in rows)
     cost = sum(h["shares"] * h["avg_cost"] for h in rows)
-    avg = cost / shares if shares else 0
+    # Guard against a near-zero (float-dust) net denominator, not just exact 0 —
+    # a residual like 1e-12 from offsetting lots would otherwise produce an
+    # astronomical per-share basis and explode mv/pnl/% downstream.
+    _has_shares = abs(shares) > 1e-9
+    avg = cost / shares if _has_shares else 0
     is_crypto = any(h.get("asset_type") == "crypto" for h in rows)
     unit = "unit" if is_crypto else "share"
     tail = ""
     try:
         q = fetcher.get_quote(symbol + "-USD" if is_crypto else symbol) or {}
         price = _finite(q.get("price"))
-        if price:
+        if price and _has_shares:
             mv = price * shares
             pnl = mv - cost
             tail = " Worth {} now at ${:,.2f} — {} {} ({}).".format(
@@ -2667,11 +2677,11 @@ def _answer_ideas() -> Dict[str, Any]:
     if not pool:
         return {"answer": "The idea pool is still warming up — check the Ideas view shortly.",
                 "action": {"view": "ideas"}}
-    top = [r for r in pool if r.get("composite_score") is not None][:3]
+    top = [r for r in pool if _finite(r.get("composite_score")) is not None][:3]
     if not top:
         return {"answer": "The idea pool is still warming up — check the Ideas view shortly.",
                 "action": {"view": "ideas"}}
-    listing = ", ".join("{} (score {:.0f})".format(r["symbol"], r["composite_score"]) for r in top)
+    listing = ", ".join("{} (score {:.0f})".format(r["symbol"], _finite(r["composite_score"])) for r in top)
     return {"answer": "Top-scored ideas right now: {}.".format(listing),
             "action": {"view": "ideas"}}
 
@@ -3485,7 +3495,17 @@ def _maybe_learn(query: str) -> None:
             fact = fact.strip().rstrip(".")
             if not (8 <= len(fact) <= 300):
                 return
-            mid = db.jarvis_add_memory(fact, source="auto")  # idempotent on dupes
+            # Re-check the cap and add atomically: the count above is stale by
+            # now (an LLM round-trip happened), and concurrent learn threads
+            # could each have observed cap-1 and all proceeded. Serialize the
+            # count+insert under the DB write lock so the 30-fact auto cap
+            # cannot be overshot under concurrency.
+            with db._write_lock:
+                autos = [f for f in db.jarvis_list_memories()
+                         if f.get("source") == "auto"]
+                if len(autos) >= _AUTO_MEMORY_CAP:
+                    return
+                mid = db.jarvis_add_memory(fact, source="auto")  # idempotent on dupes
             # Mirror into the semantic index so recall() can find it by
             # meaning, not just recency. Guarded — embedding is best-effort.
             if mid is not None:
@@ -3907,7 +3927,7 @@ def _answer_trading_agent(ql: str) -> Dict[str, Any]:
                 return {"answer": "The agent hasn't placed any orders yet.",
                         "data": d, "action": action}
             recent = "; ".join("{} {:g} {} ({})".format(
-                str(o.get("side") or "").upper(), float(o.get("qty") or 0),
+                str(o.get("side") or "").upper(), _finite(o.get("qty")) or 0.0,
                 o.get("symbol") or "?", o.get("state") or "unknown") for o in orders[:4])
             return {"answer": "Recent agent orders — {}.".format(recent),
                     "data": d, "action": action}
@@ -4084,10 +4104,15 @@ def deep_dossier(symbol):
     net = len(bulls) - len(bears)
     lean = "constructive" if net > 0 else ("cautious" if net < 0 else "mixed")
     disagreement = bool(bulls and bears)
-    # Consensus = the largest stance bloc's share. Conviction is shrunk when the
-    # signals split or there's thin coverage — refuse conviction they don't share.
-    consensus = max(len(bulls), len(bears),
-                    len([c for c in components if c["stance"] == "neutral"])) / float(n)
+    # Consensus = the share of signals that actually BACK the stated lean, not
+    # whichever bloc (including non-directional neutrals) happens to be largest.
+    # A neutral-heavy book with a lone directional signal must not read as
+    # broad agreement behind that lean. When net == 0 there's no lean to back,
+    # so fall back to the neutral bloc's share (handled as low conviction below).
+    _neutral_n = len([c for c in components if c["stance"] == "neutral"])
+    _aligned_n = (len(bulls) if net > 0
+                  else (len(bears) if net < 0 else _neutral_n))
+    consensus = _aligned_n / float(n)
     # net == 0 means no directional majority (all-neutral or a perfect split):
     # the maximally non-directional case must not earn high/moderate conviction.
     if disagreement or consensus < 0.6 or n < 2 or net == 0:
@@ -4449,17 +4474,20 @@ def ask(query: str, history: Any = None, conversation_id: Any = None,
             # dropped; a handled-but-failing dispatch leaves it in place so a
             # retry can still resume within the TTL.
             if _pend_fresh and _pend_intent in ("forecast", "agent"):
-                with _PENDING_CLARIFY_LOCK:
-                    _PENDING_CLARIFY.pop(conv_id, None)
                 try:
                     if _pend_intent == "forecast":
-                        return done("forecast", _answer_forecast(symbol, ql))
+                        _fc = _answer_forecast(symbol, ql)
+                        with _PENDING_CLARIFY_LOCK:
+                            _PENDING_CLARIFY.pop(conv_id, None)
+                        return done("forecast", _fc)
                     if _pend_intent == "agent":
                         # Agent/planner asked "which symbol?" — resume the
                         # agent with the bare-symbol reply and full history
                         # rather than dropping to the quote fast-path (J2).
                         r = _agent_ask(q, turns, progress=progress)
                         if r and r.get("answer"):
+                            with _PENDING_CLARIFY_LOCK:
+                                _PENDING_CLARIFY.pop(conv_id, None)
                             payload = {"answer": r["answer"],
                                        "used": r.get("used") or []}
                             for k in ("reasoning", "confidence", "citations",

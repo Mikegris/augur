@@ -118,7 +118,7 @@ def route(messages: List[Dict[str, Any]], role: str = "", complexity: float = 0.
                 # to cross the floor rather than burning latency for nothing.
                 if not ok and max_escalations >= 1:
                     escalated = 1
-                    retry_tokens = (max_tokens + 256) if max_tokens else None
+                    retry_tokens = (max_tokens + 256) if max_tokens is not None else None
                     text = _ai()._ollama_chat(messages, max_tokens=retry_tokens)
                     ok = _meets_floor(text, quality_floor)
             else:
@@ -137,7 +137,7 @@ def route(messages: List[Dict[str, Any]], role: str = "", complexity: float = 0.
                 # Don't turn an intended-unbounded (None) completion into a hard
                 # 256-token cap on the retry — that truncates the very output
                 # that failed the floor for being too short.
-                retry_tokens = (max_tokens + 256) if max_tokens else None
+                retry_tokens = (max_tokens + 256) if max_tokens is not None else None
                 text = _ai().chat_any(messages, max_tokens=retry_tokens,
                                       json_mode=json_mode)
                 ok = _meets_floor(text, quality_floor)
@@ -168,3 +168,39 @@ def complete(prompt: str, system: Optional[str] = None, **kw) -> Dict[str, Any]:
         msgs.append({"role": "system", "content": system})
     msgs.append({"role": "user", "content": prompt})
     return route(msgs, **kw)
+
+
+# ── two-tier abstraction (merge plan §5.5) ────────────────────────────────────
+# TradingAgents' single biggest cost lever is a deep-think / quick-think split:
+# heavy reasoning on a strong model, cheap summarization/tool-digestion on a fast
+# one. ai_summarizer.chat_any/_ollama_chat do not yet expose per-call model
+# selection, so for now the tier maps to call PARAMETERS (token budget + quality
+# floor + temperature) and is recorded in telemetry via the role suffix. When
+# ai_summarizer gains a model-override the physical model split slots in here
+# without changing callers. The tier abstraction is what the council depends on.
+
+DEEP = "deep"
+QUICK = "quick"
+
+_TIER_DEFAULTS = {
+    # tier: (default_max_tokens, default_quality_floor)
+    DEEP:  (1024, 1.0),
+    QUICK: (512, 0.0),
+}
+
+
+def complete_tiered(prompt: str, tier: str = DEEP, system: Optional[str] = None,
+                    role: str = "", max_tokens: Optional[int] = None,
+                    quality_floor: Optional[float] = None, **kw) -> Dict[str, Any]:
+    """Route a completion at a named reasoning tier (DEEP|QUICK). Resolves the
+    token budget / quality floor from the tier when not given, and tags the
+    telemetry role with the tier so the eval loop can attribute cost by tier."""
+    t = tier if tier in _TIER_DEFAULTS else DEEP
+    dt, df = _TIER_DEFAULTS[t]
+    if max_tokens is None:
+        max_tokens = dt
+    if quality_floor is None:
+        quality_floor = df
+    tagged_role = "{}#{}".format(role or "council", t)
+    return complete(prompt, system=system, role=tagged_role, max_tokens=max_tokens,
+                    quality_floor=quality_floor, **kw)

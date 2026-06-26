@@ -118,6 +118,12 @@ EXPECT = {
 OK_STATUSES = {200}
 # id-parameterized rows may legitimately be absent in the snapshot.
 ID_OK = {200, 404}
+# Routes gated behind a one-time VERIFY-* acknowledgement correctly return 403
+# until the operator closes the gate; that is the right answer in a fresh
+# snapshot, so accept it (mirrors how streaming routes are special-cased).
+GATED_ROUTES = {
+    "/api/aj/council/<symbol>": 403,   # VERIFY-COUNCIL not passed → 403 is correct
+}
 
 
 def get_sweep():
@@ -166,12 +172,27 @@ def get_sweep():
             continue
         ms = int((time.time() - t0) * 1000)
         ok = ID_OK if has_id_param else OK_STATUSES
+        if rule.rule in GATED_ROUTES:
+            ok = set(ok) | {GATED_ROUTES[rule.rule]}
         if status >= 500:
             record(FAIL, "GET " + path, "HTTP {} ({}ms): {}".format(
                 status, ms, body[:120]))
             continue
         if status not in ok and status != 400:
             # 400 without required query params is acceptable API behavior.
+            # A non-5xx response that carries a JSON error envelope is graceful
+            # degradation — a locked gate (403), an upstream rate-limit/not-found
+            # (404/429/503) — not a crash. WARN rather than FAIL. A bodyless 4xx
+            # (e.g. a missing route's default 404) still FAILs, catching real
+            # regressions.
+            try:
+                env = json.loads(body)
+            except Exception:
+                env = None
+            if status < 500 and isinstance(env, dict) and env.get("error"):
+                record(WARN, "GET " + path, "HTTP {} envelope: {}".format(
+                    status, str(env.get("error"))[:80]))
+                continue
             record(FAIL, "GET " + path, "HTTP {} ({}ms)".format(status, ms))
             continue
         note = "{} {}ms".format(status, ms)

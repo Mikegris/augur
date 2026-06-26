@@ -76,8 +76,12 @@ def size_order(symbol: str, side: str, cfg: Dict[str, Any], held_qty: float,
     notional = aj_db.money(qty * price)
     # ② min-order-notional floor (skip dust)
     min_notional = aj_db.money(cfg.get("min_order_notional_usd") or 0)
-    if min_notional > 0 and notional < min_notional:
-        if side != "sell" and max_notional < min_notional:
+    # Dust floor applies to ENTRIES only. A sell is an exit closing the full held
+    # position; skipping it because the residual notional is below the floor would
+    # leave unwanted risk on the book indefinitely (stop/take-profit/time-stop
+    # could never close a small residual). Always let an exit through.
+    if side != "sell" and min_notional > 0 and notional < min_notional:
+        if max_notional < min_notional:
             # Contradictory config: the per-order cap is below the dust floor, so
             # EVERY buy is silently skipped. Surface it to the operator, not debug.
             log.warning("skip %s %s: max_order_notional %.2f < min_order_notional "

@@ -147,6 +147,81 @@ def _judge(symbol: str, fc: Dict[str, Any], cfg: Dict[str, Any],
             "forecast_id": (fc or {}).get("forecast_id")}
 
 
+# ── analyst council (advisory) ────────────────────────────────────────────────
+
+def _council_advise(symbol: str, decision: Dict[str, Any], cfg: Dict[str, Any],
+                    cycle_id: str, budget: Dict[str, int]) -> Dict[str, Any]:
+    """Consult the Analyst Council for a BUY candidate (merge plan Phase 3).
+
+    HARD SAFETY CONTRACT — the council is ADVISORY:
+      * Only ever consulted for a 'buy' decision the rule engine already made.
+        Sells / exits are NEVER gated by the council (we never block a
+        risk-reducing close).
+      * It can VETO the buy or SHRINK its size. It can NEVER create a buy nor
+        increase size beyond what the rule engine + caps allow (coequal sizing
+        is gated to Phase 5 and still bounded by the risk gate).
+      * On not-active / over-budget / error / skipped → PROCEED rule-based
+        (fail-open to today's behavior). The fail-closed risk gate
+        (aj_risk.evaluate) remains the sole execution authority either way.
+
+    Returns {verdict:'proceed'|'veto', factor:float(0..1], council:dict|None,
+    brief:str}.
+    """
+    proceed = {"verdict": "proceed", "factor": 1.0, "council": None, "brief": ""}
+    if (decision or {}).get("side") != "buy":
+        return proceed
+    try:
+        if not aj_config.council_active(cfg):
+            return proceed
+    except Exception:
+        return proceed
+    if budget.get("max", 0) <= 0:
+        return {**proceed, "brief": "council topk=0 (disabled)"}
+    if budget.get("n", 0) >= budget.get("max", 0):
+        return {**proceed, "brief": "council topk reached"}
+    budget["n"] = budget.get("n", 0) + 1
+    try:
+        import aj_council
+        from aj_schemas import Action
+        dec = aj_council.run(symbol, cfg=cfg, cycle_id=cycle_id)
+    except Exception:
+        log.exception("council advise failed; proceeding rule-based")
+        return {**proceed, "brief": "council error"}
+    if dec.status in ("skipped", "error"):
+        return {**proceed, "brief": "council " + dec.status}
+
+    brief = "{}/{} conv={:.0%}".format(dec.rating.value, dec.action.value, dec.conviction)
+    audit = dec.to_audit()
+    policy = str(cfg.get("council_policy", "advisory")).lower()
+
+    # confirm: an entry REQUIRES the council to also say BUY.
+    if policy == "confirm":
+        if dec.action is Action.BUY:
+            return {"verdict": "proceed", "factor": 1.0, "council": audit, "brief": brief}
+        return {"verdict": "veto", "factor": 0.0, "council": audit, "brief": brief}
+
+    # advisory (default) and locked-coequal: veto a non-BUY council call; on
+    # agreement, SHRINK size on low conviction (never grow). Only equal-or-more
+    # conservative.
+    if dec.action in (Action.SELL, Action.HOLD):
+        return {"verdict": "veto", "factor": 0.0, "council": audit, "brief": brief}
+    factor = max(0.5, min(1.0, 0.5 + 0.5 * float(dec.conviction or 0.0)))
+
+    # coequal (Phase 5): once the realized track record unlocks it, a high-
+    # conviction agreement may BOOST size up to coequal_max_boost — but ONLY
+    # within the risk gate's notional cap (the run loop clips to the cap, never
+    # bypasses it). Locked coequal behaves exactly like advisory above.
+    if policy == "coequal":
+        try:
+            import aj_council as _c
+            if _c.coequal_unlocked(cfg):
+                max_boost = max(0.0, float(cfg.get("coequal_max_boost", 0.5) or 0.0))
+                factor = 1.0 + max_boost * float(dec.conviction or 0.0)
+        except Exception:
+            pass
+    return {"verdict": "proceed", "factor": factor, "council": audit, "brief": brief}
+
+
 # ── size ──────────────────────────────────────────────────────────────────────
 
 def _size(symbol: str, side: str, cfg: Dict[str, Any], held_qty: float,
@@ -319,6 +394,10 @@ def run_once(mode: str = "paper") -> Dict[str, Any]:
             scan = aj_alpha.rank_universe(scan, cfg)
         except Exception:
             log.debug("rank_universe skipped", exc_info=True)
+        # Analyst-council advisory budget (Phase 3): consult the council for at
+        # most council_topk BUY candidates per cycle (cost bound). No-op unless
+        # council_active() (council_enabled + VERIFY-COUNCIL).
+        council_budget = {"n": 0, "max": int(cfg.get("council_topk", 3) or 0)}
         for symbol in scan:
             try:
                 if symbol in _exited:
@@ -340,10 +419,39 @@ def run_once(mode: str = "paper") -> Dict[str, Any]:
                 if not decision:
                     summary["proposals"].append({"symbol": symbol, "result": "no_edge"})
                     continue
+                # Analyst-council advisory pass (BUY candidates only). Can veto
+                # or shrink; never creates/boosts; never gates a sell.
+                advise = _council_advise(symbol, decision, cfg, cycle_id, council_budget)
+                if advise["verdict"] == "veto":
+                    aj_db.audit("council_veto", {"symbol": symbol,
+                                                 "council": advise.get("council")},
+                                cycle_id=cycle_id)
+                    summary["proposals"].append({"symbol": symbol,
+                                                 "result": "council_veto",
+                                                 "council": advise["brief"]})
+                    continue
+                if advise.get("council"):
+                    decision = dict(decision)
+                    decision["thesis"] = (str(decision.get("thesis", "")) +
+                                          " | council:" + advise["brief"])[:480]
                 sizing = _size(symbol, decision["side"], cfg, held.get(symbol, 0.0), decision)
                 if not sizing:
                     summary["proposals"].append({"symbol": symbol, "result": "unsizable"})
                     continue
+                # council size adjustment. factor<1 shrinks (advisory); factor>1
+                # boosts (unlocked coequal) but is CLIPPED to the operator's
+                # per-order notional cap — never exceeding the risk gate's limit.
+                factor = float(advise.get("factor", 1.0) or 1.0)
+                if factor > 0.0 and factor != 1.0:
+                    sizing = dict(sizing)
+                    price = float(sizing.get("price") or 0)
+                    new_qty = (sizing.get("qty") or 0.0) * factor
+                    if factor > 1.0 and price > 0:
+                        cap = float(cfg.get("max_order_notional_usd", 0) or 0)
+                        if cap > 0 and new_qty * price > cap:
+                            new_qty = cap / price          # clip to the cap
+                    sizing["qty"] = new_qty
+                    sizing["notional"] = aj_db.money(new_qty * price)
                 out = _propose_and_execute(cycle_id, symbol, decision, sizing, cfg)
                 out["symbol"] = symbol
                 # 19: remember the conviction a long was opened on, to score the
@@ -398,6 +506,15 @@ def run_once(mode: str = "paper") -> Dict[str, Any]:
                 summary["briefing"] = aj_autonomy.write_briefing(cfg)
         except Exception:
             log.debug("post-cycle autonomy skipped", exc_info=True)
+
+        # Council reflection loop (Phase 4): alpha-aware lessons on closed
+        # council round-trips, fed back into future council prompts. Gated by
+        # daily_reflection (opt-in), bounded, dedup'd; never breaks the cycle.
+        try:
+            import aj_council
+            summary["council_reflections"] = aj_council.reflect_due(cfg)
+        except Exception:
+            log.debug("council reflect_due skipped", exc_info=True)
 
         aj_db.close_cycle(cycle_id, "completed")
         aj_db.audit("disconnect", {"cycle_id": cycle_id, "status": "completed"},

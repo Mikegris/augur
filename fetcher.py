@@ -593,7 +593,9 @@ def get_quote(symbol: str) -> dict:
             "prev_close": prev_close,
             "change": change,
             "change_pct": change_pct,
-            "volume": _safe(getattr(info, "three_month_average_volume", None)),
+            "volume": (_safe(getattr(info, "last_volume", None))
+                       or _safe(getattr(info, "regular_market_volume", None))
+                       or _safe(getattr(info, "three_month_average_volume", None))),
             "market_cap": _safe(getattr(info, "market_cap", None)),
             "currency": getattr(info, "currency", "USD"),
             "exchange": getattr(info, "exchange", ""),
@@ -1294,7 +1296,7 @@ def _cg_get(path: str, params: dict = None, ttl: int = None):
         except (TypeError, ValueError):
             backoff = 30.0
         _CG_RATE_LIMIT_UNTIL[0] = time.time() + min(max(backoff, 5.0), 120.0)
-        resp.raise_for_status()
+        raise RuntimeError("coingecko 429; cooling down")
     resp.raise_for_status()
     data = resp.json()
     if cache_ttl > 0:
@@ -1368,7 +1370,10 @@ def get_crypto_chart(coin_id: str, days: int = 30) -> list:
         # order/length; their ms timestamps differ slightly, so an exact-key
         # lookup misses for most points and zeroes out volume. Align by index.
         result = []
-        for idx, (ts_ms, price) in enumerate(prices):
+        for idx, pt in enumerate(prices):
+            if not isinstance(pt, (list, tuple)) or len(pt) < 2:
+                continue
+            ts_ms, price = pt[0], pt[1]
             ts_s = int(ts_ms / 1000)
             vol = total_volumes[idx][1] if idx < len(total_volumes) else 0
             result.append({
