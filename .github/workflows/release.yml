@@ -61,6 +61,32 @@ jobs:
           AUGUR_BUILD_VERSION: ${{ steps.ver.outputs.version }}
         run: python setup_app.py py2app
 
+      - name: Re-sign the bundle (ad-hoc, inside-out)
+        # py2app's `strip` step invalidates the ad-hoc code signatures on the
+        # bundled .so/.dylib files. On Apple Silicon the app then SIGKILLs at
+        # launch with "code signature invalid" (no window, immediate quit).
+        # Re-sign every Mach-O inside-out — nested binaries first, the bundle
+        # LAST. `codesign --deep` is NOT sufficient here. Ad-hoc (`-s -`):
+        # we have no Developer ID, so Gatekeeper still needs the one-time
+        # right-click → Open, but the app no longer crashes on arm64.
+        run: |
+          set -euo pipefail
+          APP=dist/AUGUR.app
+          # 1) every nested Mach-O library
+          find "$APP" -type f \( -name "*.so" -o -name "*.dylib" \) -print0 \
+            | xargs -0 codesign --force --timestamp=none -s -
+          # 2) the embedded Python framework dylib(s)
+          find "$APP" -type f -path "*Python3.framework/Versions/*/Python3" -print0 \
+            | xargs -0 codesign --force --timestamp=none -s -
+          # 3) the multiprocessing helper + the main executable
+          [ -f "$APP/Contents/MacOS/python" ] \
+            && codesign --force --timestamp=none -s - "$APP/Contents/MacOS/python"
+          codesign --force --timestamp=none -s - "$APP/Contents/MacOS/AUGUR"
+          # 4) the bundle LAST
+          codesign --force --timestamp=none -s - "$APP"
+          echo "── codesign verify ──"
+          codesign --verify --deep --strict --verbose=2 "$APP"
+
       - name: Build DMG
         run: bash build_dmg.sh
 
