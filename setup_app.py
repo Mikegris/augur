@@ -54,6 +54,9 @@ LOCAL_MODULES = [
     "aj_opencode", "aj_voice", "aj_langfuse",
     "aj_strategy", "aj_rules", "aj_analytics",
     "aj_alpha", "aj_autonomy",   # v3.2 100x layer (lazy-imported in the operator)
+    # v3.4 Analyst Council layer (lazy-imported in the operator/routes/personas)
+    "aj_schemas", "aj_analysts", "aj_debate", "aj_council", "aj_memory",
+    "aj_personas",
     "ai_summarizer",
     "alt_data_engine",
     "alt_signals",
