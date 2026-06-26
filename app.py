@@ -3722,6 +3722,54 @@ def aj_analytics_route():
         return _err(e)
 
 
+@app.route("/api/aj/council/<symbol>", methods=["GET"])
+def aj_council_route(symbol):
+    """Run the Analyst Council for one symbol (inspection). Advisory only — this
+    never trades. Doubly gated: requires the VERIFY-COUNCIL gate (force=True
+    still checks it), so it can't spend on the council without acknowledgement.
+    Returns the decision + the per-analyst reports + debate transcript."""
+    if not _valid_ticker(symbol):
+        return jsonify({"error": "Invalid symbol"}), 400
+    try:
+        import aj_db, aj_council, aj_config
+        aj_db.aj_init()
+        if not aj_config.council_verify_passed():
+            return jsonify({"error": "VERIFY-COUNCIL gate not passed",
+                            "hint": "aj_cli verify-set council --force"}), 403
+        dec = aj_council.run(symbol.upper(), force=True)
+        conn = db.get_conn()
+        run = conn.execute(
+            "SELECT id FROM aj_council_runs WHERE symbol=? ORDER BY id DESC LIMIT 1",
+            (symbol.upper(),)).fetchone()
+        reports, turns = [], []
+        if run:
+            reports = [dict(r) for r in conn.execute(
+                "SELECT analyst, band, score, confidence, narrative FROM "
+                "aj_analyst_reports WHERE council_run_id=? ORDER BY id", (run["id"],)).fetchall()]
+            turns = [dict(t) for t in conn.execute(
+                "SELECT debate, role, round, content FROM aj_debate_turns "
+                "WHERE council_run_id=? ORDER BY id", (run["id"],)).fetchall()]
+        return jsonify({"decision": dec.to_audit(), "reports": reports, "debate": turns})
+    except Exception as e:
+        return _err(e)
+
+
+@app.route("/api/aj/council/recent", methods=["GET"])
+def aj_council_recent_route():
+    """Recent council decisions (queryable copy) for the UI panel."""
+    try:
+        import aj_db
+        aj_db.aj_init()
+        conn = db.get_conn()
+        rows = [dict(r) for r in conn.execute(
+            "SELECT ts, cycle_id, symbol, status, rating, action, conviction, "
+            "thesis, dissent, cost_usd, n_calls FROM aj_council_runs "
+            "ORDER BY id DESC LIMIT 50").fetchall()]
+        return jsonify({"runs": rows})
+    except Exception as e:
+        return _err(e)
+
+
 @app.route("/api/aj/positions", methods=["GET"])
 def aj_positions_route():
     """The agent's current paper positions with per-stock analytics."""
