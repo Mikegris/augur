@@ -146,14 +146,16 @@ def cmd_secret(argv):
 # Gates that flip a LIVE broker on; refusing to set these to 'pass' without an
 # explicit operator acknowledgement that the contract test was actually run.
 _BROKER_GATES = ("alpaca", "ccxt", "robinhood")
-_KNOWN_GATES = _BROKER_GATES + ("opencode", "mcp_read")
+# 'council' gates the advisory Analyst Council (cost + non-determinism ack); it
+# is not a live-money/broker gate, so it needs no contract test or --force.
+_KNOWN_GATES = _BROKER_GATES + ("opencode", "mcp_read", "council")
 _FORCE_FLAG = "--force-i-ran-the-contract-test"
 
 
 def cmd_verify_pass(argv):
     """Mark a VERIFY gate passed AFTER its contract test succeeds.
     Usage: verify-pass <gate> [--force-i-ran-the-contract-test]
-      <gate> must be one of: alpaca|ccxt|robinhood|opencode|mcp_read
+      <gate> must be one of: alpaca|ccxt|robinhood|opencode|mcp_read|council
       * mcp_read is self-verified here (its contract_ok() must pass);
       * broker gates require the explicit --force acknowledgement because the
         CLI cannot run the live broker contract test for you — fail-closed."""
@@ -162,7 +164,7 @@ def cmd_verify_pass(argv):
     gate = next((a for a in argv if not a.startswith("-")), "")
     forced = _FORCE_FLAG in argv
     if not gate:
-        _print({"usage": "aj verify-pass <gate>  (alpaca|ccxt|robinhood|opencode|mcp_read)"})
+        _print({"usage": "aj verify-pass <gate>  (alpaca|ccxt|robinhood|opencode|mcp_read|council)"})
         return
     if gate not in _KNOWN_GATES:
         _print({"error": "unknown gate", "gate": gate, "known": list(_KNOWN_GATES)})
