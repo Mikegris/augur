@@ -255,7 +255,8 @@ def _size(symbol: str, side: str, cfg: Dict[str, Any], held_qty: float,
 # ── propose + gate + execute ──────────────────────────────────────────────────
 
 def _propose_and_execute(cycle_id: str, symbol: str, decision: Dict[str, Any],
-                         sizing: Dict[str, Any], cfg: Dict[str, Any]) -> Dict[str, Any]:
+                         sizing: Dict[str, Any], cfg: Dict[str, Any],
+                         instrument: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     order_type = sizing.get("order_type") or "market"
     limit_price = sizing.get("limit_price")
     # Normalize the sizing dict defensively: a sizer that omits 'notional'
@@ -265,19 +266,29 @@ def _propose_and_execute(cycle_id: str, symbol: str, decision: Dict[str, Any],
     notional = sizing.get("notional")
     if notional is None:
         notional = aj_db.money(qty * float(sizing.get("price") or 0))
-    pid = aj_db.insert(
-        "aj_proposals", created_at=aj_db.utc_now_iso(), cycle_id=cycle_id,
-        symbol=symbol, side=decision["side"], qty=qty,
-        notional_usd=notional, order_type=order_type, limit_price=limit_price,
-        thesis=decision.get("thesis"), forecast_id=decision.get("forecast_id"),
-        status="proposed")
+    ins = dict(created_at=aj_db.utc_now_iso(), cycle_id=cycle_id,
+               symbol=symbol, side=decision["side"], qty=qty,
+               notional_usd=notional, order_type=order_type, limit_price=limit_price,
+               thesis=decision.get("thesis"), forecast_id=decision.get("forecast_id"),
+               status="proposed")
+    if instrument:    # options carry extra columns (v4 schema)
+        ins.update(instrument_type=instrument.get("instrument_type", "option"),
+                   underlying=instrument.get("underlying"),
+                   option_type=instrument.get("option_type"),
+                   strike=instrument.get("strike"), expiry=instrument.get("expiry"),
+                   contract_multiplier=instrument.get("contract_multiplier", 100))
+    pid = aj_db.insert("aj_proposals", **ins)
     aj_db.audit("proposal", {"proposal_id": pid, "symbol": symbol,
                              "side": decision["side"], "qty": qty,
+                             "instrument": (instrument or {}).get("instrument_type", "stock"),
                              "thesis": decision.get("thesis")},
                 cycle_id=cycle_id, ref_id=pid)
 
     proposal = {"id": pid, "symbol": symbol, "side": decision["side"],
                 "qty": qty, "order_type": order_type, "limit_price": limit_price}
+    if instrument:
+        proposal["instrument_type"] = instrument.get("instrument_type", "option")
+        proposal["asset_type"] = "option"
     rd = aj_risk.evaluate(proposal)
     if rd.get("decision") != "pass":
         # The proposal CHECK constraint allows only proposed/blocked/approved/
@@ -472,8 +483,39 @@ def run_once(mode: str = "paper") -> Dict[str, Any]:
                             new_qty = cap / price          # clip to the cap
                     sizing["qty"] = new_qty
                     sizing["notional"] = aj_db.money(new_qty * price)
-                out = _propose_and_execute(cycle_id, symbol, decision, sizing, cfg)
-                out["symbol"] = symbol
+                # Options sleeve: a BUY signal becomes a long CALL on the
+                # underlying, sized by premium from the (conviction+council-
+                # adjusted) target notional. Falls back to the equity buy when
+                # options are off / no chain / can't afford one contract.
+                p_symbol, p_decision, p_sizing, instrument = symbol, decision, sizing, None
+                if cfg.get("trade_options") and decision.get("side") == "buy" \
+                        and not aj_positions.infer_asset_type(symbol) == "crypto":
+                    try:
+                        import aj_options
+                        opt = aj_options.pick_contract(symbol, "buy", cfg)
+                        prem = float((opt or {}).get("premium_contract") or 0)
+                        target = float(sizing.get("notional") or 0)
+                        n_ct = int(target // prem) if prem > 0 else 0
+                        if opt and n_ct >= 1:
+                            p_symbol = opt["symbol"]
+                            p_sizing = {"qty": n_ct, "price": prem,
+                                        "notional": aj_db.money(n_ct * prem),
+                                        "order_type": "limit", "limit_price": prem}
+                            p_decision = dict(decision)
+                            p_decision["thesis"] = (str(decision.get("thesis", "")) +
+                                " | opt {} {:.0f}C {} x{} @${:.0f}".format(
+                                    opt["underlying"], opt["strike"], opt["expiry"],
+                                    n_ct, prem))[:480]
+                            instrument = {"instrument_type": "option",
+                                          "underlying": opt["underlying"],
+                                          "option_type": opt["option_type"],
+                                          "strike": opt["strike"], "expiry": opt["expiry"],
+                                          "contract_multiplier": opt["contract_multiplier"]}
+                    except Exception:
+                        log.exception("option routing failed; equity fallback")
+                out = _propose_and_execute(cycle_id, p_symbol, p_decision, p_sizing,
+                                           cfg, instrument=instrument)
+                out["symbol"] = p_symbol
                 # 19: remember the conviction a long was opened on, to score the
                 # eventual close under the right bucket.
                 if cfg.get("signal_scorecard") and out.get("result") == "executed" \

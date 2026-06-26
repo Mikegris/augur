@@ -32,6 +32,8 @@ _CRYPTO_HINTS = {"BTC", "ETH", "SOL", "XRP", "DOGE", "ADA", "HBAR", "LTC",
 
 
 def infer_asset_type(symbol: str) -> str:
+    if isinstance(symbol, str) and symbol.startswith("OPT:"):
+        return "option"
     s = (symbol or "").upper()
     if s.endswith("-USD") or s in _CRYPTO_HINTS:
         return "crypto"

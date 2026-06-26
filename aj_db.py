@@ -32,7 +32,7 @@ import database as db
 log = logging.getLogger("augur.aj_db")
 
 # ── schema version target (bump when adding a numbered migration step) ────────
-AJ_SCHEMA_TARGET = 3
+AJ_SCHEMA_TARGET = 4
 _SCHEMA_KEY = "aj_schema_version"
 
 # ── DDL (§5). CREATE TABLE IF NOT EXISTS is safe to re-run; column ADDs go
@@ -316,6 +316,30 @@ def aj_migrate() -> int:
                 cur.execute(stmt)
             conn.commit()
             current = 3
+        # Step 4 — options support: additive option columns on proposals/orders.
+        # This ALTERs existing tables, so back up first (§6). ADD COLUMN is
+        # safe/idempotent-guarded (we check existing columns before each add).
+        if current < 4:
+            try:
+                backup_db()
+            except Exception:
+                log.debug("aj_migrate v4: backup_db failed (continuing)", exc_info=True)
+            for table in ("aj_proposals", "aj_orders"):
+                have = {r["name"] for r in conn.execute(
+                    "PRAGMA table_info({})".format(table)).fetchall()}
+                adds = [
+                    ("instrument_type", "TEXT NOT NULL DEFAULT 'stock'"),
+                    ("underlying", "TEXT"),
+                    ("option_type", "TEXT"),
+                    ("strike", "REAL"),
+                    ("expiry", "TEXT"),
+                    ("contract_multiplier", "INTEGER DEFAULT 100"),
+                ]
+                for col, decl in adds:
+                    if col not in have:
+                        conn.execute("ALTER TABLE {} ADD COLUMN {} {}".format(table, col, decl))
+            conn.commit()
+            current = 4
         set_setting_raw(_SCHEMA_KEY, str(current))
         log.info("aj_migrate: schema at version %d", current)
         return current

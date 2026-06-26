@@ -155,6 +155,14 @@ DEFAULTS: Dict[str, Any] = {
     "screen_min_price":       1.0,     # drop sub-$1 names
     "screen_min_dollar_volume": 1000000.0,  # min price*volume (liquidity floor)
     "screen_min_market_cap":  0.0,     # 0 = no market-cap floor
+    # ── options trading (aj_options) — single-leg LONG calls, paper ───────────
+    # When on, a BUY signal on an underlying becomes a long CALL (ATM, ~N DTE),
+    # sized by premium, paper-filled at the chain mid. Live options gated like
+    # live equities. Default OFF (fail-closed).
+    "trade_options":          False,
+    "option_target_dte":      35,      # target days-to-expiry for picked contracts
+    "option_moneyness":       0.0,     # 0 = ATM; +0.05 = 5% OTM call
+    "option_contract_multiplier": 100,
 }
 
 _BOOL_KEYS = {"trading_enabled", "live_trading_enabled", "robinhood_enabled",
@@ -172,7 +180,9 @@ _BOOL_KEYS = {"trading_enabled", "live_trading_enabled", "robinhood_enabled",
               "council_analyst_technical", "personas_enabled",
               "fingpt_sentiment_enabled",
               # universe screener
-              "screen_full_equities", "include_crypto"}
+              "screen_full_equities", "include_crypto",
+              # options
+              "trade_options"}
 _LIST_KEYS = {"symbol_allowlist", "session_whitelist"}
 _FLOAT_KEYS = {"max_order_notional_usd", "max_daily_loss_usd",
                "paper_slippage_bps", "paper_spread_fraction", "fee_bps",
@@ -193,7 +203,7 @@ _FLOAT_KEYS = {"max_order_notional_usd", "max_daily_loss_usd",
                "coequal_min_alpha", "coequal_max_boost",
                # universe screener
                "screen_min_price", "screen_min_dollar_volume",
-               "screen_min_market_cap"}
+               "screen_min_market_cap", "option_moneyness"}
 _INT_KEYS = {"max_trades_per_day", "forecast_horizon_days", "scan_universe_max",
              "order_ttl_cycles", "exit_cooldown_min", "max_open_positions",
              "max_trades_per_symbol_per_day", "trade_skip_open_min",

@@ -72,13 +72,27 @@ def _marks(symbols: List[str]) -> Dict[str, Optional[float]]:
     out: Dict[str, Optional[float]] = {}
     if not symbols:
         return out
-    try:
-        import fetcher
-        qmap = fetcher.get_quotes_batch(list({s for s in symbols})) or {}
-    except Exception:
-        log.debug("marks: get_quotes_batch failed", exc_info=True)
-        qmap = {}
-    for s in symbols:
+    # Options price off the chain (per-contract), not the equity quote feed.
+    opt_syms = [s for s in symbols if isinstance(s, str) and s.startswith("OPT:")]
+    eq_syms = [s for s in symbols if s not in opt_syms]
+    if opt_syms:
+        try:
+            import aj_options
+            for s in opt_syms:
+                m = aj_options.mark(s)
+                out[s] = float(m) if isinstance(m, (int, float)) and math.isfinite(m) and m >= 0 else None
+        except Exception:
+            log.debug("marks: option mark failed", exc_info=True)
+            for s in opt_syms:
+                out.setdefault(s, None)
+    qmap = {}
+    if eq_syms:
+        try:
+            import fetcher
+            qmap = fetcher.get_quotes_batch(list(set(eq_syms))) or {}
+        except Exception:
+            log.debug("marks: get_quotes_batch failed", exc_info=True)
+    for s in eq_syms:
         q = qmap.get(s) or {}
         p = q.get("price")
         out[s] = float(p) if isinstance(p, (int, float)) and not isinstance(p, bool) and math.isfinite(p) and p > 0 else None
@@ -516,7 +530,9 @@ def evaluate(proposal: Dict[str, Any]) -> RiskDecision:
                 _record("block", "symbol not in allowlist", caps, None, pid)
                 return RiskDecision(decision="block", reason="{} not in symbol allowlist".format(symbol))
         elif _open_universe:
-            if not _VALID_SYMBOL.match(symbol):
+            # Option symbols ("OPT:...") are not equity tickers — accept them
+            # past the equity-shape check (they're validated by aj_options).
+            if not symbol.startswith("OPT:") and not _VALID_SYMBOL.match(symbol):
                 _record("block", "open-universe: invalid symbol", caps, None, pid)
                 return RiskDecision(decision="block", reason="invalid symbol {}".format(symbol))
 

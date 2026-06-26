@@ -98,9 +98,14 @@ class PaperBroker(BrokerClient):
         # Share one process-wide order book across instances (see _PAPER_ORDERS).
         self._orders = _PAPER_ORDERS
 
-    # quote lookup (price only); crypto maps to SYM-USD
+    # quote lookup (price only); crypto maps to SYM-USD; options price off the
+    # chain (PER-CONTRACT premium) so the paper book's qty×price math is correct.
     def _quote(self, symbol: str, asset_type: str = "") -> Optional[float]:
         try:
+            if symbol.startswith("OPT:") or asset_type == "option":
+                import aj_options
+                m = aj_options.mark(symbol)
+                return float(m) if isinstance(m, (int, float)) and m == m and m > 0 else None
             import fetcher
             sym = symbol.upper()
             if asset_type == "crypto" and not sym.endswith("-USD"):
