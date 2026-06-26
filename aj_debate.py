@@ -15,7 +15,7 @@ import logging
 from typing import Any, Callable, Dict, List, Optional
 
 import aj_routing
-from aj_schemas import AnalystReport, ResearchPlan
+from aj_schemas import AnalystReport, ResearchPlan, TraderProposal
 
 log = logging.getLogger("augur.aj_debate")
 
@@ -86,3 +86,63 @@ def research_manager(symbol: str, reports: List[AnalystReport],
     if not text:
         return None
     return ResearchPlan.from_llm(text)
+
+
+# ── trader (plan → executable proposal) ───────────────────────────────────────
+
+_TRADER_SYS = (
+    "You are the Trader. Convert the research plan for {symbol} into a concrete "
+    "executable proposal. Respond with STRICT JSON: {{\"action\":\"BUY|HOLD|"
+    "SELL\",\"reasoning\":\"<=60 words\",\"entry_price\":<num or null>,"
+    "\"stop_loss\":<num or null>,\"position_sizing\":\"<small|normal|large>\"}}.")
+
+
+def trader(symbol: str, plan: ResearchPlan, call: CallFn) -> Optional[TraderProposal]:
+    """Turn the research plan into a 3-tier TraderProposal. Returns None when the
+    model is unavailable (the council then derives the action from the plan)."""
+    if plan is None:
+        return None
+    sys = _TRADER_SYS.format(symbol=symbol)
+    prompt = "Research plan:\n{}\n\nYour proposal (JSON):".format(plan.render())
+    text = call(aj_routing.DEEP, "council.trader", sys, prompt)
+    if not text:
+        return None
+    return TraderProposal.from_llm(text)
+
+
+# ── risk debate (3 perspectives, hard-terminated) ─────────────────────────────
+
+_RISK_PERSPECTIVES = ("aggressive", "conservative", "neutral")
+_RISK_SYS = (
+    "You are the {persp} risk manager reviewing a proposed trade in {symbol}. "
+    "From your risk perspective, assess the proposal and the portfolio context. "
+    "Be concise (<=90 words). Respond with STRICT JSON: {{\"assessment\":"
+    "\"...\",\"recommended_action\":\"BUY|HOLD|SELL\"}}.")
+
+
+def risk_debate(symbol: str, proposal: TraderProposal, portfolio_text: str,
+                call: CallFn, rounds: int = 1) -> List[Dict[str, Any]]:
+    """Aggressive → Conservative → Neutral rotation, hard-terminated after
+    3*rounds turns. ADVISORY — informs the arbiter; never the execution gate.
+    Stops early on a None completion."""
+    rounds = max(0, int(rounds or 0))
+    if rounds == 0 or proposal is None:
+        return []
+    prop_md = proposal.render()
+    ctx = ("\nPortfolio context:\n" + portfolio_text) if portfolio_text else ""
+    turns: List[Dict[str, Any]] = []
+    history = ""
+    total = 3 * rounds
+    for i in range(total):
+        persp = _RISK_PERSPECTIVES[i % 3]
+        sys = _RISK_SYS.format(persp=persp, symbol=symbol)
+        prompt = ("Proposal:\n{p}{c}\n\nDebate so far:\n{h}\n\nYour view:").format(
+            p=prop_md, c=ctx, h=history or "(none yet)")
+        text = call(aj_routing.DEEP, "council.risk." + persp, sys, prompt)
+        if not text:
+            break
+        text = str(text).strip()
+        history += "\n{}: {}".format(persp.upper(), text)
+        turns.append({"debate": "risk", "role": persp, "round": i // 3,
+                      "content": text})
+    return turns

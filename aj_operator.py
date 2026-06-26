@@ -485,6 +485,15 @@ def run_once(mode: str = "paper") -> Dict[str, Any]:
         except Exception:
             log.debug("post-cycle autonomy skipped", exc_info=True)
 
+        # Council reflection loop (Phase 4): alpha-aware lessons on closed
+        # council round-trips, fed back into future council prompts. Gated by
+        # daily_reflection (opt-in), bounded, dedup'd; never breaks the cycle.
+        try:
+            import aj_council
+            summary["council_reflections"] = aj_council.reflect_due(cfg)
+        except Exception:
+            log.debug("council reflect_due skipped", exc_info=True)
+
         aj_db.close_cycle(cycle_id, "completed")
         aj_db.audit("disconnect", {"cycle_id": cycle_id, "status": "completed"},
                     cycle_id=cycle_id)

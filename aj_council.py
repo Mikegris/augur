@@ -27,8 +27,9 @@ import aj_routing
 import aj_analysts
 import aj_debate
 import aj_memory
-from aj_schemas import (AnalystReport, CouncilDecision, ResearchPlan, Rating,
-                        rating_conviction)
+from aj_schemas import (AnalystReport, CouncilDecision, ResearchPlan,
+                        TraderProposal, Rating, rating_conviction, clamp,
+                        extract_json, parse_rating)
 
 log = logging.getLogger("augur.aj_council")
 
@@ -262,21 +263,36 @@ def run(symbol: str, cfg: Optional[Dict[str, Any]] = None,
     reports = _run_analysts(symbol, cfg, the_call)
     c_rating, conf, c_thesis, dissent = _consensus(reports)
 
-    # Phase 2: bull/bear debate → research manager refines the consensus. The
-    # consensus plan is the fail-closed fallback if the debate can't run (no
-    # model / budget exhausted) — we never fabricate a debate.
+    # Phase 2: bull/bear debate → research manager refines the consensus.
+    # Phase 4: trader → 3-way risk debate → arbiter (final risk-adjusted call).
+    # The consensus plan is the fail-closed fallback at every layer — we never
+    # fabricate a debate; any missing model/budget degrades gracefully.
     rounds = int(cfg.get("max_research_rounds", 1) or 0)
+    risk_rounds = int(cfg.get("max_risk_rounds", 1) or 0)
+    mem_text = _safe_recall(symbol)
     plan = ResearchPlan(recommendation=c_rating, rationale=c_thesis)
-    turns: List[Dict[str, Any]] = []
+    research_turns: List[Dict[str, Any]] = []
+    risk_turns: List[Dict[str, Any]] = []
+    proposal: Optional[TraderProposal] = None
+    final: Optional[CouncilDecision] = None
     debate_ran = False
     if rounds > 0 and reports and not budget.exhausted():
-        mem_text = _safe_recall(symbol)
-        turns = aj_debate.research_debate(symbol, reports, mem_text, the_call, rounds)
-        dplan = aj_debate.research_manager(symbol, reports, turns, the_call)
+        research_turns = aj_debate.research_debate(symbol, reports, mem_text, the_call, rounds)
+        dplan = aj_debate.research_manager(symbol, reports, research_turns, the_call)
         if dplan is not None:
             plan = dplan
             debate_ran = True
+            if not budget.exhausted():
+                proposal = aj_debate.trader(symbol, plan, the_call)
+            if proposal is not None and risk_rounds > 0 and not budget.exhausted():
+                # PRIVACY: portfolio holdings are PRIVATE; we deliberately pass
+                # NO holdings into the PUBLIC-routed risk debate. The debate
+                # reasons on the proposal itself. (Richer private context would
+                # need PRIVATE/local-only routing — a future refinement.)
+                risk_turns = aj_debate.risk_debate(symbol, proposal, "", the_call, risk_rounds)
+            final = _arbiter(symbol, plan, proposal, risk_turns, mem_text, conf, the_call)
 
+    turns = research_turns + risk_turns
     backed = [r for r in reports if r.confidence > 0.0]
     if not reports:
         status = "error"
@@ -285,10 +301,20 @@ def run(symbol: str, cfg: Optional[Dict[str, Any]] = None,
     else:
         status = "ok"
 
-    dec = CouncilDecision.from_plan(
-        symbol, plan, confidence=conf,
-        dissent=dissent, status=status, cost_usd=budget.cost_usd,
-        latency_ms=int((time.time() - t0) * 1000), n_calls=budget.n_calls)
+    elapsed = int((time.time() - t0) * 1000)
+    if final is not None:
+        dec = final
+        dec.status = status
+        dec.cost_usd = budget.cost_usd
+        dec.latency_ms = elapsed
+        dec.n_calls = budget.n_calls
+        if not dec.dissent:
+            dec.dissent = dissent
+    else:
+        dec = CouncilDecision.from_plan(
+            symbol, plan, proposal, confidence=conf,
+            dissent=dissent, status=status, cost_usd=budget.cost_usd,
+            latency_ms=elapsed, n_calls=budget.n_calls)
     _persist(dec, reports, turns, cycle_id)
     _remember(dec)
     _cache_put(symbol, cfg, dec)
@@ -300,6 +326,205 @@ def _safe_recall(symbol: str) -> str:
         return aj_memory.recall_text(symbol)
     except Exception:
         return ""
+
+
+# ── arbiter (final risk-adjusted decision, Phase 4) ───────────────────────────
+
+_ARBITER_SYS = (
+    "You are the Portfolio Manager — the final arbiter. Weigh the research "
+    "stance, the trader's proposal, the 3-way risk debate, and prior lessons "
+    "about {symbol}. Render an INDEPENDENT judgment (you may diverge from any "
+    "single voice). Respond with STRICT JSON: {{\"rating\":\"BUY|OVERWEIGHT|"
+    "HOLD|UNDERWEIGHT|SELL\",\"action\":\"BUY|HOLD|SELL\",\"conviction\":<0-1>,"
+    "\"thesis\":\"<=80 words\",\"dissent\":\"<=40 words or empty>\","
+    "\"time_horizon\":\"<short|medium|long or null>\"}}.")
+
+
+def _arbiter(symbol: str, plan: ResearchPlan, proposal: Optional[TraderProposal],
+             risk_turns: List[Dict[str, Any]], memory_text: str, conf: float,
+             call: aj_analysts.CallFn) -> Optional[CouncilDecision]:
+    """Final risk-adjusted synthesis. Returns None when there's nothing to
+    arbitrate or the model is unavailable (caller falls back to the plan)."""
+    if call is None or (not risk_turns and proposal is None):
+        return None
+    transcript = "\n".join("{}: {}".format(t["role"].upper(), t["content"])
+                           for t in risk_turns) or "(no risk debate)"
+    mem = ("\nPrior lessons:\n" + memory_text) if memory_text else ""
+    prompt = ("Research stance:\n{plan}\n\nTrader proposal:\n{prop}\n\n"
+              "Risk debate:\n{risk}{mem}\n\nFinal decision (JSON):").format(
+        plan=plan.render(), prop=(proposal.render() if proposal else "(none)"),
+        risk=transcript, mem=mem)
+    text = call(aj_routing.DEEP, "council.arbiter",
+                _ARBITER_SYS.format(symbol=symbol), prompt)
+    if not text:
+        return None
+    d = extract_json(text)
+    if not d:
+        return None
+    rating = parse_rating(d.get("rating") or d.get("recommendation"),
+                          default=plan.recommendation)
+    plan2 = ResearchPlan(recommendation=rating,
+                         rationale=str(d.get("thesis") or plan.rationale))
+    dec = CouncilDecision.from_plan(symbol, plan2, proposal, confidence=conf)
+    # arbiter may override conviction explicitly; honor a valid action too
+    if d.get("conviction") is not None:
+        dec.conviction = clamp(d.get("conviction"), 0.0, 1.0, dec.conviction)
+    if d.get("action"):
+        from aj_schemas import parse_action
+        dec.action = parse_action(d.get("action"), default=dec.action)
+    dec.dissent = str(d.get("dissent") or "")
+    if d.get("time_horizon") and str(d.get("time_horizon")).lower() != "null":
+        dec.time_horizon = str(d.get("time_horizon"))
+    return dec
+
+
+# ── reflection (alpha-aware lessons, Phase 4) ─────────────────────────────────
+
+_REFLECT_SYS = (
+    "You are a trading coach. In 1-2 sentences, extract ONE actionable lesson "
+    "from this outcome — what thesis element worked or failed, judged on alpha "
+    "(return vs benchmark), not raw return. Be terse and concrete.")
+
+
+def reflect(symbol: str, raw_return: float, benchmark_return: float,
+            benchmark: str = "SPY", situation: str = "",
+            call: Optional[aj_analysts.CallFn] = None) -> Dict[str, Any]:
+    """Write an alpha-aware lesson for a resolved decision: persists to
+    aj_reflections + the memory log (as a cross-symbol 'lesson') + audit. The
+    lesson is injected into future council prompts. Model lesson is optional;
+    falls back to a deterministic template. Never raises into the caller."""
+    try:
+        raw = float(raw_return)
+        bench = float(benchmark_return)
+    except (TypeError, ValueError):
+        raw, bench = 0.0, 0.0
+    alpha = raw - bench
+    lesson = ""
+    if call is not None:
+        try:
+            prompt = ("Symbol {s}: realized {r:+.1%}, benchmark {b} {bn:+.1%}, "
+                      "alpha {a:+.1%}. Situation: {sit}\nLesson:").format(
+                s=symbol, r=raw, b=benchmark, bn=bench, a=alpha, sit=situation[:300])
+            text = call(aj_routing.QUICK, "council.reflect", _REFLECT_SYS, prompt)
+            if text:
+                lesson = str(text).strip()[:400]
+        except Exception:
+            log.debug("reflect model call failed", exc_info=True)
+    if not lesson:
+        verb = "outperformed" if alpha >= 0 else "underperformed"
+        lesson = "{}: {:+.1%} vs {} ({:+.1%} alpha) — {}.".format(
+            symbol, raw, benchmark, alpha, verb)
+    import hashlib
+    sit_hash = hashlib.sha256((situation or "").encode("utf-8")).hexdigest()[:16]
+    try:
+        aj_db.insert("aj_reflections", ts=aj_db.utc_now_iso(), symbol=str(symbol).upper(),
+                     situation_hash=sit_hash, raw_return=raw, alpha_return=alpha,
+                     benchmark=benchmark, lesson=lesson)
+    except Exception:
+        log.exception("reflect persist failed (non-fatal)")
+    try:
+        aj_memory.append(str(symbol).upper(), "lesson", lesson)
+    except Exception:
+        pass
+    try:
+        aj_db.audit("council_reflection",
+                    {"symbol": symbol, "raw_return": raw, "alpha_return": alpha,
+                     "benchmark": benchmark, "lesson": lesson}, actor="council")
+    except Exception:
+        pass
+    return {"symbol": str(symbol).upper(), "raw_return": raw,
+            "alpha_return": alpha, "benchmark": benchmark, "lesson": lesson}
+
+
+def _invested_usd(symbol: str) -> float:
+    """Total cost basis of BUY fills for a symbol (qty*price + fees). Best-effort."""
+    try:
+        import database as db
+        rows = db.get_conn().execute(
+            "SELECT f.qty q, f.price p, f.fees_usd fee FROM aj_fills f "
+            "JOIN aj_orders o ON o.id=f.order_id "
+            "WHERE o.symbol=? AND o.side='buy'", (str(symbol).upper(),)).fetchall()
+        return sum(float(r["q"]) * float(r["p"]) + float(r["fee"] or 0) for r in rows)
+    except Exception:
+        return 0.0
+
+
+def _spy_return_since(ts_iso: str) -> float:
+    """SPY fractional return from `ts_iso` to now (benchmark). Fail-open to 0."""
+    try:
+        import fetcher
+        bars = fetcher.get_chart_data("SPY", "6mo", "1d")
+        if not isinstance(bars, list) or len(bars) < 2:
+            return 0.0
+        import aj_db
+        dt = aj_db.parse_iso(ts_iso)
+        start = None
+        for b in bars:
+            bt = b.get("time")
+            # bars carry unix seconds; compare to the decision epoch
+            if dt is not None and bt is not None and bt >= dt.timestamp():
+                start = b.get("close")
+                break
+        start = start or bars[0].get("close")
+        end = bars[-1].get("close")
+        if start and end and start > 0:
+            return (float(end) - float(start)) / float(start)
+    except Exception:
+        pass
+    return 0.0
+
+
+def reflect_due(cfg: Optional[Dict[str, Any]] = None, max_per_call: int = 5,
+                call: Optional[aj_analysts.CallFn] = None) -> List[Dict[str, Any]]:
+    """Reflect on CLOSED council round-trips not yet reflected (alpha vs SPY),
+    writing lessons into memory for future prompts. Gated behind the operator's
+    daily_reflection flag (opt-in); bounded; dedup'd by council run id; never
+    raises into the cycle."""
+    cfg = cfg or aj_config.get_config()
+    if not cfg.get("daily_reflection"):
+        return []
+    out: List[Dict[str, Any]] = []
+    try:
+        import database as db
+        conn = db.get_conn()
+        rows = conn.execute(
+            "SELECT id, symbol, ts FROM aj_council_runs WHERE action='BUY' "
+            "AND status IN ('ok','degraded') ORDER BY id DESC LIMIT 50").fetchall()
+    except Exception:
+        return out
+    try:
+        import aj_positions
+        open_syms = set((aj_positions.paper_book().get("positions") or {}).keys())
+    except Exception:
+        open_syms = set()
+    try:
+        import aj_analytics
+        attr = {a["symbol"]: a for a in aj_analytics.attribution()}
+    except Exception:
+        attr = {}
+    import hashlib
+    for r in rows:
+        if len(out) >= max_per_call:
+            break
+        sym, run_id = r["symbol"], r["id"]
+        situation = "run:{}".format(run_id)
+        h = hashlib.sha256(situation.encode("utf-8")).hexdigest()[:16]
+        try:
+            if conn.execute("SELECT 1 FROM aj_reflections WHERE situation_hash=?",
+                            (h,)).fetchone():
+                continue                      # already reflected
+        except Exception:
+            continue
+        if sym in open_syms:
+            continue                          # only reflect CLOSED round-trips
+        a = attr.get(sym)
+        invested = _invested_usd(sym)
+        if not a or invested <= 0:
+            continue
+        raw = float(a.get("realized") or 0) / invested
+        bench = _spy_return_since(r["ts"])
+        out.append(reflect(sym, raw, bench, situation=situation, call=call))
+    return out
 
 
 def _remember(dec: CouncilDecision) -> None:
