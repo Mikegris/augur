@@ -175,6 +175,17 @@ def _run_analysts(symbol: str, cfg: Dict[str, Any],
             reports.append(fn(symbol, call=call, cfg=cfg))
         except Exception:
             log.exception("analyst %s crashed", name)
+    # Phase 6: optional investor-persona analysts (no-op unless personas_enabled)
+    if cfg.get("personas_enabled"):
+        try:
+            import aj_personas
+            for pname, pfn in aj_personas.persona_analysts(cfg).items():
+                try:
+                    reports.append(pfn(symbol, call=call, cfg=cfg))
+                except Exception:
+                    log.exception("persona %s crashed", pname)
+        except Exception:
+            log.debug("personas skipped", exc_info=True)
     return reports
 
 
