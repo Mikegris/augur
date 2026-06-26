@@ -31,29 +31,49 @@ log = logging.getLogger("augur.aj_operator")
 # ── scan ──────────────────────────────────────────────────────────────────────
 
 def _scan_universe() -> List[str]:
-    """The candidate universe for the cycle.
+    """The candidate universe for the cycle, per `universe_mode`:
 
-    Default (fail-closed): exactly the allowlist — nothing else can pass the
-    gate. Open-universe mode (`allow_any_symbol`): a broader, BOUNDED set the
-    agent may choose from — allowlist ∪ watchlist ∪ equity holdings ∪ a
-    best-effort idea-pool feed — capped at `scan_universe_max` so a cycle never
-    forecasts an unbounded list. The risk gate still binds every pick."""
+      'market_screen' (DEFAULT) — sweep the FULL investable population (SEC
+          equities + top crypto) via aj_universe, screened to a shortlist. No
+          allowlist; portfolio is NOT a seed. Always also includes the operator's
+          explicit allowlist picks.
+      'open'      — allowlist ∪ watchlist ∪ portfolio ∪ idea-pool (legacy),
+          now INCLUDING crypto holdings, capped at scan_universe_max.
+      'allowlist' — exactly the allowlist (fail-closed).
+
+    The risk gate still binds every pick (aj_config.is_open_universe agrees with
+    this on whether off-allowlist buys are permitted)."""
     cfg = aj_config.get_config()
-    allow = list(cfg.get("symbol_allowlist") or [])
-    if not cfg.get("allow_any_symbol"):
+    mode = str(cfg.get("universe_mode") or "market_screen").lower()
+    allow = [str(s).upper() for s in (cfg.get("symbol_allowlist") or [])]
+
+    if mode == "market_screen":
+        try:
+            import aj_universe
+            shortlist = aj_universe.screen(cfg)
+            out = list(dict.fromkeys(allow + shortlist))   # allowlist first, deduped
+            if out:
+                return out
+            log.warning("market_screen returned empty; falling back to allowlist")
+        except Exception:
+            log.exception("market_screen failed; falling back to allowlist")
         return allow
 
-    universe = set(s.upper() for s in allow)
+    # 'allowlist' mode (and the legacy fail-closed default) — allowlist only.
+    if mode == "allowlist" and not cfg.get("allow_any_symbol"):
+        return allow
+
+    # 'open' mode (or legacy allow_any_symbol): allowlist ∪ watchlist ∪ portfolio
+    # ∪ idea-pool. Crypto holdings are now INCLUDED (crypto trading enabled).
+    universe = set(allow)
     try:
         import database as db
         universe.update(str(w.get("symbol") or "").upper()
                         for w in (db.get_watchlist() or []))
         universe.update(str(h.get("symbol") or "").upper()
-                        for h in (db.get_portfolio() or [])
-                        if (h.get("asset_type") or "") != "crypto")
+                        for h in (db.get_portfolio() or []))
     except Exception:
         log.debug("open-universe: watchlist/portfolio unavailable", exc_info=True)
-    # best-effort idea feed — genuinely "any" picks beyond what's tracked
     try:
         import idea_pool_warmer
         for p in (idea_pool_warmer.list_warmed_symbols() or [])[:30]:

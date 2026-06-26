@@ -507,11 +507,15 @@ def evaluate(proposal: Dict[str, Any]) -> RiskDecision:
         else:
             closing_sell = (side == "sell" and held_now > 0) or \
                            (side == "buy" and held_now < 0)
-        if not cfg.get("allow_any_symbol") and not closing_sell:
+        # Open universe = universe_mode 'open'/'market_screen' OR legacy
+        # allow_any_symbol. MUST mirror aj_operator._scan_universe (both call
+        # aj_config.is_open_universe) so a screened symbol isn't blocked here.
+        _open_universe = aj_config.is_open_universe(cfg)
+        if not _open_universe and not closing_sell:
             if symbol not in allow:
                 _record("block", "symbol not in allowlist", caps, None, pid)
                 return RiskDecision(decision="block", reason="{} not in symbol allowlist".format(symbol))
-        elif cfg.get("allow_any_symbol"):
+        elif _open_universe:
             if not _VALID_SYMBOL.match(symbol):
                 _record("block", "open-universe: invalid symbol", caps, None, pid)
                 return RiskDecision(decision="block", reason="invalid symbol {}".format(symbol))

@@ -140,6 +140,21 @@ DEFAULTS: Dict[str, Any] = {
     "coequal_min_samples":    20,      # min resolved reflections before unlock
     "coequal_min_alpha":      0.0,     # mean alpha (fraction) required to unlock
     "coequal_max_boost":      0.5,     # max extra size fraction (0.5 => up to 1.5x)
+    # ── universe / market screener (aj_universe) ─────────────────────────────
+    # How the cycle picks its candidate universe:
+    #   'allowlist'     — only symbol_allowlist (fail-closed, fully controlled)
+    #   'open'          — allowlist ∪ watchlist ∪ portfolio ∪ idea-pool (legacy)
+    #   'market_screen' — sweep the FULL investable population (SEC equities +
+    #                     top crypto), screened to a shortlist each cycle. DEFAULT.
+    "universe_mode":          "market_screen",
+    "screen_full_equities":   True,    # use the full ~10k SEC list (else curated)
+    "include_crypto":         True,    # include crypto in the screened universe
+    "crypto_universe_top":    60,      # top-N crypto by market cap to include
+    "screen_scan_batch":      400,     # names batch-quoted per cycle (rotating sweep)
+    "screen_max":             150,     # shortlist size handed to the forecaster
+    "screen_min_price":       1.0,     # drop sub-$1 names
+    "screen_min_dollar_volume": 1000000.0,  # min price*volume (liquidity floor)
+    "screen_min_market_cap":  0.0,     # 0 = no market-cap floor
 }
 
 _BOOL_KEYS = {"trading_enabled", "live_trading_enabled", "robinhood_enabled",
@@ -155,7 +170,9 @@ _BOOL_KEYS = {"trading_enabled", "live_trading_enabled", "robinhood_enabled",
               "council_enabled", "council_analyst_fundamentals",
               "council_analyst_news", "council_analyst_sentiment",
               "council_analyst_technical", "personas_enabled",
-              "fingpt_sentiment_enabled"}
+              "fingpt_sentiment_enabled",
+              # universe screener
+              "screen_full_equities", "include_crypto"}
 _LIST_KEYS = {"symbol_allowlist", "session_whitelist"}
 _FLOAT_KEYS = {"max_order_notional_usd", "max_daily_loss_usd",
                "paper_slippage_bps", "paper_spread_fraction", "fee_bps",
@@ -173,7 +190,10 @@ _FLOAT_KEYS = {"max_order_notional_usd", "max_daily_loss_usd",
                "profit_ratchet_lock_pct", "atr_stop_mult",
                "pyramid_min_gain_pct",
                # council coequal gate
-               "coequal_min_alpha", "coequal_max_boost"}
+               "coequal_min_alpha", "coequal_max_boost",
+               # universe screener
+               "screen_min_price", "screen_min_dollar_volume",
+               "screen_min_market_cap"}
 _INT_KEYS = {"max_trades_per_day", "forecast_horizon_days", "scan_universe_max",
              "order_ttl_cycles", "exit_cooldown_min", "max_open_positions",
              "max_trades_per_symbol_per_day", "trade_skip_open_min",
@@ -187,12 +207,16 @@ _INT_KEYS = {"max_trades_per_day", "forecast_horizon_days", "scan_universe_max",
              "council_topk", "max_research_rounds", "max_risk_rounds",
              "council_max_calls_per_cycle", "council_cache_ttl_min",
              "council_deep_max_tokens", "council_quick_max_tokens",
-             "coequal_min_samples"}
+             "coequal_min_samples",
+             # universe screener
+             "crypto_universe_top", "screen_scan_batch", "screen_max"}
 _STR_KEYS = {"daily_loss_basis", "halt_rearm", "default_broker",
              "entry_order_type", "council_policy",
-             "council_deep_model", "council_quick_model"}
+             "council_deep_model", "council_quick_model",
+             "universe_mode"}
 
 _VALID_COUNCIL_POLICY = ("advisory", "confirm", "coequal")
+_VALID_UNIVERSE_MODE = ("allowlist", "open", "market_screen")
 
 _PREFIX = "aj_"
 _VALID_LOSS_BASIS = ("realized_plus_unrealized", "realized")
@@ -313,6 +337,8 @@ def get_config() -> Dict[str, Any]:
         cfg["council_policy"] = "advisory"   # unknown policy => safest advisory
     else:
         cfg["council_policy"] = str(cfg["council_policy"]).lower()
+    um = str(cfg.get("universe_mode") or "").lower()
+    cfg["universe_mode"] = um if um in _VALID_UNIVERSE_MODE else "market_screen"
     cfg["session_whitelist"] = [s.lower() for s in cfg["session_whitelist"]
                                 if s.lower() in _TRADABLE_SESSIONS] or ["regular"]
     # numeric guards: caps/counts can never be negative; probs clamp to [0,1].
@@ -373,6 +399,9 @@ def _serialize(key: str, value: Any) -> str:
     if key == "council_policy":
         v = str(value).lower()
         return v if v in _VALID_COUNCIL_POLICY else "advisory"
+    if key == "universe_mode":
+        v = str(value).lower()
+        return v if v in _VALID_UNIVERSE_MODE else "market_screen"
     if key == "default_broker" and \
             str(value).lower() not in {b.lower() for b in _valid_brokers()}:
         return "paper"
@@ -449,6 +478,16 @@ def is_trade_path_enabled() -> bool:
     """True only when the master switch is on. Convenience for callers that
     want to short-circuit before building a proposal."""
     return bool(get_config().get("trading_enabled"))
+
+
+def is_open_universe(cfg: Optional[Dict[str, Any]] = None) -> bool:
+    """True when the cycle may trade OFF the allowlist — i.e. universe_mode is
+    'open' or 'market_screen', or the legacy allow_any_symbol flag is set. Both
+    the scan (which symbols to consider) and the risk gate (which symbols may
+    pass the allowlist check) MUST agree on this, so they both call here."""
+    c = cfg if cfg is not None else get_config()
+    mode = str(c.get("universe_mode") or "").lower()
+    return mode in ("open", "market_screen") or bool(c.get("allow_any_symbol"))
 
 
 # ── Analyst Council gating ────────────────────────────────────────────────────

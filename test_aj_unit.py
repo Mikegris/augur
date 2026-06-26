@@ -48,7 +48,11 @@ def _quotes(price_map):
 
 
 def _full_config(**over):
+    # universe_mode='allowlist' so the allowlist gate is active (the global
+    # default is now 'market_screen' = open universe; these unit tests exercise
+    # the allowlist-blocking path explicitly).
     cfg = {"trading_enabled": True, "symbol_allowlist": ["NVDA"],
+           "universe_mode": "allowlist", "allow_any_symbol": False,
            "max_order_notional_usd": 10000, "max_trades_per_day": 10,
            "max_daily_loss_usd": 5000}
     cfg.update(over)
@@ -116,7 +120,8 @@ def test_gate_blocks_by_default():
 
 def test_gate_order_allowlist_then_caps():
     _reset(); _quotes({"NVDA": 800})
-    aj_config.set_config({"trading_enabled": True})
+    aj_config.set_config({"trading_enabled": True, "universe_mode": "allowlist",
+                          "allow_any_symbol": False})
     d = aj_risk.evaluate({"symbol": "NVDA", "side": "buy", "qty": 1, "order_type": "market"})
     assert d["decision"] == "block" and "allowlist" in d["reason"]
     aj_config.set_config({"symbol_allowlist": ["NVDA"]})
