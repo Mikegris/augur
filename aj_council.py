@@ -114,6 +114,46 @@ def clear_cache() -> None:
         _cache.clear()
 
 
+# ── coequal track-record gate (Phase 5) ───────────────────────────────────────
+
+def track_record(window: int = 100) -> Dict[str, Any]:
+    """The council's realized alpha track record from aj_reflections (real
+    outcomes, not a fabricated backtest). Returns {n, mean_alpha, win_rate}."""
+    try:
+        import database as db
+        rows = db.get_conn().execute(
+            "SELECT alpha_return FROM aj_reflections ORDER BY id DESC LIMIT ?",
+            (max(1, int(window)),)).fetchall()
+    except Exception:
+        return {"n": 0, "mean_alpha": 0.0, "win_rate": 0.0}
+    alphas = [float(r["alpha_return"]) for r in rows if r["alpha_return"] is not None]
+    n = len(alphas)
+    if n == 0:
+        return {"n": 0, "mean_alpha": 0.0, "win_rate": 0.0}
+    mean_alpha = sum(alphas) / n
+    win_rate = sum(1 for a in alphas if a > 0) / n
+    return {"n": n, "mean_alpha": mean_alpha, "win_rate": win_rate}
+
+
+def coequal_unlocked(cfg: Optional[Dict[str, Any]] = None) -> bool:
+    """True only when 'coequal' may BOOST size: policy is coequal, council is
+    active, AND the realized alpha track record clears the configured bars
+    (>= min_samples resolved reflections with mean alpha >= min_alpha). This is
+    the gate that prevents an unproven council from sizing up. Fail-closed:
+    any error or thin sample => locked (no boost)."""
+    try:
+        cfg = cfg or aj_config.get_config()
+        if str(cfg.get("council_policy", "advisory")).lower() != "coequal":
+            return False
+        if not aj_config.council_active(cfg):
+            return False
+        tr = track_record()
+        return (tr["n"] >= int(cfg.get("coequal_min_samples", 20) or 0)
+                and tr["mean_alpha"] >= float(cfg.get("coequal_min_alpha", 0.0) or 0.0))
+    except Exception:
+        return False
+
+
 # ── analyst selection + consensus ─────────────────────────────────────────────
 
 def _selected_analysts(cfg: Dict[str, Any]) -> List[str]:

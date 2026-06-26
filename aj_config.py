@@ -133,6 +133,11 @@ DEFAULTS: Dict[str, Any] = {
     "council_analyst_technical":    True,
     "personas_enabled":       False,   # Phase 6: investor-persona analysts (opt-in)
     "fingpt_sentiment_enabled": False, # Phase 6: FinGPT numeric sentiment prior (opt-in)
+    # coequal-policy track-record gate (Phase 5): coequal may BOOST size only
+    # after the council's realized alpha track record clears these bars.
+    "coequal_min_samples":    20,      # min resolved reflections before unlock
+    "coequal_min_alpha":      0.0,     # mean alpha (fraction) required to unlock
+    "coequal_max_boost":      0.5,     # max extra size fraction (0.5 => up to 1.5x)
 }
 
 _BOOL_KEYS = {"trading_enabled", "live_trading_enabled", "robinhood_enabled",
@@ -164,7 +169,9 @@ _FLOAT_KEYS = {"max_order_notional_usd", "max_daily_loss_usd",
                "mean_reversion_rsi_max", "max_book_correlation",
                "max_sector_weight_pct", "profit_ratchet_pct",
                "profit_ratchet_lock_pct", "atr_stop_mult",
-               "pyramid_min_gain_pct"}
+               "pyramid_min_gain_pct",
+               # council coequal gate
+               "coequal_min_alpha", "coequal_max_boost"}
 _INT_KEYS = {"max_trades_per_day", "forecast_horizon_days", "scan_universe_max",
              "order_ttl_cycles", "exit_cooldown_min", "max_open_positions",
              "max_trades_per_symbol_per_day", "trade_skip_open_min",
@@ -177,7 +184,8 @@ _INT_KEYS = {"max_trades_per_day", "forecast_horizon_days", "scan_universe_max",
              # council layer
              "council_topk", "max_research_rounds", "max_risk_rounds",
              "council_max_calls_per_cycle", "council_cache_ttl_min",
-             "council_deep_max_tokens", "council_quick_max_tokens"}
+             "council_deep_max_tokens", "council_quick_max_tokens",
+             "coequal_min_samples"}
 _STR_KEYS = {"daily_loss_basis", "halt_rearm", "default_broker",
              "entry_order_type", "council_policy"}
 

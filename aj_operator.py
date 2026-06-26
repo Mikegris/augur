@@ -198,12 +198,25 @@ def _council_advise(symbol: str, decision: Dict[str, Any], cfg: Dict[str, Any],
             return {"verdict": "proceed", "factor": 1.0, "council": audit, "brief": brief}
         return {"verdict": "veto", "factor": 0.0, "council": audit, "brief": brief}
 
-    # advisory (default) and coequal-before-Phase-5: veto a non-BUY council call;
-    # on agreement, SHRINK size on low conviction (never grow). This can only
-    # make the system equally or more conservative.
+    # advisory (default) and locked-coequal: veto a non-BUY council call; on
+    # agreement, SHRINK size on low conviction (never grow). Only equal-or-more
+    # conservative.
     if dec.action in (Action.SELL, Action.HOLD):
         return {"verdict": "veto", "factor": 0.0, "council": audit, "brief": brief}
     factor = max(0.5, min(1.0, 0.5 + 0.5 * float(dec.conviction or 0.0)))
+
+    # coequal (Phase 5): once the realized track record unlocks it, a high-
+    # conviction agreement may BOOST size up to coequal_max_boost — but ONLY
+    # within the risk gate's notional cap (the run loop clips to the cap, never
+    # bypasses it). Locked coequal behaves exactly like advisory above.
+    if policy == "coequal":
+        try:
+            import aj_council as _c
+            if _c.coequal_unlocked(cfg):
+                max_boost = max(0.0, float(cfg.get("coequal_max_boost", 0.5) or 0.0))
+                factor = 1.0 + max_boost * float(dec.conviction or 0.0)
+        except Exception:
+            pass
     return {"verdict": "proceed", "factor": factor, "council": audit, "brief": brief}
 
 
@@ -423,13 +436,20 @@ def run_once(mode: str = "paper") -> Dict[str, Any]:
                 if not sizing:
                     summary["proposals"].append({"symbol": symbol, "result": "unsizable"})
                     continue
-                # advisory size shrink (factor in (0,1]; never grows the order)
+                # council size adjustment. factor<1 shrinks (advisory); factor>1
+                # boosts (unlocked coequal) but is CLIPPED to the operator's
+                # per-order notional cap — never exceeding the risk gate's limit.
                 factor = float(advise.get("factor", 1.0) or 1.0)
-                if 0.0 < factor < 1.0:
+                if factor > 0.0 and factor != 1.0:
                     sizing = dict(sizing)
+                    price = float(sizing.get("price") or 0)
                     new_qty = (sizing.get("qty") or 0.0) * factor
+                    if factor > 1.0 and price > 0:
+                        cap = float(cfg.get("max_order_notional_usd", 0) or 0)
+                        if cap > 0 and new_qty * price > cap:
+                            new_qty = cap / price          # clip to the cap
                     sizing["qty"] = new_qty
-                    sizing["notional"] = aj_db.money(new_qty * float(sizing.get("price") or 0))
+                    sizing["notional"] = aj_db.money(new_qty * price)
                 out = _propose_and_execute(cycle_id, symbol, decision, sizing, cfg)
                 out["symbol"] = symbol
                 # 19: remember the conviction a long was opened on, to score the
