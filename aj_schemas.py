@@ -374,6 +374,7 @@ class CouncilDecision:
     latency_ms: int = 0
     n_calls: int = 0
     status: str = "ok"              # ok | degraded | error | skipped
+    run_id: Optional[int] = None    # aj_council_runs.id (set after persist)
 
     def __post_init__(self):
         self.symbol = str(self.symbol or "").upper()

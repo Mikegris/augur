@@ -3766,17 +3766,23 @@ def aj_council_route(symbol):
                             "hint": "aj_cli verify-set council --force"}), 403
         dec = aj_council.run(symbol.upper(), force=True)
         conn = db.get_conn()
-        run = conn.execute(
-            "SELECT id FROM aj_council_runs WHERE symbol=? ORDER BY id DESC LIMIT 1",
-            (symbol.upper(),)).fetchone()
+        # S067: bind reports/turns to THIS run via the run_id carried on the
+        # returned decision. The old "ORDER BY id DESC" re-query could attach a
+        # concurrent run's rows. Fall back to that query only if run_id is None.
+        run_id = getattr(dec, "run_id", None)
+        if run_id is None:
+            run = conn.execute(
+                "SELECT id FROM aj_council_runs WHERE symbol=? ORDER BY id DESC LIMIT 1",
+                (symbol.upper(),)).fetchone()
+            run_id = run["id"] if run else None
         reports, turns = [], []
-        if run:
+        if run_id is not None:
             reports = [dict(r) for r in conn.execute(
                 "SELECT analyst, band, score, confidence, narrative FROM "
-                "aj_analyst_reports WHERE council_run_id=? ORDER BY id", (run["id"],)).fetchall()]
+                "aj_analyst_reports WHERE council_run_id=? ORDER BY id", (run_id,)).fetchall()]
             turns = [dict(t) for t in conn.execute(
                 "SELECT debate, role, round, content FROM aj_debate_turns "
-                "WHERE council_run_id=? ORDER BY id", (run["id"],)).fetchall()]
+                "WHERE council_run_id=? ORDER BY id", (run_id,)).fetchall()]
         return jsonify({"decision": dec.to_audit(), "reports": reports, "debate": turns})
     except Exception as e:
         return _err(e)

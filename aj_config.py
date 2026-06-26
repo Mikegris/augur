@@ -127,6 +127,8 @@ DEFAULTS: Dict[str, Any] = {
     "council_cache_ttl_min":  360,     # memoize a decision per (symbol,date,hash)
     "council_deep_max_tokens": 1024,   # token budget for deep-think analysis
     "council_quick_max_tokens": 512,   # token budget for quick-think summarization
+    "council_deep_model":     "",      # model for the deep tier ("" = provider default)
+    "council_quick_model":    "",      # model for the quick tier ("" = provider default)
     "council_analyst_fundamentals": True,
     "council_analyst_news":         True,
     "council_analyst_sentiment":    True,
@@ -187,7 +189,8 @@ _INT_KEYS = {"max_trades_per_day", "forecast_horizon_days", "scan_universe_max",
              "council_deep_max_tokens", "council_quick_max_tokens",
              "coequal_min_samples"}
 _STR_KEYS = {"daily_loss_basis", "halt_rearm", "default_broker",
-             "entry_order_type", "council_policy"}
+             "entry_order_type", "council_policy",
+             "council_deep_model", "council_quick_model"}
 
 _VALID_COUNCIL_POLICY = ("advisory", "confirm", "coequal")
 

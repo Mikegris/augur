@@ -17,57 +17,18 @@ Design for testability + safety:
 """
 from __future__ import annotations
 
-import json
 import logging
-from typing import Any, Callable, Dict, List, Optional
+from typing import Dict, Optional
 
 import aj_routing
 from aj_schemas import AnalystReport
+# Shared helpers live in aj_analyst_util (extracted to drop the private-import
+# smell where aj_personas reached into this module's privates). Re-exported here
+# under their original names for backward compatibility with any external
+# importer of aj_analysts.{CallFn,default_call,_safe,_fmt,_neutral}.
+from aj_analyst_util import CallFn, default_call, _safe, _fmt, _neutral
 
 log = logging.getLogger("augur.aj_analysts")
-
-# call(tier, role, system, prompt) -> Optional[str]
-CallFn = Callable[[str, str, str, str], Optional[str]]
-
-
-def default_call(tier: str, role: str, system: str, prompt: str) -> Optional[str]:
-    """Real completion via the privacy-aware router. Public sensitivity: an
-    analyst prompt is market evidence about ONE ticker — no holdings/P&L — so it
-    may use a cloud model. (The operator's portfolio is never injected here.)"""
-    try:
-        r = aj_routing.complete_tiered(prompt, tier=tier, system=system, role=role,
-                                       sensitivity=aj_routing.PUBLIC)
-        return r.get("text") if r and r.get("ok") else None
-    except Exception:
-        log.exception("default_call failed for role=%s", role)
-        return None
-
-
-def _safe(fn, *a, **k):
-    """Call an engine fail-open; return its result or None on any error."""
-    try:
-        return fn(*a, **k)
-    except Exception as e:
-        log.debug("evidence engine %s failed: %s", getattr(fn, "__name__", fn), e)
-        return None
-
-
-def _fmt(obj: Any, keep: Optional[List[str]] = None, limit: int = 1500) -> str:
-    """Compact a dict/list of evidence into a bounded JSON snippet for a prompt."""
-    if obj is None:
-        return ""
-    try:
-        if isinstance(obj, dict) and keep:
-            # Compute each value once; drop missing (None) and NaN floats — NaN
-            # would otherwise serialize as the literal token 'NaN', which is
-            # invalid JSON in the evidence snippet the model is shown.
-            vals = ((k, obj.get(k)) for k in keep)
-            obj = {k: v for k, v in vals
-                   if v is not None and not (isinstance(v, float) and v != v)}
-        s = json.dumps(obj, default=str, separators=(",", ":"))
-        return s[:limit]
-    except Exception:
-        return str(obj)[:limit]
 
 
 _SYS = ("You are a {role} for a disciplined trading desk. Analyze ONLY the "
@@ -75,12 +36,6 @@ _SYS = ("You are a {role} for a disciplined trading desk. Analyze ONLY the "
         "STRICT JSON: {{\"band\":\"<one label>\",\"score\":<0-10, 10=most "
         "bullish>,\"confidence\":<0-1>,\"key_points\":[\"...\"],\"narrative\":"
         "\"<=80 words\"}}. No prose outside the JSON.")
-
-
-def _neutral(analyst: str, why: str = "") -> AnalystReport:
-    return AnalystReport(analyst=analyst, band="NEUTRAL", score=5.0, confidence=0.1,
-                         key_points=([why] if why else []),
-                         narrative=why or "insufficient evidence")
 
 
 def _run(analyst: str, symbol: str, evidence: Dict[str, str], call: CallFn,

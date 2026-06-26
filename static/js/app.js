@@ -4229,6 +4229,64 @@ function _ajPill(label, on, tone) {
   const cls = on ? (tone || 'green') : 'dim';
   return `<span class="status-val ${cls}" style="padding:2px 8px;border:1px solid var(--border);border-radius:10px;font-size:11px;margin-right:6px">${_esc(label)}</span>`;
 }
+function _ajPct(v) {
+  if (v === null || v === undefined || isNaN(v)) return '—';
+  const n = Number(v);
+  // accept either 0–1 or 0–100; treat ≤1 as a fraction.
+  return Math.round((Math.abs(n) <= 1 ? n * 100 : n)) + '%';
+}
+// Render the full council response (decision + per-analyst reports + debate).
+function _ajRenderCouncil(d) {
+  const dec = d.decision || {};
+  const reports = d.reports || [];
+  const debate = d.debate || [];
+  const actTone = (dec.action || '').toLowerCase() === 'buy' ? 'green'
+    : (dec.action || '').toLowerCase() === 'sell' ? 'red' : 'amber';
+  // ── per-analyst cards ──
+  const cards = reports.length ? `<div class="kpi-grid" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:10px;margin:10px 0">${reports.map(r =>
+    `<div class="panel"><div class="panel-body">
+      <div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:4px">
+        <b>${_esc(r.analyst || '—')}</b>
+        ${_ajPill(_esc(String(r.band || '—')), true, 'blue')}
+      </div>
+      <div class="muted" style="font-size:11px;margin-bottom:6px">Score <b style="color:var(--text-primary)">${r.score == null ? '—' : _esc(String(r.score)) + '/10'}</b> · Confidence <b style="color:var(--text-primary)">${_ajPct(r.confidence)}</b></div>
+      <div style="font-size:12px">${_esc(r.narrative || '')}</div>
+    </div></div>`).join('')}</div>` : '<div class="muted">No analyst reports.</div>';
+  // ── debate transcript, grouped by debate then role ──
+  let transcript = '';
+  if (debate.length) {
+    const byDebate = {};
+    debate.forEach(t => { const k = t.debate || 'debate'; (byDebate[k] = byDebate[k] || []).push(t); });
+    transcript = Object.keys(byDebate).map(dk => {
+      const turns = byDebate[dk].slice().sort((a, b) => (a.round || 0) - (b.round || 0));
+      return `<div style="margin-bottom:10px"><div class="muted" style="font-size:10px;letter-spacing:.05em;text-transform:uppercase;margin-bottom:4px">${_esc(dk)} debate</div>${turns.map(t =>
+        `<div class="jv-obs info" style="margin-bottom:4px"><span class="muted">[R${_esc(String(t.round == null ? '?' : t.round))} · ${_esc(t.role || '—')}]</span> ${_esc(t.content || '')}</div>`).join('')}</div>`;
+    }).join('');
+  } else {
+    transcript = '<div class="muted">No debate transcript.</div>';
+  }
+  // ── final decision ──
+  const decBox = `<div class="panel" style="margin:10px 0;border-left:3px solid var(--${actTone})"><div class="panel-body">
+    <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:8px">
+      <b style="font-size:15px">${_esc(dec.symbol || '')}</b>
+      ${_ajPill((dec.action || '—').toUpperCase(), true, actTone)}
+      ${dec.rating != null ? _ajPill('rating ' + _esc(String(dec.rating)), true, 'blue') : ''}
+      ${_ajPill('conviction ' + _ajPct(dec.conviction), true, 'blue')}
+      ${dec.status ? _ajPill(_esc(String(dec.status)), true, 'dim') : ''}
+    </div>
+    ${dec.thesis ? `<div style="font-size:12px;margin-bottom:6px"><span class="muted">Thesis:</span> ${_esc(dec.thesis)}</div>` : ''}
+    ${dec.dissent ? `<div style="font-size:12px;margin-bottom:6px"><span class="muted">Dissent:</span> ${_esc(dec.dissent)}</div>` : ''}
+    <div class="muted" style="font-size:11px;display:flex;gap:16px;flex-wrap:wrap">
+      ${dec.price_target != null ? '<span>Target <b style="color:var(--text-primary)">' + _ajMoney(dec.price_target) + '</b></span>' : ''}
+      ${dec.time_horizon ? '<span>Horizon <b style="color:var(--text-primary)">' + _esc(String(dec.time_horizon)) + '</b></span>' : ''}
+      <span>Cost <b style="color:var(--text-primary)">${dec.cost_usd == null ? '—' : _ajMoney(dec.cost_usd)}</b></span>
+      <span>LLM calls <b style="color:var(--text-primary)">${dec.n_calls == null ? '—' : _esc(String(dec.n_calls))}</b></span>
+    </div>
+  </div>`;
+  return decBox
+    + '<div class="panel-title" style="font-size:11px;margin-top:6px">ANALYST REPORTS</div>' + cards
+    + '<div class="panel-title" style="font-size:11px;margin-top:6px">DEBATE TRANSCRIPT</div><div style="margin-top:6px">' + transcript + '</div>';
+}
 
 async function loadTradingView() {
   const el = document.getElementById('view-trading');
@@ -4283,6 +4341,7 @@ async function loadTradingView() {
     <div class="aj-tabs">
       <button class="aj-tab active" data-pane="dashboard">Dashboard</button>
       <button class="aj-tab" data-pane="positions">Positions</button>
+      <button class="aj-tab" data-pane="council">Council</button>
       <button class="aj-tab" data-pane="config">Config</button>
       <button class="aj-tab" data-pane="analytics">Analytics</button>
       <button class="aj-tab" data-pane="activity">Activity</button>
@@ -4304,6 +4363,22 @@ async function loadTradingView() {
 
     <div class="aj-pane" data-pane="positions">
       <div class="panel"><div class="panel-header"><span class="panel-title">◉ AGENT PAPER POSITIONS</span> <span class="muted" id="aj-pos-summary" style="font-size:11px"></span></div><div class="panel-body" id="aj-positions-panel"><div class="muted">loading…</div></div></div>
+    </div>
+
+    <div class="aj-pane" data-pane="council">
+      <div class="panel" style="border-left:3px solid var(--amber)"><div class="panel-body muted" style="font-size:12px">The <b>Analyst Council</b> is <b>advisory only</b> — it never trades and never overrides the risk gate. It's double-gated (council_enabled + VERIFY-COUNCIL) and runs only when you ask. Running a council may incur LLM cost.</div></div>
+      <div class="panel">
+        <div class="panel-header"><span class="panel-title">◉ ANALYST COUNCIL</span></div>
+        <div class="panel-body">
+          <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:10px">
+            <input id="aj-council-symbol" placeholder="Symbol (e.g. NVDA)" style="max-width:160px;text-transform:uppercase">
+            <button class="btn btn-sm" id="aj-council-run">▶ Run Council</button>
+            <span class="muted" id="aj-council-status" style="font-size:11px"></span>
+          </div>
+          <div id="aj-council-result"></div>
+        </div>
+      </div>
+      <div class="panel"><div class="panel-header"><span class="panel-title">RECENT DECISIONS</span></div><div class="panel-body" id="aj-council-recent"><div class="muted">loading…</div></div></div>
     </div>
 
     <div class="aj-pane" data-pane="analytics">
@@ -4345,6 +4420,19 @@ async function loadTradingView() {
           f('Symbol allowlist', txt('aj-cfg-symbol_allowlist', allowlist, 'NVDA, AAPL, …'), 'Comma-separated tickers it may trade. The only universe unless “open universe” is on.') +
           f('Open universe', yn('aj-cfg-allow_any_symbol', cfg.allow_any_symbol, 'Yes — any quotable', 'No — allowlist only'), 'Let it trade any quotable symbol, not just the allowlist above.') +
           f('Scan limit (open mode)', num('aj-cfg-scan_universe_max', cfg.scan_universe_max, null, 'symbols'), 'In open-universe mode, how many candidates to scan each cycle.')
+        )}
+
+        ${group('🧠 Analyst Council (advisory)', 'A panel of analysts that debate a name — advisory only, never trades, double-gated', false,
+          f('Council enabled', yn('aj-cfg-council_enabled', cfg.council_enabled), 'Master switch for the council. Off by default; also needs the VERIFY-COUNCIL gate to actually run.') +
+          f('Policy', `<select id="aj-cfg-council_policy"><option value="advisory"${cfg.council_policy!=='confirm'&&cfg.council_policy!=='coequal'?' selected':''}>Advisory (read-only)</option><option value="confirm"${cfg.council_policy==='confirm'?' selected':''}>Confirm (must agree)</option><option value="coequal"${cfg.council_policy==='coequal'?' selected':''}>Co-equal</option></select>`, 'How much weight the council carries. The risk gate is always the final authority — the council can never push an order past a cap or unblock a gate.') +
+          f('Analysts polled (top-K)', num('aj-cfg-council_topk', cfg.council_topk, null, 'analysts'), 'How many analyst viewpoints to include in the debate.') +
+          f('Max research rounds', num('aj-cfg-max_research_rounds', cfg.max_research_rounds, null, 'rounds'), 'Debate rounds among the research analysts.') +
+          f('Max risk rounds', num('aj-cfg-max_risk_rounds', cfg.max_risk_rounds, null, 'rounds'), 'Debate rounds for the risk review.') +
+          f('Fundamental analyst', yn('aj-cfg-council_analyst_fundamental', cfg.council_analyst_fundamental), 'Include the fundamentals viewpoint.') +
+          f('Technical analyst', yn('aj-cfg-council_analyst_technical', cfg.council_analyst_technical), 'Include the price/technical viewpoint.') +
+          f('Sentiment analyst', yn('aj-cfg-council_analyst_sentiment', cfg.council_analyst_sentiment), 'Include the news/sentiment viewpoint.') +
+          f('Macro analyst', yn('aj-cfg-council_analyst_macro', cfg.council_analyst_macro), 'Include the macro/regime viewpoint.') +
+          f('Analyst personas', yn('aj-cfg-personas_enabled', cfg.personas_enabled), 'Give each analyst a distinct persona/voice in the debate.')
         )}
 
         ${group('Risk limits', 'Hard guardrails — the agent fails closed if any are unset', true,
@@ -4573,6 +4661,17 @@ async function loadTradingView() {
       signal_scorecard: vBool('aj-cfg-signal_scorecard'),
       opportunity_radar: vBool('aj-cfg-opportunity_radar'),
       opportunity_radar_top_k: vNum('aj-cfg-opportunity_radar_top_k'),
+      // analyst council (advisory)
+      council_enabled: vBool('aj-cfg-council_enabled'),
+      council_policy: vStr('aj-cfg-council_policy'),
+      council_topk: vNum('aj-cfg-council_topk'),
+      max_research_rounds: vNum('aj-cfg-max_research_rounds'),
+      max_risk_rounds: vNum('aj-cfg-max_risk_rounds'),
+      council_analyst_fundamental: vBool('aj-cfg-council_analyst_fundamental'),
+      council_analyst_technical: vBool('aj-cfg-council_analyst_technical'),
+      council_analyst_sentiment: vBool('aj-cfg-council_analyst_sentiment'),
+      council_analyst_macro: vBool('aj-cfg-council_analyst_macro'),
+      personas_enabled: vBool('aj-cfg-personas_enabled'),
       // autonomy
       auto_run_enabled: vBool('aj-cfg-auto_run_enabled'),
       auto_run_interval_min: vNum('aj-cfg-auto_run_interval_min'),
@@ -4660,6 +4759,56 @@ async function loadTradingView() {
   } catch (e) {
     const aEl = document.getElementById('aj-analytics'); if (aEl) aEl.innerHTML = '<div class="muted">Analytics unavailable.</div>';
   }
+
+  // ── Analyst Council (advisory) ──
+  const councilRun = async () => {
+    const symEl = document.getElementById('aj-council-symbol');
+    const stEl = document.getElementById('aj-council-status');
+    const resEl = document.getElementById('aj-council-result');
+    const runBtn = document.getElementById('aj-council-run');
+    if (!symEl || !resEl) return;
+    const sym = (symEl.value || '').trim().toUpperCase();
+    if (!sym) { if (stEl) stEl.textContent = 'Enter a symbol first.'; return; }
+    if (stEl) stEl.textContent = '';
+    resEl.innerHTML = '<div class="loading"><div class="spinner"></div> Convening council for ' + _esc(sym) + '…</div>';
+    if (runBtn) { runBtn.disabled = true; runBtn.textContent = '… running'; }
+    try {
+      // Raw fetch so we can read the 403 hint + status (API.get drops the body).
+      const r = await fetch('/api/aj/council/' + encodeURIComponent(sym));
+      let body = {};
+      try { body = await r.json(); } catch (_) {}
+      if (r.status === 403) {
+        resEl.innerHTML = '<div class="panel" style="border-left:3px solid var(--amber)"><div class="panel-body">'
+          + '<div style="font-size:12px;margin-bottom:6px">' + _esc(body.error || 'VERIFY-COUNCIL gate not passed') + '</div>'
+          + '<div class="muted" style="font-size:11px">To enable: ' + _esc(body.hint || 'pass VERIFY-COUNCIL') + '</div></div></div>';
+        return;
+      }
+      if (!r.ok) { resEl.innerHTML = '<div class="muted">Council failed: ' + _esc(body.error || ('HTTP ' + r.status)) + '</div>'; return; }
+      resEl.innerHTML = _ajRenderCouncil(body);
+      councilLoadRecent();
+    } catch (e) {
+      resEl.innerHTML = '<div class="muted">Council failed: ' + _esc(e.message || String(e)) + '</div>';
+    } finally {
+      if (runBtn) { runBtn.disabled = false; runBtn.textContent = '▶ Run Council'; }
+    }
+  };
+  const councilLoadRecent = async () => {
+    const rEl = document.getElementById('aj-council-recent');
+    if (!rEl) return;
+    try {
+      const d = await API.get('/api/aj/council/recent');
+      const runs = d.runs || [];
+      rEl.innerHTML = runs.length ? `<table class="data-table" style="width:100%"><thead><tr><th>When</th><th>Symbol</th><th>Action</th><th>Rating</th><th>Conviction</th><th>Status</th><th>Thesis</th><th>Cost</th></tr></thead><tbody>${runs.map(r =>
+        `<tr><td class="muted" style="font-size:11px">${_esc(String(r.ts || '').slice(0, 19))}</td><td><b>${_esc(r.symbol || '')}</b></td><td>${_esc(String(r.action || '—').toUpperCase())}</td><td>${r.rating == null ? '—' : _esc(String(r.rating))}</td><td>${_ajPct(r.conviction)}</td><td>${_esc(String(r.status || '—'))}</td><td class="muted" style="font-size:11px">${_esc((r.thesis || '').slice(0, 70))}</td><td>${r.cost_usd == null ? '—' : _ajMoney(r.cost_usd)}</td></tr>`).join('')}</tbody></table>` : '<div class="muted">No council decisions yet — run one above.</div>';
+    } catch (e) {
+      rEl.innerHTML = '<div class="muted">Recent decisions unavailable.</div>';
+    }
+  };
+  const cRunBtn = document.getElementById('aj-council-run');
+  if (cRunBtn) cRunBtn.addEventListener('click', councilRun);
+  const cSymEl = document.getElementById('aj-council-symbol');
+  if (cSymEl) cSymEl.addEventListener('keyup', (e) => { if (e.key === 'Enter') councilRun(); });
+  councilLoadRecent();
 }
 
 const VIEW_LOADERS = {

@@ -62,6 +62,36 @@ def _resolve_light_model(model):
     return MODEL_LIGHT if model in _LEGACY_LIGHT else model
 
 
+# Best-effort USD pricing (input, output) per 1M tokens. Used only to surface a
+# rough per-call cost for the trading agent's budget guard; unknown models fall
+# back to a conservative blended estimate. Pricing drifts — this is advisory,
+# never billed-against, so a stale number can only over/under-estimate the
+# council's self-imposed cost cap, never move real money.
+_MODEL_PRICE_PER_M = {
+    "gpt-5.5":      (1.25, 10.0),
+    "gpt-5.4-mini": (0.25,  2.0),
+    "gpt-4o":       (2.5,  10.0),
+    "gpt-4o-mini":  (0.15,  0.6),
+}
+_DEFAULT_PRICE_PER_M = (1.0, 4.0)
+
+
+def _estimate_cost_usd(model, usage):
+    """Best-effort USD cost from an OpenAI `usage` object. Returns 0.0 when
+    usage is missing (e.g. local Ollama, or a response without token counts).
+    Never raises."""
+    try:
+        if usage is None:
+            return 0.0
+        pin = int(getattr(usage, "prompt_tokens", 0) or 0)
+        pout = int(getattr(usage, "completion_tokens", 0) or 0)
+        rin, rout = _MODEL_PRICE_PER_M.get(str(model or "").lower(),
+                                           _DEFAULT_PRICE_PER_M)
+        return (pin / 1_000_000.0) * rin + (pout / 1_000_000.0) * rout
+    except Exception:
+        return 0.0
+
+
 def _uses_reasoning_params(model):
     """gpt-5.x / o-series models reject `temperature` and `max_tokens` on Chat
     Completions — they take `max_completion_tokens` and only the default
@@ -527,8 +557,12 @@ def _ollama_ready():
     return ok
 
 
-def _ollama_chat(messages, max_tokens=None, temperature=None, json_mode=False):
+def _ollama_chat(messages, max_tokens=None, temperature=None, json_mode=False,
+                 model=None):
     """Non-streaming POST {url}/api/chat. Returns message content str or None.
+
+    `model` overrides the configured local model for this call only; None keeps
+    the existing behavior (the DB-configured Ollama model).
 
     NO cap accounting (_record_ai_call/_cap_exceeded): local inference is
     free — the daily cap exists only to bound paid OpenAI spend. Never raises.
@@ -536,7 +570,8 @@ def _ollama_chat(messages, max_tokens=None, temperature=None, json_mode=False):
     url = _ollama_url()
     if not url:
         return None
-    payload = {"model": _ollama_model(), "messages": messages, "stream": False}
+    use_model = (str(model).strip() if model else "") or _ollama_model()
+    payload = {"model": use_model, "messages": messages, "stream": False}
     options = {}
     if max_tokens is not None:
         options["num_predict"] = max_tokens
@@ -567,7 +602,8 @@ def llm_ready():
         return False
 
 
-def chat_any(messages, max_tokens=None, temperature=None, json_mode=False):
+def chat_any(messages, max_tokens=None, temperature=None, json_mode=False,
+             model=None, return_cost=False):
     """PUBLIC unified plain-text completion. Returns content str or None.
 
     Routing: OpenAI when a key exists (cap-gated, counted), falling to local
@@ -575,42 +611,57 @@ def chat_any(messages, max_tokens=None, temperature=None, json_mode=False):
     alone when keyless; None when neither backend is usable. Tool-schema
     completions must NOT go through here — use _chat_completion directly.
     Never raises.
+
+    `model` overrides the model for THIS call only (cloud or local); None keeps
+    the exact historical behavior (MODEL_LIGHT for OpenAI, configured model for
+    Ollama). `return_cost=True` returns a (content, cost_usd) tuple instead of a
+    bare string so a caller (the trading agent's budget guard) can account for
+    spend; the default (False) preserves the bare-string contract every existing
+    caller relies on. Local/Ollama completions cost 0.0.
     """
+    cost = 0.0
+    content = None
     try:
         key = get_openai_key()
         if key:
             if _cap_exceeded():
                 # Paid budget spent — free local inference if available.
                 if _ollama_ready():
-                    return _ollama_chat(messages, max_tokens=max_tokens,
-                                        temperature=temperature, json_mode=json_mode)
-                return None
+                    content = _ollama_chat(messages, max_tokens=max_tokens,
+                                           temperature=temperature,
+                                           json_mode=json_mode, model=model)
+                return (content, cost) if return_cost else content
             try:
                 from openai import OpenAI
                 client = OpenAI(api_key=key, timeout=30.0)
+                use_model = (str(model).strip() if model else "") or MODEL_LIGHT
                 resp = _chat_completion(
-                    client, MODEL_LIGHT, messages,
+                    client, use_model, messages,
                     max_tokens=max_tokens, temperature=temperature,
                     json_mode=json_mode,
                 )
                 _record_ai_call()
-                content = resp.choices[0].message.content
-                if content:
-                    return content
+                cost = _estimate_cost_usd(getattr(resp, "model", use_model),
+                                          getattr(resp, "usage", None))
+                c = resp.choices[0].message.content
+                if c:
+                    return (c, cost) if return_cost else c
             except Exception as e:
                 log.debug("chat_any OpenAI path failed: %s", e)
             # OpenAI returned nothing usable — degrade to local if possible.
             if _ollama_ready():
-                return _ollama_chat(messages, max_tokens=max_tokens,
-                                    temperature=temperature, json_mode=json_mode)
-            return None
+                content = _ollama_chat(messages, max_tokens=max_tokens,
+                                       temperature=temperature,
+                                       json_mode=json_mode, model=model)
+            return (content, cost) if return_cost else content
         if _ollama_ready():
-            return _ollama_chat(messages, max_tokens=max_tokens,
-                                temperature=temperature, json_mode=json_mode)
-        return None
+            content = _ollama_chat(messages, max_tokens=max_tokens,
+                                   temperature=temperature, json_mode=json_mode,
+                                   model=model)
+        return (content, cost) if return_cost else content
     except Exception as e:  # belt-and-braces: contract says never raise
         log.debug("chat_any failed: %s", e)
-        return None
+        return (None, 0.0) if return_cost else None
 
 
 def summarize_filing(filing_text, form_type, ticker, description=""):

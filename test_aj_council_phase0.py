@@ -137,7 +137,7 @@ def test_routing_tier_tags_role():
     orig = aj_routing.route
     def fake_route(messages, **kw):
         calls.update(kw)
-        return {"ok": True, "text": "ok", "model": "stub"}
+        return {"ok": True, "text": "ok", "model": "stub", "cost_usd": 0.0}
     aj_routing.route = fake_route
     try:
         aj_routing.complete_tiered("hi", tier=aj_routing.DEEP, role="analyst.fundamentals")
@@ -151,6 +151,73 @@ def test_routing_tier_tags_role():
         assert calls["role"].endswith("#deep")
     finally:
         aj_routing.route = orig
+
+
+def test_routing_tier_resolves_model_from_config():
+    # Empty config (default) => model resolves to None (provider default).
+    aj_config.set_config({"council_deep_model": "", "council_quick_model": ""})
+    calls = {}
+    orig = aj_routing.route
+    def fake_route(messages, **kw):
+        calls.clear()
+        calls.update(kw)
+        return {"ok": True, "text": "ok", "model": "stub", "cost_usd": 0.0}
+    aj_routing.route = fake_route
+    try:
+        aj_routing.complete_tiered("hi", tier=aj_routing.DEEP, role="x")
+        assert calls.get("model") is None        # "" => provider default
+        # Configure per-tier models; each tier resolves its own.
+        aj_config.set_config({"council_deep_model": "gpt-5.5",
+                              "council_quick_model": "gpt-5.4-mini"})
+        aj_routing.complete_tiered("hi", tier=aj_routing.DEEP, role="x")
+        assert calls.get("model") == "gpt-5.5"
+        aj_routing.complete_tiered("hi", tier=aj_routing.QUICK, role="x")
+        assert calls.get("model") == "gpt-5.4-mini"
+        # An explicit model arg still wins over config.
+        aj_routing.complete_tiered("hi", tier=aj_routing.DEEP, role="x", model="override-m")
+        assert calls.get("model") == "override-m"
+    finally:
+        aj_routing.route = orig
+        aj_config.set_config({"council_deep_model": "", "council_quick_model": ""})
+
+
+def test_routing_returns_cost_usd():
+    # route() must surface cost_usd (threaded from chat_any) for the budget guard.
+    import ai_summarizer
+    orig_key = ai_summarizer.get_openai_key
+    orig_cap = ai_summarizer._cap_exceeded
+    orig_ready = ai_summarizer._ollama_ready
+    orig_chat = ai_summarizer.chat_any
+    try:
+        ai_summarizer.get_openai_key = lambda: "sk-test"
+        ai_summarizer._cap_exceeded = lambda: False
+        ai_summarizer._ollama_ready = lambda: False
+        seen = {}
+        def fake_chat_any(messages, max_tokens=None, temperature=None,
+                          json_mode=False, model=None, return_cost=False):
+            seen["model"] = model
+            text = "x" * 64                       # clears the quality floor
+            return (text, 0.0123) if return_cost else text
+        ai_summarizer.chat_any = fake_chat_any
+        # PUBLIC prompt with an explicit tier model => model forwarded + cost set.
+        r = aj_routing.route([{"role": "user", "content": "summarize the market"}],
+                             role="analyst", quality_floor=0.0, model="gpt-5.5")
+        assert r["sensitivity"] == "public"
+        assert seen.get("model") == "gpt-5.5"     # public call carries the model
+        assert r.get("cost_usd") == 0.0123        # cost threaded through
+        # PRIVATE prompt: model must NOT egress; stays local, cost 0.0.
+        seen.clear()
+        ai_summarizer._ollama_ready = lambda: True
+        ai_summarizer._ollama_chat = lambda m, max_tokens=None: "y" * 64
+        rp = aj_routing.route([{"role": "user", "content": "my portfolio P&L"}],
+                              role="analyst", quality_floor=0.0, model="gpt-5.5")
+        assert rp["sensitivity"] == "private"
+        assert rp.get("cost_usd") == 0.0          # local inference is free
+    finally:
+        ai_summarizer.get_openai_key = orig_key
+        ai_summarizer._cap_exceeded = orig_cap
+        ai_summarizer._ollama_ready = orig_ready
+        ai_summarizer.chat_any = orig_chat
 
 
 if __name__ == "__main__":

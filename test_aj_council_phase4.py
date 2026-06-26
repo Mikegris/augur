@@ -134,7 +134,12 @@ def test_full_pipeline_uses_arbiter_and_persists_risk_turns():
     dec = aj_council.run("AAPL", call=_full_call(arbiter_rating="OVERWEIGHT"))
     assert dec.rating is Rating.OVERWEIGHT      # arbiter's call, not raw consensus
     assert dec.status == "ok"
+    # run_id stamped on the arbiter (`final`) branch too
+    assert dec.run_id is not None
     conn = db.get_conn()
+    rid = conn.execute("SELECT id FROM aj_council_runs WHERE symbol='AAPL' "
+                       "ORDER BY id DESC LIMIT 1").fetchone()["id"]
+    assert dec.run_id == rid
     nrisk = conn.execute("SELECT COUNT(*) c FROM aj_debate_turns WHERE debate='risk'").fetchone()["c"]
     nres = conn.execute("SELECT COUNT(*) c FROM aj_debate_turns WHERE debate='research'").fetchone()["c"]
     assert nrisk >= 3 and nres >= 2
@@ -148,22 +153,78 @@ def test_reflect_due_dedup_and_alpha():
     # a closed council BUY round-trip
     aj_db.insert("aj_council_runs", ts=aj_db.utc_now_iso(), symbol="RDUE",
                  action="BUY", status="ok", rating="BUY", conviction=0.8)
-    saved = (aj_council._invested_usd, aj_council._spy_return_since,
+    saved = (aj_council._closed_round_trip, aj_council._spy_return_since,
              aj_positions.paper_book, aj_analytics.attribution)
-    aj_council._invested_usd = lambda s: 1000.0
-    aj_council._spy_return_since = lambda ts: 0.02
+    # S006: return is realized P&L over THIS round-trip's own basis (1000), and
+    # S007: benchmark spans the round-trip's holding window (first buy→last sell).
+    seen = {"end": "sentinel"}
+    aj_council._closed_round_trip = lambda s: ({
+        "basis_usd": 1000.0, "realized_usd": 100.0,
+        "first_buy_ts": "2026-01-01T00:00:00Z", "last_sell_ts": "2026-02-01T00:00:00Z"}
+        if s == "RDUE" else None)
+
+    def _spy(ts, end=None):
+        seen["end"] = end                       # capture the holding-window end
+        return 0.02
+    aj_council._spy_return_since = _spy
     aj_positions.paper_book = lambda *a, **k: {"positions": {}}      # closed
     aj_analytics.attribution = lambda: [{"symbol": "RDUE", "realized": 100.0}]
     try:
         first = aj_council.reflect_due(aj_config.get_config())
         assert len(first) == 1
         assert abs(first[0]["alpha_return"] - 0.08) < 1e-9   # 0.10 raw - 0.02 SPY
+        assert seen["end"] == "2026-02-01T00:00:00Z"         # S007 horizon passed
         second = aj_council.reflect_due(aj_config.get_config())
         assert second == []                                   # dedup by run id
     finally:
-        (aj_council._invested_usd, aj_council._spy_return_since,
+        (aj_council._closed_round_trip, aj_council._spy_return_since,
          aj_positions.paper_book, aj_analytics.attribution) = saved
     aj_config.set_config({"daily_reflection": False})
+
+
+def test_closed_round_trip_scopes_basis_to_one_round_trip():
+    # Two separate round-trips for the SAME symbol. The all-time _invested_usd
+    # would sum BOTH buys' basis (double-count); _closed_round_trip must scope to
+    # the LAST closed round-trip only (S006).
+    sym = "RTRIP"
+    p1 = aj_db.insert("aj_proposals", created_at=aj_db.utc_now_iso(), cycle_id="c",
+                      symbol=sym, side="buy", order_type="market")
+    def _order(side, qty):
+        import os as _os
+        return aj_db.insert(
+            "aj_orders", proposal_id=p1, client_order_id=_os.urandom(6).hex(),
+            broker="paper", mode="paper", symbol=sym, side=side, qty=qty,
+            order_type="market", state="filled", created_at=aj_db.utc_now_iso())
+    def _fill(oid, qty, price, ts):
+        aj_db.insert("aj_fills", order_id=oid, qty=qty, price=price,
+                     fees_usd=0.0, filled_at=ts)
+    # round-trip 1: buy 10@100, sell 10@110  (basis 1000)
+    _fill(_order("buy", 10), 10, 100, "2026-01-01T00:00:00Z")
+    _fill(_order("sell", 10), 10, 110, "2026-01-10T00:00:00Z")
+    # round-trip 2: buy 5@200, sell 5@180    (basis 1000, realized -100)
+    _fill(_order("buy", 5), 5, 200, "2026-02-01T00:00:00Z")
+    _fill(_order("sell", 5), 5, 180, "2026-02-10T00:00:00Z")
+    rt = aj_council._closed_round_trip(sym)
+    assert rt is not None
+    assert abs(rt["basis_usd"] - 1000.0) < 1e-6       # only RT2's basis, not 2000
+    assert abs(rt["realized_usd"] - (-100.0)) < 1e-6  # RT2 P&L only
+    assert rt["first_buy_ts"] == "2026-02-01T00:00:00Z"
+    assert rt["last_sell_ts"] == "2026-02-10T00:00:00Z"
+    # lifetime helper still double-counts (kept for back-compat) — proves the fix
+    assert abs(aj_council._invested_usd(sym) - 2000.0) < 1e-6
+
+
+def test_closed_round_trip_none_when_still_open():
+    sym = "OPENPOS"
+    p = aj_db.insert("aj_proposals", created_at=aj_db.utc_now_iso(), cycle_id="c",
+                     symbol=sym, side="buy", order_type="market")
+    import os as _os
+    oid = aj_db.insert("aj_orders", proposal_id=p, client_order_id=_os.urandom(6).hex(),
+                       broker="paper", mode="paper", symbol=sym, side="buy", qty=10,
+                       order_type="market", state="filled", created_at=aj_db.utc_now_iso())
+    aj_db.insert("aj_fills", order_id=oid, qty=10, price=100, fees_usd=0.0,
+                 filled_at="2026-03-01T00:00:00Z")   # bought, never sold
+    assert aj_council._closed_round_trip(sym) is None
 
 
 def test_reflect_due_gated_off_by_default():

@@ -3731,6 +3731,18 @@ _CONC_GUARDRAIL_PCT = 25.0  # single-name weight above which we flag a trim
 _TRADING_AGENT_RE = re.compile(
     r"\b(trading agent|trade agent|trading bot|trade bot|auto[- ]?trader|"
     r"autonomous (?:trad\w+|agent)|ajta|ai trader|the bot)\b", re.IGNORECASE)
+# Analyst Council referent — the advisory multi-analyst layer (ADR/§5.6),
+# which is OFF by default and never an execution authority. A council read is
+# the persisted decision only ("what does the council think of NVDA", "why
+# did/didn't the agent trade AAPL"); we never trigger a live run from here.
+# Requires an explicit council/analyst-view phrasing so plain trading-agent
+# questions ("what is the trading agent holding") aren't diverted.
+_COUNCIL_RE = re.compile(
+    r"\b(council|analyst council|analysts? (?:think|say|said|view|verdict|"
+    r"rating|call)|why (?:did|didn'?t|wasn'?t|hasn'?t|was|has)\b.*\b"
+    r"(?:agent|council|it)\b.*\btrade\b|"
+    r"why (?:did|didn'?t|wasn'?t|hasn'?t)\b.*\b(?:buy|bought|sell|sold|"
+    r"trade|traded|pass|skip|avoid)\b)\b", re.IGNORECASE)
 
 
 def _priced_weights():
@@ -3999,6 +4011,79 @@ def _answer_trading_agent_action(ql: str) -> Optional[Dict[str, Any]]:
                       "portfolio.".format(verb),
             "proposal": {"tool": tool, "args": args, "label": label},
             "action": {"view": "trading"}}
+
+
+def _answer_council(symbol: str) -> Dict[str, Any]:
+    """Read-only relay of the Analyst Council's most recent PERSISTED stance on
+    one symbol (aj_council_runs). The council is advisory and off by default;
+    this NEVER triggers a live run (cost/non-determinism) — it surfaces the last
+    saved decision, or a graceful 'hasn't weighed in' when there's no row.
+    Fail-open: any read error degrades to that same graceful line, never a crash.
+    The risk gate remains the sole execution authority; this is commentary only."""
+    sym = (symbol or "").upper()
+    row: Optional[Dict[str, Any]] = None
+    try:
+        # Read-only against the shared DB. The council layer writes here only
+        # when doubly gated (council_enabled + VERIFY-COUNCIL); if the table is
+        # absent (migration not applied) the query raises and we fall through.
+        conn = db.get_conn()
+        r = conn.execute(
+            "SELECT ts, rating, action, conviction, thesis, dissent, status "
+            "FROM aj_council_runs WHERE symbol=? "
+            "ORDER BY id DESC LIMIT 1", (sym,)).fetchone()
+        if r is not None:
+            row = dict(r)
+    except Exception as e:
+        log.debug("council readback skipped for %s: %s", sym, e)
+
+    if not row:
+        return {"answer": "The council hasn't weighed in on {} — no analyst run "
+                          "is on record for it. (The Analyst Council is advisory "
+                          "and off by default; it only logs a view when it's "
+                          "enabled and verified.)".format(sym),
+                "symbol": sym}
+
+    status = (row.get("status") or "").lower()
+    rating = (row.get("rating") or "").upper().strip()
+    action = (row.get("action") or "").upper().strip()
+    thesis = (row.get("thesis") or "").strip()
+    dissent = (row.get("dissent") or "").strip()
+    conv = _finite(row.get("conviction"))
+
+    # A non-OK status (error/skipped/no symbol) is a non-decision — say so plainly
+    # rather than dressing up an empty rating as a stance.
+    if status and status not in ("ok", "complete", "completed", "done", "success"):
+        return {"answer": "The council's last look at {} didn't reach a verdict "
+                          "({}). Nothing actionable on record.".format(
+                              sym, status), "data": row, "symbol": sym}
+
+    parts: List[str] = []
+    head = "The council's read on {}".format(sym)
+    if rating:
+        head += " is {}".format(rating)
+        if action and action != rating:
+            head += " (action: {})".format(action)
+    elif action:
+        head += " is to {}".format(action)
+    else:
+        head += " is on file"
+    if conv is not None:
+        head += ", conviction {:.0f}%".format(max(0.0, min(1.0, conv)) * 100)
+    parts.append(head + ".")
+
+    if thesis:
+        parts.append("Thesis: {}".format(thesis if len(thesis) <= 320
+                                         else thesis[:317] + "…"))
+    if dissent:
+        parts.append("Dissent: {}".format(dissent if len(dissent) <= 220
+                                          else dissent[:217] + "…"))
+    # A timestamp anchors it as a SAVED view, not a fresh run.
+    ts = row.get("ts")
+    if ts:
+        parts.append("(advisory only, logged {} UTC — the risk gate still "
+                     "decides execution.)".format(str(ts)[:16].replace("T", " ")))
+
+    return {"answer": " ".join(parts), "data": row, "symbol": sym}
 
 
 def _dossier_forecast(symbol):
@@ -4545,6 +4630,14 @@ def ask(query: str, history: Any = None, conversation_id: Any = None,
         trade = _answer_trade(q)
         if trade is not None:
             return done("action", trade)
+        # Analyst Council read — "what does the council think of NVDA", "why
+        # did/didn't the agent trade AAPL". A READ-ONLY relay of the council's
+        # last persisted decision; never triggers a live run. Gated on BOTH an
+        # explicit council/why-trade referent AND a symbol, so plain agent
+        # questions ("what is the trading agent holding") fall through to the
+        # trading-agent gate below and bare quotes stay quotes.
+        if symbol and _COUNCIL_RE.search(ql):
+            return done("council", _answer_council(symbol))
         # Autonomous trading agent (AJTA) — its OWN paper book/ops, separate from
         # the user's real portfolio. High precedence so "what is the trading
         # agent holding" doesn't get swallowed by the portfolio intents below.

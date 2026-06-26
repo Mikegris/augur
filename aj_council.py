@@ -83,6 +83,12 @@ def _make_call(cfg: Dict[str, Any], budget: Budget,
 
 _cache: Dict[str, Any] = {}
 _cache_lock = threading.Lock()
+# In-flight registry (S004): key -> threading.Event. While one thread computes a
+# decision for a (symbol+config) key, concurrent identical run() calls wait on
+# the event and then read the freshly-cached result instead of recomputing (and
+# re-spending). Guarded by _cache_lock; the Event is always set in a finally so
+# an error never deadlocks the waiters.
+_inflight: Dict[str, "threading.Event"] = {}
 
 
 def _cache_key(symbol: str, cfg: Dict[str, Any]) -> str:
@@ -115,6 +121,10 @@ def _cache_put(symbol: str, cfg: Dict[str, Any], dec: CouncilDecision) -> None:
 def clear_cache() -> None:
     with _cache_lock:
         _cache.clear()
+        # Release any waiters so a clear_cache() between runs can't strand them.
+        for ev in _inflight.values():
+            ev.set()
+        _inflight.clear()
 
 
 # ── coequal track-record gate (Phase 5) ───────────────────────────────────────
@@ -311,6 +321,44 @@ def run(symbol: str, cfg: Optional[Dict[str, Any]] = None,
     if cached is not None:
         return cached
 
+    # In-flight de-dup (S004): coalesce concurrent identical run() calls so only
+    # the first computes (and spends); the rest wait and read the cache. Only
+    # meaningful when the cache is on — without a TTL there is nothing for a
+    # waiter to read, so it falls through and computes independently.
+    ttl_on = int(cfg.get("council_cache_ttl_min", 360) or 0) > 0
+    key = _cache_key(symbol, cfg)
+    my_event: Optional[threading.Event] = None
+    if ttl_on:
+        wait_on: Optional[threading.Event] = None
+        with _cache_lock:
+            existing = _inflight.get(key)
+            if existing is not None:
+                wait_on = existing
+            else:
+                my_event = threading.Event()
+                _inflight[key] = my_event
+        if wait_on is not None:
+            # Another thread owns this key — wait for it, then read its result.
+            wait_on.wait(timeout=120)
+            cached = _cache_get(symbol, cfg)
+            if cached is not None:
+                return cached
+            # Leader produced a non-cacheable (degraded/error) decision or timed
+            # out; fall through and compute our own rather than block forever.
+
+    try:
+        return _compute(symbol, cfg, cycle_id, call)
+    finally:
+        if my_event is not None:
+            # Always release waiters, even on error, so they never deadlock.
+            with _cache_lock:
+                _inflight.pop(key, None)
+            my_event.set()
+
+
+def _compute(symbol: str, cfg: Dict[str, Any], cycle_id: Optional[str],
+             call: Optional[aj_analysts.CallFn]) -> CouncilDecision:
+    """Compute one council decision (no gating/cache/de-dup — run() owns those)."""
     raw_max = cfg.get("council_max_calls_per_cycle", 40)
     budget = Budget(int(raw_max) if raw_max is not None else 40)
     the_call = call or _make_call(cfg, budget, cycle_id)
@@ -373,7 +421,13 @@ def run(symbol: str, cfg: Optional[Dict[str, Any]] = None,
             symbol, plan, proposal, confidence=conf,
             dissent=dissent, status=status, cost_usd=budget.cost_usd,
             latency_ms=elapsed, n_calls=budget.n_calls)
-    _persist(dec, reports, turns, cycle_id)
+    run_id = _persist(dec, reports, turns, cycle_id)
+    # Stamp the exact persisted run id so callers can fetch this run's artifacts
+    # directly (covers both the arbiter `final` and the `from_plan` branches —
+    # `dec` is whichever was assigned above) instead of re-querying "latest run
+    # for symbol" (which races concurrent runs of the same symbol).
+    if run_id is not None:
+        dec.run_id = run_id
     _remember(dec)
     _cache_put(symbol, cfg, dec)
     return dec
@@ -508,7 +562,12 @@ def reflect(symbol: str, raw_return: float, benchmark_return: float,
 
 
 def _invested_usd(symbol: str) -> float:
-    """Total cost basis of BUY fills for a symbol (qty*price + fees). Best-effort."""
+    """Total cost basis of BUY fills for a symbol (qty*price + fees). Best-effort.
+
+    NOTE: this sums ALL-TIME buy fills and so double-counts basis for a symbol
+    traded across multiple round-trips. Per-round-trip reflection uses
+    `_closed_round_trip()` instead; `_invested_usd` is retained for callers/tests
+    that want the lifetime figure."""
     try:
         import database as db
         rows = db.get_conn().execute(
@@ -520,8 +579,82 @@ def _invested_usd(symbol: str) -> float:
         return 0.0
 
 
-def _spy_return_since(ts_iso: str) -> float:
-    """SPY fractional return from `ts_iso` to now (benchmark). Fail-open to 0."""
+def _closed_round_trip(symbol: str) -> Optional[Dict[str, Any]]:
+    """Best-effort scope of the most-recently CLOSED round-trip for `symbol`.
+
+    Walks all fills (buy + sell) in chronological order, tracking running shares,
+    and isolates the LAST completed round-trip: the run of fills from the buy that
+    re-opened a flat position up to the sell that returned it to flat. Returns
+    {basis_usd, realized_usd, first_buy_ts, last_sell_ts} for that round-trip, or
+    None when a sound per-round-trip basis can't be derived (no fills, still open,
+    or no realized sells). Never raises — returns None on any error so the caller
+    skips the reflection rather than emitting a wrong number.
+
+    realized_usd is computed FIFO over the consumed buy lots, so it reflects this
+    round-trip's P&L only (not lifetime). basis_usd is the cost of the buy shares
+    consumed by this round-trip's sells (qty*price + pro-rated buy fees) — the
+    denominator the per-round-trip return is measured against."""
+    try:
+        import database as db
+        rows = db.get_conn().execute(
+            "SELECT o.side side, f.qty q, f.price p, f.fees_usd fee, f.filled_at ts "
+            "FROM aj_fills f JOIN aj_orders o ON o.id=f.order_id "
+            "WHERE o.symbol=? ORDER BY f.filled_at ASC, f.id ASC",
+            (str(symbol).upper(),)).fetchall()
+    except Exception:
+        return None
+    EPS = 1e-9
+    lots: List[Dict[str, Any]] = []   # open FIFO buy lots: {qty, unit_cost, ts}
+    rt: Optional[Dict[str, Any]] = None  # the round-trip currently being built
+    for r in rows:
+        try:
+            side = str(r["side"] or "").lower()
+            qty = float(r["q"] or 0)
+            price = float(r["p"] or 0)
+            fee = float(r["fee"] or 0)
+            ts = r["ts"]
+        except Exception:
+            return None
+        if qty <= 0:
+            continue
+        if side == "buy":
+            # Per-share cost includes pro-rated entry fees so basis is complete.
+            unit_cost = price + (fee / qty if qty else 0.0)
+            if not lots:
+                # Re-opening a flat position starts a fresh round-trip.
+                rt = {"basis_usd": 0.0, "realized_usd": 0.0,
+                      "first_buy_ts": ts, "last_sell_ts": None}
+            lots.append({"qty": qty, "unit_cost": unit_cost, "ts": ts})
+        elif side == "sell":
+            if rt is None or not lots:
+                # A sell with no open lots (short/over-sell/unmatched) — can't
+                # derive a sound basis; abort to avoid a wrong number.
+                return None
+            remaining = qty
+            sell_unit = price - (fee / qty if qty else 0.0)  # net of exit fees
+            while remaining > EPS and lots:
+                lot = lots[0]
+                take = min(remaining, lot["qty"])
+                rt["basis_usd"] += take * lot["unit_cost"]
+                rt["realized_usd"] += take * (sell_unit - lot["unit_cost"])
+                lot["qty"] -= take
+                remaining -= take
+                if lot["qty"] <= EPS:
+                    lots.pop(0)
+            rt["last_sell_ts"] = ts
+    # A clean closed round-trip: position is flat and we matched at least one sell.
+    if lots:
+        return None                       # still open — not a closed round-trip
+    if rt is None or rt["last_sell_ts"] is None or rt["basis_usd"] <= 0:
+        return None
+    return rt
+
+
+def _spy_return_since(ts_iso: str, end_iso: Optional[str] = None) -> float:
+    """SPY fractional return over the benchmark window. Start = first bar
+    at-or-after `ts_iso`; end = last bar at-or-before `end_iso` (defaults to the
+    latest bar, i.e. "now") so the benchmark window matches the actual trade
+    horizon (S007). Fail-open to 0."""
     try:
         import fetcher
         bars = fetcher.get_chart_data("SPY", "6mo", "1d")
@@ -542,6 +675,17 @@ def _spy_return_since(ts_iso: str) -> float:
         if start is None:
             return 0.0
         end = bars[-1].get("close")
+        # Cap the benchmark window at the holding horizon's end (last sell), so a
+        # closed trade's alpha isn't measured against SPY's move AFTER the exit.
+        end_dt = aj_db.parse_iso(end_iso) if end_iso else None
+        if end_dt is not None:
+            cutoff = end_dt.timestamp()
+            for b in bars:
+                bt = b.get("time")
+                if bt is not None and bt <= cutoff:
+                    end = b.get("close")
+                elif bt is not None and bt > cutoff:
+                    break
         if start and end and start > 0:
             return (float(end) - float(start)) / float(start)
     except Exception:
@@ -592,12 +736,16 @@ def reflect_due(cfg: Optional[Dict[str, Any]] = None, max_per_call: int = 5,
             continue
         if sym in open_syms:
             continue                          # only reflect CLOSED round-trips
-        a = attr.get(sym)
-        invested = _invested_usd(sym)
-        if not a or invested <= 0:
-            continue
-        raw = float(a.get("realized") or 0) / invested
-        bench = _spy_return_since(r["ts"])
+        # S006: return is realized P&L over the CLOSED round-trip's OWN cost
+        # basis (not all-time buy fills, which double-count a re-traded symbol).
+        rt = _closed_round_trip(sym)
+        if not rt or rt.get("basis_usd", 0) <= 0:
+            continue                          # no sound per-round-trip basis => skip
+        raw = float(rt["realized_usd"]) / float(rt["basis_usd"])
+        # S007: benchmark over the trade's actual holding window (first buy →
+        # last sell), not run-ts→now. Fall back to run-ts→now if fills missing.
+        start_ts = rt.get("first_buy_ts") or r["ts"]
+        bench = _spy_return_since(start_ts, rt.get("last_sell_ts"))
         out.append(reflect(sym, raw, bench, situation=situation, call=call))
     return out
 

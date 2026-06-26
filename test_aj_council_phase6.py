@@ -99,6 +99,23 @@ def test_council_includes_personas_when_enabled():
                               "council_analyst_sentiment": True, "council_analyst_fundamentals": True})
 
 
+def test_personas_use_shared_util_not_analysts_privates():
+    # S033 refactor: aj_personas must pull the shared helpers from
+    # aj_analyst_util, NOT reach into aj_analysts' module privates. We assert on
+    # the source so the private-import smell can't silently come back.
+    import inspect
+    src = inspect.getsource(aj_personas)
+    assert "from aj_analyst_util import" in src
+    assert "from aj_analysts import" not in src
+    # The helpers resolve to the SAME objects across both modules + the util
+    # module (pure refactor — byte-for-byte identical behavior).
+    import aj_analyst_util
+    for name in ("CallFn", "default_call", "_safe", "_fmt", "_neutral"):
+        assert getattr(aj_personas, name) is getattr(aj_analyst_util, name)
+        # aj_analysts re-exports for backward compat.
+        assert getattr(aj_analysts, name) is getattr(aj_analyst_util, name)
+
+
 def test_council_report_renders():
     decs = [CouncilDecision(symbol="AAPL", rating=Rating.BUY, action=Action.BUY,
                             conviction=0.8, thesis="momentum", dissent="valuation")]

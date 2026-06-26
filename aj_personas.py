@@ -21,7 +21,7 @@ import logging
 from typing import Any, Callable, Dict, List, Optional
 
 import aj_routing
-from aj_analysts import CallFn, default_call, _safe, _fmt, _neutral
+from aj_analyst_util import CallFn, default_call, _safe, _fmt, _neutral
 from aj_schemas import AnalystReport
 
 log = logging.getLogger("augur.aj_personas")

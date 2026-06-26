@@ -90,6 +90,20 @@ def test_persistence_and_audit_chain():
     teardown()
 
 
+def test_run_id_set_on_decision():
+    # run() stamps the persisted aj_council_runs.id onto the returned decision so
+    # callers can fetch this exact run's artifacts without racing "latest run".
+    _set_analysts({"fundamentals": (7.5, 0.8), "news": (7.0, 0.7)})
+    aj_council.clear_cache()
+    dec = aj_council.run("RIDSET", cycle_id="cyc-rid", call=_DUMMY)
+    assert dec.run_id is not None
+    row = db.get_conn().execute(
+        "SELECT id FROM aj_council_runs WHERE symbol='RIDSET' ORDER BY id DESC LIMIT 1"
+    ).fetchone()
+    assert row is not None and dec.run_id == row["id"]
+    teardown()
+
+
 def test_gating_not_active_returns_skipped():
     # call=None path: council disabled by default => skipped
     aj_config.set_config({"council_enabled": False})
@@ -135,6 +149,66 @@ def test_cache_returns_same_decision():
     _set_analysts({"fundamentals": (1.0, 0.9)})
     d2 = aj_council.run("CACHE", call=_DUMMY)
     assert d1.rating is d2.rating, "cache should return the first decision"
+    teardown()
+
+
+def test_inflight_dedup_coalesces_concurrent_runs():
+    # S004: concurrent identical run() calls coalesce — the first computes, the
+    # rest wait and read the cache (so analysts run once, not per-thread).
+    import threading
+    aj_config.set_config({"council_cache_ttl_min": 360})
+    aj_council.clear_cache()
+    runs = {"n": 0}
+    gate = threading.Event()
+
+    def slow_analyst(symbol, call=None, cfg=None):
+        runs["n"] += 1
+        gate.wait(timeout=5)        # hold the leader until all threads are waiting
+        return AnalystReport(analyst="f", band="NEUTRAL", score=8.0, confidence=0.9,
+                             key_points=["pt"], narrative="v")
+    aj_analysts.ANALYSTS = {"fundamentals": slow_analyst}
+
+    results = []
+    def worker():
+        results.append(aj_council.run("FLIGHT", call=_DUMMY))
+    threads = [threading.Thread(target=worker) for _ in range(4)]
+    for t in threads:
+        t.start()
+    import time as _t
+    _t.sleep(0.3)                   # let the leader enter the analyst + others wait
+    gate.set()                      # release the leader
+    for t in threads:
+        t.join(timeout=10)
+
+    assert len(results) == 4
+    assert runs["n"] == 1, "analysts should run once (coalesced), got {}".format(runs["n"])
+    assert all(r.rating is results[0].rating for r in results)
+    teardown()
+
+
+def test_inflight_event_released_on_error():
+    # The in-flight Event must always be signaled (finally) so an error in the
+    # leader never deadlocks subsequent runs for the same key.
+    aj_config.set_config({"council_cache_ttl_min": 360})
+    aj_council.clear_cache()
+
+    def boom_analyst(symbol, call=None, cfg=None):
+        raise RuntimeError("boom")
+    # _run_analysts swallows analyst crashes, but force a harder failure path:
+    orig_consensus = aj_council._consensus
+    aj_council._consensus = lambda reports: (_ for _ in ()).throw(RuntimeError("boom"))
+    aj_analysts.ANALYSTS = {"fundamentals": boom_analyst}
+    try:
+        raised = False
+        try:
+            aj_council.run("ERRKEY", call=_DUMMY)
+        except RuntimeError:
+            raised = True
+        assert raised
+        # in-flight registry must be empty (Event released in finally)
+        assert "ERRKEY" not in "".join(aj_council._inflight.keys())
+    finally:
+        aj_council._consensus = orig_consensus
     teardown()
 
 
