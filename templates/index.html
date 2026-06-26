@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <meta name="theme-color" content="#050b11">
   <title>AUGUR // WEALTH INTELLIGENCE SYSTEM</title>
-  <link rel="stylesheet" href="/static/css/terminal.css?v=19">
+  <link rel="stylesheet" href="/static/css/terminal.css?v={{ app_version }}">
   <!-- All scripts use `defer`: it unblocks HTML parsing/first paint (these
        three CDN scripts used to block the parser in <head>) while keeping
        document execution order — vendor libs, then charts.js, app.js,
@@ -342,7 +342,7 @@
   <footer id="statusbar">
     <div class="status-item">
       <span class="status-key">SYS:</span>
-      <span class="status-val green">AUGUR v{{ app_version }}</span>
+      <span class="status-val green" id="sys-version">AUGUR v{{ app_version }}</span>
     </div>
     <div class="status-item">
       <span class="status-key">DATA:</span>
@@ -683,41 +683,46 @@
 </div>
 
 <!-- Scripts -->
-<script defer src="/static/js/charts.js?v=4"></script>
-<script defer src="/static/js/app.js?v=29"></script>
-<script defer src="/static/js/jarvis.js?v=22"></script>
+<script defer src="/static/js/charts.js?v={{ app_version }}"></script>
+<script defer src="/static/js/app.js?v={{ app_version }}"></script>
+<script defer src="/static/js/jarvis.js?v={{ app_version }}"></script>
 
 <!-- v0.2.0 research modules — each registers window.render* globals. Loaded
      after app.js so they can read State / API / fmt helpers if needed. -->
-<script defer src="/static/js/research_backtest.js?v=1"></script>
-<script defer src="/static/js/research_eventstudy.js?v=1"></script>
-<script defer src="/static/js/research_factors.js?v=1"></script>
-<script defer src="/static/js/research_hypothesis.js?v=1"></script>
-<script defer src="/static/js/research_iv_density.js?v=1"></script>
-<script defer src="/static/js/research_montecarlo.js?v=1"></script>
-<script defer src="/static/js/research_multihorizon.js?v=1"></script>
-<script defer src="/static/js/research_optimizer.js?v=1"></script>
-<script defer src="/static/js/research_probforecast.js?v=1"></script>
-<script defer src="/static/js/research_tracker.js?v=1"></script>
+<script defer src="/static/js/research_backtest.js?v={{ app_version }}"></script>
+<script defer src="/static/js/research_eventstudy.js?v={{ app_version }}"></script>
+<script defer src="/static/js/research_factors.js?v={{ app_version }}"></script>
+<script defer src="/static/js/research_hypothesis.js?v={{ app_version }}"></script>
+<script defer src="/static/js/research_iv_density.js?v={{ app_version }}"></script>
+<script defer src="/static/js/research_montecarlo.js?v={{ app_version }}"></script>
+<script defer src="/static/js/research_multihorizon.js?v={{ app_version }}"></script>
+<script defer src="/static/js/research_optimizer.js?v={{ app_version }}"></script>
+<script defer src="/static/js/research_probforecast.js?v={{ app_version }}"></script>
+<script defer src="/static/js/research_tracker.js?v={{ app_version }}"></script>
 
 <!-- v0.3.0 synthesis modules — cross-source fusion / what-if / cluster scan.
      Each registers window.render*  (or loadSectorFlow) globals. -->
-<script defer src="/static/js/synth_bayessmart.js?v=1"></script>
-<script defer src="/static/js/synth_catalyst.js?v=1"></script>
-<script defer src="/static/js/synth_cluster.js?v=1"></script>
-<script defer src="/static/js/synth_consensus.js?v=1"></script>
-<script defer src="/static/js/synth_divmap.js?v=1"></script>
-<script defer src="/static/js/synth_groundhyp.js?v=1"></script>
-<script defer src="/static/js/synth_macrotranslate.js?v=1"></script>
-<script defer src="/static/js/synth_peerdiv.js?v=1"></script>
-<script defer src="/static/js/synth_sectorflow.js?v=1"></script>
-<script defer src="/static/js/synth_whatif.js?v=1"></script>
+<script defer src="/static/js/synth_bayessmart.js?v={{ app_version }}"></script>
+<script defer src="/static/js/synth_catalyst.js?v={{ app_version }}"></script>
+<script defer src="/static/js/synth_cluster.js?v={{ app_version }}"></script>
+<script defer src="/static/js/synth_consensus.js?v={{ app_version }}"></script>
+<script defer src="/static/js/synth_divmap.js?v={{ app_version }}"></script>
+<script defer src="/static/js/synth_groundhyp.js?v={{ app_version }}"></script>
+<script defer src="/static/js/synth_macrotranslate.js?v={{ app_version }}"></script>
+<script defer src="/static/js/synth_peerdiv.js?v={{ app_version }}"></script>
+<script defer src="/static/js/synth_sectorflow.js?v={{ app_version }}"></script>
+<script defer src="/static/js/synth_whatif.js?v={{ app_version }}"></script>
 
 <!-- Inline: pre-populate research quick buttons -->
 <script>
-  // Allow inline onclick for quick buttons in the research view placeholder
-  document.querySelectorAll('#view-research button[onclick]').forEach(btn => {
-    btn.onclick = new Function(btn.getAttribute('onclick').replace('openResearch', 'window.openResearch'));
+  // Allow inline onclick for quick buttons in the research view placeholder.
+  // Runs after app.js (deferred) has defined the window.* globals; rewrite every
+  // research opener name (not just the first) so the BTC openCryptoResearch
+  // button is window-qualified too.
+  document.addEventListener('DOMContentLoaded', function () {
+    document.querySelectorAll('#view-research button[onclick]').forEach(btn => {
+      btn.onclick = new Function(btn.getAttribute('onclick').replace(/openResearch|openCryptoResearch/g, m => 'window.' + m));
+    });
   });
 </script>
 

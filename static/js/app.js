@@ -786,7 +786,7 @@ async function loadSidebarWatchlist() {
           <div class="swl-sym">${_esc(i.symbol)}</div>
           <div class="swl-price">${fmt.price(i.price)}</div>
         </div>
-        <div class="swl-chg ${i.change_pct > 0 ? 'up' : i.change_pct < 0 ? 'down' : ''}">${fmt.pct(i.change_pct)}</div>
+        <div class="swl-chg ${i.change_pct == null ? 'flat' : i.change_pct > 0 ? 'up' : i.change_pct < 0 ? 'down' : 'flat'}">${fmt.pct(i.change_pct)}</div>
       </div>
     `).join('');
   } catch(e) {}
@@ -898,7 +898,7 @@ async function loadOverview() {
     const el = id => document.getElementById(id);
     if (el('ov-kpi-value')) el('ov-kpi-value').innerHTML = `<div class="kpi-label">PORTFOLIO VALUE</div><div class="kpi-value">$${fmt.compact(summary.total_value)}</div><div class="kpi-sub">$${fmt.currency(summary.total_value)}</div>`;
     if (el('ov-kpi-value')) el('ov-kpi-value').className = `kpi-card ${pnlClass}`;
-    if (el('ov-kpi-pnl'))   el('ov-kpi-pnl').innerHTML  = `<div class="kpi-label">UNREALIZED P&L</div><div class="kpi-value ${col.kpi(summary.total_pnl)}">${summary.total_pnl >= 0 ? '+' : ''}$${fmt.compact(summary.total_pnl)}</div><div class="kpi-sub">${fmt.pct(summary.total_pnl_pct)}</div>`;
+    if (el('ov-kpi-pnl'))   el('ov-kpi-pnl').innerHTML  = `<div class="kpi-label">UNREALIZED P&L</div><div class="kpi-value ${col.kpi(summary.total_pnl)}">${summary.total_pnl >= 0 ? '+$' : '-$'}${fmt.compact(Math.abs(summary.total_pnl))}</div><div class="kpi-sub">${fmt.pct(summary.total_pnl_pct)}</div>`;
     if (el('ov-kpi-pnl'))   el('ov-kpi-pnl').className  = `kpi-card ${col.kpi(summary.total_pnl)}`;
     if (el('ov-kpi-pos'))   el('ov-kpi-pos').innerHTML   = `<div class="kpi-label">POSITIONS</div><div class="kpi-value blue">${summary.num_positions || 0}</div><div class="kpi-sub">TOTAL HOLDINGS</div>`;
     ['ov-kpi-value', 'ov-kpi-pnl', 'ov-kpi-pos'].forEach(kpiCountUp);
@@ -1133,7 +1133,7 @@ async function loadPortfolio() {
       + '</div>'
       + '<div class="kpi-card ' + col.kpi(summary.total_pnl) + '" style="padding:8px 14px;min-width:140px">'
       + '<div class="kpi-label">TOTAL P&L</div>'
-      + '<div class="kpi-value ' + col.kpi(summary.total_pnl) + '" style="font-size:18px">' + (summary.total_pnl >= 0 ? '+' : '') + '$' + fmt.currency(summary.total_pnl) + '</div>'
+      + '<div class="kpi-value ' + col.kpi(summary.total_pnl) + '" style="font-size:18px">' + (summary.total_pnl >= 0 ? '+$' : '-$') + fmt.currency(Math.abs(summary.total_pnl)) + '</div>'
       + '<div class="kpi-sub">' + fmt.pct(summary.total_pnl_pct) + '</div>'
       + '</div>'
       + '<div class="kpi-card" style="padding:8px 14px;min-width:120px">'
@@ -1555,7 +1555,7 @@ async function submitAddPosition() {
   const accountSel = document.getElementById('pos-account');
   const accountId = accountSel ? accountSel.value : '';
 
-  if (!symbol || !shares || !cost) { Toast.warn('Symbol, shares, and cost are required'); return; }
+  if (!symbol || !shares || isNaN(cost) || cost < 0) { Toast.warn('Symbol, shares, and cost are required'); return; }
 
   try {
     // Auto-fetch name if blank
@@ -1987,19 +1987,19 @@ function renderFundamentals(fund) {
     ['EV/EBITDA', fmt.num(fund.ev_ebitda)],
     ['Beta', fmt.num(fund.beta)],
     ['Revenue', '$' + fmt.compact(fund.revenue)],
-    ['Revenue Growth', fmt.pct(fund.revenue_growth ? fund.revenue_growth * 100 : null)],
-    ['Earnings Growth', fmt.pct(fund.earnings_growth ? fund.earnings_growth * 100 : null)],
-    ['Profit Margin', fmt.pct(fund.profit_margin ? fund.profit_margin * 100 : null)],
-    ['Gross Margin', fmt.pct(fund.gross_margin ? fund.gross_margin * 100 : null)],
-    ['Operating Margin', fmt.pct(fund.operating_margin ? fund.operating_margin * 100 : null)],
-    ['ROE', fmt.pct(fund.return_on_equity ? fund.return_on_equity * 100 : null)],
-    ['ROA', fmt.pct(fund.return_on_assets ? fund.return_on_assets * 100 : null)],
+    ['Revenue Growth', fmt.pct(fund.revenue_growth != null ? fund.revenue_growth * 100 : null)],
+    ['Earnings Growth', fmt.pct(fund.earnings_growth != null ? fund.earnings_growth * 100 : null)],
+    ['Profit Margin', fmt.pct(fund.profit_margin != null ? fund.profit_margin * 100 : null)],
+    ['Gross Margin', fmt.pct(fund.gross_margin != null ? fund.gross_margin * 100 : null)],
+    ['Operating Margin', fmt.pct(fund.operating_margin != null ? fund.operating_margin * 100 : null)],
+    ['ROE', fmt.pct(fund.return_on_equity != null ? fund.return_on_equity * 100 : null)],
+    ['ROA', fmt.pct(fund.return_on_assets != null ? fund.return_on_assets * 100 : null)],
     ['Debt/Equity', fmt.num(fund.debt_equity)],
     ['Current Ratio', fmt.num(fund.current_ratio)],
     ['Free Cash Flow', '$' + fmt.compact(fund.free_cashflow)],
-    ['Dividend Yield', fmt.pct(fund.dividend_yield ? fund.dividend_yield * 100 : null)],
-    ['Payout Ratio', fmt.pct(fund.payout_ratio ? fund.payout_ratio * 100 : null)],
-    ['Short % Float', fmt.pct(fund.short_percent_float ? fund.short_percent_float * 100 : null)],
+    ['Dividend Yield', fmt.pct(fund.dividend_yield != null ? fund.dividend_yield * 100 : null)],
+    ['Payout Ratio', fmt.pct(fund.payout_ratio != null ? fund.payout_ratio * 100 : null)],
+    ['Short % Float', fmt.pct(fund.short_percent_float != null ? fund.short_percent_float * 100 : null)],
     ['Short Ratio', fmt.num(fund.short_ratio)],
     ['Shares Out', fmt.compact(fund.shares_outstanding)],
     ['Float', fmt.compact(fund.float_shares)],
@@ -2318,7 +2318,7 @@ async function openCryptoResearch(coinId, symbol) {
               ['24H Volume', '$' + fmt.compact(coin.volume_24h)],
               ['Circ Supply', fmt.compact(coin.circulating_supply) + ' ' + coin.symbol],
               ['Total Supply', fmt.compact(coin.total_supply)],
-              ['Max Supply', fmt.compact(coin.max_supply) || '∞'],
+              ['Max Supply', coin.max_supply != null ? fmt.compact(coin.max_supply) : '∞'],
               ['ATH', '$' + fmt.price(coin.ath)],
               ['ATH Change', fmt.pct(coin.ath_change_pct)],
               ['ATL', '$' + fmt.price(coin.atl)],
@@ -2456,8 +2456,8 @@ async function loadTransactions() {
       API.get('/api/transactions?limit=200'),
       API.get('/api/transactions/summary').catch(() => null),
     ]);
-    const total_buy  = summary ? summary.total_buy  : txns.filter(t=>t.action==='BUY').reduce((s,t)=>s+t.total,0);
-    const total_sell = summary ? summary.total_sell : txns.filter(t=>t.action==='SELL').reduce((s,t)=>s+t.total,0);
+    const total_buy  = summary ? summary.total_buy  : txns.filter(t=>t.action==='BUY').reduce((s,t)=>s+(t.total||0),0);
+    const total_sell = summary ? summary.total_sell : txns.filter(t=>t.action==='SELL').reduce((s,t)=>s+(t.total||0),0);
     const total_count = summary ? summary.count : txns.length;
 
     view.innerHTML = `
@@ -2553,9 +2553,15 @@ async function loadGlobalNews() {
     const all = [];
     const seen = new Set();
     newsMap.flat().forEach(n => {
-      if (!seen.has(n.title)) { seen.add(n.title); all.push(n); }
+      const key = n.title || n.url;
+      if (key && !seen.has(key)) { seen.add(key); all.push(n); }
     });
-    all.sort((a, b) => new Date(b.published) - new Date(a.published));
+    all.sort((a, b) => {
+      const ta = new Date(a.published).getTime();
+      const tb = new Date(b.published).getTime();
+      // Undated/unparseable items sort last (treated as oldest).
+      return (isNaN(tb) ? -Infinity : tb) - (isNaN(ta) ? -Infinity : ta);
+    });
 
     view.innerHTML = `
       <div class="panel">
@@ -2872,7 +2878,8 @@ async function loadAlertsView() {
             <tbody>
               ${active.map(a => {
                 const atTarget = a.distance_pct != null && Math.abs(a.distance_pct) < 1;
-                const distColor = atTarget ? 'var(--amber)' :
+                const distColor = a.distance_pct == null ? 'var(--text-dim)' :
+                  atTarget ? 'var(--amber)' :
                   (a.alert_type === 'above' && a.distance_pct < 0) ? 'var(--green)' :
                   (a.alert_type === 'below' && a.distance_pct > 0) ? 'var(--green)' : 'var(--text-dim)';
                 return `<tr>
@@ -3013,7 +3020,7 @@ async function _pollTriggeredAlerts() {
       if (a.id == null || seen.has(a.id)) continue;
       const dir = a.alert_type === 'above' ? '↑' : '↓';
       const cur = a.current_price != null ? '$' + fmt.price(a.current_price) : '—';
-      Toast.warn(`${dir} ALERT ${_esc(a.symbol)} @ ${cur} (target $${fmt.price(a.price)})`);
+      Toast.warn(`${dir} ALERT ${a.symbol} @ ${cur} (target $${fmt.price(a.price)})`);
       seen.add(a.id);
       dirty = true;
     }
@@ -3074,18 +3081,6 @@ async function loadDividendsView() {
 
     const divPositions = positions.filter(p => p.div_rate);
     const noDivPositions = positions.filter(p => !p.div_rate);
-
-    // Build monthly income bar (next 12 months)
-    const months = ['JAN','FEB','MAR','APR','MAY','JUN','JUL','AUG','SEP','OCT','NOV','DEC'];
-    const monthlyIncome = Array(12).fill(0);
-    divPositions.forEach(p => {
-      if (!p.history || !p.history.length) return;
-      // Infer which months pay dividends from history
-      p.history.slice(0, 8).forEach(h => {
-        const mo = new Date(h.date).getMonth();
-        monthlyIncome[mo] += (h.amount || 0) * p.shares;
-      });
-    });
 
     view.innerHTML = `
       <div class="flex-between mb-8">
@@ -3172,11 +3167,13 @@ async function loadDividendsView() {
               <span style="font-size:10px;color:${urgColor}">${daysUntil <= 0 ? 'PASSED' : daysUntil + 'd away'}</span>
               ${(() => {
                 if (!p.div_rate) return `<span style="font-size:10px;color:var(--green)">$— / share</span>`;
-                const freqMap = { 'Monthly': 12, 'Quarterly': 4, 'Semi-Annual': 2, 'Annual': 1 };
-                const freq = p.frequency;
-                const divisor = freqMap[freq] != null ? freqMap[freq] : 4; // unknown/null/Irregular → quarterly
+                // Normalize the frequency label (case/whitespace/synonym tolerant) before lookup.
+                const freqMap = { monthly: 12, quarterly: 4, 'semi-annual': 2, semiannual: 2, 'semi annual': 2, biannual: 2, annual: 1, yearly: 1 };
+                const freqKey = String(p.frequency || '').trim().toLowerCase();
+                const known = freqMap[freqKey] != null;
+                const divisor = known ? freqMap[freqKey] : 4; // unknown/null/Irregular → quarterly
                 const perShare = (p.div_rate / divisor).toFixed(4);
-                const note = freqMap[freq] == null ? ' <small style="color:var(--text-dim)">(approx, freq unknown)</small>' : '';
+                const note = known ? '' : ' <small style="color:var(--text-dim)">(approx, freq unknown)</small>';
                 return `<span style="font-size:10px;color:var(--green)">$${perShare} / share${note}</span>`;
               })()}
               ${p.pay_date ? `<span style="font-size:10px;color:var(--text-dim)">pays ${fmt.date(p.pay_date)}</span>` : ''}
@@ -3385,11 +3382,15 @@ async function runStressTest() {
   }
 }
 
+// Module-scoped cache so the per-card click handler can look the scenario up by
+// name instead of round-tripping the whole object through an HTML attribute.
+let _lastStressScenarios = {};
 function renderStressResults(data) {
   const div = document.getElementById('stress-results');
   if (!div) return;
   const current = data.current_total_value;
   const scenarios = data.scenarios;
+  _lastStressScenarios = scenarios || {};
 
   const scenarioOrder = ['2008 Financial Crisis', '2020 COVID Crash', '2022 Rate Hike Bear', '2000 Dot-com Bust', 'Custom Scenario'];
 
@@ -3401,7 +3402,7 @@ function renderStressResults(data) {
         const lossColor = s.total_loss_pct < -30 ? 'var(--red)' : s.total_loss_pct < -15 ? 'var(--amber)' : 'var(--text-secondary)';
         const isCustom = name === 'Custom Scenario';
         return `
-          <div class="stress-card ${isCustom ? 'stress-card-custom' : ''}" onclick="showScenarioDetail('${_esc(_jesc(name))}', ${_esc(JSON.stringify(s))})">
+          <div class="stress-card ${isCustom ? 'stress-card-custom' : ''}" onclick="showScenarioDetail('${_esc(_jesc(name))}')">
             <div style="font-size:10px;color:${isCustom ? 'var(--amber)' : 'var(--blue)'};letter-spacing:.08em;margin-bottom:6px">${name.toUpperCase()}</div>
             <div style="font-size:11px;color:var(--text-dim);margin-bottom:10px;line-height:1.5">${_esc(s.description)}</div>
             <div style="font-size:22px;font-weight:bold;color:${lossColor}">${s.total_loss_pct.toFixed(1)}%</div>
@@ -3443,6 +3444,9 @@ function renderStressResults(data) {
 function showScenarioDetail(name, scenario) {
   const panel = document.getElementById('stress-detail-panel');
   if (!panel) return;
+  // Prefer the cached scenario for `name`; fall back to an explicitly-passed
+  // object (legacy callers) so behavior is unchanged.
+  scenario = scenario || _lastStressScenarios[name] || {};
   const positions = scenario.positions || [];
   const lossColor = scenario.total_loss_pct < -30 ? 'var(--red)' : scenario.total_loss_pct < -15 ? 'var(--amber)' : 'var(--text-secondary)';
 
@@ -3916,7 +3920,7 @@ async function loadSettings() {
           <div class="panel-body">
             <div class="fund-grid">
               ${[
-                ['SYSTEM', 'AUGUR v2.3.0'],
+                ['SYSTEM', ((document.getElementById('sys-version') || {}).textContent || 'AUGUR').trim()],
                 ['DATA SOURCE', 'YAHOO FINANCE + COINGECKO'],
                 ['DATABASE', 'SQLITE3 (LOCAL)'],
                 ['BACKEND', 'PYTHON / FLASK'],
@@ -4137,6 +4141,7 @@ function handleCmdInput(e) {
 
   if (e.key === 'Enter' && q) {
     const sym = q.toUpperCase();
+    clearTimeout(searchTimer);
     document.getElementById('search-results').classList.remove('visible');
     e.target.value = '';
     openResearch(sym);
@@ -4144,6 +4149,7 @@ function handleCmdInput(e) {
   }
 
   if (e.key === 'Escape') {
+    clearTimeout(searchTimer);
     document.getElementById('search-results').classList.remove('visible');
     e.target.value = '';
     return;
@@ -4247,9 +4253,9 @@ function _ajRenderCouncil(d) {
     `<div class="panel"><div class="panel-body">
       <div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:4px">
         <b>${_esc(r.analyst || '—')}</b>
-        ${_ajPill(_esc(String(r.band || '—')), true, 'blue')}
+        ${_ajPill(String(r.band || '—'), true, 'blue')}
       </div>
-      <div class="muted" style="font-size:11px;margin-bottom:6px">Score <b style="color:var(--text-primary)">${r.score == null ? '—' : _esc(String(r.score)) + '/10'}</b> · Confidence <b style="color:var(--text-primary)">${_ajPct(r.confidence)}</b></div>
+      <div class="muted" style="font-size:11px;margin-bottom:6px">Score <b style="color:var(--text-primary)">${r.score == null ? '—' : (Math.round(Number(r.score) * 10) / 10) + '/10'}</b> · Confidence <b style="color:var(--text-primary)">${_ajPct(r.confidence)}</b></div>
       <div style="font-size:12px">${_esc(r.narrative || '')}</div>
     </div></div>`).join('')}</div>` : '<div class="muted">No analyst reports.</div>';
   // ── debate transcript, grouped by debate then role ──
@@ -4543,10 +4549,13 @@ async function loadTradingView() {
   `;
 
   // tab switching
+  let councilRecentLoaded = false;
   el.querySelectorAll('.aj-tab').forEach(t => t.addEventListener('click', () => {
     const pane = t.getAttribute('data-pane');
     el.querySelectorAll('.aj-tab').forEach(x => x.classList.toggle('active', x === t));
     el.querySelectorAll('.aj-pane').forEach(p => p.classList.toggle('active', p.getAttribute('data-pane') === pane));
+    // Lazy-load recent council decisions only the first time the Council tab is opened.
+    if (pane === 'council' && !councilRecentLoaded) { councilRecentLoaded = true; councilLoadRecent(); }
   }));
   const refreshBtn = document.getElementById('aj-refresh');
   if (refreshBtn) refreshBtn.addEventListener('click', () => loadTradingView());
@@ -4571,7 +4580,7 @@ async function loadTradingView() {
       const executed = props.filter(p => p && p.result === 'executed').length;
       _ajToast('◉ Cycle complete: ' + executed + ' executed / ' + props.length + ' scanned');
       loadTradingView();
-    } catch (e) { _ajToast('Run failed: ' + (e.message || e), false); runBtn.disabled = false; runBtn.textContent = '▶ RUN CYCLE (paper)'; }
+    } catch (e) { _ajToast('Run failed: ' + (e.message || e), false); runBtn.disabled = false; runBtn.textContent = '▶ RUN CYCLE'; }
   });
   const rearmBtn = document.getElementById('aj-rearm');
   if (rearmBtn) rearmBtn.addEventListener('click', async () => {
@@ -4736,7 +4745,7 @@ async function loadTradingView() {
     if (sumEl) sumEl.textContent = posRows.length ? (posRows.length + ' positions · MV ' + _ajMoney(pd.total_market_value) + ' · unreal ' + _ajMoney(pd.total_unrealized)) : '';
     if (ppEl) {
       ppEl.innerHTML = posRows.length ? `<table class="data-table" style="width:100%"><thead><tr><th>Symbol</th><th>Qty</th><th>Avg cost</th><th>Price</th><th>Mkt value</th><th>Unreal P&L</th><th>%</th><th>Weight</th><th>Age</th></tr></thead><tbody>${posRows.map(p =>
-        `<tr><td><b>${_esc(p.symbol)}</b></td><td>${_esc(String(p.qty))}</td><td>${_ajMoney(p.avg_cost)}</td><td>${_ajMoney(p.mark)}</td><td>${_ajMoney(p.market_value)}</td><td style="color:${(p.unrealized||0)>=0?'var(--green)':'var(--red)'}">${_ajMoney(p.unrealized)}</td><td style="color:${(p.unrealized_pct||0)>=0?'var(--green)':'var(--red)'}">${p.unrealized_pct>=0?'+':''}${_esc(String(p.unrealized_pct))}%</td><td>${_esc(String(p.weight_pct))}%</td><td>${p.age_days==null?'—':_esc(String(p.age_days))+'d'}</td></tr>`).join('')}</tbody></table>` : '<div class="muted">No paper positions yet — the agent opens positions when it buys (run a cycle during market hours).</div>';
+        `<tr><td><b>${_esc(p.symbol)}</b></td><td>${_esc(String(p.qty))}</td><td>${_ajMoney(p.avg_cost)}</td><td>${_ajMoney(p.mark)}</td><td>${_ajMoney(p.market_value)}</td><td style="color:${(p.unrealized||0)>=0?'var(--green)':'var(--red)'}">${_ajMoney(p.unrealized)}</td><td style="color:${(p.unrealized_pct||0)>=0?'var(--green)':'var(--red)'}">${p.unrealized_pct==null?'—':(p.unrealized_pct>=0?'+':'')+_esc(String(p.unrealized_pct))+'%'}</td><td>${p.weight_pct==null?'—':_esc(String(p.weight_pct))+'%'}</td><td>${p.age_days==null?'—':_esc(String(p.age_days))+'d'}</td></tr>`).join('')}</tbody></table>` : '<div class="muted">No paper positions yet — the agent opens positions when it buys (run a cycle during market hours).</div>';
     }
     const aEl = document.getElementById('aj-analytics');
     if (aEl) {
@@ -4747,9 +4756,9 @@ async function loadTradingView() {
       const statline = `<div style="display:flex;gap:18px;flex-wrap:wrap;margin-bottom:10px">
         <span class="muted">Trades <b style="color:var(--text-primary)">${ts.trades || 0}</b></span>
         <span class="muted">Win rate <b style="color:var(--text-primary)">${ts.win_rate == null ? '—' : Math.round(ts.win_rate * 100) + '%'}</b></span>
-        <span class="muted">Profit factor <b style="color:var(--text-primary)">${ts.profit_factor == null ? '—' : ts.profit_factor}</b></span>
+        <span class="muted">Profit factor <b style="color:var(--text-primary)">${ts.profit_factor == null ? '—' : fmt.num(ts.profit_factor)}</b></span>
         <span class="muted">Net <b style="color:${(ts.net || 0) >= 0 ? 'var(--green)' : 'var(--red)'}">${_ajMoney(ts.net)}</b></span>
-        <span class="muted">Sharpe <b style="color:var(--text-primary)">${sh.sharpe == null ? '—' : sh.sharpe}</b></span>
+        <span class="muted">Sharpe <b style="color:var(--text-primary)">${sh.sharpe == null ? '—' : fmt.num(sh.sharpe)}</b></span>
         <span class="muted">Equity <b style="color:var(--text-primary)">${lastEq == null ? '—' : _ajMoney(lastEq)}</b></span>
       </div>`;
       const attrTable = attr.length ? `<table class="data-table" style="width:100%"><thead><tr><th>Symbol</th><th>Realized</th><th>Unrealized</th><th>Total</th></tr></thead><tbody>${attr.map(d =>
@@ -4761,7 +4770,9 @@ async function loadTradingView() {
   }
 
   // ── Analyst Council (advisory) ──
+  let councilBusy = false;
   const councilRun = async () => {
+    if (councilBusy) return;
     const symEl = document.getElementById('aj-council-symbol');
     const stEl = document.getElementById('aj-council-status');
     const resEl = document.getElementById('aj-council-result');
@@ -4769,6 +4780,7 @@ async function loadTradingView() {
     if (!symEl || !resEl) return;
     const sym = (symEl.value || '').trim().toUpperCase();
     if (!sym) { if (stEl) stEl.textContent = 'Enter a symbol first.'; return; }
+    councilBusy = true;
     if (stEl) stEl.textContent = '';
     resEl.innerHTML = '<div class="loading"><div class="spinner"></div> Convening council for ' + _esc(sym) + '…</div>';
     if (runBtn) { runBtn.disabled = true; runBtn.textContent = '… running'; }
@@ -4789,6 +4801,7 @@ async function loadTradingView() {
     } catch (e) {
       resEl.innerHTML = '<div class="muted">Council failed: ' + _esc(e.message || String(e)) + '</div>';
     } finally {
+      councilBusy = false;
       if (runBtn) { runBtn.disabled = false; runBtn.textContent = '▶ Run Council'; }
     }
   };
@@ -4808,7 +4821,7 @@ async function loadTradingView() {
   if (cRunBtn) cRunBtn.addEventListener('click', councilRun);
   const cSymEl = document.getElementById('aj-council-symbol');
   if (cSymEl) cSymEl.addEventListener('keyup', (e) => { if (e.key === 'Enter') councilRun(); });
-  councilLoadRecent();
+  // Recent decisions are lazy-loaded when the Council tab is first opened (see tab handler).
 }
 
 const VIEW_LOADERS = {
@@ -5250,7 +5263,7 @@ async function loadOptionsForSymbol(symbol) {
       bodyEl.innerHTML = '<div class="empty-state"><span>No options available for ' + symbol + '</span></div>';
       return;
     }
-    selectEl.innerHTML = dates.map(d => '<option value="' + d + '">' + d + '</option>').join('');
+    selectEl.innerHTML = dates.map(d => '<option value="' + _esc(d) + '">' + _esc(d) + '</option>').join('');
     loadOptionsChain(symbol, dates[0]);
   } catch(e) {
     bodyEl.innerHTML = '<div class="empty-state"><span class="text-red">Failed to load options: ' + _esc(e.message) + '</span></div>';
@@ -5307,7 +5320,6 @@ async function loadOptionsChain(symbol, date) {
       allStrikes.map(strike => {
         const call = callMap[strike];
         const put = putMap[strike];
-        const strikeCls = (call && call.inTheMoney) || (put && put.inTheMoney) ? '' : '';
         return '<tr>' + optCell(call, 'call') + '<td class="col-price" style="text-align:center;color:var(--amber);font-weight:600;border-left:1px solid var(--border);border-right:1px solid var(--border)">' + fmt.price(strike) + '</td>' + optCell(put, 'put') + '</tr>';
       }).join('') +
       '</tbody></table>';
@@ -6434,8 +6446,10 @@ function renderSignalsGrid(scores) {
 }
 
 function buildSignalCard(s) {
+  const sym = s && s.symbol ? String(s.symbol) : '';
+  if (!sym) return '';
   const components = s.components || {};
-  const cardId = 'ml-panel-' + s.symbol.replace(/[^A-Z0-9]/g, '');
+  const cardId = 'ml-panel-' + sym.replace(/[^A-Z0-9]/g, '');
 
   const bars = Object.entries(components).map(([key, c]) => {
     const pct = c.max ? Math.round((c.score / c.max) * 100) : 0;  // avoid NaN/Infinity width
@@ -6475,13 +6489,13 @@ function buildSignalCard(s) {
 
   // ML detail panel
   const ml = (components.ml_forecast || {}).ml_detail || {};
-  const mlPanel = _buildMLDetailPanel(ml, s.symbol, cardId);
+  const mlPanel = _buildMLDetailPanel(ml, sym, cardId);
 
   return `
     <div class="smart-money-card">
       <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:10px">
         <div>
-          <div style="font-size:15px;font-weight:700;color:var(--text-primary)">${_esc(s.symbol)}</div>
+          <div style="font-size:15px;font-weight:700;color:var(--text-primary)">${_esc(sym)}</div>
           <div style="font-size:10px;color:var(--text-dim);max-width:140px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${_esc(s.name || '')}</div>
           <div style="margin-top:6px">
             <span class="signal-badge ${signalColors[s.signal] || ''}" style="font-size:11px">${_esc(s.signal)}</span>
@@ -6493,7 +6507,7 @@ function buildSignalCard(s) {
       </div>
       <div style="margin-top:4px">${bars}</div>
       <div style="margin-top:8px;border-top:1px solid var(--border);padding-top:8px">
-        <button class="btn btn-ghost btn-sm" style="width:100%;font-size:10px" onclick="toggleMLPanel('${cardId}', '${_esc(s.symbol)}')">
+        <button class="btn btn-ghost btn-sm" style="width:100%;font-size:10px" onclick="toggleMLPanel('${cardId}', '${_jesc(sym)}')">
           ⚡ ML FORECAST DETAIL ▾
         </button>
         <div id="${cardId}" class="ml-detail-panel" style="display:none;margin-top:8px"></div>
@@ -6549,7 +6563,6 @@ function renderMLForecastPanel(data) {
   const mr = data.mean_reversion || {};
 
   const probUp = Math.round((rf.prob_up_20d || 0) * 100);
-  const probDown = 100 - probUp;
   const rfColor = probUp >= 60 ? 'var(--green)' : probUp <= 40 ? 'var(--red)' : 'var(--amber)';
   const rfAccuracy = Math.round((rf.accuracy_recent || 0) * 100);
 
@@ -6818,22 +6831,27 @@ function _ansiToHtml(text) {
   let html = _escHtml(text);
   // Handle escaped literal \033 from template strings
   html = html.replace(/\\033/g, '\x1b');
-  // Replace ANSI codes
+  // Replace ANSI codes. Track how many spans are currently open so a reset (0)
+  // closes ALL of them — a combined sequence like 97;1 opens two spans, and a
+  // single </span> on reset would otherwise leave one dangling and bleed styling.
+  let openSpans = 0;
   html = html.replace(/\x1b\[([0-9;]+)m/g, (match, codes) => {
     const parts = codes.split(';');
     let result = '';
     for (const code of parts) {
       if (code === '0') {
-        result += '</span>';
+        while (openSpans > 0) { result += '</span>'; openSpans--; }
       } else if (colorMap[code]) {
         result += colorMap[code];
+        openSpans++;
       } else {
-        // Combined codes like 97;1
-        // skip unknown
+        // unknown code — skip
       }
     }
     return result;
   });
+  // Close any spans left open at end of string.
+  while (openSpans > 0) { html += '</span>'; openSpans--; }
   // Convert newlines to <br>
   html = html.replace(/\n/g, '<br>');
   return html;
@@ -7526,15 +7544,15 @@ function renderScanResults(data) {
     var compColor = o.composite >= 70 ? 'var(--green)' : (o.composite >= 50 ? 'var(--amber)' : 'var(--text-dim)');
     var tagBadges = (o.tags || []).map(function(t) {
       var cls = t === 'TOP PICK' ? 'col-positive' : (t === 'EARLY SIGNAL' ? 'col-amber' : '');
-      return '<span class="signal-badge ' + cls + '" style="font-size:8px">' + t + '</span>';
+      return '<span class="signal-badge ' + cls + '" style="font-size:8px">' + _esc(t) + '</span>';
     }).join(' ');
     var catalysts = (o.catalysts || []).slice(0, 2).join(', ');
     var typeLabel = (o.asset_type || 'stock').toUpperCase();
 
     html += '<tr>'
       + '<td style="color:var(--text-dim)">' + (i + 1) + '</td>'
-      + '<td style="font-weight:700;color:var(--green);cursor:pointer" onclick="openResearch(\'' + o.symbol + '\')">' + o.symbol + '</td>'
-      + '<td style="font-size:10px">' + typeLabel + '</td>'
+      + '<td style="font-weight:700;color:var(--green);cursor:pointer" onclick="openResearch(\'' + _jesc(o.symbol) + '\')">' + _esc(o.symbol) + '</td>'
+      + '<td style="font-size:10px">' + _esc(typeLabel) + '</td>'
       + '<td style="text-align:right">' + _fmtScanPrice(o.price) + '</td>'
       + '<td style="text-align:right;font-weight:700;color:' + compColor + '">' + (o.composite != null ? o.composite.toFixed(1) : '—') + '</td>'
       + '<td style="text-align:right">' + _fmtScanScore(o.scores, 'smart_money') + '</td>'
@@ -7542,8 +7560,8 @@ function renderScanResults(data) {
       + '<td style="text-align:right">' + _fmtScanScore(o.scores, 'momentum') + '</td>'
       + '<td style="text-align:right">' + _fmtScanScore(o.scores, 'fundamentals') + '</td>'
       + '<td>' + tagBadges + '</td>'
-      + '<td style="font-size:10px;color:var(--text-secondary);max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="' + (o.catalysts || []).join(', ') + '">' + catalysts + '</td>'
-      + '<td><button class="btn btn-ghost btn-sm" onclick="openResearch(\'' + o.symbol + '\')">RESEARCH</button></td>'
+      + '<td style="font-size:10px;color:var(--text-secondary);max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="' + _esc((o.catalysts || []).join(', ')) + '">' + _esc(catalysts) + '</td>'
+      + '<td><button class="btn btn-ghost btn-sm" onclick="openResearch(\'' + _jesc(o.symbol) + '\')">RESEARCH</button></td>'
       + '</tr>';
   });
 
@@ -7554,10 +7572,10 @@ function renderScanResults(data) {
 function _scannerTopCard(o) {
   var compColor = o.composite >= 70 ? 'var(--green)' : 'var(--amber)';
   var catalysts = (o.catalysts || []).slice(0, 3).map(function(c) {
-    return '<div style="font-size:9px;color:var(--text-secondary)">+ ' + c + '</div>';
+    return '<div style="font-size:9px;color:var(--text-secondary)">+ ' + _esc(c) + '</div>';
   }).join('');
-  return '<div class="kpi-card" style="cursor:pointer;border:1px solid var(--green-dim)" onclick="openResearch(\'' + o.symbol + '\')">'
-    + '<div class="kpi-label" style="color:var(--green)">' + o.symbol + ' <span style="font-size:9px;color:var(--text-dim)">' + (o.asset_type || 'stock').toUpperCase() + '</span></div>'
+  return '<div class="kpi-card" style="cursor:pointer;border:1px solid var(--green-dim)" onclick="openResearch(\'' + _jesc(o.symbol) + '\')">'
+    + '<div class="kpi-label" style="color:var(--green)">' + _esc(o.symbol) + ' <span style="font-size:9px;color:var(--text-dim)">' + _esc((o.asset_type || 'stock').toUpperCase()) + '</span></div>'
     + '<div class="kpi-value" style="color:' + compColor + ';font-size:28px">' + (o.composite != null ? o.composite.toFixed(1) : '—') + '<span style="font-size:12px;color:var(--text-dim)">/100</span></div>'
     + '<div style="font-size:10px;color:var(--text-secondary);margin-top:4px">' + _fmtScanPrice(o.price) + '</div>'
     + catalysts
@@ -7565,10 +7583,10 @@ function _scannerTopCard(o) {
 }
 
 function _scannerSignalCard(o) {
-  return '<div class="kpi-card" style="cursor:pointer;border:1px solid var(--amber-dim, var(--amber))" onclick="openResearch(\'' + o.symbol + '\')">'
-    + '<div class="kpi-label" style="color:var(--amber)">' + o.symbol + '</div>'
+  return '<div class="kpi-card" style="cursor:pointer;border:1px solid var(--amber-dim, var(--amber))" onclick="openResearch(\'' + _jesc(o.symbol) + '\')">'
+    + '<div class="kpi-label" style="color:var(--amber)">' + _esc(o.symbol) + '</div>'
     + '<div class="kpi-value" style="font-size:22px">' + (o.composite != null ? o.composite.toFixed(1) : '—') + '</div>'
-    + '<div style="font-size:9px;color:var(--text-dim);margin-top:2px">' + (o.catalysts || []).slice(0, 2).join(' | ') + '</div>'
+    + '<div style="font-size:9px;color:var(--text-dim);margin-top:2px">' + _esc((o.catalysts || []).slice(0, 2).join(' | ')) + '</div>'
     + '</div>';
 }
 
@@ -7677,7 +7695,7 @@ async function analyzeGex(sym) {
         var typeCls = (w.type || '').toLowerCase() === 'support' ? 'col-positive' : 'col-negative';
         html += '<tr><td>$' + _alphaFmtNum(w.strike, 2) + '</td>'
           + '<td>' + _alphaFmtNum(w.net_gex || w.gex, 0) + '</td>'
-          + '<td><span class="signal-badge ' + typeCls + '" style="font-size:9px">' + (w.type || '—') + '</span></td></tr>';
+          + '<td><span class="signal-badge ' + typeCls + '" style="font-size:9px">' + _esc(w.type || '—') + '</span></td></tr>';
       }
       html += '</tbody></table></div></div>';
     }
@@ -7773,9 +7791,9 @@ async function mapContagion(sym) {
     }
     var html = '<div class="kpi-grid" style="display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:16px">'
       + '<div class="kpi-card"><div class="form-label">Total Connections</div><div style="font-size:18px;font-weight:700">' + connections.length + '</div></div>'
-      + '<div class="kpi-card"><div class="form-label">Filing Date</div><div style="font-size:14px">' + (data.filing_date || '—') + '</div></div>'
-      + '<div class="kpi-card"><div class="form-label">Company</div><div style="font-size:14px">' + (data.company_name || data.company || symbol) + '</div></div>'
-      + '<div class="kpi-card"><div class="form-label">Sector</div><div style="font-size:14px">' + (data.sector || '—') + '</div></div>'
+      + '<div class="kpi-card"><div class="form-label">Filing Date</div><div style="font-size:14px">' + _esc(data.filing_date || '—') + '</div></div>'
+      + '<div class="kpi-card"><div class="form-label">Company</div><div style="font-size:14px">' + _esc(data.company_name || data.company || symbol) + '</div></div>'
+      + '<div class="kpi-card"><div class="form-label">Sector</div><div style="font-size:14px">' + _esc(data.sector || '—') + '</div></div>'
       + '</div>';
 
     if (connections.length) {
@@ -8009,7 +8027,7 @@ async function analyzeForecast(sym) {
   if (!symbol) return;
   if (input) input.value = symbol;
   var hsel = document.getElementById('forecast-horizon');
-  var horizon = hsel ? hsel.value : 20;
+  var horizon = parseInt(hsel && hsel.value, 10) || 20;
   var results = document.getElementById('forecast-results');
   if (!results) return;
   results.innerHTML = '<div class="loading"><div class="spinner"></div> Fusing forecast signals for ' + _esc(symbol) + '...</div>';
@@ -8021,11 +8039,11 @@ async function analyzeForecast(sym) {
     var ens = data.ensemble;
     if (!ens) throw new Error('No ensemble produced');
 
-    var probPct = Math.round(ens.prob_up * 100);
-    var probRawPct = Math.round(ens.prob_up_raw * 100);
+    var probPct = ens.prob_up != null ? Math.round(ens.prob_up * 100) : null;
+    var probRawPct = ens.prob_up_raw != null ? Math.round(ens.prob_up_raw * 100) : null;
     var vColor = _forecastVerdictColor(ens.verdict);
     var dirArrow = ens.direction === 'UP' ? '▲' : ens.direction === 'DOWN' ? '▼' : '◆';
-    var consensusPct = Math.round(ens.consensus * 100);
+    var consensusPct = ens.consensus != null ? Math.round(ens.consensus * 100) : null;
 
     // ── Hero verdict + probability gauge ──────────────────────────────
     var html = '<div class="panel mb-8"><div class="panel-body" style="display:grid;grid-template-columns:1.2fr 1fr 1fr 1fr;gap:16px;align-items:center">';
@@ -8037,18 +8055,18 @@ async function analyzeForecast(sym) {
     // P(up) gauge bar
     html += '<div>'
       + '<div class="form-label">P(UP) — CALIBRATED</div>'
-      + '<div style="font-size:24px;font-weight:700;color:' + vColor + '">' + probPct + '%</div>'
+      + '<div style="font-size:24px;font-weight:700;color:' + vColor + '">' + (probPct != null ? probPct + '%' : '—') + '</div>'
       + '<div style="height:8px;background:var(--bg-secondary);border-radius:4px;overflow:hidden;margin-top:4px;position:relative">'
       + '<div style="position:absolute;left:50%;top:0;bottom:0;width:1px;background:var(--text-dim);z-index:2"></div>'
-      + '<div style="height:100%;width:' + probPct + '%;background:' + vColor + '"></div>'
+      + '<div style="height:100%;width:' + (probPct || 0) + '%;background:' + vColor + '"></div>'
       + '</div>'
-      + '<div style="font-size:9px;color:var(--text-dim);margin-top:3px">raw ' + probRawPct + '% · edge ' + (ens.edge_pct_pts >= 0 ? '+' : '') + _esc(ens.edge_pct_pts) + 'pp</div>'
+      + '<div style="font-size:9px;color:var(--text-dim);margin-top:3px">raw ' + (probRawPct != null ? probRawPct + '%' : '—') + ' · edge ' + (ens.edge_pct_pts >= 0 ? '+' : '') + _esc(ens.edge_pct_pts) + 'pp</div>'
       + '</div>';
     // Consensus
-    var conColor = consensusPct >= 70 ? 'var(--green)' : consensusPct >= 40 ? 'var(--amber,#f0a020)' : 'var(--red,#ff4444)';
+    var conColor = (consensusPct || 0) >= 70 ? 'var(--green)' : (consensusPct || 0) >= 40 ? 'var(--amber,#f0a020)' : 'var(--red,#ff4444)';
     html += '<div>'
       + '<div class="form-label">SIGNAL CONSENSUS</div>'
-      + '<div style="font-size:24px;font-weight:700;color:' + conColor + '">' + consensusPct + '%</div>'
+      + '<div style="font-size:24px;font-weight:700;color:' + conColor + '">' + (consensusPct != null ? consensusPct + '%' : '—') + '</div>'
       + '<div style="font-size:9px;color:var(--text-dim);margin-top:6px">' + _esc(ens.agree_count) + ' agree · ' + _esc(ens.disagree_count) + ' disagree</div>'
       + '</div>';
     // Expected return cone center
@@ -8189,7 +8207,7 @@ async function analyzeNarrative(sym) {
     for (var w = 0; w < windowKeys.length; w++) {
       var wk = windowKeys[w];
       var wData = windows[wk] || {};
-      var buckets = wData.buckets || wData.distribution || wData;
+      var buckets = wData.buckets || wData.distribution || null;
       html += '<div style="flex:1;padding:12px;background:var(--bg-secondary);border-radius:4px">'
         + '<div style="font-size:11px;color:var(--green);font-weight:600;margin-bottom:8px">' + wk.toUpperCase() + '</div>';
       if (typeof buckets === 'object' && buckets !== null) {
@@ -8269,6 +8287,7 @@ async function analyzeSyntheticInsider(sym) {
 
   try {
     var data = await API.get('/api/synthetic-insider/' + symbol);
+    if (!results.isConnected) return; // navigated away during fetch
     if (data.error) throw new Error(data.error);
 
     var score = data.composite_score != null ? data.composite_score : 0;
@@ -8297,7 +8316,7 @@ async function analyzeSyntheticInsider(sym) {
       + '<div class="kpi-card"><div class="form-label">Composite Score</div><div style="font-size:18px;font-weight:700;color:' + _alphaScoreColor(score) + '">' + _alphaFmtNum(score, 1) + '</div></div>'
       + '<div class="kpi-card"><div class="form-label">Alert Level</div><div><span class="signal-badge ' + alertCls + '" style="font-size:9px;' + alertStyle + '">' + alertLevel + '</span></div></div>'
       + '<div class="kpi-card"><div class="form-label">Convergence Count</div><div style="font-size:18px;font-weight:700">' + convergence + '/' + totalChannels + ' <span style="font-size:10px;color:var(--text-dim)">firing</span></div></div>'
-      + '<div class="kpi-card"><div class="form-label">Signal</div><div style="font-size:14px;font-weight:600">' + signal + '</div></div>'
+      + '<div class="kpi-card"><div class="form-label">Signal</div><div style="font-size:14px;font-weight:600">' + _esc(signal) + '</div></div>'
       + '</div>';
 
     // Channel Breakdown
@@ -8315,11 +8334,11 @@ async function analyzeSyntheticInsider(sym) {
         var chScore = ch.score != null ? ch.score : 0;
         var firing = ch.firing ? '<span style="color:var(--green)">&#10003;</span>' : '<span style="color:var(--text-dim)">—</span>';
         html += '<tr>'
-          + '<td style="font-weight:600">' + (ch.channel || ch.name || '—') + '</td>'
+          + '<td style="font-weight:600">' + _esc(ch.channel || ch.name || '—') + '</td>'
           + '<td style="color:' + _alphaScoreColor(chScore) + '">' + _alphaFmtNum(chScore, 1) + '</td>'
           + '<td>' + firing + '</td>'
           + '<td>' + _alphaFmtNum(ch.weight, 2) + '</td>'
-          + '<td style="font-size:10px;color:var(--text-dim);max-width:250px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + (ch.detail || '—') + '</td>'
+          + '<td style="font-size:10px;color:var(--text-dim);max-width:250px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + _esc(ch.detail || '—') + '</td>'
           + '</tr>';
       }
       html += '</tbody></table></div></div>';
@@ -8338,6 +8357,7 @@ async function scanSyntheticInsiderPortfolio() {
 
   try {
     var data = await API.post('/api/synthetic-insider/scan', {});
+    if (!results.isConnected) return; // navigated away during fetch
     if (data.error) throw new Error(data.error);
     var items = data.results || data.scores || [];
     if (!items.length) {
@@ -8355,7 +8375,7 @@ async function scanSyntheticInsiderPortfolio() {
       var it = items[i];
       var sc = it.composite_score || it.score || 0;
       html += '<tr>'
-        + '<td><span class="col-symbol" style="cursor:pointer" onclick="document.getElementById(\'si-symbol\').value=\'' + (it.symbol || it.ticker || '') + '\';analyzeSyntheticInsider()">' + (it.symbol || it.ticker || '—') + '</span></td>'
+        + '<td><span class="col-symbol" style="cursor:pointer" onclick="document.getElementById(\'si-symbol\').value=\'' + _jesc(it.symbol || it.ticker || '') + '\';analyzeSyntheticInsider()">' + _esc(it.symbol || it.ticker || '—') + '</span></td>'
         + '<td style="color:' + _alphaScoreColor(sc) + ';font-weight:700">' + _alphaFmtNum(sc, 1) + '</td>'
         + '<td>' + _alphaRegimeBadge(it.alert_level || '—') + '</td>'
         + '<td>' + (it.convergence_count != null ? it.convergence_count : '—') + '</td>'
@@ -8402,6 +8422,7 @@ async function detectReflexivity(sym) {
 
   try {
     var data = await API.get('/api/reflexivity/' + symbol);
+    if (!results.isConnected) return; // navigated away during fetch
     if (data.error) throw new Error(data.error);
 
     // Backend returns active_loops as an ARRAY of loop objects (+ a loop_count).
@@ -8421,7 +8442,7 @@ async function detectReflexivity(sym) {
     var html = '<div class="kpi-grid" style="display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:16px">'
       + '<div class="kpi-card"><div class="form-label">Active Loops</div><div style="font-size:18px;font-weight:700">' + activeLoops + '</div></div>'
       + '<div class="kpi-card"><div class="form-label">Max Strength</div><div style="font-size:18px;font-weight:700;color:' + _alphaScoreColor(maxStrength) + '">' + _alphaFmtNum(maxStrength, 1) + '</div></div>'
-      + '<div class="kpi-card"><div class="form-label">Dominant Loop</div><div style="font-size:12px;font-weight:600">' + dominant + '</div></div>'
+      + '<div class="kpi-card"><div class="form-label">Dominant Loop</div><div style="font-size:12px;font-weight:600">' + _esc(dominant) + '</div></div>'
       + '<div class="kpi-card"><div class="form-label">Overall Risk</div><div><span class="signal-badge ' + riskCls + '" style="font-size:9px">' + overallRisk + '</span></div></div>'
       + '</div>';
 
@@ -8471,11 +8492,11 @@ async function detectReflexivity(sym) {
         + '<div style="font-size:10px;color:' + _alphaScoreColor(strength) + ';margin-top:2px">' + _alphaFmtNum(strength, 1) + '/100</div>'
         + '</div>'
         + '<div style="display:grid;grid-template-columns:1fr 1fr;gap:4px;font-size:10px">'
-        + '<div><span style="color:var(--text-dim)">Direction:</span> <span class="' + dirCls + '">' + (direction || '—') + '</span></div>'
+        + '<div><span style="color:var(--text-dim)">Direction:</span> <span class="' + dirCls + '">' + _esc(direction || '—') + '</span></div>'
         + '<div><span style="color:var(--text-dim)">Proximity:</span> ' + proximity + '</div>'
-        + '<div><span style="color:var(--text-dim)">Timeline:</span> ' + timeline + '</div>'
+        + '<div><span style="color:var(--text-dim)">Timeline:</span> ' + _esc(timeline) + '</div>'
         + '</div>'
-        + '<div style="font-size:10px;color:var(--text-dim);margin-top:6px;border-top:1px solid var(--border);padding-top:6px">' + detail + '</div>'
+        + '<div style="font-size:10px;color:var(--text-dim);margin-top:6px;border-top:1px solid var(--border);padding-top:6px">' + _esc(detail) + '</div>'
         + '</div></div>';
     }
     html += '</div>';
@@ -8487,8 +8508,8 @@ async function detectReflexivity(sym) {
         + '<div class="panel-body" style="display:grid;grid-template-columns:repeat(4,1fr);gap:8px;font-size:11px">';
       var fKeys = Object.keys(fundamentals);
       for (var f = 0; f < fKeys.length; f++) {
-        html += '<div><span style="color:var(--text-dim)">' + fKeys[f].replace(/_/g, ' ').toUpperCase() + ':</span> '
-          + '<span style="font-weight:600">' + fundamentals[fKeys[f]] + '</span></div>';
+        html += '<div><span style="color:var(--text-dim)">' + _esc(fKeys[f].replace(/_/g, ' ').toUpperCase()) + ':</span> '
+          + '<span style="font-weight:600">' + _esc(fundamentals[fKeys[f]]) + '</span></div>';
       }
       html += '</div></div>';
     }
@@ -8525,6 +8546,7 @@ async function loadLiquidityData() {
 
   try {
     var data = await API.get('/api/liquidity');
+    if (!results.isConnected) return; // navigated away during fetch
     if (data.error) throw new Error(data.error);
 
     var score = data.composite_score != null ? data.composite_score : 0;
@@ -8557,7 +8579,7 @@ async function loadLiquidityData() {
 
     if (recommendation) {
       html += '<div style="padding:12px;background:var(--bg-secondary);border-radius:4px;font-size:11px;color:var(--text-secondary);margin-bottom:16px;border-left:3px solid var(--green)">'
-        + '<strong style="color:var(--green)">RECOMMENDATION:</strong> ' + recommendation + '</div>';
+        + '<strong style="color:var(--green)">RECOMMENDATION:</strong> ' + _esc(recommendation) + '</div>';
     }
 
     // Indicators table
@@ -8575,7 +8597,7 @@ async function loadLiquidityData() {
         var indScore = ind.score != null ? ind.score : 0;
         var barWidth = Math.min(Math.abs(indScore), 100);
         html += '<tr>'
-          + '<td style="font-weight:600;font-size:11px">' + (ind.indicator || ind.name || '—') + '</td>'
+          + '<td style="font-weight:600;font-size:11px">' + _esc(ind.indicator || ind.name || '—') + '</td>'
           + '<td>'
           + '<div style="display:flex;align-items:center;gap:6px">'
           + '<div style="width:60px;height:6px;background:var(--bg-primary);border-radius:3px;overflow:hidden">'
@@ -8584,9 +8606,9 @@ async function loadLiquidityData() {
           + '<span style="font-size:11px;color:' + _alphaScoreColor(indScore) + '">' + _alphaFmtNum(indScore, 1) + '</span>'
           + '</div>'
           + '</td>'
-          + '<td style="font-size:11px">' + (ind.value != null ? ind.value : '—') + '</td>'
+          + '<td style="font-size:11px">' + _esc(ind.value != null ? ind.value : '—') + '</td>'
           + '<td style="font-size:11px">' + _alphaFmtNum(ind.weight, 2) + '</td>'
-          + '<td style="font-size:10px;color:var(--text-dim);max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + (ind.detail || '—') + '</td>'
+          + '<td style="font-size:10px;color:var(--text-dim);max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + _esc(ind.detail || '—') + '</td>'
           + '</tr>';
       }
       html += '</tbody></table></div></div>';
@@ -8659,7 +8681,7 @@ async function nowcastAltData(sym) {
       + '<div class="kpi-card"><div class="form-label">Nowcast Score</div><div style="font-size:18px;font-weight:700;color:' + _alphaScoreColor(score) + '">' + _alphaFmtNum(score, 1) + '</div></div>'
       + '<div class="kpi-card"><div class="form-label">Beat Probability</div><div><span class="signal-badge ' + beatBadgeCls + '" style="font-size:10px">' + beatProbText + '</span></div></div>'
       + '<div class="kpi-card"><div class="form-label">Est. Surprise %</div><div style="font-size:18px;font-weight:700;color:' + (surprise != null && surprise >= 0 ? 'var(--green)' : 'var(--red, #ff4444)') + '">' + (surprise != null ? (surprise >= 0 ? '+' : '') + _alphaFmtNum(surprise, 2) + '%' : '—') + '</div></div>'
-      + '<div class="kpi-card"><div class="form-label">Confidence</div><div style="font-size:14px;font-weight:600">' + confidence + '</div></div>'
+      + '<div class="kpi-card"><div class="form-label">Confidence</div><div style="font-size:14px;font-weight:600">' + _esc(confidence) + '</div></div>'
       + '</div>';
 
     // Signal Breakdown
@@ -8676,10 +8698,10 @@ async function nowcastAltData(sym) {
         var sig = signals[i];
         var sigScore = sig.score != null ? sig.score : 0;
         html += '<tr>'
-          + '<td style="font-weight:600;font-size:11px">' + (sig.signal || sig.name || '—') + '</td>'
+          + '<td style="font-weight:600;font-size:11px">' + _esc(sig.signal || sig.name || '—') + '</td>'
           + '<td style="color:' + _alphaScoreColor(sigScore) + ';font-weight:700">' + _alphaFmtNum(sigScore, 1) + '</td>'
           + '<td>' + _alphaFmtNum(sig.weight, 2) + '</td>'
-          + '<td style="font-size:10px;color:var(--text-dim);max-width:250px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + (sig.detail || '—') + '</td>'
+          + '<td style="font-size:10px;color:var(--text-dim);max-width:250px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + _esc(sig.detail || '—') + '</td>'
           + '</tr>';
       }
       html += '</tbody></table></div></div>';
@@ -8779,8 +8801,8 @@ async function renderSocialPulse(symbol) {
     if (wk.status === 'live') {
       var ws = wk.stats || {};
       html += '<div style="display:flex;justify-content:space-between;font-size:11px;color:var(--text-secondary)">'
-        + '<span>Latest: <b>' + _esc((ws.latest != null ? ws.latest.toLocaleString('en-US') : '—')) + '</b> views/day</span>'
-        + '<span>7d baseline: ' + _esc((ws.baseline_7d != null ? Math.round(ws.baseline_7d).toLocaleString('en-US') : '—')) + '</span></div>'
+        + '<span>Latest: <b>' + _esc((Number.isFinite(+ws.latest) ? (+ws.latest).toLocaleString('en-US') : '—')) + '</b> views/day</span>'
+        + '<span>7d baseline: ' + _esc((Number.isFinite(+ws.baseline_7d) ? Math.round(+ws.baseline_7d).toLocaleString('en-US') : '—')) + '</span></div>'
         + _miniSparkline(wk.points, 'var(--blue)')
         + (wk.article_url ? '<div style="margin-top:6px"><a href="' + _esc(safeUrl(wk.article_url)) + '" target="_blank" rel="noopener" style="font-size:10px;color:var(--blue)">' + _esc(wk.article || 'article') + ' ↗</a></div>' : '');
     } else {
@@ -8862,10 +8884,10 @@ async function scanAltDataPortfolio() {
       var sc = it.nowcast_score || it.score || 0;
       var bp = it.beat_probability;
       html += '<tr>'
-        + '<td><span class="col-symbol" style="cursor:pointer" onclick="document.getElementById(\'altdata-symbol\').value=\'' + (it.symbol || it.ticker || '') + '\';nowcastAltData()">' + (it.symbol || it.ticker || '—') + '</span></td>'
+        + '<td><span class="col-symbol" style="cursor:pointer" onclick="document.getElementById(\'altdata-symbol\').value=\'' + _jesc(it.symbol || it.ticker || '') + '\';nowcastAltData()">' + _esc(it.symbol || it.ticker || '—') + '</span></td>'
         + '<td style="color:' + _alphaScoreColor(sc) + ';font-weight:700">' + _alphaFmtNum(sc, 1) + '</td>'
         + '<td>' + (bp != null ? _alphaFmtNum(bp, 1) + '%' : '—') + '</td>'
-        + '<td style="font-size:10px;color:var(--text-dim)">' + (it.signal || '—') + '</td>'
+        + '<td style="font-size:10px;color:var(--text-dim)">' + _esc(it.signal || '—') + '</td>'
         + '</tr>';
     }
     html += '</tbody></table></div></div>';
