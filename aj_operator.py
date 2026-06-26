@@ -332,6 +332,112 @@ def _propose_and_execute(cycle_id: str, symbol: str, decision: Dict[str, Any],
     return {"proposal_id": pid, "result": "executed", "exec": ex}
 
 
+def _option_order(opt: Dict[str, Any], target_notional: float,
+                  base_thesis: str) -> Optional[Dict[str, Any]]:
+    """Build {symbol, sizing, decision, instrument} for a long option from a
+    target notional (premium-sized, whole contracts). None if unaffordable."""
+    prem = float((opt or {}).get("premium_contract") or 0)
+    n_ct = int(target_notional // prem) if prem > 0 else 0
+    if not opt or n_ct < 1:
+        return None
+    t = opt["option_type"][0].upper()
+    thesis = (str(base_thesis) + " | opt {} {:.0f}{} {} x{} @${:.0f}".format(
+        opt["underlying"], opt["strike"], t, opt["expiry"], n_ct, prem))[:480]
+    return {
+        "symbol": opt["symbol"],
+        "sizing": {"qty": n_ct, "price": prem, "notional": aj_db.money(n_ct * prem),
+                   "order_type": "limit", "limit_price": prem},
+        "decision": {"side": "buy", "thesis": thesis},
+        "instrument": {"instrument_type": "option", "underlying": opt["underlying"],
+                       "option_type": opt["option_type"], "strike": opt["strike"],
+                       "expiry": opt["expiry"],
+                       "contract_multiplier": opt["contract_multiplier"]},
+    }
+
+
+def _bearish_put_entry(cycle_id: str, symbol: str, fc: Dict[str, Any],
+                       cfg: Dict[str, Any], held_qty: float) -> Optional[Dict[str, Any]]:
+    """A bearish forecast on a not-held name becomes a long PUT (the agent's only
+    bearish play — it never shorts). Returns the propose/execute result or None.
+    Bypasses the council (its bull/bear framing doesn't map to put-buying)."""
+    if not (cfg.get("trade_options") and cfg.get("option_trade_puts")):
+        return None
+    if aj_positions.infer_asset_type(symbol) == "crypto" or held_qty > 0:
+        return None
+    ens = (fc or {}).get("ensemble") or {}
+    prob = ens.get("prob_up")
+    if not isinstance(prob, (int, float)):
+        return None
+    sell_thr = float(cfg.get("sell_prob_threshold", 0.45))
+    min_edge = float(cfg.get("min_edge_pct_pts", 0) or 0)
+    raw_edge = ens.get("edge_pct_pts")
+    edge_pts = abs(float(raw_edge)) if raw_edge is not None else abs((prob - 0.5) * 100)
+    if prob > sell_thr or edge_pts < min_edge:
+        return None
+    try:
+        import aj_options
+        opt = aj_options.pick_contract(symbol, "buy", cfg, direction="bearish")
+    except Exception:
+        log.debug("bearish put pick failed for %s", symbol, exc_info=True)
+        return None
+    if not opt:
+        return None
+    max_notional = aj_db.money(cfg.get("max_order_notional_usd") or 0)
+    target = aj_db.money(cfg.get("order_notional_target_usd") or 0) or aj_db.money(max_notional * 0.5)
+    target = min(target, max_notional)
+    oo = _option_order(opt, target, "rule: bearish prob_up={:.2f} -> long put".format(float(prob)))
+    if not oo:
+        return None
+    out = _propose_and_execute(cycle_id, oo["symbol"], oo["decision"], oo["sizing"],
+                               cfg, instrument=oo["instrument"])
+    out["symbol"] = oo["symbol"]
+    out["underlying"] = symbol
+    return out
+
+
+def _close_expired_options(cycle_id: str, cfg: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Administratively close any held option whose expiry has passed: book a
+    SELL fill at the expired mark (0 = worthless) so the FIFO book realizes the
+    loss and the position is removed. Bypasses the broker marketability check
+    (a $0 quote would otherwise reject)."""
+    out: List[Dict[str, Any]] = []
+    try:
+        import aj_options
+        book = aj_positions.paper_book().get("positions") or {}
+        for sym, p in list(book.items()):
+            if not (isinstance(sym, str) and sym.startswith("OPT:")):
+                continue
+            qty = float(p.get("qty") or 0)
+            if qty <= 0:
+                continue
+            meta = aj_options.parse_symbol(sym)
+            if not meta:
+                continue
+            dte = aj_options._days_to(meta["expiry"])
+            if dte is None or dte >= 0:
+                continue   # not expired
+            try:
+                oid = aj_db.insert(
+                    "aj_orders", proposal_id=0,
+                    client_order_id="ajexp-{}-{}".format(sym, cycle_id),
+                    broker="paper", mode="paper", symbol=sym, side="sell", qty=qty,
+                    order_type="market", state="filled", filled_qty=qty,
+                    avg_fill_price=0.0, fees_usd=0.0, created_at=aj_db.utc_now_iso(),
+                    terminal_at=aj_db.utc_now_iso(), instrument_type="option",
+                    underlying=meta["underlying"], option_type=meta["option_type"],
+                    strike=meta["strike"], expiry=meta["expiry"])
+                aj_db.insert("aj_fills", order_id=oid, qty=qty, price=0.0,
+                             fees_usd=0.0, filled_at=aj_db.utc_now_iso())
+                aj_db.audit("option_expiry_close",
+                            {"symbol": sym, "qty": qty}, cycle_id=cycle_id)
+                out.append({"symbol": sym, "result": "expired_closed", "qty": qty})
+            except Exception:
+                log.exception("expiry close failed for %s", sym)
+    except Exception:
+        log.exception("close_expired_options failed (non-fatal)")
+    return out
+
+
 def _process_exits(cycle_id: str, cfg: Dict[str, Any]) -> List[Dict[str, Any]]:
     """Execute take-profit / stop-loss / trailing-stop sells (⑤⑥⑦) before the
     scan. Each exit sell still passes the risk gate (held-sells are permitted
@@ -404,6 +510,8 @@ def run_once(mode: str = "paper") -> Dict[str, Any]:
             import aj_rules
             aj_rules.update_position_state()            # peak/last marks, aging
             summary["expired_orders"] = aj_rules.expire_stale_orders(cfg)  # ④ TTL
+            # close any expired option positions (worthless) before exits/scan
+            summary["expired_options"] = _close_expired_options(cycle_id, cfg)
             # ⑤⑥⑦ exit rules — close paper longs hitting TP/SL/trailing first
             summary["exits"] = _process_exits(cycle_id, cfg)
         except Exception:
@@ -448,6 +556,11 @@ def run_once(mode: str = "paper") -> Dict[str, Any]:
                     continue
                 decision = _judge(symbol, fc, cfg, held.get(symbol, 0.0))
                 if not decision:
+                    # bearish + not-held + options on -> long PUT (no council)
+                    bp = _bearish_put_entry(cycle_id, symbol, fc, cfg, held.get(symbol, 0.0))
+                    if bp:
+                        summary["proposals"].append(bp)
+                        continue
                     summary["proposals"].append({"symbol": symbol, "result": "no_edge"})
                     continue
                 # Analyst-council advisory pass (BUY candidates only). Can veto

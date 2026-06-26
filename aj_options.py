@@ -117,22 +117,47 @@ def _days_to(expiry: str) -> Optional[int]:
 
 # ── contract selection ────────────────────────────────────────────────────────
 
+def _liquid_enough(row: Dict[str, Any], min_oi: int, max_spread_pct: float) -> bool:
+    """Reject illiquid contracts: low open interest, or a bid-ask spread wider
+    than max_spread_pct of the mid (you can't realistically trade those)."""
+    try:
+        oi = int(row.get("openInterest") or 0)
+        vol = int(row.get("volume") or 0)
+    except (TypeError, ValueError):
+        oi, vol = 0, 0
+    if min_oi > 0 and oi < min_oi and vol < min_oi:
+        return False
+    try:
+        bid, ask = float(row.get("bid") or 0), float(row.get("ask") or 0)
+    except (TypeError, ValueError):
+        return True   # no bid/ask to judge — don't reject on spread alone
+    if bid > 0 and ask > 0:
+        mid = (bid + ask) / 2.0
+        if mid > 0 and (ask - bid) / mid > max_spread_pct:
+            return False
+    return True
+
+
 def pick_contract(underlying: str, side: str, cfg: Dict[str, Any], *,
+                  direction: str = "bullish",
                   spot: Optional[float] = None,
                   expirations: Optional[List[str]] = None,
                   chain_fn: Optional[Callable[[str, str], Dict]] = None) -> Optional[Dict[str, Any]]:
-    """Pick a near-dated, near-the-money LONG option for a directional signal.
-    side 'buy' -> long CALL (bullish). Returns a contract dict or None.
-    Long-only: a 'sell' here is not a new short — it returns None (exits of held
-    options are handled by closing the existing position, not via pick)."""
+    """Pick a near-dated, near-the-money LONG option for a directional signal:
+    direction 'bullish' -> long CALL, 'bearish' -> long PUT. side must be 'buy'
+    (we're always BUYING the option / long premium — never writing). A 'sell'
+    returns None (exits close the held position, not via pick)."""
     if str(side).lower() != "buy":
         return None
     underlying = str(underlying or "").upper()
     if not underlying:
         return None
+    opt_type = "put" if str(direction).lower() == "bearish" else "call"
     mult = int(cfg.get("option_contract_multiplier", DEFAULT_MULTIPLIER) or DEFAULT_MULTIPLIER)
     target_dte = int(cfg.get("option_target_dte", 35) or 35)
-    moneyness = float(cfg.get("option_moneyness", 0.0) or 0.0)   # 0 = ATM; +0.05 = 5% OTM
+    moneyness = float(cfg.get("option_moneyness", 0.0) or 0.0)
+    min_oi = int(cfg.get("option_min_open_interest", 50) or 0)
+    max_spread = float(cfg.get("option_max_spread_pct", 0.30) or 1.0)
 
     if spot is None:
         spot = _default_spot(underlying)
@@ -141,7 +166,6 @@ def pick_contract(underlying: str, side: str, cfg: Dict[str, Any], *,
     exps = expirations if expirations is not None else _default_expirations(underlying)
     if not exps:
         return None
-    # nearest expiry with DTE >= target (else the longest available)
     dated = sorted([(e, _days_to(e)) for e in exps if _days_to(e) is not None],
                    key=lambda x: x[1])
     if not dated:
@@ -149,12 +173,15 @@ def pick_contract(underlying: str, side: str, cfg: Dict[str, Any], *,
     expiry = next((e for e, d in dated if d >= target_dte), dated[-1][0])
 
     chain = (chain_fn or _default_chain)(underlying, expiry)
-    calls = (chain or {}).get("calls") or []
-    if not calls:
+    rows = (chain or {}).get("calls" if opt_type == "call" else "puts") or []
+    if not rows:
         return None
-    target_strike = spot * (1.0 + moneyness)
+    # ATM by default; a call OTM is ABOVE spot, a put OTM is BELOW spot.
+    sign = 1.0 if opt_type == "call" else -1.0
+    target_strike = spot * (1.0 + sign * abs(moneyness))
     best = None
-    for row in calls:
+    fallback = None   # nearest contract ignoring liquidity, if none pass the filter
+    for row in rows:
         try:
             strike = float(row.get("strike"))
         except (TypeError, ValueError):
@@ -163,14 +190,19 @@ def pick_contract(underlying: str, side: str, cfg: Dict[str, Any], *,
         if prem is None:
             continue
         dist = abs(strike - target_strike)
+        if fallback is None or dist < fallback[0]:
+            fallback = (dist, strike, prem)
+        if not _liquid_enough(row, min_oi, max_spread):
+            continue
         if best is None or dist < best[0]:
             best = (dist, strike, prem)
-    if best is None:
+    chosen = best or fallback
+    if chosen is None:
         return None
-    _, strike, prem = best
+    _, strike, prem = chosen
     return {
-        "symbol": format_symbol(underlying, expiry, "call", strike),
-        "underlying": underlying, "option_type": "call", "strike": strike,
+        "symbol": format_symbol(underlying, expiry, opt_type, strike),
+        "underlying": underlying, "option_type": opt_type, "strike": strike,
         "expiry": expiry, "premium_contract": prem, "contract_multiplier": mult,
         "spot": spot, "instrument_type": "option",
     }

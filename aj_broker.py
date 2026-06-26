@@ -118,8 +118,13 @@ class PaperBroker(BrokerClient):
             log.debug("paper quote failed for %s", symbol, exc_info=True)
         return None
 
-    def _fees(self, notional: float, asset_type: str) -> float:
+    def _fees(self, notional: float, asset_type: str, qty: float = 0.0) -> float:
         cfg = aj_config.get_config()
+        # Options: a per-CONTRACT commission (qty = contracts), not a bps of
+        # notional — the standard options fee model.
+        if asset_type == "option":
+            per = max(0.0, float(cfg.get("option_fee_per_contract") or 0))
+            return aj_db.money(abs(float(qty or 0)) * per)
         bps = cfg.get("crypto_fee_bps") if asset_type == "crypto" else cfg.get("fee_bps")
         # Clamp bps to >=0 so a misconfigured negative fee_bps cannot silently
         # zero out (or refund) fees — fail-safe toward charging, never free trades.
@@ -189,7 +194,7 @@ class PaperBroker(BrokerClient):
 
         fill_price = aj_db.money(fill_price)
         notional = fill_price * qty
-        fees = self._fees(notional, asset_type)
+        fees = self._fees(notional, asset_type, qty=qty)
         fill = {"qty": qty, "price": fill_price, "fees_usd": fees,
                 "broker_fill_id": "pf_" + uuid.uuid4().hex[:12],
                 "filled_at": aj_db.utc_now_iso()}

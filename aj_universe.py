@@ -53,23 +53,43 @@ def _crypto_population(cfg: Dict[str, Any]) -> List[str]:
     if not cfg.get("include_crypto", True):
         return []
     out: List[str] = []
+    top = int(cfg.get("crypto_universe_top", 60) or 60)
     try:
         import idea_generator as ig
-        top = int(cfg.get("crypto_universe_top", 60) or 60)
-        try:
-            full = ig.get_full_crypto_universe(top) or []
-            out = [(c.get("symbol") if isinstance(c, dict) else c) for c in full]
-        except Exception:
-            out = list(getattr(ig, "CRYPTO_UNIVERSE", []) or [])
+        full = ig.get_full_crypto_universe(top) or []
+        out = [(c.get("symbol") if isinstance(c, dict) else c) for c in full if (
+            c.get("symbol") if isinstance(c, dict) else c)]
     except Exception:
-        log.debug("crypto universe unavailable", exc_info=True)
+        log.debug("crypto universe fetch failed; using last-good/curated", exc_info=True)
     norm = []
     for s in out:
         if not s:
             continue
         s = str(s).upper()
         norm.append(s if s.endswith("-USD") else s + "-USD")
-    return norm[:int(cfg.get("crypto_universe_top", 60) or 60)]
+    norm = norm[:top]
+    # Robustness: persist the last GOOD list; on a fetch failure (e.g. CoinGecko
+    # 429) reuse it instead of collapsing to the tiny curated fallback.
+    try:
+        import aj_db
+        import json as _json
+        if len(norm) >= 10:
+            aj_db.set_setting_raw("__aj_crypto_lastgood", _json.dumps(norm))
+        else:
+            raw = aj_db.get_setting_raw("__aj_crypto_lastgood")
+            cached = _json.loads(raw) if raw else []
+            if len(cached) > len(norm):
+                norm = cached[:top]
+    except Exception:
+        pass
+    if not norm:
+        try:
+            import idea_generator as ig
+            norm = [(s if str(s).upper().endswith("-USD") else str(s).upper() + "-USD")
+                    for s in (getattr(ig, "CRYPTO_UNIVERSE", []) or [])][:top]
+        except Exception:
+            pass
+    return norm
 
 
 # ── rotation (sweep the full population across cycles) ─────────────────────────
@@ -105,12 +125,60 @@ def _num(v: Any) -> float:
         return 0.0
 
 
+def _cache_upsert(rows: Dict[str, Any]) -> None:
+    """Store this cycle's slice quotes so future cycles can rank across them."""
+    try:
+        import aj_db
+        import database as db
+        ts = aj_db.utc_now_iso()
+        with db._write_lock:
+            conn = db.get_conn()
+            for sym, q in rows.items():
+                if not isinstance(q, dict):
+                    continue
+                conn.execute(
+                    "INSERT OR REPLACE INTO aj_screen_cache "
+                    "(symbol, ts, price, volume, market_cap, change_pct) VALUES (?,?,?,?,?,?)",
+                    (sym, ts, _num(q.get("price")), _num(q.get("volume")),
+                     _num(q.get("market_cap")), _num(q.get("change_pct"))))
+            conn.commit()
+    except Exception:
+        log.debug("screen cache upsert failed", exc_info=True)
+
+
+def _cache_fresh(ttl_min: int) -> List[Dict[str, Any]]:
+    """All cache rows seen within ttl_min (the global-best view), pruning older."""
+    try:
+        import aj_db
+        import database as db
+        from datetime import timedelta
+        cutoff = (aj_db.utc_now() - timedelta(minutes=max(1, ttl_min))).replace(
+            microsecond=0).isoformat()
+        with db._write_lock:
+            conn = db.get_conn()
+            conn.execute("DELETE FROM aj_screen_cache WHERE ts < ?", (cutoff,))
+            conn.commit()
+            rows = conn.execute(
+                "SELECT symbol, price, volume, market_cap, change_pct "
+                "FROM aj_screen_cache WHERE ts >= ?", (cutoff,)).fetchall()
+        return [dict(r) for r in rows]
+    except Exception:
+        log.debug("screen cache read failed", exc_info=True)
+        return []
+
+
 def screen(cfg: Dict[str, Any] = None) -> List[str]:
-    """Return the screened candidate shortlist for this cycle. Never raises."""
+    """Return the screened candidate shortlist for this cycle. Never raises.
+
+    Quotes this cycle's rotating slice, merges it into a TTL cache, then ranks
+    across EVERY recently-seen name (not just the slice) so a strong setup seen a
+    few cycles ago is still selectable. Crypto (inherently liquid) is always
+    included so crypto trading is guaranteed."""
     try:
         cfg = cfg or aj_config.get_config()
         batch = max(1, int(cfg.get("screen_scan_batch", 400) or 400))
         smax = max(1, int(cfg.get("screen_max", 150) or 150))
+        ttl = int(cfg.get("screen_cache_ttl_min", 45) or 45)
         min_price = _num(cfg.get("screen_min_price", 1.0))
         min_dvol = _num(cfg.get("screen_min_dollar_volume", 1_000_000))
         min_mcap = _num(cfg.get("screen_min_market_cap", 0))
@@ -120,18 +188,29 @@ def screen(cfg: Dict[str, Any] = None) -> List[str]:
         if not equities and not cryptos:
             return []
 
-        # cheap batch quote of this cycle's slice (+ crypto, for momentum rank)
+        # quote this cycle's slice, fold into the global cache
         quotes: Dict[str, Any] = {}
         try:
             import fetcher
             quotes = fetcher.get_quotes_batch(equities + cryptos) or {}
         except Exception:
             log.exception("screen: batch quote failed")
+        if quotes:
+            _cache_upsert({s: quotes[s] for s in equities if s in quotes})
+
+        # rank across the whole fresh cache (global-best), else this slice only
+        pool = _cache_fresh(ttl)
+        if not pool:
+            pool = [dict(symbol=s, price=_num((quotes.get(s) or {}).get("price")),
+                         volume=_num((quotes.get(s) or {}).get("volume")),
+                         market_cap=_num((quotes.get(s) or {}).get("market_cap")),
+                         change_pct=_num((quotes.get(s) or {}).get("change_pct")))
+                    for s in equities if s in quotes]
 
         scored = []
-        for sym in equities:
-            q = quotes.get(sym) or quotes.get(sym.upper())
-            if not isinstance(q, dict):
+        for q in pool:
+            sym = q.get("symbol")
+            if not sym or sym.endswith("-USD"):
                 continue
             px = _num(q.get("price"))
             if px < min_price:
@@ -146,9 +225,6 @@ def screen(cfg: Dict[str, Any] = None) -> List[str]:
             scored.append((sym, momentum, dvol))
         scored.sort(key=lambda x: (-x[1], -x[2]))
         out = [s for s, _, _ in scored[:smax]]
-
-        # crypto is the inherently-liquid top set → always include (capped),
-        # so crypto trading is guaranteed even when a slice has thin equity flow.
         out.extend(c for c in cryptos if c not in out)
         return out
     except Exception:

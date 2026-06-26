@@ -165,6 +165,95 @@ def test_option_marks_via_chain():
         aj_options.mark = _orig
 
 
+def test_pick_contract_bearish_put():
+    exp = _future(40)
+    puts = [{"strike": 150, "bid": 5.0, "ask": 5.2, "openInterest": 500},
+            {"strike": 140, "bid": 1.0, "ask": 1.1, "openInterest": 500}]
+    c = O.pick_contract("AAPL", "buy", {}, direction="bearish", spot=151.0,
+                        expirations=[exp], chain_fn=lambda u, e: {"calls": [], "puts": puts})
+    assert c is not None and c["option_type"] == "put"
+    assert c["strike"] == 150 and c["symbol"].endswith(":P:150.0")
+
+
+def test_pick_contract_liquidity_filter():
+    exp = _future(40)
+    # the ATM 150 is ILLIQUID (oi 0, wide spread); 145 is liquid -> pick 145
+    calls = [
+        {"strike": 150, "bid": 1.0, "ask": 3.0, "openInterest": 0, "volume": 0},   # illiquid+wide
+        {"strike": 145, "bid": 6.0, "ask": 6.2, "openInterest": 800, "volume": 50},  # liquid
+    ]
+    c = O.pick_contract("AAPL", "buy", {"option_min_open_interest": 50, "option_max_spread_pct": 0.30},
+                        spot=151.0, expirations=[exp], chain_fn=_chain(calls))
+    assert c["strike"] == 145, c
+
+
+def test_option_fee_per_contract():
+    import aj_broker, aj_config
+    aj_config.set_config({"option_fee_per_contract": 0.65})
+    b = aj_broker.PaperBroker()
+    # 3 contracts -> 3 × $0.65 = $1.95 (notional ignored for options)
+    assert abs(b._fees(1530.0, "option", qty=3) - 1.95) < 1e-9
+    # equities still use bps
+    aj_config.set_config({"fee_bps": 0.0})
+    assert b._fees(1000.0, "stock", qty=3) == 0.0
+
+
+def test_close_expired_options():
+    import aj_config, aj_operator, aj_positions, aj_options
+    aj_db.aj_init()
+    conn = db.get_conn()
+    for t in ("aj_fills", "aj_orders"):
+        conn.execute("DELETE FROM " + t)
+    conn.commit()
+    sym = O.format_symbol("AAPL", _future(-3), "call", 150.0)   # already expired
+    oid = aj_db.insert("aj_orders", proposal_id=0, client_order_id="seed1", broker="paper",
+                       mode="paper", symbol=sym, side="buy", qty=2, order_type="limit",
+                       state="filled", filled_qty=2, avg_fill_price=500.0,
+                       created_at=aj_db.utc_now_iso(), instrument_type="option")
+    aj_db.insert("aj_fills", order_id=oid, qty=2, price=500.0, fees_usd=0, filled_at=aj_db.utc_now_iso())
+    assert sym in (aj_positions.paper_book().get("positions") or {})
+    out = aj_operator._close_expired_options("cyc-exp", aj_config.get_config())
+    assert any(o.get("result") == "expired_closed" for o in out), out
+    # position is flat now; realized reflects the full premium loss
+    book = aj_positions.paper_book()
+    assert sym not in (book.get("positions") or {})
+    assert book["realized_total"] < 0      # lost the premium
+
+
+def test_bearish_put_entry_routes():
+    import aj_config, aj_operator, aj_options, aj_positions
+    aj_db.aj_init()
+    conn = db.get_conn()
+    for t in ("aj_fills", "aj_orders", "aj_proposals"):
+        conn.execute("DELETE FROM " + t)
+    conn.commit()
+    aj_config.set_config({"trading_enabled": True, "universe_mode": "market_screen",
+                          "auto_approve_paper": True, "default_broker": "paper",
+                          "max_order_notional_usd": 100000, "max_trades_per_day": 50,
+                          "max_daily_loss_usd": 100000, "min_edge_pct_pts": 0.0,
+                          "session_whitelist": ["premarket", "regular", "afterhours"],
+                          "trade_options": True, "option_trade_puts": True})
+    _orig = aj_options.pick_contract
+    aj_options.pick_contract = lambda und, side, cfg, **k: {
+        "symbol": O.format_symbol(und, "2026-07-17", "put", 140.0),
+        "underlying": und, "option_type": "put", "strike": 140.0,
+        "expiry": "2026-07-17", "premium_contract": 300.0, "contract_multiplier": 100,
+        "instrument_type": "option"}
+    _omark = aj_options.mark
+    aj_options.mark = lambda s, **k: 300.0
+    fc = {"ensemble": {"prob_up": 0.30, "edge_pct_pts": 20.0}}   # bearish
+    try:
+        out = aj_operator._bearish_put_entry("cyc-bear", "AAPL", fc, aj_config.get_config(), 0.0)
+        assert out is not None and out.get("result") == "executed", out
+        book = aj_positions.paper_book().get("positions") or {}
+        put_sym = O.format_symbol("AAPL", "2026-07-17", "put", 140.0)
+        assert put_sym in book and book[put_sym]["asset_type"] == "option"
+    finally:
+        aj_options.pick_contract = _orig
+        aj_options.mark = _omark
+        aj_config.set_config({"trade_options": False})
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     print("aj_options — {} tests".format(len(fns)))

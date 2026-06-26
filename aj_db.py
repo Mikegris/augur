@@ -32,7 +32,7 @@ import database as db
 log = logging.getLogger("augur.aj_db")
 
 # ── schema version target (bump when adding a numbered migration step) ────────
-AJ_SCHEMA_TARGET = 4
+AJ_SCHEMA_TARGET = 5
 _SCHEMA_KEY = "aj_schema_version"
 
 # ── DDL (§5). CREATE TABLE IF NOT EXISTS is safe to re-run; column ADDs go
@@ -340,6 +340,19 @@ def aj_migrate() -> int:
                         conn.execute("ALTER TABLE {} ADD COLUMN {} {}".format(table, col, decl))
             conn.commit()
             current = 4
+        # Step 5 — screener quote cache (global-best ranking across cycles).
+        if current < 5:
+            conn.execute("""CREATE TABLE IF NOT EXISTS aj_screen_cache (
+                symbol      TEXT PRIMARY KEY,
+                ts          TEXT NOT NULL,
+                price       REAL,
+                volume      REAL,
+                market_cap  REAL,
+                change_pct  REAL
+            )""")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_aj_screen_cache_ts ON aj_screen_cache(ts)")
+            conn.commit()
+            current = 5
         set_setting_raw(_SCHEMA_KEY, str(current))
         log.info("aj_migrate: schema at version %d", current)
         return current
@@ -762,6 +775,8 @@ _ALLOWED_TABLES = frozenset({
     "aj_recon", "aj_cycles", "aj_equity", "aj_cycle_log", "aj_position_state",
     # Analyst Council (step 3) — advisory artifacts, also audit-chained.
     "aj_council_runs", "aj_analyst_reports", "aj_debate_turns", "aj_reflections",
+    # screener quote cache (step 5)
+    "aj_screen_cache",
 })
 _IDENT_RE = _re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 

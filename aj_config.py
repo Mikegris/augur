@@ -163,6 +163,13 @@ DEFAULTS: Dict[str, Any] = {
     "option_target_dte":      35,      # target days-to-expiry for picked contracts
     "option_moneyness":       0.0,     # 0 = ATM; +0.05 = 5% OTM call
     "option_contract_multiplier": 100,
+    "option_min_open_interest": 50,    # skip illiquid contracts below this OI
+    "option_max_spread_pct":  0.30,    # skip contracts whose bid-ask > this × mid
+    "option_fee_per_contract": 0.65,   # paper option commission per contract
+    "option_trade_puts":      True,    # also buy long PUTS on bearish signals
+    # screener global-best cache: rank across recently-seen names, not just the
+    # current rotating slice (closes the "rolling sweep only sees 400/cycle" gap).
+    "screen_cache_ttl_min":   45,      # how long a screened quote stays rank-eligible
 }
 
 _BOOL_KEYS = {"trading_enabled", "live_trading_enabled", "robinhood_enabled",
@@ -182,7 +189,7 @@ _BOOL_KEYS = {"trading_enabled", "live_trading_enabled", "robinhood_enabled",
               # universe screener
               "screen_full_equities", "include_crypto",
               # options
-              "trade_options"}
+              "trade_options", "option_trade_puts"}
 _LIST_KEYS = {"symbol_allowlist", "session_whitelist"}
 _FLOAT_KEYS = {"max_order_notional_usd", "max_daily_loss_usd",
                "paper_slippage_bps", "paper_spread_fraction", "fee_bps",
@@ -203,7 +210,8 @@ _FLOAT_KEYS = {"max_order_notional_usd", "max_daily_loss_usd",
                "coequal_min_alpha", "coequal_max_boost",
                # universe screener
                "screen_min_price", "screen_min_dollar_volume",
-               "screen_min_market_cap", "option_moneyness"}
+               "screen_min_market_cap", "option_moneyness",
+               "option_max_spread_pct", "option_fee_per_contract"}
 _INT_KEYS = {"max_trades_per_day", "forecast_horizon_days", "scan_universe_max",
              "order_ttl_cycles", "exit_cooldown_min", "max_open_positions",
              "max_trades_per_symbol_per_day", "trade_skip_open_min",

@@ -30,6 +30,8 @@ def _mock_quotes(qmap):
 
 
 def test_screen_filters_and_ranks():
+    db.get_conn().execute("DELETE FROM aj_screen_cache"); db.get_conn().commit()
+    aj_db.set_setting_raw("__aj_crypto_lastgood", "")
     _mock_population(["AAA", "BBB", "CCC", "PENNY", "ILLIQ"])
     _mock_quotes({
         "AAA": {"price": 100, "volume": 1e6, "market_cap": 5e9, "change_pct": 5.0},   # strong mover
@@ -53,6 +55,7 @@ def test_screen_filters_and_ranks():
 
 
 def test_screen_respects_screen_max():
+    db.get_conn().execute("DELETE FROM aj_screen_cache"); db.get_conn().commit()
     _mock_population(["A", "B", "C", "D", "E"], cryptos=())
     _mock_quotes({s: {"price": 10, "volume": 1e7, "market_cap": 1e9, "change_pct": i}
                   for i, s in enumerate(["A", "B", "C", "D", "E"])})
@@ -62,6 +65,8 @@ def test_screen_respects_screen_max():
 
 
 def test_screen_fail_closed_on_quote_error():
+    db.get_conn().execute("DELETE FROM aj_screen_cache"); db.get_conn().commit()
+    aj_db.set_setting_raw("__aj_crypto_lastgood", "")
     _mock_population(["A", "B"], cryptos=("BTC",))
     import fetcher
     fetcher.get_quotes_batch = lambda syms: (_ for _ in ()).throw(RuntimeError("net down"))
@@ -98,6 +103,41 @@ def test_scan_dispatch_allowlist_failclosed():
     out = aj_operator._scan_universe()
     assert sorted(out) == ["AAPL", "NVDA"]
     assert aj_config.is_open_universe() is False  # gate stays fail-closed too
+
+
+def test_screen_global_cache_ranks_across_cycles():
+    # population of 4, batch 2 -> cycle1 sees AAA/BBB, cycle2 sees CCC/DDD.
+    # AAA is the strongest mover; it must still rank into cycle2's shortlist
+    # from the cache even though it's NOT in cycle2's slice.
+    db.get_conn().execute("DELETE FROM aj_screen_cache"); db.get_conn().commit()
+    aj_db.set_setting_raw("__aj_screen_cursor", "0")
+    _mock_population(["AAA", "BBB", "CCC", "DDD"], cryptos=())
+    _mock_quotes({
+        "AAA": {"price": 100, "volume": 1e7, "market_cap": 1e10, "change_pct": 9.0},
+        "BBB": {"price": 50, "volume": 1e7, "market_cap": 1e10, "change_pct": 1.0},
+        "CCC": {"price": 20, "volume": 1e7, "market_cap": 1e10, "change_pct": 2.0},
+        "DDD": {"price": 30, "volume": 1e7, "market_cap": 1e10, "change_pct": 3.0},
+    })
+    aj_config.set_config({"screen_scan_batch": 2, "screen_max": 5, "include_crypto": False,
+                          "screen_cache_ttl_min": 60})
+    c1 = aj_universe.screen()
+    assert "AAA" in c1
+    c2 = aj_universe.screen()                  # slice is CCC/DDD now
+    assert "AAA" in c2, "strong name from a prior slice must persist via the cache"
+    assert c2[0] == "AAA"                      # still the top mover globally
+
+
+def test_crypto_lastgood_fallback():
+    import idea_generator as ig
+    aj_db.set_setting_raw("__aj_crypto_lastgood", "")
+    big = [{"symbol": "C%02d" % i} for i in range(30)]
+    ig.get_full_crypto_universe = lambda top_n=60: big
+    got1 = aj_universe._crypto_population({"include_crypto": True, "crypto_universe_top": 60})
+    assert len(got1) == 30 and got1[0] == "C00-USD"
+    # now the fetch fails -> must reuse the last-good 30, not collapse
+    ig.get_full_crypto_universe = lambda top_n=60: (_ for _ in ()).throw(RuntimeError("429"))
+    got2 = aj_universe._crypto_population({"include_crypto": True, "crypto_universe_top": 60})
+    assert len(got2) == 30, "should reuse last-good crypto list on fetch failure"
 
 
 def test_open_universe_helper_agrees():

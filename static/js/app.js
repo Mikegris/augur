@@ -4231,6 +4231,23 @@ function _ajMoney(v) {
   const n = Number(v);
   return (n < 0 ? '-$' : '$') + Math.abs(n).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 }
+// Render an option ticker like "OPT:AAPL:20260717:C:150.0" as a human label
+// "AAPL $150 CALL 07/17/26". Non-option symbols pass through unchanged.
+function _ajFmtSymbol(sym) {
+  if (typeof sym !== 'string' || sym.indexOf('OPT:') !== 0) return sym;
+  const parts = sym.split(':');
+  if (parts.length < 5) return sym;
+  const und = parts[1];
+  const ymd = parts[2];
+  const cp = (parts[3] || '').toUpperCase();
+  const strikeRaw = parts[4];
+  if (!/^\d{8}$/.test(ymd)) return sym;
+  const mm = ymd.slice(4, 6), dd = ymd.slice(6, 8), yy = ymd.slice(2, 4);
+  const right = cp === 'C' ? 'CALL' : (cp === 'P' ? 'PUT' : cp);
+  const strikeN = Number(strikeRaw);
+  const strike = isFinite(strikeN) ? String(strikeN) : strikeRaw;
+  return `${und} $${strike} ${right} ${mm}/${dd}/${yy}`;
+}
 function _ajPill(label, on, tone) {
   const cls = on ? (tone || 'green') : 'dim';
   return `<span class="status-val ${cls}" style="padding:2px 8px;border:1px solid var(--border);border-radius:10px;font-size:11px;margin-right:6px">${_esc(label)}</span>`;
@@ -4428,6 +4445,24 @@ async function loadTradingView() {
           f('Scan limit (open mode)', num('aj-cfg-scan_universe_max', cfg.scan_universe_max, null, 'symbols'), 'In open-universe mode, how many candidates to scan each cycle.')
         )}
 
+        ${group('🌐 Universe / screener', 'How wide a net the agent casts for candidates', false,
+          f('Universe', `<select id="aj-cfg-universe_mode"><option value="allowlist"${cfg.universe_mode!=='open'&&cfg.universe_mode!=='market_screen'?' selected':''}>Allowlist (only your tickers)</option><option value="open"${cfg.universe_mode==='open'?' selected':''}>Open (any quotable)</option><option value="market_screen"${cfg.universe_mode==='market_screen'?' selected':''}>Market screen (auto-shortlist)</option></select>`, 'Allowlist trades only your tickers; open lets it trade anything quotable; market-screen builds a shortlist by liquidity & size each cycle.') +
+          f('Include crypto', yn('aj-cfg-include_crypto', cfg.include_crypto), 'Add liquid crypto names to the candidate universe.') +
+          f('Top-N crypto', num('aj-cfg-crypto_universe_top', cfg.crypto_universe_top, null, 'names'), 'How many of the largest crypto names to include.') +
+          f('Screen shortlist size', num('aj-cfg-screen_max', cfg.screen_max, null, 'names'), 'Market-screen: how many names to keep on the shortlist.') +
+          f('Per-cycle scan batch', num('aj-cfg-screen_scan_batch', cfg.screen_scan_batch, null, 'names'), 'Market-screen: how many names to scan each cycle.') +
+          f('Min price $', num('aj-cfg-screen_min_price', cfg.screen_min_price, '0.5', '$'), 'Screen out names trading below this price.') +
+          f('Min $ volume', num('aj-cfg-screen_min_dollar_volume', cfg.screen_min_dollar_volume, null, '$'), 'Require at least this much daily dollar-volume (liquidity).') +
+          f('Min market cap $', num('aj-cfg-screen_min_market_cap', cfg.screen_min_market_cap, null, '$'), 'Screen out names smaller than this market cap.')
+        )}
+
+        ${group('📑 Options (paper)', 'Let the agent trade long calls/puts on its signals — paper only', false,
+          f('Trade options (long calls/puts, paper)', yn('aj-cfg-trade_options', cfg.trade_options), 'When on, the agent may express a signal as a long call or put instead of stock. Paper only.') +
+          f('Option target DTE', num('aj-cfg-option_target_dte', cfg.option_target_dte, null, 'days'), 'Aim for a contract roughly this many days to expiration.') +
+          f('Option moneyness (0=ATM)', num('aj-cfg-option_moneyness', cfg.option_moneyness, '0.01'), 'Strike offset from spot: 0=at-the-money, positive=out-of-the-money.') +
+          f('Contract multiplier', num('aj-cfg-option_contract_multiplier', cfg.option_contract_multiplier, null, '×'), 'Shares per contract (standard US equity options = 100).')
+        )}
+
         ${group('🧠 Analyst Council (advisory)', 'A panel of analysts that debate a name — advisory only, never trades, double-gated', false,
           f('Council enabled', yn('aj-cfg-council_enabled', cfg.council_enabled), 'Master switch for the council. Off by default; also needs the VERIFY-COUNCIL gate to actually run.') +
           f('Policy', `<select id="aj-cfg-council_policy"><option value="advisory"${cfg.council_policy!=='confirm'&&cfg.council_policy!=='coequal'?' selected':''}>Advisory (read-only)</option><option value="confirm"${cfg.council_policy==='confirm'?' selected':''}>Confirm (must agree)</option><option value="coequal"${cfg.council_policy==='coequal'?' selected':''}>Co-equal</option></select>`, 'How much weight the council carries. The risk gate is always the final authority — the council can never push an order past a cap or unblock a gate.') +
@@ -4603,6 +4638,20 @@ async function loadTradingView() {
       symbol_allowlist: vList('aj-cfg-symbol_allowlist'),
       allow_any_symbol: vBool('aj-cfg-allow_any_symbol'),
       scan_universe_max: vNum('aj-cfg-scan_universe_max'),
+      // universe / screener
+      universe_mode: vStr('aj-cfg-universe_mode'),
+      include_crypto: vBool('aj-cfg-include_crypto'),
+      crypto_universe_top: vNum('aj-cfg-crypto_universe_top'),
+      screen_max: vNum('aj-cfg-screen_max'),
+      screen_scan_batch: vNum('aj-cfg-screen_scan_batch'),
+      screen_min_price: vNum('aj-cfg-screen_min_price'),
+      screen_min_dollar_volume: vNum('aj-cfg-screen_min_dollar_volume'),
+      screen_min_market_cap: vNum('aj-cfg-screen_min_market_cap'),
+      // options (paper)
+      trade_options: vBool('aj-cfg-trade_options'),
+      option_target_dte: vNum('aj-cfg-option_target_dte'),
+      option_moneyness: vNum('aj-cfg-option_moneyness'),
+      option_contract_multiplier: vNum('aj-cfg-option_contract_multiplier'),
       max_order_notional_usd: vNum('aj-cfg-max_order_notional_usd'),
       max_trades_per_day: vNum('aj-cfg-max_trades_per_day'),
       max_daily_loss_usd: vNum('aj-cfg-max_daily_loss_usd'),
@@ -4705,13 +4754,13 @@ async function loadTradingView() {
     if (pEl) {
       const rows = (pr.proposals || []);
       pEl.innerHTML = rows.length ? `<table class="data-table" style="width:100%"><thead><tr><th>Symbol</th><th>Side</th><th>Qty</th><th>Status</th><th>Thesis</th></tr></thead><tbody>${rows.map(p =>
-        `<tr><td>${_esc(p.symbol)}</td><td>${_esc(p.side)}</td><td>${_esc(String(p.qty || ''))}</td><td>${_esc(p.status)}</td><td class="muted" style="font-size:11px">${_esc((p.thesis || p.risk_reason || '').slice(0, 80))}</td></tr>`).join('')}</tbody></table>` : '<div class="muted">No proposals yet — run a cycle.</div>';
+        `<tr><td>${_esc(_ajFmtSymbol(p.symbol))}</td><td>${_esc(p.side)}</td><td>${_esc(String(p.qty || ''))}</td><td>${_esc(p.status)}</td><td class="muted" style="font-size:11px">${_esc((p.thesis || p.risk_reason || '').slice(0, 80))}</td></tr>`).join('')}</tbody></table>` : '<div class="muted">No proposals yet — run a cycle.</div>';
     }
     const oEl = document.getElementById('aj-orders');
     if (oEl) {
       const rows = (od.orders || []);
       oEl.innerHTML = rows.length ? `<table class="data-table" style="width:100%"><thead><tr><th>Symbol</th><th>Side</th><th>Qty</th><th>State</th><th>Avg fill</th><th>Mode</th></tr></thead><tbody>${rows.map(o =>
-        `<tr><td>${_esc(o.symbol)}</td><td>${_esc(o.side)}</td><td>${_esc(String(o.qty || ''))}</td><td>${_esc(o.state)}</td><td>${o.avg_fill_price ? _ajMoney(o.avg_fill_price) : '—'}</td><td>${_esc(o.mode)}</td></tr>`).join('')}</tbody></table>` : '<div class="muted">No orders yet.</div>';
+        `<tr><td>${_esc(_ajFmtSymbol(o.symbol))}</td><td>${_esc(o.side)}</td><td>${_esc(String(o.qty || ''))}</td><td>${_esc(o.state)}</td><td>${o.avg_fill_price ? _ajMoney(o.avg_fill_price) : '—'}</td><td>${_esc(o.mode)}</td></tr>`).join('')}</tbody></table>` : '<div class="muted">No orders yet.</div>';
     }
   } catch (e) {}
 
@@ -4745,7 +4794,7 @@ async function loadTradingView() {
     if (sumEl) sumEl.textContent = posRows.length ? (posRows.length + ' positions · MV ' + _ajMoney(pd.total_market_value) + ' · unreal ' + _ajMoney(pd.total_unrealized)) : '';
     if (ppEl) {
       ppEl.innerHTML = posRows.length ? `<table class="data-table" style="width:100%"><thead><tr><th>Symbol</th><th>Qty</th><th>Avg cost</th><th>Price</th><th>Mkt value</th><th>Unreal P&L</th><th>%</th><th>Weight</th><th>Age</th></tr></thead><tbody>${posRows.map(p =>
-        `<tr><td><b>${_esc(p.symbol)}</b></td><td>${_esc(String(p.qty))}</td><td>${_ajMoney(p.avg_cost)}</td><td>${_ajMoney(p.mark)}</td><td>${_ajMoney(p.market_value)}</td><td style="color:${(p.unrealized||0)>=0?'var(--green)':'var(--red)'}">${_ajMoney(p.unrealized)}</td><td style="color:${(p.unrealized_pct||0)>=0?'var(--green)':'var(--red)'}">${p.unrealized_pct==null?'—':(p.unrealized_pct>=0?'+':'')+_esc(String(p.unrealized_pct))+'%'}</td><td>${p.weight_pct==null?'—':_esc(String(p.weight_pct))+'%'}</td><td>${p.age_days==null?'—':_esc(String(p.age_days))+'d'}</td></tr>`).join('')}</tbody></table>` : '<div class="muted">No paper positions yet — the agent opens positions when it buys (run a cycle during market hours).</div>';
+        `<tr><td><b>${_esc(_ajFmtSymbol(p.symbol))}</b></td><td>${_esc(String(p.qty))}</td><td>${_ajMoney(p.avg_cost)}</td><td>${_ajMoney(p.mark)}</td><td>${_ajMoney(p.market_value)}</td><td style="color:${(p.unrealized||0)>=0?'var(--green)':'var(--red)'}">${_ajMoney(p.unrealized)}</td><td style="color:${(p.unrealized_pct||0)>=0?'var(--green)':'var(--red)'}">${p.unrealized_pct==null?'—':(p.unrealized_pct>=0?'+':'')+_esc(String(p.unrealized_pct))+'%'}</td><td>${p.weight_pct==null?'—':_esc(String(p.weight_pct))+'%'}</td><td>${p.age_days==null?'—':_esc(String(p.age_days))+'d'}</td></tr>`).join('')}</tbody></table>` : '<div class="muted">No paper positions yet — the agent opens positions when it buys (run a cycle during market hours).</div>';
     }
     const aEl = document.getElementById('aj-analytics');
     if (aEl) {
@@ -4762,7 +4811,7 @@ async function loadTradingView() {
         <span class="muted">Equity <b style="color:var(--text-primary)">${lastEq == null ? '—' : _ajMoney(lastEq)}</b></span>
       </div>`;
       const attrTable = attr.length ? `<table class="data-table" style="width:100%"><thead><tr><th>Symbol</th><th>Realized</th><th>Unrealized</th><th>Total</th></tr></thead><tbody>${attr.map(d =>
-        `<tr><td>${_esc(d.symbol)}</td><td>${_ajMoney(d.realized)}</td><td>${_ajMoney(d.unrealized)}</td><td style="color:${(d.total || 0) >= 0 ? 'var(--green)' : 'var(--red)'}">${_ajMoney(d.total)}</td></tr>`).join('')}</tbody></table>` : '<div class="muted">No closed trades yet.</div>';
+        `<tr><td>${_esc(_ajFmtSymbol(d.symbol))}</td><td>${_ajMoney(d.realized)}</td><td>${_ajMoney(d.unrealized)}</td><td style="color:${(d.total || 0) >= 0 ? 'var(--green)' : 'var(--red)'}">${_ajMoney(d.total)}</td></tr>`).join('')}</tbody></table>` : '<div class="muted">No closed trades yet.</div>';
       aEl.innerHTML = statline + attrTable + '<div style="margin-top:8px"><a href="/api/aj/journal.csv" class="btn btn-sm">⬇ Export trade journal (CSV)</a></div>';
     }
   } catch (e) {
