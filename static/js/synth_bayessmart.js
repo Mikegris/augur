@@ -55,7 +55,6 @@
   }
   function _scoreColor(score) {
     if (score == null) return 'var(--text-dim, #888)';
-    if (score >= 75) return 'var(--green, #1fb950)';
     if (score >= 60) return 'var(--green, #1fb950)';
     if (score >= 45) return 'var(--yellow, #d4a017)';
     if (score >= 30) return 'var(--amber, #d4a017)';

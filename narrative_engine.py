@@ -183,25 +183,73 @@ def _build_window(articles, now, days):
     }
 
 
+def _build_window_range(articles, now, start_days, end_days):
+    """Build bucket distribution for a NON-overlapping window covering
+    [now-end_days, now-start_days).
+
+    Used for true rate-of-change velocity: the recent window (0-7d) is
+    compared against the immediately-preceding window (7-14d) so the two
+    samples share no articles. ``_build_window`` (cumulative from now) is
+    kept for phase detection, which genuinely wants nested 7/14/30d shares.
+    """
+    hi = now - timedelta(days=start_days)
+    lo = now - timedelta(days=end_days)
+    window_articles = [a for a in articles if lo <= a["dt"] < hi]
+    total = len(window_articles)
+    if total < 3:
+        return {
+            "buckets": {},
+            "dominant": "INSUFFICIENT DATA",
+            "dominant_pct": 0.0,
+            "article_count": total,
+        }
+    buckets = {}
+    for a in window_articles:
+        b = a["bucket"]
+        buckets[b] = buckets.get(b, 0) + 1
+
+    def _dominant_key(b):
+        idx = _BUCKET_ORDER.index(b) if b in _BUCKET_ORDER else len(_BUCKET_ORDER)
+        return (buckets[b], -idx)
+
+    dominant = max(buckets, key=_dominant_key)
+    dominant_pct = round(buckets[dominant] / total * 100, 1)
+    return {
+        "buckets": buckets,
+        "dominant": dominant,
+        "dominant_pct": dominant_pct,
+        "article_count": total,
+    }
+
+
 def _compute_velocity(windows):
     """Compute narrative velocity score from window data.
 
-    Compares 7d dominant share vs 14d dominant share.  If dominant bucket
-    changed between windows, that signals reversal (negative velocity).
+    Compares the recent 7d window (days 0-7) against the immediately-
+    preceding, NON-overlapping 7d window (days 7-14) for a true
+    rate-of-change. Previously this differenced overlapping cumulative
+    windows (0-7d vs 0-14d), so the 14d figure already contained the 7d
+    articles and the "change" was mechanically damped (and the share delta
+    was scaled by an arbitrary ×2). With disjoint windows a rising dominant
+    share is a genuine acceleration of that narrative.
+
+    Falls back to the cumulative 14d window when the disjoint prior window
+    isn't supplied (older callers) so behaviour never crashes.
 
     Returns int clamped to [-100, +100].
     """
     w7 = windows.get("7d", {})
-    w14 = windows.get("14d", {})
+    # Prefer the non-overlapping prior window; fall back to cumulative 14d.
+    w_prior = windows.get("7d_prior") or windows.get("14d", {})
 
     # Can't compute if either window has insufficient data
-    if w7.get("dominant") == "INSUFFICIENT DATA" or w14.get("dominant") == "INSUFFICIENT DATA":
+    if w7.get("dominant") == "INSUFFICIENT DATA" or w_prior.get("dominant") == "INSUFFICIENT DATA":
         return 0
 
     dominant_7d = w7.get("dominant", "NEUTRAL")
-    dominant_14d = w14.get("dominant", "NEUTRAL")
+    dominant_14d = w_prior.get("dominant", "NEUTRAL")
     pct_7d = w7.get("dominant_pct", 0.0)
-    pct_14d = w14.get("dominant_pct", 0.0)
+    pct_14d = w_prior.get("dominant_pct", 0.0)
 
     if dominant_7d != dominant_14d:
         # A genuine narrative-to-narrative shift gives negative velocity
@@ -397,6 +445,9 @@ def analyze_narrative(symbol):
         "7d": _build_window(articles, now, 7),
         "14d": _build_window(articles, now, 14),
         "30d": _build_window(articles, now, 30),
+        # Non-overlapping prior 7d (days 7-14) for true rate-of-change
+        # velocity. Phase detection still uses the cumulative windows above.
+        "7d_prior": _build_window_range(articles, now, 7, 14),
     }
 
     # Velocity

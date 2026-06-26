@@ -284,17 +284,26 @@ def _c_gex_regime(symbol: str) -> Optional[Tuple[Any, float]]:
     if not regime:
         return None
     r = str(regime).upper()
-    # LONG GAMMA → dampened, pinning, usually a bullish stability tilt.
-    # SHORT GAMMA → reflexive/trending; we call that mildly bearish on the
-    # assumption that flow demand from dealer hedging amplifies down moves.
-    # NEUTRAL → 0.
-    if "LONG" in r or "POSITIVE" in r:
-        n = +0.3
-    elif "SHORT" in r or "NEGATIVE" in r:
-        n = -0.3
+    # GEX is DIRECTION-SYMMETRIC, not directional. Short/negative gamma is
+    # vol-amplifying (dealers hedge WITH the move, magnifying it in either
+    # direction); long/positive gamma is vol-dampening (pinning). It does NOT
+    # imply bullish vs bearish. The previous code scored SHORT gamma as −0.3
+    # (and LONG as +0.3), which injected a persistent bearish bias into the
+    # consensus whenever a name was in a short-gamma regime.
+    #
+    # Fix: contribute ZERO directional score (so GEX no longer pushes the
+    # bull/bear average) and surface the regime + its volatility-amplification
+    # magnitude as a confidence-only annotation in the displayed value. The
+    # contributor still counts toward n_contributors so the regime stays
+    # visible in the drill-down, it just can't bias the score's sign.
+    if "SHORT" in r or "NEGATIVE" in r:
+        vol_amp = "amplifying"   # reflexive / trending regime
+    elif "LONG" in r or "POSITIVE" in r:
+        vol_amp = "dampening"    # pinning / mean-reverting regime
     else:
-        n = 0.0
-    return regime, n
+        vol_amp = "neutral"
+    value = "{} (vol-{})".format(regime, vol_amp)
+    return value, 0.0
 
 
 def _c_narrative(symbol: str) -> Optional[Tuple[Any, float]]:
@@ -601,6 +610,8 @@ def _compute(symbol: str) -> Dict[str, Any]:
     missing: List[str] = []
     weighted_sum = 0.0
     sum_w = 0.0
+    sum_static_w = 0.0       # static weight of contributors that produced a value
+    total_static_w = sum(STATIC_WEIGHTS.values()) or 1.0  # full possible coverage
 
     for name, fn in _CONTRIBUTORS:
         static_w = STATIC_WEIGHTS.get(name, 0.05)
@@ -624,6 +635,7 @@ def _compute(symbol: str) -> Dict[str, Any]:
         weight, hit_rate, n_calls = _dynamic_weight(name, static_w)
         weighted_sum += weight * normalized
         sum_w += weight
+        sum_static_w += static_w
         contributors.append({
             "name": name,
             "value": value,
@@ -647,6 +659,15 @@ def _compute(symbol: str) -> Dict[str, Any]:
         }
 
     avg = weighted_sum / sum_w  # in roughly [-1, +1]
+    # Coverage attenuation: a consensus built from one thin source shouldn't
+    # get the same dynamic range as one corroborated by many. `coverage` is
+    # the fraction of the full static-weight budget that actually produced a
+    # value; we shrink `avg` toward 0 (→ score 50, neutral) proportionally.
+    # A single-source read at ~5-20% coverage is pulled hard toward neutral;
+    # near-full coverage leaves the score essentially unchanged.
+    coverage = sum_static_w / total_static_w if total_static_w > 0 else 1.0
+    coverage = _clip(coverage, 0.0, 1.0)
+    avg *= coverage
     # Tanh squash gives nice midrange spread; 50 + 50*tanh(1.6*avg) maps the
     # high-conviction tails (|avg|≈1) to ~96/4 and keeps the middle band
     # wide. The factor of 1.6 was chosen so |avg|=0.5 lands at ~83.
@@ -665,6 +686,7 @@ def _compute(symbol: str) -> Dict[str, Any]:
         "score": score,
         "label": _label_for_score(score),
         "n_contributors": len(contributors),
+        "coverage": round(coverage, 3),  # fraction of full static-weight budget present
         "contributors": contributors,
         "missing": missing,
         "as_of": datetime.now(timezone.utc).isoformat(),

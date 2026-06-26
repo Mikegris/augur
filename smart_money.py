@@ -300,11 +300,30 @@ def _score_options(ticker, current_price, hist):
         if calls.empty or puts.empty:
             return 8
 
-        # ATM straddle
+        # ATM straddle — use bid/ask MID (not stale lastPrice); fall back to
+        # lastPrice only when a leg has no live quotes.
+        def _leg_mid(df):
+            bid = ask = None
+            try:
+                if "bid" in df.columns:
+                    bid = float(df["bid"].iloc[0])
+                if "ask" in df.columns:
+                    ask = float(df["ask"].iloc[0])
+            except (TypeError, ValueError):
+                bid = ask = None
+            if bid and ask and bid > 0 and ask > 0:
+                return (bid + ask) / 2.0
+            return float(df["lastPrice"].iloc[0])
+
         atm_calls = calls.iloc[(calls["strike"] - current_price).abs().argsort()[:1]]
         atm_puts  = puts.iloc[(puts["strike"] - current_price).abs().argsort()[:1]]
-        straddle_price = float(atm_calls["lastPrice"].iloc[0]) + float(atm_puts["lastPrice"].iloc[0])
-        implied_move_pct = straddle_price / current_price * 100 if current_price else 0
+        straddle_price = _leg_mid(atm_calls) + _leg_mid(atm_puts)
+        raw_implied_move_pct = straddle_price / current_price * 100 if current_price else 0
+        # The ATM straddle prices roughly a 1.25-sigma move, while HV below is a
+        # 1-sigma quantity. Divide the straddle-implied move by ~1.25 so that a
+        # fairly-priced chain (IV == HV) yields iv_premium ~= 1.0 instead of a
+        # spurious ~1.25 premium on every name.
+        implied_move_pct = raw_implied_move_pct / 1.25
 
         # Historical volatility (30-day) — use shared history
         if hist.empty or len(hist) < 20:
@@ -802,7 +821,7 @@ def _compute_score_uncached(symbol):
                 "score": sec_score,
                 "max": 10,
                 "label": "Filing Sentiment",
-                "detail": "AI-analyzed SEC filings",
+                "detail": "8-K item-code analysis (no AI/LLM)",
             },
             "ml_forecast": {
                 "score": ml_score,

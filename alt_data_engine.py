@@ -1,10 +1,12 @@
 """
 Alt-Data Revenue Nowcasting Engine for AUGUR.
 
-Fuses 6 publicly available alternative data signals into a forward-looking
-revenue estimate that predicts the probability of a company beating Wall Street
-consensus earnings estimates. Outputs a nowcast score (0-100) representing
-beat probability.
+Fuses 6 publicly available alternative data signals into a single ordinal
+"nowcast" score (0-100) that summarizes the directional lean of public alt-data
+ahead of an earnings print. The score is a HEURISTIC composite of the
+sub-signals, NOT a calibrated probability of beating consensus and NOT a
+forecast of the surprise magnitude. Outputs a nowcast_score (0-100) with a
+qualitative signal_strength bucket.
 """
 
 import logging
@@ -213,16 +215,35 @@ def _score_options_implied(symbol, current_price):
     if atm_call is None or atm_put is None:
         return {"score": 50, "detail": "Could not find ATM options", "weight": 0.15}
 
-    call_price = atm_call.get("lastPrice") or atm_call.get("bid") or 0
-    put_price = atm_put.get("lastPrice") or atm_put.get("bid") or 0
+    # Use bid/ask MID (not stale lastPrice) for the straddle legs; fall back to
+    # lastPrice only if a side has no quotes.
+    def _mid(contract):
+        bid = contract.get("bid")
+        ask = contract.get("ask")
+        try:
+            bid = float(bid) if bid is not None else 0.0
+            ask = float(ask) if ask is not None else 0.0
+        except (TypeError, ValueError):
+            bid = ask = 0.0
+        if bid > 0 and ask > 0:
+            return (bid + ask) / 2.0
+        last = contract.get("lastPrice") or bid or ask or 0
+        try:
+            return float(last)
+        except (TypeError, ValueError):
+            return 0.0
 
-    try:
-        call_price = float(call_price)
-        put_price = float(put_price)
-    except (TypeError, ValueError):
+    call_price = _mid(atm_call)
+    put_price = _mid(atm_put)
+
+    if call_price <= 0 or put_price <= 0:
         return {"score": 50, "detail": "Invalid option prices", "weight": 0.15}
 
-    implied_move_pct = (call_price + put_price) / current_price * 100
+    # Raw straddle / spot over-states the expected absolute move (the straddle
+    # prices a ~1.25-sigma move while E|move| ~= 0.7979*sigma). Apply the ~0.85
+    # straddle->expected-move correction factor.
+    _STRADDLE_MOVE_FACTOR = 0.85
+    implied_move_pct = (call_price + put_price) / current_price * 100 * _STRADDLE_MOVE_FACTOR
 
     # Days to expiration — options trade ET, so use NY date for "today".
     try:
@@ -232,15 +253,22 @@ def _score_options_implied(symbol, current_price):
     except Exception:
         dte = 30  # safe fallback
 
-    # Compute historical average move from ATR. ATR is a *daily* range while
-    # the straddle premium is the implied move over the option's full life,
-    # so scale daily ATR by sqrt(dte) to compare like-for-like.
+    # Historical expected move = close-to-close return std-dev scaled by
+    # sqrt(trading days), NOT ATR (a daily *range*, not a return sigma) scaled
+    # by sqrt(calendar days). Approximate trading days as dte * 5/7.
     chart = fetcher.get_chart_data(symbol, period="3mo", interval="1d")
-    indicators = fetcher.compute_indicators(chart) if chart else {}
-    atr = indicators.get("ATR")
-    if atr and current_price > 0:
-        historical_avg_pct = float(atr) / current_price * 100 * math.sqrt(dte)
-    else:
+    closes = [d.get("close") for d in (chart or []) if d.get("close")]
+    historical_avg_pct = None
+    if len(closes) >= 21 and current_price > 0:
+        rets = [(closes[i] - closes[i - 1]) / closes[i - 1]
+                for i in range(1, len(closes)) if closes[i - 1]]
+        if len(rets) >= 20:
+            mean_r = sum(rets) / len(rets)
+            var_r = sum((r - mean_r) ** 2 for r in rets) / (len(rets) - 1)
+            daily_std = math.sqrt(var_r)
+            trading_days = max(1.0, dte * 5.0 / 7.0)
+            historical_avg_pct = daily_std * math.sqrt(trading_days) * 100
+    if not historical_avg_pct or historical_avg_pct <= 0:
         historical_avg_pct = implied_move_pct  # fallback: treat as normal
 
     if historical_avg_pct > 0:
@@ -426,7 +454,9 @@ def nowcast_revenue(symbol):
     """
     Main entry point. Score 6 signals and produce composite revenue nowcast.
 
-    Returns a dict with nowcast_score (0-100), beat_probability, signals, etc.
+    Returns a dict with nowcast_score (0-100, heuristic ordinal), signal_strength
+    (qualitative bucket), a qualitative directional lean, signals, etc.
+    estimated_surprise_pct is intentionally None (no calibrated surprise model).
     On error returns {"error": str}.
     """
     try:
@@ -495,16 +525,35 @@ def nowcast_revenue(symbol):
         nowcast = int(s1 * 0.30 + s2 * 0.20 + s3 * 0.15 + s4 * 0.15 + s5 * 0.15 + s6 * 0.05)
         nowcast = _clamp(nowcast)
 
-        # Beat probability
+        # Ordinal signal-strength bucket. This is a HEURISTIC score (0-100), NOT
+        # a calibrated probability of beating consensus, so we surface a
+        # qualitative directional *lean* rather than a fabricated probability.
         if nowcast > 70:
-            beat_probability = "LIKELY BEAT"
+            beat_probability = "BULLISH LEAN"
         elif nowcast >= 45:
-            beat_probability = "UNCERTAIN"
+            beat_probability = "NEUTRAL"
         else:
-            beat_probability = "LIKELY MISS"
+            beat_probability = "BEARISH LEAN"
 
-        # Estimated surprise magnitude
-        estimated_surprise_pct = round((nowcast - 50) * 0.15, 2)
+        # NOTE: the former `estimated_surprise_pct = (nowcast-50)*0.15` was a
+        # FABRICATED earnings-surprise % derived purely from the heuristic score
+        # itself (no model fit against realized surprises). It is removed: we do
+        # NOT emit a fake surprise number. The key is preserved as None to avoid
+        # breaking consumers (UI renders None as "—"). Use `signal_strength` /
+        # `nowcast_score` for the ordinal read instead.
+        estimated_surprise_pct = None
+
+        # Qualitative ordinal bucket for the nowcast score (0-100 heuristic).
+        if nowcast >= 75:
+            signal_strength = "VERY STRONG"
+        elif nowcast >= 60:
+            signal_strength = "STRONG"
+        elif nowcast >= 45:
+            signal_strength = "MODERATE"
+        elif nowcast >= 30:
+            signal_strength = "WEAK"
+        else:
+            signal_strength = "VERY WEAK"
 
         # Confidence level.
         # A signal counts as "available" only if its scorer actually had data.
@@ -564,6 +613,7 @@ def nowcast_revenue(symbol):
         result = {
             "symbol": symbol,
             "nowcast_score": nowcast,
+            "signal_strength": signal_strength,
             "beat_probability": beat_probability,
             "estimated_surprise_pct": estimated_surprise_pct,
             "confidence_level": confidence,

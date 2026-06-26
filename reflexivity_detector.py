@@ -63,9 +63,14 @@ def _set_cached(key, value):
 
 def _price_trend(price_data, days):
     # type: (list, int) -> float
-    """Calculate linear regression slope over the last N trading days.
+    """Calculate linear regression slope over the last N trading days,
+    normalized by mean price so trends are comparable across price levels.
 
-    Returns slope of best-fit line through closing prices.
+    Returns the best-fit slope expressed as a *fraction of mean price per
+    day* (i.e. slope_in_$/day ÷ mean_close). A $5 stock and a $500 stock
+    with the same percentage drift now yield the same number. The SIGN is
+    unchanged from the raw OLS slope, so every downstream `slope > 0` /
+    `slope < 0` uptrend/downtrend test behaves identically.
     Positive = uptrend, negative = downtrend.
     """
     if not price_data or len(price_data) < 2:
@@ -94,6 +99,13 @@ def _price_trend(price_data, days):
     if denom == 0:
         return 0.0
     slope = (n * sum_xy - sum_x * sum_y) / denom
+    # Normalize by mean price → slope as a fraction of price per day. This
+    # makes the magnitude comparable across price levels (the raw $/day slope
+    # scales with the absolute price). Fall back to the raw slope only if the
+    # mean is non-positive (degenerate / non-positive prices).
+    mean_price = sum_y / n
+    if mean_price > 0:
+        return slope / mean_price
     return slope
 
 

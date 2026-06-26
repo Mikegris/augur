@@ -577,17 +577,47 @@ def _format_skew(skew: Optional[float]) -> Optional[str]:
 
 # ── Edge synthesis and note generation ───────────────────────────────────
 
+# For a zero-mean normal, E|X| = σ·√(2/π) ≈ 0.7979·σ. The option-implied
+# move is a ~1σ quantity, while the historical overlay reports a MEAN
+# ABSOLUTE move. Comparing them directly biased the edge ~−0.20 even on a
+# fairly-priced chain; converting the implied σ to an expected-absolute-move
+# puts both sides on the same footing.
+_E_ABS_OVER_SIGMA = 0.7978845608028654
+
+
 def _edge_score(implied: Optional[float],
-                historical: Optional[float]) -> Optional[float]:
-    """Edge = (historical - implied) / max(implied, 1).
+                historical: Optional[float],
+                n_events: Optional[int] = None) -> Optional[float]:
+    """Edge = (historical − E|implied move|) / max(E|implied move|, 1),
+    shrunk toward 0 by the size of the historical sample.
+
+    The option-implied move is a 1σ figure; the historical overlay is a
+    mean-absolute move ≈ 0.7979σ. We scale the implied σ by 0.7979 before
+    differencing so we compare like-for-like (was: σ vs E|move|, a
+    systematic ~−0.2 edge even on fair chains).
+
+    The raw edge is then shrunk toward 0 by ``n/(n+k)`` so a single past
+    event (n=1) can't masquerade as the same conviction as n=5. With k=4 a
+    1-event sample keeps ~20% of its edge, a 5-event sample ~56%, a
+    20-event sample ~83%.
 
     Positive ⇒ historical event move is *larger* than what options price
     in — straddle looks cheap. Negative ⇒ implied move richer than history
     — straddle expensive."""
     if implied is None or historical is None:
         return None
-    denom = max(abs(implied), 1.0)
-    edge = (historical - implied) / denom
+    implied_e_abs = abs(implied) * _E_ABS_OVER_SIGMA
+    denom = max(implied_e_abs, 1.0)
+    edge = (historical - implied_e_abs) / denom
+    # Shrink toward 0 by the number of historical events. n=1 must not look
+    # like n=5. With no count supplied, fall back to no shrinkage (prior
+    # behaviour) rather than over-penalising.
+    if n_events is not None:
+        try:
+            n = max(0, int(n_events))
+            edge *= n / (n + 4.0)
+        except (TypeError, ValueError):
+            pass
     # Cap so a single noisy run doesn't blow out the visualization.
     if edge > 3.0:
         edge = 3.0
@@ -671,7 +701,7 @@ def _make_event(symbol: str, event_type: str, event_date: datetime.date,
         "historical_n_events": n_events,
         "historical_hit_rate_positive_post": hit_rate,
         "current_signals": signals,
-        "edge_score": _edge_score(implied, historical),
+        "edge_score": _edge_score(implied, historical, n_events),
         "note": _build_note(event_type, implied, historical, n_events, hit_rate),
     }
 

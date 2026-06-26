@@ -1973,6 +1973,10 @@ def terminal_exec():
         "smart-money", "ml-forecast", "congress", "crypto", "ai", "scanner",
         "gex", "contagion", "narrative", "synthetic-insider", "reflexivity",
         "liquidity", "alt-data",
+        # Jarvis read-only commands: "ask" runs with persist=False (no portfolio
+        # mutation), "briefing"/"health" are pure read snapshots. "settings"
+        # stays excluded (mutating) as does "serve" (server launcher).
+        "ask", "briefing", "health",
     }
     first = command.split()[0].lower() if command.split() else ""
     if first not in _ALLOWED_CLI:

@@ -42,6 +42,33 @@ _CACHE_TTL = 6 * 3600       # 6 hours
 _MIN_BARS = 200             # need at least ~200 daily bars to compute MA200
 
 
+def _phi(x: float) -> float:
+    """Standard-normal CDF Φ(x). scipy if available, else math.erf. Returns
+    0.5 on non-finite input. Never raises."""
+    try:
+        xf = float(x)
+        if not math.isfinite(xf):
+            return 0.5
+    except (TypeError, ValueError):
+        return 0.5
+    try:
+        from scipy.stats import norm
+        return float(norm.cdf(xf))
+    except Exception:
+        return 0.5 * (1.0 + math.erf(xf / math.sqrt(2.0)))
+
+
+def _cdf_prob(expected_move_frac: float, horizon_dispersion: float) -> float:
+    """Vol-normalized directional probability P(up) = Φ(E[move]/dispersion).
+
+    `expected_move_frac` is the expected horizon return as a fraction (e.g.
+    0.03 = +3%); `horizon_dispersion` is the horizon return std (σ_daily·√h).
+    Clamped to [0.05, 0.95]. Degenerate dispersion → neutral 0.5."""
+    if horizon_dispersion is None or horizon_dispersion <= 1e-9:
+        return 0.5
+    return float(min(0.95, max(0.05, _phi(expected_move_frac / horizon_dispersion))))
+
+
 # ──────────────────────────── data plumbing ───────────────────────────────
 
 def _load_history(symbol: str) -> Optional[pd.DataFrame]:
@@ -116,21 +143,23 @@ def _h5_short_mom(hist: pd.DataFrame) -> Dict[str, Any]:
     # Stretch score: -1 (deep oversold) … +1 (overbought)
     stretch = (rsi - 50.0) / 50.0  # [-1, 1]
 
-    # Base prob_up: mean-revert when stretched
-    # The minus sign is the whole point of this horizon — it should disagree
-    # with the long-term trend when price has gone too far too fast.
-    prob_up = 0.5 - 0.25 * stretch
+    # Horizon dispersion = daily-vol × √5 (the 5-day return std).
+    dispersion5 = max(vol5, 0.005) * math.sqrt(5)
 
-    # Mild 5d-ROC tilt when not stretched (|stretch| < 0.4)
+    # A5: build an EXPECTED 5-day MOVE (a real return), then map it to a
+    # probability via the normal CDF — instead of fabricating prob_up from a
+    # hand-tuned 0.25 gain. The minus sign is the whole point of this horizon:
+    # a stretched-up RSI implies an expected pull-BACK (mean reversion). The
+    # move is sized as a fraction of the 5-day dispersion so it's vol-aware.
+    expected_move = -0.6 * stretch * dispersion5
+    # Mild 5d-ROC momentum tilt when not stretched (|stretch| < 0.4).
     if abs(stretch) < 0.4:
-        prob_up += np.clip(roc5 * 2.0, -0.15, 0.15)
+        expected_move += float(np.clip(roc5, -0.05, 0.05)) * 0.5
 
-    # Vol-spike haircut on confidence
-    prob_up = float(np.clip(prob_up, 0.05, 0.95))
+    prob_up = _cdf_prob(expected_move, dispersion5)
 
-    # Expected return: scale by recent vol; sign comes from prob_up
-    direction = (prob_up - 0.5) * 2.0  # [-1, 1]
-    expected_pct = direction * max(vol5, 0.005) * math.sqrt(5) * 100.0 * 1.2
+    # Expected return in % over the horizon (the actual move that drives prob_up).
+    expected_pct = expected_move * 100.0
 
     # Confidence: stronger when both stretch and vol agree
     confidence = float(np.clip(
@@ -258,12 +287,17 @@ def _h60_medium_trend(hist: pd.DataFrame) -> Dict[str, Any]:
     vol200 = float(rets.iloc[-200:].std()) if len(rets) >= 200 else vol60 or 0.01
     vol_regime = vol60 / vol200 if vol200 > 1e-9 else 1.0  # >1 = expanding
 
-    # Combine: crossover dominates direction, ROC adds momentum, vol regime
-    # taxes confidence (high vol = lower confidence).
-    direction = 0.6 * np.tanh(cross * 15.0) + 0.4 * np.tanh(roc60 * 3.0)
-    prob_up = float(np.clip(0.5 + direction * 0.25, 0.05, 0.95))
+    # A5: build an EXPECTED 60-day MOVE from the trend signals, then map it to
+    # a probability via the normal CDF (vol-normalized) instead of a hand-tuned
+    # tanh→0.25 gain. The crossover dominates direction; the 60d ROC adds a
+    # momentum component. Both are already returns, so they combine directly.
+    dispersion60 = max(vol60, 0.005) * math.sqrt(60)
+    # Damp the raw signals toward a horizon-scaled expectation: a golden cross
+    # of size `cross` and recent momentum `roc60` jointly imply continuation.
+    expected_move = 0.6 * cross + 0.4 * roc60
+    prob_up = _cdf_prob(expected_move, dispersion60)
 
-    expected_pct = direction * max(vol60, 0.005) * math.sqrt(60) * 100.0 * 1.5
+    expected_pct = expected_move * 100.0
 
     base_conf = abs(prob_up - 0.5) * 2.0
     # Tax high vol_regime; reward when crossover and ROC agree in sign.
@@ -317,10 +351,15 @@ def _h120_long_trend(hist: pd.DataFrame) -> Dict[str, Any]:
     vol250 = float(rets.iloc[-250:].std()) if len(rets) >= 250 else vol120 or 0.02
     vol_regime_long = vol120 / vol250 if vol250 > 1e-9 else 1.0
 
-    # Probability: signed slope mapped through a soft step, modulated by R^2.
-    # A noisy upward drift (low R^2) shouldn't claim high prob_up.
-    direction = np.tanh(slope * 800.0)  # slope is per-day log-return; ~0.001 = ~25% per yr
-    prob_up = float(np.clip(0.5 + direction * 0.4 * max(0.2, r2), 0.05, 0.95))
+    # A5: vol-normalized normal-CDF probability from the regression's expected
+    # 120d move and its dispersion, instead of a hand-tuned tanh(slope*800)*0.4
+    # gain. `expected_pct` (computed above) IS the model's expected 120d return;
+    # express it as a fraction and divide by the 120d return std. R² scales the
+    # *signal strength*: a noisy upward drift (low R²) shouldn't claim a strong
+    # edge, so we shrink the expected move toward 0 by R².
+    dispersion120 = max(vol120, 0.005) * math.sqrt(120)
+    expected_move120 = (expected_pct / 100.0) * max(0.2, r2)
+    prob_up = _cdf_prob(expected_move120, dispersion120)
 
     # Confidence: prob distance × R^2 × vol-regime moderation
     confidence = float(np.clip(

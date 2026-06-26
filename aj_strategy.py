@@ -24,6 +24,34 @@ _FULL_SIZE_EDGE_PTS = 20.0
 _MIN_SIZE_FACTOR = 0.25
 
 
+def _risk_based_qty(symbol: str, price: float, cfg: Dict[str, Any]) -> Optional[float]:
+    """Quantity that risks ~risk_per_trade_pct of account equity to the ATR-based
+    stop: qty = (equity * r%) / (atr_stop_mult * ATR). Returns None when ATR,
+    equity, or the stop distance is unavailable/non-finite (caller then keeps the
+    notional-target qty). Never raises."""
+    try:
+        import aj_alpha
+        risk_pct = float(cfg.get("risk_per_trade_pct") or 0)
+        atr_mult = float(cfg.get("atr_stop_mult") or 0)
+        if risk_pct <= 0 or atr_mult <= 0:
+            return None
+        equity = aj_alpha.account_equity()
+        if not equity or equity <= 0:
+            return None
+        atr = aj_alpha._atr(aj_alpha._bars(symbol, "6mo"), int(cfg.get("atr_period") or 14))
+        if atr is None or atr <= 0:
+            return None
+        stop_dist = atr_mult * atr
+        if not math.isfinite(stop_dist) or stop_dist <= 0:
+            return None
+        risk_dollars = equity * (risk_pct / 100.0)
+        qty = risk_dollars / stop_dist
+        return qty if math.isfinite(qty) and qty > 0 else None
+    except Exception:
+        log.debug("_risk_based_qty failed", exc_info=True)
+        return None
+
+
 def size_order(symbol: str, side: str, cfg: Dict[str, Any], held_qty: float,
                decision: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, Any]]:
     """Return {qty, price, notional, order_type, limit_price} or None to skip."""
@@ -70,6 +98,18 @@ def size_order(symbol: str, side: str, cfg: Dict[str, Any], held_qty: float,
         qty = held_qty if held_qty > 0 else 0.0
     else:
         qty = target / price
+        # Risk-based sizing (opt-in): size so the trade risks ~risk_per_trade_pct
+        # of account equity to its ATR-based stop. qty ~ (equity*r%)/atr_stop_dist,
+        # then bounded by the existing notional cap. Falls back to the notional
+        # target when ATR/equity are unavailable (safer/existing behaviour).
+        if cfg.get("risk_based_sizing"):
+            try:
+                rq = _risk_based_qty(symbol, price, cfg)
+                if rq is not None and rq > 0:
+                    # never exceed the per-order notional cap
+                    qty = min(rq, max_notional / price)
+            except Exception:
+                log.debug("risk-based sizing skipped -> notional target", exc_info=True)
     if qty <= 0:
         return None
 

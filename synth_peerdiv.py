@@ -694,17 +694,26 @@ def _enrich_with_stats(
             block["peer_mad"] = None
             med = None
             mad = 0.0
-        if sym_val is not None and med is not None:
+        # Require at least 3 peers before computing a z-score: a median/MAD
+        # (or stdev) over 1-2 points is not a meaningful dispersion estimate,
+        # and a 2-peer MAD is frequently exactly 0 (collapsing to the stdev
+        # fallback on every metric). Below 3 peers the z is undefined.
+        if sym_val is not None and med is not None and len(peer_vals) >= 3:
             # WHY (S8): when peers are (near) identical, MAD collapses to 0 and
             # the old `denom = max(mad, 1e-9)` produced z = ±(diff)/1e-9 → it
             # always pinned to the ±99 cap, manufacturing a "huge divergence"
             # out of a rounding-level difference and crowding genuine outliers
-            # out of the top-K ranking. Fall back to the (scaled) stdev when
-            # MAD is 0; if there's no spread at all, the z is undefined → None.
+            # out of the top-K ranking. Fall back to the stdev when MAD is 0;
+            # if there's no spread at all, the z is undefined → None.
+            #
+            # SCALE FIX: a raw MAD is ~0.6745× the stdev for normal data, so a
+            # MAD-branch z and a stdev-fallback z lived on DIFFERENT scales yet
+            # were ranked against each other in the top-K. Multiply MAD by the
+            # consistency constant 1.4826 so 1.4826·MAD ≈ σ — now both branches
+            # produce comparable, σ-equivalent z-scores.
             if mad > 0:
-                denom = mad
+                denom = 1.4826 * mad
             else:
-                # 1.4826*MAD ≈ stdev for normal data; use stdev directly here.
                 sd = _stdev(peer_vals)
                 denom = sd if sd > 0 else None
             if denom is None:

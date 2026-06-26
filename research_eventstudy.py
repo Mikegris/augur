@@ -60,6 +60,7 @@ Python 3.9 compatible.
 
 import datetime
 import logging
+import math
 import warnings
 from typing import List, Optional
 
@@ -331,6 +332,84 @@ def _event_window_curve(closes: pd.Series, event_dt: datetime.date,
     return curve
 
 
+# Market-model estimation window: ~250 trading days ending W+1 days before T0.
+_EST_WINDOW = 250
+_EST_MIN = 60  # need at least this many overlapping est-window obs for OLS
+
+
+def _market_model_ar_curve(sym_closes: pd.Series, bench_closes: pd.Series,
+                           event_dt: datetime.date,
+                           window_days: int) -> Optional[np.ndarray]:
+    """Abnormal-return curve for ONE event under the market model.
+
+    WHY (B2): the old "symbol mean − benchmark mean" abnormal return assumes
+    β=1, α=0 for every name — that's not an abnormal return, it's a raw
+    benchmark-relative difference. Here we estimate (α,β) by OLS of the
+    stock's daily simple returns on the benchmark's, over a pre-event
+    estimation window [-(W+1)-EST .. -(W+1)] (so the event window itself is
+    NOT in the estimation sample), then form
+
+        AR_t = R_sym,t − (α̂ + β̂·R_mkt,t)
+
+    for each day t in [-W, +W] and return the *cumulative* AR curve (CAR
+    path) so it is directly comparable to the existing cumulative-return
+    curves. Returns None when there isn't enough clean estimation history.
+    """
+    if (sym_closes is None or sym_closes.empty
+            or bench_closes is None or bench_closes.empty):
+        return None
+    ts = pd.Timestamp(event_dt)
+    sidx = sym_closes.index
+    pos = sidx.searchsorted(ts, side="right") - 1
+    if pos < 0 or pos >= len(sym_closes):
+        return None
+    lo = pos - window_days
+    hi = pos + window_days
+    if lo < 0 or hi >= len(sym_closes):
+        return None
+
+    # Estimation window: the EST_WINDOW trading days ending just before lo.
+    est_hi = lo - 1
+    est_lo = est_hi - _EST_WINDOW
+    if est_lo < 1:  # need a prior close to form the first return
+        return None
+
+    # Build aligned (sym, bench) simple-return frames on shared dates over the
+    # union of estimation + event windows.
+    seg_sym = sym_closes.iloc[est_lo - 1: hi + 1]
+    sym_ret = seg_sym.pct_change().dropna()
+    # Re-align the benchmark onto the symbol's trading days.
+    bench_on_sym = bench_closes.reindex(sym_closes.index).iloc[est_lo - 1: hi + 1]
+    bench_ret = bench_on_sym.pct_change()
+    df = pd.DataFrame({"sym": sym_ret, "mkt": bench_ret}).dropna()
+    if df.empty:
+        return None
+
+    # Split into estimation (dates strictly before the event window) and event.
+    event_start_ts = sym_closes.index[lo]
+    est = df[df.index < event_start_ts]
+    evt = df[df.index >= event_start_ts]
+    if len(est) < _EST_MIN or len(evt) != (2 * window_days + 1):
+        return None
+
+    x = est["mkt"].to_numpy(dtype=float)
+    y = est["sym"].to_numpy(dtype=float)
+    try:
+        Xe = np.column_stack([np.ones_like(x), x])
+        coef, *_ = np.linalg.lstsq(Xe, y, rcond=None)
+        alpha, beta = float(coef[0]), float(coef[1])
+        if not (np.isfinite(alpha) and np.isfinite(beta)):
+            return None
+    except Exception:
+        return None
+
+    r_sym = evt["sym"].to_numpy(dtype=float)
+    r_mkt = evt["mkt"].to_numpy(dtype=float)
+    ar = r_sym - (alpha + beta * r_mkt)  # daily abnormal returns
+    car = np.cumsum(ar)                  # cumulative AR path (length 2W+1)
+    return car
+
+
 def _summary_stats(curves: np.ndarray, dates: List[str],
                    window_days: int) -> dict:
     """Compute the headline summary scalars described in the spec docstring."""
@@ -464,6 +543,7 @@ def _compute(symbol: str, event_type: str, window_days: int,
     # 3. Curves
     sym_curves = []
     bench_curves = []
+    mm_car_curves = []  # per-event market-model CAR paths (B2), or None
     kept_dates = []
     sym_closes = sym_df["Close"]
     bench_closes = bench_df["Close"] if has_bench else None
@@ -477,9 +557,20 @@ def _compute(symbol: str, event_type: str, window_days: int,
             continue
         c_bench = (_event_window_curve(bench_closes, d, window_days)
                    if has_bench else None)
+        # Market-model abnormal-return path for this single event (B2).
+        mm_car = None
+        if has_bench:
+            try:
+                mm_car = _market_model_ar_curve(sym_closes, bench_closes,
+                                                d, window_days)
+            except Exception as e:
+                logger.debug("event_study: market-model AR failed for %s @ %s: %s",
+                             symbol, ds, e)
+                mm_car = None
         sym_curves.append(c_sym)
         bench_curves.append(c_bench if c_bench is not None
                             else np.full(2 * window_days + 1, np.nan))
+        mm_car_curves.append(mm_car)
         kept_dates.append(ds)
 
     n = len(sym_curves)
@@ -531,6 +622,42 @@ def _compute(symbol: str, event_type: str, window_days: int,
 
     summary = _summary_stats(sym_arr, kept_dates, window_days)
 
+    # ── Market-model abnormal returns + CAR significance (B2) ───────────────
+    # Aggregate the per-event market-model CAR paths and test H0: CAR=0 at the
+    # end of the window with a cross-sectional t-stat. These are ADDED keys;
+    # the legacy `abnormal_return_curve` (sym_avg − bench_avg) is preserved.
+    mm_valid = [c for c in mm_car_curves if c is not None
+                and np.all(np.isfinite(c))]
+    market_model: dict = {
+        "available": False,
+        "n_events": len(mm_valid),
+        "method": "market_model_ols_estimation_window",
+        "estimation_window_days": _EST_WINDOW,
+    }
+    mm_abnormal_curve = np.full_like(avg, np.nan)
+    if len(mm_valid) >= _MIN_EVENTS:
+        car_mat = np.array(mm_valid, dtype=float)  # (n_valid, 2W+1)
+        mm_abnormal_curve = np.nanmean(car_mat, axis=0)
+        car_end = car_mat[:, -1]                    # terminal CAR per event
+        n_mm = car_end.size
+        mean_car = float(np.mean(car_end))
+        # Cross-sectional t-stat for H0: mean CAR = 0 (treats events as the
+        # i.i.d. cross-section; far less overlap-biased than the old curve).
+        sd = float(np.std(car_end, ddof=1)) if n_mm > 1 else 0.0
+        se = sd / math.sqrt(n_mm) if sd > 0 and n_mm > 1 else float("nan")
+        t_stat = mean_car / se if (se == se and se > 0) else float("nan")
+        # Two-sided normal-approx p-value (consistent with the factor module).
+        p_value = (math.erfc(abs(t_stat) / math.sqrt(2.0))
+                   if t_stat == t_stat else float("nan"))
+        market_model.update({
+            "available": True,
+            "mean_car_pct": round(mean_car * 100.0, 4),
+            "car_std_pct": round(sd * 100.0, 4),
+            "car_t_stat": round(t_stat, 3) if t_stat == t_stat else None,
+            "car_p_value": round(p_value, 4) if p_value == p_value else None,
+            "significant_5pct": bool(p_value < 0.05) if p_value == p_value else None,
+        })
+
     return {
         "symbol": symbol,
         "event_type": event_type,
@@ -544,6 +671,9 @@ def _compute(symbol: str, event_type: str, window_days: int,
         "p25_curve": _round_pct_list(p25),
         "p75_curve": _round_pct_list(p75),
         "abnormal_return_curve": _round_pct_list(abnormal),
+        # NEW (B2): proper market-model abnormal-return / CAR analytics.
+        "market_model_abnormal_return_curve": _round_pct_list(mm_abnormal_curve),
+        "market_model": market_model,
         "summary": summary,
         "as_of": today.isoformat(),
     }

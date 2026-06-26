@@ -29,11 +29,18 @@ _LOOKBACK_PERIOD = "5y"
 _LOOKBACK_YEARS = 5
 _MIN_HISTORY_DAYS = 250
 _FORWARD_WINDOW = 30
-_MIN_MATCHES = 5
+# Raised from 5: a 5-sample forward-return mean has very wide error bars. We
+# now take the k nearest neighbours by a graded distance (not a discrete band),
+# so we can afford — and want — a larger, more statistically stable set.
+_MIN_MATCHES = 15
+_KNN_K = 40           # neighbours to keep for the forward-return distribution
 _RSI_PERIOD = 14
 _VOL_WINDOW = 20
 _SMA_FAST = 50
 _SMA_SLOW = 200
+
+# Feature columns used for the z-scored / Mahalanobis k-NN similarity.
+_KNN_FEATURES = ("rsi_14", "vol_ann", "px_vs_sma50", "px_vs_sma200")
 
 
 # ---------------------------------------------------------------------------
@@ -41,16 +48,29 @@ _SMA_SLOW = 200
 # ---------------------------------------------------------------------------
 
 def _compute_rsi(close: pd.Series, period: int = 14) -> pd.Series:
-    """Standard 14-day Wilder-style RSI (using simple rolling means of gains/losses).
+    """14-day Wilder RSI using Wilder's smoothing (the modified EMA with
+    α = 1/period), matching the docstring and fetcher.py's genuine Wilder RSI.
 
-    Handles the degenerate cases properly:
-      - No losses over the window (loss == 0) -> RSI = 100 (max overbought)
-      - No gains over the window  (gain == 0) -> RSI = 0   (max oversold)
-    Previously this returned NaN in both cases because we divided by NaN.
+    Previously this used a SIMPLE rolling mean of gains/losses, which is the
+    Cutler variant — it reacts faster and disagrees with every "Wilder RSI"
+    reference. We now seed with the first `period`-window simple average and
+    then apply Wilder's recursive smoothing
+    (avg = (prev_avg·(period-1) + current) / period), implemented via
+    ewm(alpha=1/period, adjust=False) after the seed.
+
+    Degenerate cases preserved:
+      - No losses (loss == 0, gain > 0) -> RSI = 100
+      - No gains  (gain == 0)           -> RSI = 0
+      - Perfectly flat window           -> NaN (caller treats as undefined)
     """
     delta = close.diff()
-    gain = delta.clip(lower=0).rolling(period).mean()
-    loss = (-delta.clip(upper=0)).rolling(period).mean()
+    up = delta.clip(lower=0)
+    down = -delta.clip(upper=0)
+    # Wilder smoothing == EWM with alpha = 1/period (adjust=False). We still
+    # require a full `period` of history before emitting a value so the warm-up
+    # NaNs match the old simple-rolling behaviour (no look-ahead change).
+    gain = up.ewm(alpha=1.0 / period, adjust=False, min_periods=period).mean()
+    loss = down.ewm(alpha=1.0 / period, adjust=False, min_periods=period).mean()
     # Standard RSI handles the zero-denominator cases as RSI=100 / RSI=0.
     rsi = pd.Series(np.nan, index=close.index, dtype=float)
     valid = gain.notna() & loss.notna()
@@ -106,6 +126,12 @@ def _build_features(hist: pd.DataFrame) -> pd.DataFrame:
 
     df["sma_50"] = close.rolling(_SMA_FAST).mean()
     df["sma_200"] = close.rolling(_SMA_SLOW).mean()
+
+    # Continuous "distance from moving average" features for the graded k-NN
+    # (replacing the discrete above/below band match). Expressed as fractional
+    # deviation: (close/sma - 1).
+    df["px_vs_sma50"] = close / df["sma_50"] - 1.0
+    df["px_vs_sma200"] = close / df["sma_200"] - 1.0
 
     # Forward 30-day return (% change to close 30 trading days later)
     df["fwd_return_pct"] = (close.shift(-_FORWARD_WINDOW) / close - 1.0) * 100.0
@@ -180,6 +206,82 @@ def _summarise_returns(matches: pd.DataFrame) -> dict:
         "best_pct": round(float(np.max(rets)), 2),
         "worst_pct": round(float(np.min(rets)), 2),
     }
+
+
+def _knn_matches(candidates: pd.DataFrame, current: pd.Series, k: int) -> pd.DataFrame:
+    """Graded similarity via a z-scored / Mahalanobis k-NN over the continuous
+    feature set (rsi, vol, price-vs-sma50, price-vs-sma200).
+
+    Replaces the old discrete band-matching (which lumped a 31-RSI and a
+    44-RSI into the same "WEAK" bucket while splitting 29 vs 31 across
+    OVERSOLD/WEAK). Each candidate row gets a distance to *today*; the k
+    closest are returned with a ``similarity_distance`` column so the caller
+    can weight or inspect them.
+
+    Uses the inverse feature covariance (Mahalanobis) when it's well-
+    conditioned, falling back to per-feature z-scoring (diagonal covariance)
+    otherwise. Returns an empty frame if features can't be assembled.
+    """
+    feats = [f for f in _KNN_FEATURES if f in candidates.columns]
+    if len(feats) < 2:
+        return candidates.iloc[0:0]
+
+    X = candidates[feats].astype(float)
+    cur = current[feats].astype(float)
+    valid = X.notna().all(axis=1) & cur.notna().all()
+    if not bool(valid.all()):
+        X = X[valid.reindex(X.index, fill_value=False)]
+    cur_vec = cur.values
+    if X.empty or any(pd.isna(cur_vec)):
+        return candidates.iloc[0:0]
+
+    Xv = X.values
+    mu = Xv.mean(axis=0)
+    cov = np.cov(Xv, rowvar=False)
+    # Mahalanobis when invertible & well-conditioned; else diagonal z-score.
+    inv = None
+    try:
+        cov2d = np.atleast_2d(cov)
+        if cov2d.shape[0] == cov2d.shape[1] and np.all(np.isfinite(cov2d)):
+            if np.linalg.cond(cov2d) < 1e12:
+                inv = np.linalg.pinv(cov2d)
+    except Exception:
+        inv = None
+    if inv is None:
+        var = Xv.var(axis=0)
+        var[var <= 0] = 1.0
+        inv = np.diag(1.0 / var)
+
+    diff = Xv - cur_vec
+    # Mahalanobis distance per row: sqrt((x-c)·Σ⁻¹·(x-c))
+    dists = np.sqrt(np.clip(np.einsum("ij,jk,ik->i", diff, inv, diff), 0.0, None))
+
+    out = candidates.loc[X.index].copy()
+    out["similarity_distance"] = dists
+    out = out.sort_values("similarity_distance", ascending=True)
+    return out.head(max(1, int(k)))
+
+
+def _mean_ci(rets: np.ndarray, conf: float = 0.95) -> Optional[list]:
+    """Normal-approx confidence interval for the MEAN forward return.
+
+    Returns [lo, hi] in percent, or None when n < 2. z=1.96 for 95%; we use a
+    t-like inflation for small n by widening with 2.2 below n=15. Reported so
+    the UI can show how shaky a small-sample analog read is.
+    """
+    n = len(rets)
+    if n < 2:
+        return None
+    mean = float(np.mean(rets))
+    sd = float(np.std(rets, ddof=1))
+    if sd == 0:
+        return [round(mean, 2), round(mean, 2)]
+    se = sd / np.sqrt(n)
+    z = 1.96 if conf >= 0.95 else 1.64
+    if n < 15:
+        z *= 1.12  # small-sample widening (rough t-vs-z inflation)
+    half = z * se
+    return [round(mean - half, 2), round(mean + half, 2)]
 
 
 def _sample_dates(matches: pd.DataFrame, n: int = 5) -> list:
@@ -308,38 +410,55 @@ def compute_historical_analog(symbol: str) -> dict:
         "rsi_band": current_rsi_band,
     }
 
-    # Candidate pool: exclude the most recent _FORWARD_WINDOW bars (no fwd return)
-    # and require all classification + forward return present.
+    # Candidate pool: exclude the most recent _FORWARD_WINDOW bars (no fwd
+    # return — preserves the no-look-ahead guarantee) and require the
+    # continuous k-NN features + forward return present.
     candidates = classified.iloc[:-_FORWARD_WINDOW] if len(classified) > _FORWARD_WINDOW else classified.iloc[0:0]
-    candidates = candidates.dropna(subset=["rsi_band", "vol_band", "trend_position", "fwd_return_pct"])
+    knn_required = list(_KNN_FEATURES) + ["fwd_return_pct"]
+    candidates = candidates.dropna(subset=knn_required)
 
     if candidates.empty:
         result = {"available": False, "error": "No usable candidate history"}
         _set_cache(cache_key, result, ttl=_CACHE_TTL)
         return result
 
-    # Tier 1: strict match on all three
-    matches = _find_matches(
-        candidates, current_rsi_band, current_vol_band, current_trend,
-        require_trend=True, require_vol=True,
-    )
+    # ── Primary path: graded z-scored / Mahalanobis k-NN similarity ──────
+    method = "knn_mahalanobis"
     loosened = None
+    knn = _knn_matches(candidates, current, _KNN_K)
+    matches = knn
 
-    # Tier 2: drop trend_position
-    if len(matches) < _MIN_MATCHES:
-        matches = _find_matches(
-            candidates, current_rsi_band, current_vol_band, current_trend,
-            require_trend=False, require_vol=True,
-        )
-        loosened = "dropped trend_position"
+    similarity = None
+    if not matches.empty and "similarity_distance" in matches.columns:
+        dvals = matches["similarity_distance"].dropna().values
+        if len(dvals):
+            similarity = {
+                "mean_distance": round(float(np.mean(dvals)), 4),
+                "max_distance": round(float(np.max(dvals)), 4),
+            }
 
-    # Tier 3: drop vol_band too (RSI band only)
+    # ── Fallback: discrete band-matching (only if k-NN couldn't assemble a
+    # usable neighbour set, e.g. degenerate features) ───────────────────
     if len(matches) < _MIN_MATCHES:
+        band_cands = candidates.dropna(subset=["rsi_band", "vol_band", "trend_position"])
+        method = "band_match"
         matches = _find_matches(
-            candidates, current_rsi_band, current_vol_band, current_trend,
-            require_trend=False, require_vol=False,
+            band_cands, current_rsi_band, current_vol_band, current_trend,
+            require_trend=True, require_vol=True,
         )
-        loosened = "dropped trend_position + vol_band"
+        loosened = None
+        if len(matches) < _MIN_MATCHES:
+            matches = _find_matches(
+                band_cands, current_rsi_band, current_vol_band, current_trend,
+                require_trend=False, require_vol=True,
+            )
+            loosened = "dropped trend_position"
+        if len(matches) < _MIN_MATCHES:
+            matches = _find_matches(
+                band_cands, current_rsi_band, current_vol_band, current_trend,
+                require_trend=False, require_vol=False,
+            )
+            loosened = "dropped trend_position + vol_band"
 
     if matches.empty:
         result = {
@@ -354,13 +473,23 @@ def compute_historical_analog(symbol: str) -> dict:
     samples = _sample_dates(matches, n=5)
     interpretation = _interpret(stats, len(matches), loosened)
 
+    # Confidence interval on the mean forward return — surfaces small-sample
+    # fragility instead of presenting a 5-point mean as gospel.
+    rets = matches["fwd_return_pct"].dropna().values
+    mean_ci = _mean_ci(np.asarray(rets, dtype=float)) if len(rets) else None
+    low_confidence = len(matches) < _MIN_MATCHES
+
     result = {
         "available": True,
         "current_conditions": current_conditions,
         "match_count": int(len(matches)),
+        "match_method": method,            # "knn_mahalanobis" | "band_match"
+        "similarity": similarity,           # k-NN distance summary (None for band match)
         "lookback_years": _LOOKBACK_YEARS,
         "forward_window_days": _FORWARD_WINDOW,
         "forward_returns": stats,
+        "forward_return_mean_ci95": mean_ci,  # [lo, hi] % CI on the mean (None if n<2)
+        "low_confidence": bool(low_confidence),
         "sample_dates": samples,
         "interpretation": interpretation,
         "error": None,

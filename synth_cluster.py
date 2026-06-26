@@ -83,12 +83,22 @@ SOURCE_WEIGHTS: Dict[str, float] = {
     "13f_institutional":  0.10,
     "ml_forecast":        0.16,
     "narrative":          0.08,
-    "smart_money":        0.14,
+    # smart_money is NOT an independent source: it already internally folds
+    # insider + options + ml + sec, so counting it alongside those raw sources
+    # double-counts the same evidence and inflates the "many independent
+    # sources agree" breadth premise. Down-weighted heavily (0.14 → 0.03) and
+    # excluded from the breadth count entirely (see _BREADTH_EXCLUDED).
+    "smart_money":        0.03,
     "alt_signals":        0.06,
     "options_skew":       0.08,
     "wiki_attention":     0.04,
     "reflexivity":        0.06,
 }
+
+# Components that fold OTHER components' evidence internally and therefore must
+# not contribute to the independence-breadth count (n_fired) that drives the
+# agreement bonus. They can still add a small weighted nudge to the base score.
+_BREADTH_EXCLUDED = frozenset({"smart_money"})
 
 # Per-source timeout. EDGAR + congress PDF parsing can take 5–10s each
 # on a cold cache; cap the whole symbol at ~25s so the 100-symbol scan
@@ -104,6 +114,45 @@ BEARISH_BUCKETS = {"REGULATORY", "SCANDAL", "MACRO"}
 
 # Phases that signal direction is forming — analogue of "BREAKOUT / BUILDING"
 ACTIVE_PHASES = {"ACCELERATION", "EMERGENCE"}
+
+# Rolling cross-sectional sample of institutional-ownership fractions seen
+# across recent scans. Used so the 13F component fires on RELATIVE standing
+# (top/bottom tercile of the observed cross-section) rather than an absolute
+# 0.65/0.40 cutoff that mechanically tags whole sectors (mega-cap tech is
+# ~80% institutional almost universally — an absolute 0.65 bull cutoff fires
+# for nearly all of them and carries no cross-sectional information).
+_INST_SAMPLE: List[float] = []
+_INST_SAMPLE_LOCK = threading.Lock()
+_INST_SAMPLE_MAX = 300
+_INST_MIN_SAMPLE = 20  # below this we fall back to the absolute thresholds
+
+
+def _inst_percentile_thresholds() -> Optional[Tuple[float, float]]:
+    """Return (bull_cutoff, bear_cutoff) = (67th, 33rd) percentiles of the
+    rolling institutional-ownership cross-section, or None when the sample is
+    too small to be meaningful (caller falls back to absolute thresholds)."""
+    with _INST_SAMPLE_LOCK:
+        if len(_INST_SAMPLE) < _INST_MIN_SAMPLE:
+            return None
+        vals = sorted(_INST_SAMPLE)
+    n = len(vals)
+
+    def _pct(p: float) -> float:
+        idx = p * (n - 1)
+        lo = int(math.floor(idx))
+        hi = int(math.ceil(idx))
+        if lo == hi:
+            return vals[lo]
+        return vals[lo] + (vals[hi] - vals[lo]) * (idx - lo)
+
+    return (_pct(0.67), _pct(0.33))
+
+
+def _record_inst_observation(inst_f: float) -> None:
+    with _INST_SAMPLE_LOCK:
+        _INST_SAMPLE.append(inst_f)
+        if len(_INST_SAMPLE) > _INST_SAMPLE_MAX:
+            del _INST_SAMPLE[: len(_INST_SAMPLE) - _INST_SAMPLE_MAX]
 
 
 # ---------------------------------------------------------------------------
@@ -283,17 +332,30 @@ def _component_13f_institutional(symbol: str, direction: str) -> Tuple[bool, str
     if inst_f is None and short_f is None:
         return (False, "no data", "no institutional metrics")
 
-    if direction == "bullish":
-        # Healthy institutional ownership + low shorts
-        fired = (inst_f is not None and inst_f > 0.65) and (short_f is None or short_f < 0.05)
+    # Cross-sectional percentile thresholds (top/bottom tercile of the rolling
+    # observed distribution); fall back to absolute 0.65/0.40 when the sample
+    # is too small. Record this observation for future scans either way.
+    if inst_f is not None:
+        _record_inst_observation(inst_f)
+    pct_cuts = _inst_percentile_thresholds()
+    if pct_cuts is not None:
+        bull_cut, bear_cut = pct_cuts
+        basis = "cross-sectional pctile"
     else:
-        # Low institutional ownership + heavy shorts
-        fired = (inst_f is not None and inst_f < 0.40) or (short_f is not None and short_f > 0.10)
+        bull_cut, bear_cut = 0.65, 0.40
+        basis = "absolute (sample<20)"
+
+    if direction == "bullish":
+        # Top-tercile institutional ownership + low shorts
+        fired = (inst_f is not None and inst_f >= bull_cut) and (short_f is None or short_f < 0.05)
+    else:
+        # Bottom-tercile institutional ownership + heavy shorts
+        fired = (inst_f is not None and inst_f <= bear_cut) or (short_f is not None and short_f > 0.10)
 
     inst_str = f"{inst_f*100:.0f}%" if inst_f is not None else "?"
     short_str = f"{short_f*100:.1f}%" if short_f is not None else "?"
     value = f"inst {inst_str} / short {short_str}"
-    return (fired, value, "yfinance proxy for 13F flow")
+    return (fired, value, f"yfinance 13F proxy ({basis})")
 
 
 def _component_ml_forecast(symbol: str, direction: str) -> Tuple[bool, str, str]:
@@ -600,7 +662,12 @@ def _finalize_scan(symbol: str, sources: List[Optional[Dict[str, Any]]]) -> Dict
             sources[i] = {"name": name, "fired": False,
                           "value": "timeout", "note": "future not completed"}
 
-    n_fired = sum(1 for s in sources if s.get("fired"))
+    # Breadth count excludes sources that fold other sources (smart_money), so
+    # the "independent sources agree" premise actually holds. smart_money still
+    # contributes its (small) weight to the base score below.
+    n_fired = sum(1 for s in sources
+                  if s.get("fired") and s["name"] not in _BREADTH_EXCLUDED)
+    n_fired_all = sum(1 for s in sources if s.get("fired"))
     total_w = sum(SOURCE_WEIGHTS.values()) or 1.0
     weighted = sum(SOURCE_WEIGHTS.get(s["name"], 0) for s in sources if s.get("fired"))
     base = weighted / total_w
@@ -609,6 +676,7 @@ def _finalize_scan(symbol: str, sources: List[Optional[Dict[str, Any]]]) -> Dict
     return {
         "symbol":           symbol,
         "n_sources_firing": n_fired,
+        "n_sources_firing_all": n_fired_all,  # incl. smart_money (additive field)
         "sources":          sources,
         "composite_score":  round(composite, 4),
     }

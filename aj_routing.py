@@ -75,12 +75,17 @@ def _local_available() -> bool:
         return False
 
 
-def _meets_floor(text: Optional[str], quality_floor: float) -> bool:
+def _meets_min_length(text: Optional[str], quality_floor: float) -> bool:
+    """Completeness/length heuristic — NOT a quality grade. Returns True iff the
+    model produced a non-empty output of at least a minimum length. We cannot
+    truly grade answer quality offline, so `quality_floor` is interpreted as a
+    minimum-output-length bar (≈ 8 chars per floor unit): it only catches empty
+    or trivially short (truncated/failed) completions, not low-quality ones."""
     if not text:
         return False
     if quality_floor <= 0:
         return True
-    # We can't truly grade quality offline; use a non-trivial-length proxy.
+    # Non-trivial-length proxy — a completeness check, not a quality grade.
     return len(text.strip()) >= max(1, int(8 * quality_floor))
 
 
@@ -117,7 +122,7 @@ def route(messages: List[Dict[str, Any]], role: str = "", complexity: float = 0.
             if _local_available():
                 chosen = "ollama"
                 text = _ai()._ollama_chat(messages, max_tokens=max_tokens)
-                ok = _meets_floor(text, quality_floor)
+                ok = _meets_min_length(text, quality_floor)
                 # bounded escalation: retry once locally on a quality miss OR
                 # on a None first result (a transient connection blip to a
                 # server that may have just recovered — the cached 60s probe
@@ -131,7 +136,7 @@ def route(messages: List[Dict[str, Any]], role: str = "", complexity: float = 0.
                     escalated = 1
                     retry_tokens = (max_tokens + 256) if max_tokens is not None else None
                     text = _ai()._ollama_chat(messages, max_tokens=retry_tokens)
-                    ok = _meets_floor(text, quality_floor)
+                    ok = _meets_min_length(text, quality_floor)
             else:
                 chosen = "none(local-required)"
                 ok = False  # fail-closed: no local model => no private inference
@@ -141,7 +146,7 @@ def route(messages: List[Dict[str, Any]], role: str = "", complexity: float = 0.
                                      json_mode=json_mode, model=model,
                                      return_cost=True)
             cost_usd += c or 0.0
-            ok = _meets_floor(text, quality_floor)
+            ok = _meets_min_length(text, quality_floor)
             if not ok and max_escalations >= 1:
                 escalated = 1
                 # NOTE: this retry re-calls the same chat_any routing (no
@@ -156,7 +161,7 @@ def route(messages: List[Dict[str, Any]], role: str = "", complexity: float = 0.
                                          json_mode=json_mode, model=model,
                                          return_cost=True)
                 cost_usd += c or 0.0
-                ok = _meets_floor(text, quality_floor)
+                ok = _meets_min_length(text, quality_floor)
     except Exception as e:
         log.exception("route failed for role=%s", role)
         ok = False

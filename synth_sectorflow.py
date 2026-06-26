@@ -138,6 +138,23 @@ CACHE_TTL = 600  # 10 min — bounded enough to feel live, long enough to dodge 
 _NARRATIVE_BULL = {"GROWTH", "PROFITABILITY", "TURNAROUND", "M_AND_A"}
 _NARRATIVE_BEAR = {"REGULATORY", "SCANDAL"}
 
+# narrative_engine's *phase* labels (EMERGENCE→ACCELERATION→CONSENSUS→
+# EXHAUSTION→REVERSAL, plus DEVELOPING) never contain the substring "BULL"/
+# "BEAR", so the old `"BULL" in phase` test silently dropped the narrative
+# term whenever a phase (rather than a topic bucket) came through. Map each
+# phase explicitly to a signed direction. ACCELERATION/EMERGENCE = a building
+# bullish story; CONSENSUS/EXHAUSTION = crowded/late (contrarian bearish);
+# REVERSAL = story breaking down; DEVELOPING = neutral.
+_PHASE_DIRECTION: Dict[str, float] = {
+    "ACCELERATION": +1.0,
+    "EMERGENCE":    +0.6,
+    "BREAKOUT":     +1.0,
+    "DEVELOPING":    0.0,
+    "CONSENSUS":    -0.6,
+    "EXHAUSTION":   -1.0,
+    "REVERSAL":     -0.6,
+}
+
 
 # ─── small helpers ───────────────────────────────────────────────────
 
@@ -574,9 +591,17 @@ def _composite_score(row: Dict[str, Any]) -> float:
     if nv is not None:
         parts.append((0.08, _clip(nv / 2.0, -2, 2)))
     phase = (row.get("narrative_phase") or "").upper()
-    if "BULL" in phase or phase in _NARRATIVE_BULL:
+    # Resolve direction in priority order: explicit phase map, then topic
+    # bucket, then the legacy substring test (kept as a last-resort fallback).
+    if phase in _PHASE_DIRECTION:
+        parts.append((0.04, _PHASE_DIRECTION[phase]))
+    elif phase in _NARRATIVE_BULL:
         parts.append((0.04, 1.0))
-    elif "BEAR" in phase or phase in _NARRATIVE_BEAR:
+    elif phase in _NARRATIVE_BEAR:
+        parts.append((0.04, -1.0))
+    elif "BULL" in phase:
+        parts.append((0.04, 1.0))
+    elif "BEAR" in phase:
         parts.append((0.04, -1.0))
 
     insider = row.get("insider_buy_ratio_30d")
@@ -643,13 +668,73 @@ SECTOR_FACTOR_TILT: Dict[str, Dict[str, float]] = {
 }
 
 
-def _factor_contribution(sector: str, factor_panel: Dict[str, Any]) -> Optional[float]:
-    """Per-sector blended factor return using the heuristic tilts above.
+_FACTOR_COLS_FOR_TILT = ("Mkt-RF", "SMB", "HML", "RMW", "CMA", "Mom")
+# Per-process cache of regressed sector tilts: sector -> {factor: beta}.
+_REGRESSED_TILT_CACHE: Dict[str, Dict[str, float]] = {}
+_REGRESSED_TILT_TS: float = 0.0
+_REGRESSED_TILT_TTL = 24 * 3600  # betas move slowly; refresh daily
+
+
+def _regressed_sector_tilts() -> Dict[str, Dict[str, float]]:
+    """Compute each sector ETF's FF5+Mom factor betas via the existing
+    ``research_factors.factor_exposure`` regression (3y window), replacing the
+    hand-invented ``SECTOR_FACTOR_TILT`` constants. Cached for a day.
+
+    Fails OPEN: any ETF whose regression errors or returns no exposures simply
+    isn't added to the map, and ``_factor_contribution`` falls back to the
+    static ``SECTOR_FACTOR_TILT`` constant for that sector.
+    """
+    global _REGRESSED_TILT_TS
+    if research_factors is None:
+        return {}
+    now = time.time()
+    if _REGRESSED_TILT_CACHE and (now - _REGRESSED_TILT_TS) < _REGRESSED_TILT_TTL:
+        return _REGRESSED_TILT_CACHE
+    fn = getattr(research_factors, "factor_exposure", None)
+    if not callable(fn):
+        return _REGRESSED_TILT_CACHE
+    out: Dict[str, Dict[str, float]] = {}
+    for spec in SECTORS:
+        sector = spec["sector"]
+        etf = spec["etf"]
+        try:
+            res = fn(etf, period_years=3)
+        except Exception as e:
+            log.debug("sector beta regression failed for %s: %s", etf, e)
+            continue
+        if not isinstance(res, dict) or res.get("error"):
+            continue
+        exposures = res.get("exposures") or {}
+        betas: Dict[str, float] = {}
+        for fac in _FACTOR_COLS_FOR_TILT:
+            blk = exposures.get(fac) or {}
+            b = _safe_float(blk.get("beta"))
+            if b is not None:
+                betas[fac] = round(b, 4)
+        if betas:
+            out[sector] = betas
+    if out:
+        _REGRESSED_TILT_CACHE.clear()
+        _REGRESSED_TILT_CACHE.update(out)
+        _REGRESSED_TILT_TS = now
+    return _REGRESSED_TILT_CACHE
+
+
+def _factor_contribution(sector: str, factor_panel: Dict[str, Any],
+                         regressed_tilts: Optional[Dict[str, Dict[str, float]]] = None
+                         ) -> Optional[float]:
+    """Per-sector blended factor return. Prefers the ETF's REGRESSED factor
+    betas (computed from real data); falls back to the heuristic
+    ``SECTOR_FACTOR_TILT`` constants when no regression is available.
     Mostly informational — the composite picks it up at a small weight."""
     facs = factor_panel.get("factors") or {}
     if not facs:
         return None
-    tilt = SECTOR_FACTOR_TILT.get(sector) or {}
+    tilt = None
+    if regressed_tilts:
+        tilt = regressed_tilts.get(sector)
+    if not tilt:
+        tilt = SECTOR_FACTOR_TILT.get(sector) or {}
     if not tilt:
         return None
     num = 0.0
@@ -668,7 +753,7 @@ def _factor_contribution(sector: str, factor_panel: Dict[str, Any]) -> Optional[
 # ─── public API ──────────────────────────────────────────────────────
 
 def _build_sector_row(spec: Dict[str, str], insiders, congress, factors,
-                      spy_bars) -> Dict[str, Any]:
+                      spy_bars, regressed_tilts=None) -> Dict[str, Any]:
     """Build one sector's row. Each call makes ~6 independent upstream fetches
     (price / narrative / reddit / hn / wiki / options); cheap individually but
     serial across 11 sectors was the ~113s cold-cache cost. Shared indices /
@@ -679,7 +764,7 @@ def _build_sector_row(spec: Dict[str, str], insiders, congress, factors,
     row: Dict[str, Any] = {"sector": sector, "etf": etf}
     row.update(_price_panel(etf, spy_bars=spy_bars))          # price + RS
     row.update(_narrative_panel(etf))                          # narrative
-    row["factor_1d_return_pct"] = _factor_contribution(sector, factors)
+    row["factor_1d_return_pct"] = _factor_contribution(sector, factors, regressed_tilts)
     row["insider_buy_ratio_30d"] = _insider_buy_ratio(insiders, sector)
     # WHY (S2): `or None` mapped a genuine net flow of exactly 0.0 (balanced
     # buys/sells) to None, dropping a real, informative weight. Only treat a
@@ -698,6 +783,13 @@ def _compute() -> Dict[str, Any]:
     insiders = _insider_index()
     congress = _congress_index()
     factors  = _factor_panel()
+    # Regressed sector→factor betas (real data); empty dict falls back to the
+    # hand-tuned SECTOR_FACTOR_TILT constants inside _factor_contribution.
+    try:
+        regressed_tilts = _regressed_sector_tilts()
+    except Exception as e:
+        log.debug("regressed sector tilts unavailable: %s", e)
+        regressed_tilts = {}
     # Fetch SPY's 1y chart exactly once for the whole scan — every sector's
     # rs_vs_spy_* computation reuses it. Without this we'd issue 11
     # cache_store.coalesce(("chart","SPY",…)) calls per scan even though
@@ -718,7 +810,8 @@ def _compute() -> Dict[str, Any]:
         # those FDs leak until the thread object is GC'd. Close them on the way
         # out so a long-lived process doesn't accumulate handles per 10min TTL.
         try:
-            return _build_sector_row(spec, insiders, congress, factors, spy_bars)
+            return _build_sector_row(spec, insiders, congress, factors, spy_bars,
+                                     regressed_tilts)
         finally:
             try:
                 import database

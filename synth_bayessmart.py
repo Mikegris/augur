@@ -185,7 +185,27 @@ def seed_synthetic_history(
     rather than going through `log_forecast`, because `log_forecast` records
     only un-scored calls. We need *scored* rows to populate `get_track_record`.
     Returns a {component: rows_inserted} summary.
+
+    SAFETY GUARD: this fabricates *scored* track-record rows, which then drive
+    the Bayes weights of the live panel. Running it against the production
+    `wealth.db` permanently pollutes the real ledger. It is therefore refused
+    unless ``AUGUR_ALLOW_SEED=1`` is set in the environment, AND — even with
+    the flag off — the target DB path must contain 'test' or 'tmp'. With the
+    flag on, any path is allowed (explicit opt-in). Returns ``{}`` when
+    refused, never raising.
     """
+    db_path = os.environ.get("AUGUR_DB_PATH", "wealth.db")
+    allow_seed = os.environ.get("AUGUR_ALLOW_SEED") == "1"
+    _path_lc = db_path.lower()
+    _is_test_db = ("test" in _path_lc) or ("tmp" in _path_lc)
+    if not allow_seed and not _is_test_db:
+        log.warning(
+            "seed_synthetic_history refused: would write to non-test DB %r without "
+            "AUGUR_ALLOW_SEED=1. Set AUGUR_ALLOW_SEED=1 to override, or point "
+            "AUGUR_DB_PATH at a path containing 'test'/'tmp'.", db_path,
+        )
+        return {}
+
     if counts is None:
         counts = {
             "insider_activity": (40, 0.65),   # strong — gets upweighted
@@ -204,7 +224,6 @@ def seed_synthetic_history(
         log.warning("seed_synthetic_history: research_tracker unavailable: %s", e)
         return {}
 
-    db_path = os.environ.get("AUGUR_DB_PATH", "wealth.db")
     inserted: Dict[str, int] = {}
     now = datetime.now(timezone.utc)
     issued_at = (now - timedelta(days=horizon_days + 1)).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -371,13 +390,42 @@ def _compute(symbol: str) -> Dict[str, Any]:
         c["contribution"] = round(post_w * c["normalized"], 4)
 
     # ── Stage 3: composite recomputation ────────────────────────────────
-    # The static composite (`static_score`) is in 0..100. The Bayesian
-    # composite uses each component's normalized [-1..+1] value weighted by
-    # the posterior weight, then maps that back onto 0..100 (with 0 = -1,
-    # 50 = 0, 100 = +1) — same scale as the static.
+    # NOTE: `bayes_score` is a TRACK-RECORD-WEIGHTED COMPOSITE, not a posterior
+    # probability. It re-weights each component's normalized [-1..+1] value by
+    # the (Beta-Binomial-derived) posterior weight and maps back onto 0..100
+    # (0 = -1, 50 = 0, 100 = +1) — same scale as the static score. The
+    # Bayes-ness is in the WEIGHTS, not in the output being P(up). See
+    # `posterior_p_up` below for an actual log-odds posterior.
     bayes_normalized = sum(c["posterior_weight"] * c["normalized"] for c in components_out)
     bayes_score = 50.0 + (bayes_normalized * 50.0)
     bayes_score = max(0.0, min(100.0, bayes_score))
+
+    # ── Stage 3b: TRUE log-odds posterior P(up) ─────────────────────────
+    # Combine the calibrated component signals in log-odds space (naive-Bayes
+    # fusion). Each component carries a directional signal `normalized` ∈
+    # [-1,+1] and a *calibrated reliability* `posterior_mean` ∈ (0,1) — the
+    # Beta-Binomial estimate of how often that component is directionally
+    # right. A component pointing up with reliability p contributes
+    # +|normalized|·logit(p) to the up-log-odds; pointing down contributes the
+    # negation. Summing logits and applying the logistic gives a genuine
+    # probability (unlike `bayes_score`, which is a weighted average on a
+    # bipolar scale). Components with no track record (posterior_mean == prior
+    # 0.5) contribute logit(0.5)=0 → they don't move the posterior, which is
+    # the correct "no calibrated evidence" behaviour.
+    log_odds = 0.0
+    for c in components_out:
+        p = c["posterior_mean"]
+        try:
+            p = min(0.999, max(0.001, float(p)))
+        except (TypeError, ValueError):
+            continue
+        comp_logit = math.log(p / (1.0 - p))      # 0 when p == 0.5
+        log_odds += float(c["normalized"]) * comp_logit
+    try:
+        posterior_p_up = 1.0 / (1.0 + math.exp(-log_odds))
+    except OverflowError:
+        posterior_p_up = 0.0 if log_odds < 0 else 1.0
+    posterior_p_up = max(0.0, min(1.0, posterior_p_up))
 
     # ── Stage 4: top-3 weight shifts ────────────────────────────────────
     shifts = sorted(
@@ -414,7 +462,13 @@ def _compute(symbol: str) -> Dict[str, Any]:
         "static_score": round(static_score, 2),
         "static_signal": sm.get("signal"),
         "bayes_score": round(bayes_score, 2),
+        # User-facing label clarifying what bayes_score actually is.
+        "bayes_score_label": "track-record-weighted composite (0-100, not a probability)",
         "bayes_signal": bayes_signal,
+        # True log-odds posterior P(up) from naive-Bayes fusion of the
+        # calibrated component signals (this one IS a probability).
+        "posterior_p_up": round(posterior_p_up, 4),
+        "posterior_log_odds": round(log_odds, 4),
         "score_delta": round(bayes_score - static_score, 2),
         "components": components_out,
         "weight_shift_summary": shifts,

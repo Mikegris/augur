@@ -649,22 +649,55 @@ def _fetch_signal(symbol: str, key: str) -> Optional[Dict[str, Any]]:
 
 def _pair_row(symbol: str, pair: dict,
               a: Optional[Dict[str, Any]],
-              b: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+              b: Optional[Dict[str, Any]],
+              norm_stats: Optional[Dict[str, Tuple[float, float]]] = None) -> Optional[Dict[str, Any]]:
     """Build a divergence row from two already-fetched signals.
+
+    The raw per-signal ``norm`` values saturate at DIFFERENT scales (e.g.
+    insider flow hits ±1 at $5M net, smart-money at ±50pts), so a single
+    global 0.8 magnitude threshold on raw norms compared apples to oranges.
+    When ``norm_stats`` (a per-signal-key {key: (mean, std)} map computed
+    cross-sectionally over the scanned universe) is supplied, we z-score each
+    leg against its OWN distribution first, then compare the standardized
+    values — so "0.8 apart" means the same thing for every pair. We keep the
+    opposite-sign opposition check on the (sign-preserving) z-scores.
+
+    Falls back to raw-norm comparison when ``norm_stats`` is absent (e.g. a
+    direct ``_evaluate_pair_for_symbol`` call outside a full scan).
 
     Returns None on:
       - either signal missing
-      - magnitude <= threshold
+      - standardized magnitude <= threshold
       - same-sign signals (big and small, but not opposed)
     """
     if a is None or b is None:
         return None
 
-    magnitude = abs(a["norm"] - b["norm"])
+    key_a, key_b = _PAIR_SIGNALS[pair["name"]]
+
+    def _z(key: str, norm: float) -> float:
+        # z-score against the signal's own cross-sectional distribution;
+        # mean-center then scale by std. Std<=0 (degenerate) → fall back to
+        # the centered value so we never divide by ~0 and manufacture a blowout.
+        if not norm_stats:
+            return norm
+        stats = norm_stats.get(key)
+        if not stats:
+            return norm
+        mean, std = stats
+        if std and std > 1e-9:
+            return (norm - mean) / std
+        return norm - mean
+
+    za = _z(key_a, a["norm"])
+    zb = _z(key_b, b["norm"])
+
+    magnitude = abs(za - zb)
     if magnitude <= _DIVERGENCE_THRESHOLD:
         return None
     # Require actual *opposition*, not just one big and one small same-sign.
-    if (a["norm"] > 0) == (b["norm"] > 0) and abs(a["norm"]) > 0.05 and abs(b["norm"]) > 0.05:
+    # Use the standardized (sign-preserving) values for the sign test.
+    if (za > 0) == (zb > 0) and abs(za) > 0.05 and abs(zb) > 0.05:
         # Same sign — both bullish or both bearish, just different magnitudes.
         # Not a divergence; skip.
         return None
@@ -677,12 +710,14 @@ def _pair_row(symbol: str, pair: dict,
             "name": pair["signal_a_name"],
             "value": a.get("raw"),
             "norm": round(a["norm"], 3),
+            "z_score": round(za, 3),
             "interpretation": a.get("label", ""),
         },
         "signal_b": {
             "name": pair["signal_b_name"],
             "value": b.get("raw"),
             "norm": round(b["norm"], 3),
+            "z_score": round(zb, 3),
             "interpretation": b.get("label", ""),
         },
         "magnitude": round(magnitude, 3),
@@ -701,15 +736,11 @@ def _evaluate_pair_for_symbol(symbol: str, pair: dict) -> Optional[Dict[str, Any
     return _pair_row(symbol, pair, a, b)
 
 
-def _scan_symbol(symbol: str) -> List[Dict[str, Any]]:
-    """Evaluate every pair for one symbol. Returns list of divergence rows.
-
-    Fetches each distinct signal at most ONCE (smart_money used to be hit
-    twice — once per pair that reads it), and skips a pair's expensive
-    partner signal entirely when the cheap gating side returned nothing.
-    Both phases run on safe_executor's daemon threads; the per-symbol wall
-    clock stays bounded by _PER_SYMBOL_TIMEOUT_S across the two phases.
-    """
+def _gather_symbol_signals(symbol: str) -> Dict[str, Optional[Dict[str, Any]]]:
+    """Fetch every distinct signal for one symbol (each at most ONCE), with
+    the two-phase cheap-then-expensive gating. Returns the {key: signal|None}
+    map without building rows — so the caller can z-score norms
+    cross-sectionally across the universe before thresholding."""
     t0 = time.time()
     signals: Dict[str, Optional[Dict[str, Any]]] = {}
 
@@ -734,18 +765,70 @@ def _scan_symbol(symbol: str) -> List[Dict[str, Any]]:
             thread_name_prefix="divmap-p2",
         )
         signals.update(zip(phase2, res2))
+    return signals
 
+
+def _rows_from_signals(symbol: str,
+                       signals: Dict[str, Optional[Dict[str, Any]]],
+                       norm_stats: Optional[Dict[str, Tuple[float, float]]] = None
+                       ) -> List[Dict[str, Any]]:
+    """Build divergence rows for one symbol from its already-fetched signals,
+    standardizing each leg by ``norm_stats`` when supplied."""
     rows: List[Dict[str, Any]] = []
     for pair in PAIR_DEFS:
         key_a, key_b = _PAIR_SIGNALS[pair["name"]]
         try:
-            row = _pair_row(symbol, pair, signals.get(key_a), signals.get(key_b))
+            row = _pair_row(symbol, pair, signals.get(key_a), signals.get(key_b), norm_stats)
         except Exception as e:
             log.debug("scan %s pair %s failed: %s", symbol, pair["name"], e)
             continue
         if row is not None:
             rows.append(row)
     return rows
+
+
+def _scan_symbol(symbol: str) -> List[Dict[str, Any]]:
+    """Evaluate every pair for one symbol. Returns list of divergence rows.
+
+    Standalone seam (no universe context, so norms are compared raw — the
+    full-universe scan in ``_compute`` z-scores them cross-sectionally first).
+    Fetches each distinct signal at most ONCE and skips a pair's expensive
+    partner signal when the cheap gating side returned nothing.
+    """
+    signals = _gather_symbol_signals(symbol)
+    return _rows_from_signals(symbol, signals, norm_stats=None)
+
+
+def _compute_norm_stats(
+    per_symbol_signals: Dict[str, Dict[str, Optional[Dict[str, Any]]]]
+) -> Dict[str, Tuple[float, float]]:
+    """Cross-sectional (mean, std) of each signal key's ``norm`` over the
+    universe. Keys with <3 observations are omitted (insufficient to z-score),
+    causing _pair_row to fall back to the raw norm for that leg."""
+    by_key: Dict[str, List[float]] = {k: [] for k in _SIGNAL_FNS}
+    for signals in per_symbol_signals.values():
+        for key, sig in signals.items():
+            if sig is None:
+                continue
+            v = sig.get("norm")
+            if v is None:
+                continue
+            try:
+                fv = float(v)
+            except (TypeError, ValueError):
+                continue
+            if fv == fv and not math.isinf(fv):
+                by_key[key].append(fv)
+    stats: Dict[str, Tuple[float, float]] = {}
+    for key, vals in by_key.items():
+        n = len(vals)
+        if n < 3:
+            continue
+        mean = sum(vals) / n
+        var = sum((x - mean) ** 2 for x in vals) / (n - 1)
+        std = math.sqrt(var) if var > 0 else 0.0
+        stats[key] = (mean, std)
+    return stats
 
 
 # ───────────────────────── public API ─────────────────────────
@@ -817,14 +900,26 @@ def divergence_map(universe=None, top_n: int = 20) -> dict:
         # deadline of _PER_SYMBOL_TIMEOUT_S × 4 is a hard cap so one slow
         # upstream can't stall the scan forever, with headroom for symbols
         # queued behind the _MAX_WORKERS limit.
-        raw_rows = safe_executor.parallel_map(
-            _scan_symbol,
+        # Pass 1: gather every symbol's signals (no thresholding yet) so we
+        # can z-score each signal against its own cross-sectional distribution.
+        raw_signals = safe_executor.parallel_map(
+            _gather_symbol_signals,
             symbols,
             max_workers=_MAX_WORKERS,
             timeout_per_item=_PER_SYMBOL_TIMEOUT_S * 4,
             thread_name_prefix="divmap",
         )
-        for rows in raw_rows:
+        per_symbol_signals: Dict[str, Dict[str, Optional[Dict[str, Any]]]] = {}
+        for sym, sigs in zip(symbols, raw_signals):
+            per_symbol_signals[sym] = sigs if isinstance(sigs, dict) else {}
+
+        # Per-signal cross-sectional (mean,std) → puts every pair's two legs
+        # on a common z-scale before the magnitude threshold.
+        norm_stats = _compute_norm_stats(per_symbol_signals)
+
+        # Pass 2: build rows with standardized norms.
+        for sym in symbols:
+            rows = _rows_from_signals(sym, per_symbol_signals.get(sym, {}), norm_stats)
             if rows:
                 all_rows.extend(rows)
 

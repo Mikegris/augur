@@ -323,14 +323,51 @@ def _stock_log_returns(symbol: str, period_years: int) -> Tuple[List[str], np.nd
 # ───────────────────────── OLS ─────────────────────────
 
 
+def _newey_west_cov(X: np.ndarray, resid: np.ndarray, XtX_inv: np.ndarray,
+                    lag: Optional[int] = None) -> np.ndarray:
+    """Heteroskedasticity- and autocorrelation-consistent (HAC / Newey-West)
+    coefficient covariance matrix.
+
+    WHY (B1): daily regression residuals are autocorrelated and
+    heteroskedastic, so the homoskedastic ``(X'X)^-1·σ²`` understates the
+    coefficient standard errors and *overstates* the alpha / factor t-stats.
+    Newey-West weights the lagged autocovariances of the score
+    ``u_t = x_t·e_t`` with Bartlett (triangular) kernel weights to produce a
+    consistent ``Cov(β̂)``. Point estimates are unchanged — only inference.
+
+    ``lag`` defaults to the standard automatic bandwidth
+    ``floor(4·(n/100)^(2/9))`` (Newey-West 1994 rule of thumb).
+    """
+    n, k = X.shape
+    u = X * resid.reshape(-1, 1)  # (n, k) score contributions
+    if lag is None:
+        lag = int(np.floor(4.0 * (n / 100.0) ** (2.0 / 9.0)))
+    lag = max(0, min(int(lag), n - 1))
+    # S = Γ0 + Σ_{l=1..lag} w_l (Γl + Γl')
+    S = u.T @ u
+    for l in range(1, lag + 1):
+        w = 1.0 - l / (lag + 1.0)  # Bartlett weight
+        gamma_l = u[l:].T @ u[:-l]
+        S += w * (gamma_l + gamma_l.T)
+    # Sandwich: (X'X)^-1 · S · (X'X)^-1  (note XtX_inv = (X'X)^-1)
+    cov = XtX_inv @ S @ XtX_inv
+    return cov
+
+
 def _ols(
     y: np.ndarray, X: np.ndarray
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, float, np.ndarray]:
-    """Plain OLS: returns (coef, t_stats, p_values, r_squared, residuals).
+    """OLS with Newey-West (HAC) inference: returns
+    (coef, t_stats, p_values, r_squared, residuals).
 
     ``X`` should already include an intercept column. With small (n,k) and
     well-behaved factor data, ``lstsq`` is more numerically stable than
     forming X'X directly.
+
+    WHY (B1): point estimates (betas, alpha) come straight from OLS, but the
+    t-stats / p-values are now computed from a Newey-West HAC covariance so
+    the inference is robust to the autocorrelation and heteroskedasticity of
+    daily residuals (the homoskedastic SEs previously overstated them).
 
     The numpy 2.0 BLAS path emits spurious ``divide by zero / overflow``
     RuntimeWarnings from inside ``matmul`` even on perfectly finite inputs;
@@ -342,13 +379,22 @@ def _ols(
     with np.errstate(divide="ignore", over="ignore", invalid="ignore"):
         coef, *_ = np.linalg.lstsq(X, y, rcond=None)
         resid = y - X @ coef
-        dof = max(n - k, 1)
-        sigma2 = float(resid @ resid) / dof
         try:
             XtX_inv = np.linalg.pinv(X.T @ X)
         except np.linalg.LinAlgError:
             XtX_inv = np.linalg.pinv(X.T @ X + 1e-10 * np.eye(k))
-        se = np.sqrt(np.clip(np.diag(XtX_inv) * sigma2, 0.0, None))
+        # Newey-West HAC standard errors. Fail OPEN to the prior homoskedastic
+        # SEs if the HAC sandwich is degenerate (e.g. tiny n / singular score).
+        dof = max(n - k, 1)
+        sigma2 = float(resid @ resid) / dof
+        try:
+            cov_hac = _newey_west_cov(X, resid, XtX_inv)
+            diag = np.diag(cov_hac)
+            if not np.all(np.isfinite(diag)):
+                raise ValueError("non-finite HAC variance")
+            se = np.sqrt(np.clip(diag, 0.0, None))
+        except Exception:
+            se = np.sqrt(np.clip(np.diag(XtX_inv) * sigma2, 0.0, None))
         t = np.divide(coef, se, out=np.full_like(coef, np.nan), where=se > 0)
         p = np.asarray([_norm_sf(float(tt)) if tt == tt else float("nan") for tt in t])
         yc = y - float(np.mean(y))

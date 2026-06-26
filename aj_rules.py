@@ -245,24 +245,27 @@ def enhanced_gate(symbol: str, side: str, qty: float, price: float,
             if rows and int(rows[0]["n"]) >= sym_cap:
                 return "per-symbol daily trade cap ({}/{})".format(rows[0]["n"], sym_cap)
 
-        # ⑩ per-symbol weight cap (projected book weight after a buy)
+        # ⑩ per-symbol weight cap (projected weight after a buy), against
+        # ACCOUNT EQUITY (cash + positions MV) rather than invested notional —
+        # so the cap sees cash/leverage instead of treating the first position
+        # as ~100% of an empty 'book'. With no configured cash (the default)
+        # equity == positions MV and behaviour is unchanged.
         wcap = float(cfg.get("max_symbol_weight_pct") or 0)
         if wcap > 0 and side == "buy":
             import aj_risk
+            import aj_alpha
             marks = aj_risk._marks(list(positions.keys()) + [symbol])
-            total = 0.0
             sym_val = 0.0
             for s, p in positions.items():
                 mv = float(p.get("qty") or 0) * (marks.get(s) or float(p.get("avg_cost") or 0))
-                total += mv
                 if s == symbol:
                     sym_val = mv
             add = qty * price
-            total += add
             sym_val += add
-            if total > 0 and (sym_val / total * 100.0) > wcap:
+            equity = aj_alpha.account_equity(positions, marks) + add
+            if equity > 0 and (sym_val / equity * 100.0) > wcap:
                 return "{} would be {:.1f}% of book (cap {:g}%)".format(
-                    symbol, sym_val / total * 100.0, wcap)
+                    symbol, sym_val / equity * 100.0, wcap)
 
         # ⑬ slippage guard (estimated adverse bps for a market order)
         smax = float(cfg.get("max_slippage_bps") or 0)

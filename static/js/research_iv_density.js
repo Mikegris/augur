@@ -180,13 +180,8 @@
       ys.push(density[N - 1]);
     }
 
-    // Vertical spot marker via an extra dataset with two points.
+    // Vertical spot marker is drawn by the `spotMarker` plugin below.
     const spot = rnd.spot;
-    const yMax = Math.max.apply(null, ys);
-    const spotLineData = [
-      { x: spot, y: 0 },
-      { x: spot, y: yMax * 1.05 },
-    ];
 
     // Compact, terminal-style chart matching the rest of AUGUR's theme.
     _charts[canvasId] = new Chart(ctx, {
@@ -203,21 +198,6 @@
             pointRadius: 0,
             tension: 0.35,
             fill: true,
-          },
-          {
-            label: 'Spot',
-            data: spotLineData.map(p => p.y),  // y values at indices corresponding to xs nearest spot
-            // We'll instead draw the spot as a vertical reference via an
-            // x-aligned scatter trick: build a sparse dataset where only the
-            // entry whose x is closest to spot has a non-null y.
-            xAxisID: 'x',
-            borderColor: '#ffae42',
-            backgroundColor: '#ffae42',
-            borderWidth: 1,
-            borderDash: [4, 4],
-            pointRadius: 0,
-            showLine: false,
-            hidden: true,  // hidden — the annotation below replaces it
           },
         ],
       },

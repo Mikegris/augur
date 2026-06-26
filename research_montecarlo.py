@@ -79,6 +79,15 @@ _LOOKBACK_DAYS = 504
 # of float64s stays comfortably under 200 MB for any realistic N.
 _MAX_PATHS = 20000
 _MAX_HORIZON = 365 * 2
+# Block-bootstrap block length (trading days). ~10d keeps the bulk of daily
+# return autocorrelation / volatility clustering inside each resampled block
+# (C). block_size=1 reduces to the old i.i.d. bootstrap.
+_BLOCK_SIZE = 10
+# Shrinkage applied to the MVN daily-drift estimate (toward 0). The daily
+# sample mean is too noisy to extrapolate over a multi-month horizon (C).
+_MVN_DRIFT_SHRINK = 0.9
+# Eigenvalue floor used by the PSD repair before drawing MVN normals (C).
+_PSD_EIG_FLOOR = 1e-12
 
 # Default RNG when caller passes seed=None — keeps simulations reproducible
 # within a single process while still producing fresh draws across runs.
@@ -391,11 +400,20 @@ def _build_returns_matrix(symbols: List[str]) -> Tuple[np.ndarray, List[str], Li
 
 def _simulate_paths_bootstrap(R: np.ndarray, weights: np.ndarray,
                               n_paths: int, horizon_days: int,
-                              rng: np.random.Generator) -> np.ndarray:
+                              rng: np.random.Generator,
+                              block_size: int = _BLOCK_SIZE) -> np.ndarray:
     """
-    Block bootstrap with block_size=1. Sample `horizon_days * n_paths`
-    row indices uniformly from R, slot into a (n_paths, horizon_days, N)
-    cube, project onto weights, compound into NAV multipliers.
+    Stationary / circular block bootstrap. Sample CONTIGUOUS blocks of
+    consecutive return rows (wrapping circularly at the end of the history)
+    and lay them end-to-end until each path has ``horizon_days`` rows.
+
+    WHY (C): the previous implementation used ``block_size=1`` — i.e. plain
+    i.i.d. resampling — which destroys the serial dependence in daily
+    returns (volatility clustering, momentum/mean-reversion). That makes
+    simulated drawdowns look milder and less clustered than reality. A block
+    bootstrap with block length ~10 keeps within-block autocorrelation
+    intact. ``block_size`` is configurable; the circular wrap avoids
+    end-of-sample truncation bias.
 
     Returns
     -------
@@ -403,11 +421,21 @@ def _simulate_paths_bootstrap(R: np.ndarray, weights: np.ndarray,
         NAV / initial_NAV at each step. Multiply by initial_nav to get $.
     """
     T = R.shape[0]
-    # Flat index pool then reshape — single RNG call is much faster than
-    # n_paths separate calls.
-    idx = rng.integers(0, T, size=n_paths * horizon_days)
-    # (n_paths, horizon_days, N) — but we only need portfolio returns, so
-    # collapse the asset axis on the fly with the einsum.
+    L = int(max(1, min(block_size, T)))
+    if L <= 1 or T <= 1:
+        # Degenerate case → fall back to i.i.d. resampling (prior behaviour).
+        idx = rng.integers(0, T, size=n_paths * horizon_days)
+    else:
+        # Number of blocks needed per path (last block may be trimmed).
+        n_blocks = int(np.ceil(horizon_days / L))
+        # Random block start row for every (path, block).
+        starts = rng.integers(0, T, size=(n_paths, n_blocks))
+        # Offsets 0..L-1 within a block; circular wrap with modulo T.
+        offsets = np.arange(L)
+        # (n_paths, n_blocks, L) absolute indices, then flatten the time axis.
+        block_idx = (starts[:, :, None] + offsets[None, None, :]) % T
+        idx = block_idx.reshape(n_paths, n_blocks * L)[:, :horizon_days]
+        idx = idx.reshape(-1)
     sampled = R[idx].reshape(n_paths, horizon_days, R.shape[1])
     port_rets = sampled @ weights  # (n_paths, horizon_days)
     # Compound. log1p + cumsum + expm1 is more numerically stable than
@@ -416,11 +444,33 @@ def _simulate_paths_bootstrap(R: np.ndarray, weights: np.ndarray,
     return nav
 
 
+def _psd_repair(cov: np.ndarray, floor: float = _PSD_EIG_FLOOR) -> np.ndarray:
+    """Project a symmetric matrix onto the PSD cone by clipping negative
+    eigenvalues to ``floor``. Fails OPEN to the symmetrized input on error."""
+    try:
+        sym = 0.5 * (cov + cov.T)
+        vals, vecs = np.linalg.eigh(sym)
+        if np.all(vals >= floor):
+            return sym
+        vals = np.clip(vals, floor, None)
+        repaired = (vecs * vals) @ vecs.T
+        return 0.5 * (repaired + repaired.T)  # re-symmetrize numerical drift
+    except Exception:  # pragma: no cover - defensive
+        return 0.5 * (cov + cov.T)
+
+
 def _simulate_paths_mvn(R: np.ndarray, weights: np.ndarray,
                         n_paths: int, horizon_days: int,
                         rng: np.random.Generator) -> np.ndarray:
     """Multivariate-normal fallback. Same return shape as bootstrap."""
     mu = R.mean(axis=0)
+    # WHY (C): the daily sample mean is an extremely noisy drift estimate —
+    # over a 252-day horizon it dominates the cone and bakes the last year's
+    # luck into the forecast. Shrink the drift strongly toward 0 so the MVN
+    # paths are driven by the (well-estimated) covariance, not the (poorly
+    # estimated) mean. A 90% shrink keeps a faint drift without letting it run
+    # the simulation.
+    mu = mu * (1.0 - _MVN_DRIFT_SHRINK)
     cov = np.cov(R, rowvar=False)
     # Ensure cov is at least 2D (single-asset case).
     if cov.ndim == 0:
@@ -432,8 +482,11 @@ def _simulate_paths_mvn(R: np.ndarray, weights: np.ndarray,
         # fails loudly in multivariate_normal rather than being silently
         # squashed to (1, 1) (which would drop assets).
         cov = np.atleast_2d(cov)
-    # Add a small ridge to keep the covariance positive-definite — without
-    # this, near-collinear holdings (e.g. SPY + VOO) blow up Cholesky.
+    # WHY (C): eigenvalue PSD repair. The cosmetic 1e-12 ridge does not fix a
+    # covariance with genuinely negative eigenvalues (sampling noise / near-
+    # collinear holdings). Clip the eigenvalues to a small positive floor and
+    # rebuild a symmetric PSD matrix, then add a tiny ridge for Cholesky.
+    cov = _psd_repair(cov)
     ridge = 1e-12 * np.eye(cov.shape[0])
     # Suppress harmless BLAS overflow/divide warnings that fire on macOS
     # Accelerate when the (n_paths, horizon, N) draw cube is large.

@@ -34,6 +34,27 @@ _cache_ts = {}    # type: Dict[str, float]
 _cache_lock = threading.Lock()
 _CACHE_TTL = 300
 
+# Rolling history of the REAL 6-indicator composite (most-recent last). The
+# percentile rank used to compare the true composite against a 2-indicator
+# (VIX+volume) sparkline proxy — apples-to-oranges. We now persist each real
+# composite here and rank against this same-population history.
+_REAL_HISTORY_MAX = 120
+_real_history = []          # type: List[float]
+_real_history_lock = threading.Lock()
+
+
+def _record_real_composite(value):
+    # type: (float) -> List[float]
+    """Append a real composite score and return a snapshot of the history."""
+    with _real_history_lock:
+        # Avoid double-counting cache-coalesced repeats within the same TTL by
+        # skipping an identical back-to-back value.
+        if not _real_history or _real_history[-1] != value:
+            _real_history.append(float(value))
+            if len(_real_history) > _REAL_HISTORY_MAX:
+                del _real_history[:-_REAL_HISTORY_MAX]
+        return list(_real_history)
+
 
 def _cached_get(key):
     # type: (str) -> Optional[object]
@@ -93,7 +114,12 @@ def _rate_of_change(arr, lookback=20):
 
 def _neutral_indicator(name):
     # type: (str) -> dict
-    return {"score": 50, "value": 0.0, "detail": "{} data unavailable".format(name)}
+    # `available: False` flags a dead/empty feed so the composite can RENORMALIZE
+    # the weights over only the indicators that actually had data instead of
+    # injecting a neutral-50 into the weighted mean (which biases a calm read
+    # toward ELEVATED and deflates a high-conviction read).
+    return {"score": 50, "value": 0.0,
+            "detail": "{} data unavailable".format(name), "available": False}
 
 
 # ── Sub-indicator 1: VIX Regime (25%) ────────────────────────────────────────
@@ -504,16 +530,32 @@ def _compute_stress_score_inner():
     credit = _compute_credit_stress()
     breadth = _compute_market_breadth()
 
-    # ── Weighted composite ────────────────────────────────────────────
-    composite = int(
-        vix["score"] * 0.25
-        + correlation["score"] * 0.20
-        + dispersion["score"] * 0.15
-        + volume["score"] * 0.15
-        + credit["score"] * 0.15
-        + breadth["score"] * 0.10
-    )
+    # ── Weighted composite (renormalized over AVAILABLE indicators) ───
+    # A dead feed returns `available: False` (via _neutral_indicator). Rather
+    # than feed its neutral-50 into the weighted mean — which would bias a calm
+    # market toward ELEVATED and deflate a high-conviction read — we drop the
+    # missing indicators and renormalize the remaining weights to sum to 1.
+    # An indicator that genuinely computed a score has no `available` key, so we
+    # treat absence as available=True.
+    _weighted = [
+        (vix, 0.25),
+        (correlation, 0.20),
+        (dispersion, 0.15),
+        (volume, 0.15),
+        (credit, 0.15),
+        (breadth, 0.10),
+    ]
+    avail = [(ind, w) for ind, w in _weighted if ind.get("available", True)]
+    total_w = sum(w for _, w in avail)
+    if avail and total_w > 0:
+        composite = int(round(sum(ind["score"] * w for ind, w in avail) / total_w))
+    else:
+        # No live indicators — fall open to a neutral read rather than 0.
+        composite = 50
     composite = max(0, min(100, composite))
+
+    # Fraction of indicators (by count) that had live data.
+    coverage = round(len(avail) / float(len(_weighted)), 3)
 
     # ── Regime classification ─────────────────────────────────────────
     if composite > 70:
@@ -550,9 +592,16 @@ def _compute_stress_score_inner():
     # ── History sparkline ─────────────────────────────────────────────
     history = _compute_history_sparkline()
 
-    # ── Percentile rank (current vs last 60 approx scores) ───────────
+    # ── Percentile rank ───────────────────────────────────────────────
+    # Rank the REAL composite against the persisted history of real composites
+    # (same-population). Fall back to the VIX+volume sparkline proxy only while
+    # real history is still thin, so the rank is never undefined on a cold start.
+    real_hist = _record_real_composite(composite)
     percentile_rank = 50.0  # default
-    if history and len(history) >= 5:
+    if len(real_hist) >= 5:
+        rh = np.array(real_hist, dtype=float)
+        percentile_rank = float(np.sum(rh <= composite) / len(rh) * 100.0)
+    elif history and len(history) >= 5:
         hist_scores = np.array([h["score"] for h in history], dtype=float)
         percentile_rank = float(np.sum(hist_scores <= composite) / len(hist_scores) * 100.0)
 
@@ -601,6 +650,7 @@ def _compute_stress_score_inner():
             },
         },
         "percentile_rank": round(percentile_rank, 1),
+        "coverage": coverage,  # fraction of the 6 indicators with live data
         "history": history[-30:],  # last 30 data points
         "recommendation": recommendation,
         "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),

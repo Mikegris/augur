@@ -18,6 +18,24 @@ from datetime import datetime
 
 log = logging.getLogger(__name__)
 
+
+def _phi(x):
+    """Standard-normal CDF Φ(x). Prefers scipy; falls back to math.erf so a
+    missing scipy never breaks a forecast. Returns 0.5 on any non-finite input."""
+    try:
+        x = float(x)
+        if not np.isfinite(x):
+            return 0.5
+    except (TypeError, ValueError):
+        return 0.5
+    try:
+        from scipy.stats import norm
+        return float(norm.cdf(x))
+    except Exception:
+        import math as _m
+        return 0.5 * (1.0 + _m.erf(x / _m.sqrt(2.0)))
+
+
 # ── TTL cache: avoid retraining models on every request ──────────────────────
 # Cache results for 1 hour per symbol. Training 4 models takes 2-5s per symbol.
 _forecast_cache = {}   # symbol -> result dict
@@ -164,6 +182,11 @@ def _rf_predict(hist):
     from sklearn.ensemble import RandomForestClassifier
     from sklearn.preprocessing import StandardScaler
 
+    try:
+        from sklearn.calibration import CalibratedClassifierCV
+    except Exception:  # pragma: no cover - sklearn always present in venv
+        CalibratedClassifierCV = None
+
     df_full, feature_cols = _build_features(hist)
     df = df_full.dropna(subset=feature_cols + ["fwd_ret_20d"])
 
@@ -212,7 +235,8 @@ def _rf_predict(hist):
     )
     rf.fit(X_train_scaled, y_train)
 
-    # Predict probability
+    # Predict probability from the raw RF (the calibrated estimate below
+    # overrides this when calibration succeeds; this is the fail-open value).
     proba = rf.predict_proba(X_latest)
     if proba.shape[1] < 2:
         # Single-class training set — predict_proba returns one column for
@@ -226,6 +250,59 @@ def _rf_predict(hist):
     else:
         class_idx = list(rf.classes_).index(1) if 1 in rf.classes_ else 0
         prob_up = float(proba[0][class_idx])
+
+    # CALIBRATION (C): raw RF votes are notoriously uncalibrated (they cluster
+    # away from 0/1). Wrap a fresh RF in CalibratedClassifierCV fit on a PURGED
+    # holdout so the reported prob_up is an honest probability, not a tree-vote
+    # fraction. The split mirrors the OOS accuracy block: fit the inner RF on
+    # everything except the final ~60 labelled rows, then fit the calibration
+    # map on that held-out tail (purging the 20-row label overlap between them).
+    # isotonic needs ~50+ calibration points to be stable; below that use
+    # sigmoid (Platt). Fail OPEN to the raw RF prob_up on any error.
+    calibrated = False
+    if CalibratedClassifierCV is not None and len(train) >= 80 + 20:
+        try:
+            cal_hold = train.iloc[-60:] if len(train) >= 60 else train.iloc[-20:]
+            cal_fit = train.iloc[: len(train) - len(cal_hold)]
+            # Purge the 20-row label-window overlap (their realized 20d outcome
+            # lands inside the calibration holdout).
+            cal_fit = cal_fit.iloc[:-20] if len(cal_fit) > 20 else cal_fit.iloc[:0]
+            y_hold = cal_hold["target"].values
+            if (len(cal_fit) >= 60 and len(cal_hold) >= 20
+                    and len(np.unique(cal_fit["target"].values)) == 2
+                    and len(np.unique(y_hold)) == 2):
+                scaler_cal = StandardScaler()
+                X_cal_fit = scaler_cal.fit_transform(cal_fit[feature_cols].values)
+                rf_cal = RandomForestClassifier(
+                    n_estimators=200, max_depth=6, min_samples_leaf=10,
+                    random_state=42, n_jobs=1,
+                )
+                rf_cal.fit(X_cal_fit, cal_fit["target"].values)
+                method = "isotonic" if len(cal_hold) >= 50 else "sigmoid"
+                # Calibrate the already-fitted rf_cal on the holdout. Prefer the
+                # modern FrozenEstimator wrapper (sklearn >= 1.6); fall back to
+                # cv="prefit" on older sklearn (both with new keyword and old
+                # positional base-estimator signatures).
+                cc = None
+                try:
+                    from sklearn.frozen import FrozenEstimator
+                    cc = CalibratedClassifierCV(
+                        FrozenEstimator(rf_cal), method=method)
+                except Exception:
+                    try:
+                        cc = CalibratedClassifierCV(rf_cal, method=method, cv="prefit")
+                    except TypeError:  # older sklearn: positional base estimator
+                        cc = CalibratedClassifierCV(
+                            base_estimator=rf_cal, method=method, cv="prefit")
+                cc.fit(scaler_cal.transform(cal_hold[feature_cols].values), y_hold)
+                X_latest_cal = scaler_cal.transform(latest.values)
+                cproba = cc.predict_proba(X_latest_cal)
+                cls = list(cc.classes_)
+                cidx = cls.index(1) if 1 in cls else 0
+                prob_up = float(cproba[0][cidx])
+                calibrated = True
+        except Exception as e:
+            log.debug("RF calibration failed, using raw prob: %s", e)
 
     # Feature importances
     importances = dict(zip(feature_cols, rf.feature_importances_))
@@ -273,6 +350,7 @@ def _rf_predict(hist):
         # model) is a valid accuracy value but `if accuracy` would drop it.
         "accuracy_recent": round(accuracy, 3) if accuracy is not None else None,
         "class_balance": round(class_balance, 3),
+        "calibrated": calibrated,
         "top_features": [{"name": n, "importance": round(v, 4)} for n, v in top_features],
     }
 
@@ -332,9 +410,28 @@ def _trend_forecast(hist, days_ahead=30):
     )
     blend_pct = round((blend_price / current_price - 1) * 100, 1)
 
-    # Confidence bands (using short-term residual std)
+    # Confidence bands (using short-term residual std).
+    # WHY (B4): the old band was res_std·√h·1.96 — it captured residual scatter
+    # but IGNORED slope (parameter) uncertainty, so the cone was too narrow far
+    # out. Use the proper OLS prediction-interval factor for a NEW observation
+    # at x*: se = res_std·√(1 + 1/n + (x*-x̄)²/Σ(x-x̄)²). The short regression
+    # ran on x = 0..w_s-1, so the forecast end sits at x* = (w_s-1)+days_ahead.
     res_std = forecasts["short"]["residual_std"]
-    ci_factor = res_std * np.sqrt(days_ahead) * 1.96
+    w_s = min(60, n)
+    x_short = np.arange(w_s)
+    x_mean = float(x_short.mean())
+    sxx = float(np.sum((x_short - x_mean) ** 2))
+
+    def _pi_se(steps_ahead):
+        """Prediction-interval std for a point `steps_ahead` beyond the last
+        observed bar (anchor at x=w_s-1). Falls back to the old √h scaling if
+        the design is degenerate (sxx==0, e.g. a single point)."""
+        if sxx <= 0 or w_s <= 1:
+            return res_std * np.sqrt(max(steps_ahead, 0.0))
+        x_star = (w_s - 1) + steps_ahead
+        return res_std * np.sqrt(1.0 + 1.0 / w_s + (x_star - x_mean) ** 2 / sxx)
+
+    ci_factor = _pi_se(days_ahead) * 1.96
     # blend_price comes out of OLS extrapolation and can briefly go non-positive
     # for highly-shorted instruments — np.log(<=0) emits a RuntimeWarning every
     # forecast pass. Clamp to a small epsilon so the band collapses to 0 instead.
@@ -354,8 +451,11 @@ def _trend_forecast(hist, days_ahead=30):
         t = (w - 1) + d
         log_p = np.polyval(short_coeffs, t)
         p = float(np.exp(log_p))
-        u = float(np.exp(log_p + res_std * np.sqrt(d) * 1.96))
-        l = float(np.exp(log_p - res_std * np.sqrt(d) * 1.96))
+        # Proper prediction-interval band (B4): includes slope uncertainty, so
+        # the cone widens correctly with horizon instead of only as √d.
+        band = _pi_se(d) * 1.96
+        u = float(np.exp(log_p + band))
+        l = float(np.exp(log_p - band))
         path.append({"day": d, "price": round(p, 2), "upper": round(u, 2), "lower": round(l, 2)})
 
     # Trend direction
@@ -468,6 +568,89 @@ def _detect_regime(hist):
 
 # ── Model 4: Mean Reversion Signal ───────────────────────────────────────────
 
+def _spread_stationarity(spread_vals):
+    """Cheap stationarity check for the OU spread WITHOUT statsmodels (which is
+    not bundled). Uses a variance-ratio statistic: for a stationary
+    (mean-reverting) series, the variance of k-step changes grows SUBLINEARLY
+    in k, so VR(k) = Var(Δ_k)/(k·Var(Δ_1)) < 1. For a random walk VR≈1; for a
+    trending/non-stationary series VR>1.
+
+    Returns (is_stationary: bool, vr: float|None). Fails OPEN to
+    (True, None) when there isn't enough data to judge — i.e. we don't punish
+    confidence on thin samples, matching the prior behavior.
+    """
+    try:
+        x = np.asarray(spread_vals, dtype=float)
+        x = x[np.isfinite(x)]
+        if x.size < 40:
+            return True, None
+        d1 = np.diff(x)
+        var1 = float(np.var(d1, ddof=1))
+        if var1 <= 1e-12:
+            return True, None
+        k = 5
+        dk = x[k:] - x[:-k]
+        vark = float(np.var(dk, ddof=1))
+        vr = vark / (k * var1)
+        if not np.isfinite(vr):
+            return True, None
+        # VR comfortably below 1 ⇒ mean-reverting/stationary. Allow a margin.
+        return (vr < 0.9), vr
+    except Exception:
+        return True, None
+
+
+def _empirical_reversion_freq(close, ma, zscore, current_z, horizon=20):
+    """Empirical P(reversion toward the MA within `horizon` days), conditional
+    on the z-score bucket the stock is in RIGHT NOW, measured over the stock's
+    OWN history (B/A: replaces the hardcoded half-life step-function).
+
+    A "reversion" event = the |spread to MA| is smaller `horizon` bars later
+    than it is today (price moved back toward its mean). We count that frequency
+    among historical bars whose z-score fell in the same bucket as `current_z`.
+
+    Returns (freq: float|None, n: int). freq is None when there aren't enough
+    same-bucket observations to trust — the caller then falls back to the old
+    half-life constants.
+    """
+    try:
+        c = close.reindex(zscore.index)
+        m = ma.reindex(zscore.index)
+        z = zscore
+        spread_abs = (c - m).abs()
+        # Bucket by |z|: [0,0.5),[0.5,1),[1,1.5),[1.5,2),[2,inf)
+        def _bucket(zv):
+            a = abs(zv)
+            if a < 0.5:
+                return 0
+            if a < 1.0:
+                return 1
+            if a < 1.5:
+                return 2
+            if a < 2.0:
+                return 3
+            return 4
+        cur_b = _bucket(current_z)
+        vals = z.values
+        sa = spread_abs.values
+        n_total = len(vals)
+        hits = 0
+        n = 0
+        for i in range(n_total - horizon):
+            if _bucket(vals[i]) != cur_b:
+                continue
+            if not (np.isfinite(sa[i]) and np.isfinite(sa[i + horizon])):
+                continue
+            n += 1
+            if sa[i + horizon] < sa[i]:
+                hits += 1
+        if n < 12:
+            return None, n
+        return float(hits) / float(n), n
+    except Exception:
+        return None, 0
+
+
 def _mean_reversion_signal(hist):
     """
     Compute mean-reversion probability using z-score and
@@ -491,6 +674,12 @@ def _mean_reversion_signal(hist):
     if len(spread) < 30:
         return None
 
+    # Stationarity guard (B3): the spread is regressed against a TRAILING mean,
+    # which makes it mechanically mean-reverting; if it's actually
+    # non-stationary, θ is untrustworthy. We do NOT hard-fail — we lower the
+    # reported confidence below.
+    is_stationary, var_ratio = _spread_stationarity(spread.values)
+
     spread_lag = spread.shift(1).dropna()
     spread_diff = spread.diff().dropna()
     common_idx = spread_lag.index.intersection(spread_diff.index)
@@ -507,11 +696,22 @@ def _mean_reversion_signal(hist):
 
     if theta <= 0:
         half_life = None
-        mr_probability = 0.3  # weak mean reversion
     else:
         half_life = round(np.log(2) / theta, 1)
-        # Faster half-life = stronger mean reversion
-        if half_life < 5:
+
+    # A2: prefer an EMPIRICAL reversion frequency measured on this stock's own
+    # history, conditional on the current z-score bucket. Fall back to the old
+    # half-life step-function constants only when there isn't enough same-bucket
+    # history to trust the empirical estimate.
+    emp_freq, emp_n = _empirical_reversion_freq(close, ma50, zscore, current_z, horizon=20)
+    mr_prob_source = "empirical"
+    if emp_freq is not None:
+        mr_probability = float(emp_freq)
+    else:
+        mr_prob_source = "half_life_prior"
+        if theta <= 0:
+            mr_probability = 0.3  # weak mean reversion
+        elif half_life < 5:
             mr_probability = 0.85
         elif half_life < 15:
             mr_probability = 0.70
@@ -520,10 +720,12 @@ def _mean_reversion_signal(hist):
         else:
             mr_probability = 0.40
 
-    # Adjust by z-score magnitude (more extended = higher reversion probability)
-    z_adj = min(0.15, abs(current_z) * 0.05)
-    if abs(current_z) > 1.5:
-        mr_probability = min(0.95, mr_probability + z_adj)
+        # Adjust by z-score magnitude (more extended = higher reversion
+        # probability). The empirical estimate already conditions on the
+        # z-bucket, so this hand-tuned bump applies only to the prior fallback.
+        z_adj = min(0.15, abs(current_z) * 0.05)
+        if abs(current_z) > 1.5:
+            mr_probability = min(0.95, mr_probability + z_adj)
 
     # Direction of expected reversion
     if current_z > 0.5:
@@ -536,6 +738,17 @@ def _mean_reversion_signal(hist):
         reversion_dir = "FLAT"
         signal = "FAIR VALUE"
 
+    # Confidence (B3): when the spread looks non-stationary, θ/half-life are
+    # untrustworthy, so we report LOWER confidence rather than hard-failing.
+    # The empirical-frequency path is more robust to this, so its haircut is
+    # gentler. base_conf scales with how far mr_probability sits from a coin flip.
+    base_conf = abs(float(mr_probability) - 0.5) * 2.0
+    if is_stationary:
+        mr_confidence = base_conf
+    else:
+        mr_confidence = base_conf * (0.6 if mr_prob_source == "empirical" else 0.4)
+    mr_confidence = round(float(min(0.95, max(0.0, mr_confidence))), 3)
+
     return {
         "zscore": round(current_z, 2),
         "half_life_days": half_life,
@@ -543,6 +756,12 @@ def _mean_reversion_signal(hist):
         "reversion_direction": reversion_dir,
         "signal": signal,
         "ou_theta": round(theta, 4),
+        # ADD-only diagnostic fields (existing keys untouched).
+        "mr_prob_source": mr_prob_source,
+        "mr_samples": emp_n,
+        "spread_stationary": bool(is_stationary),
+        "variance_ratio": round(float(var_ratio), 3) if var_ratio is not None else None,
+        "mr_confidence": mr_confidence,
     }
 
 
@@ -636,6 +855,14 @@ def _ml_forecast_compute(symbol):
         log.warning("MR error for %s: %s", symbol, e)
         results["mean_reversion"] = None
 
+    # Realized daily vol (close-to-close) for the principled trend→prob map.
+    try:
+        _daily_vol = float(hist["Close"].pct_change().dropna().iloc[-60:].std())
+        if not np.isfinite(_daily_vol) or _daily_vol <= 0:
+            _daily_vol = None
+    except Exception:
+        _daily_vol = None
+
     # Composite ML signal
     signals = []
     if results.get("rf_classifier"):
@@ -647,7 +874,15 @@ def _ml_forecast_compute(symbol):
         # rescale to a 20d-equivalent (fp*20/30) before mapping to a probability
         # so the trend vote isn't over-weighted vs the other channels.
         fp20 = fp * 20.0 / 30.0
-        p = 0.5 + min(0.4, max(-0.4, fp20 / 20))
+        # A3: principled trend-%→probability via the normal CDF of the expected
+        # return scaled by its horizon dispersion: P(up)=Φ(E[r]/(σ_daily·√h)).
+        # Falls back to the old linear map only when realized vol is unavailable.
+        if _daily_vol is not None:
+            sigma_h = _daily_vol * np.sqrt(20.0)
+            p = _phi((fp20 / 100.0) / sigma_h) if sigma_h > 0 else 0.5
+            p = float(min(0.95, max(0.05, p)))
+        else:
+            p = 0.5 + min(0.4, max(-0.4, fp20 / 20))
         signals.append(("Trend", p))
     if results.get("mean_reversion"):
         mr = results["mean_reversion"]

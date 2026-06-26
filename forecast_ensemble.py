@@ -85,6 +85,22 @@ def _clamp(x: float, lo: float = 0.0, hi: float = 1.0) -> float:
     return max(lo, min(hi, x))
 
 
+def _phi(x: float) -> float:
+    """Standard-normal CDF Φ(x). scipy if available, else math.erf. Returns
+    0.5 on any non-finite input. Never raises."""
+    try:
+        xf = float(x)
+        if not math.isfinite(xf):
+            return 0.5
+    except (TypeError, ValueError):
+        return 0.5
+    try:
+        from scipy.stats import norm
+        return float(norm.cdf(xf))
+    except Exception:
+        return 0.5 * (1.0 + math.erf(xf / math.sqrt(2.0)))
+
+
 def _now_iso() -> str:
     return datetime.now(tz=timezone.utc).isoformat()
 
@@ -131,9 +147,27 @@ def _sig_ml(symbol: str) -> Dict[str, Optional[Dict[str, Any]]]:
     fp = tf.get("forecast_pct")
     if fp is not None:
         fp = float(fp)
-        # Map a 30d trend % into a probability-like lean, same scaling the
-        # ML module uses internally (±20% -> ±0.4 around 0.5).
-        p = _clamp(0.5 + max(-0.4, min(0.4, fp / 20.0)))
+        # A3: principled trend-%→probability via the normal CDF, P(up) =
+        # Φ(E[r]/(σ_daily·√h)), using the model's own 30d forecast return and a
+        # realized daily-vol estimate. The vol comes from ml_forecast's regime
+        # stats (current regime vol_20d, reported in % daily-return std). Falls
+        # back to the old ±20%→±0.4 linear map only when no vol is available.
+        daily_vol = None
+        try:
+            reg = ml.get("regime") or {}
+            cur = reg.get("current_regime")
+            rstats = (reg.get("regime_stats") or {}).get(cur) or {}
+            v = rstats.get("vol_20d")  # percent (e.g. 1.8 == 1.8%/day)
+            if v is not None and float(v) > 0:
+                daily_vol = float(v) / 100.0
+        except Exception:
+            daily_vol = None
+        if daily_vol is not None:
+            sigma_h = daily_vol * math.sqrt(30.0)
+            p = _clamp(_phi((fp / 100.0) / sigma_h) if sigma_h > 0 else 0.5,
+                       0.05, 0.95)
+        else:
+            p = _clamp(0.5 + max(-0.4, min(0.4, fp / 20.0)))
         out["trend"] = {
             "prob_up": p,
             "expected_return_pct": round(fp, 2),
@@ -197,7 +231,20 @@ def _sig_narrative(symbol: str) -> Optional[Dict[str, Any]]:
     if not nar.get("article_count"):
         return None  # no news -> no signal, don't dilute with a 0.5 vote
     phase = (nar.get("narrative_phase") or "NEUTRAL").upper()
+    # A4: _NARRATIVE_PHASE_PROB is a documented PRIOR. Before using it, try to
+    # pull a CALIBRATED phase→P(up) from the accountability ledger's realized
+    # outcomes for this phase. Only fall back to the prior when there isn't
+    # enough scored history (the common case on a fresh install).
+    prob_source = "prior"
     p = _NARRATIVE_PHASE_PROB.get(phase, 0.5)
+    try:
+        import forecast_accountability
+        cal = forecast_accountability.narrative_phase_prob(phase)
+        if cal is not None:
+            p = float(cal)
+            prob_source = "calibrated"
+    except Exception as e:
+        log.debug("narrative_phase_prob unavailable: %s", e)
     # WHY (Q3): _NARRATIVE_PHASE_PROB ALREADY encodes the contrarian view —
     # CONSENSUS=0.52 and EXHAUSTION=0.40 are deliberately damped/bearish. The
     # old `p -> 1-p` flip on contrarian_signal (set exactly for CONSENSUS /
@@ -205,8 +252,10 @@ def _sig_narrative(symbol: str) -> Optional[Dict[str, Any]]:
     # table is the mapping; do not flip again.
     return {
         "prob_up": _clamp(p),
-        "detail": "Narrative phase {} ({} articles)".format(
-            phase, nar.get("article_count")),
+        "phase": phase,
+        "prob_source": prob_source,
+        "detail": "Narrative phase {} ({} articles, {})".format(
+            phase, nar.get("article_count"), prob_source),
     }
 
 
@@ -344,14 +393,19 @@ def _run_uncached(symbol: str, horizon_days: int) -> Dict[str, Any]:
         w = weights.get(key, _BASE_WEIGHTS.get(key, 0.1)) / total_w
         p = float(sig["prob_up"])
         weighted_sum += p * w
-        signal_rows.append({
+        row = {
             "key": key,
             "name": labels.get(key, key),
             "prob_up": round(p, 4),
             "weight": round(w, 4),
             "expected_return_pct": sig.get("expected_return_pct"),
             "detail": sig.get("detail", ""),
-        })
+        }
+        # Carry the narrative phase through so the accountability ledger can
+        # accumulate per-phase realized outcomes (A4 calibration data source).
+        if sig.get("phase"):
+            row["phase"] = sig["phase"]
+        signal_rows.append(row)
 
     prob_up_raw = _clamp(weighted_sum)
 

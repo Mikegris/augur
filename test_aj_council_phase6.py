@@ -64,9 +64,29 @@ def test_persona_neutral_when_no_evidence():
 
 
 def test_fingpt_sentiment_fails_open_without_stack():
-    # In the test env the optional finbert/fingpt helper modules don't exist, so
-    # this must return None (never raise, never a hard dependency).
-    assert aj_personas.fingpt_sentiment("AAPL") is None
+    # No optional finbert/fingpt helper is installed, so the dependency-free
+    # lexicon scorer is the functional default. Contract: never raises, never a
+    # hard dependency, source is "lexicon" (not "fingpt"), and it returns None
+    # when there are no headlines / no polarity cue.
+    import fetcher
+    saved = getattr(fetcher, "get_news", None)
+    try:
+        # no headlines -> None
+        fetcher.get_news = lambda s, n=10: []
+        assert aj_personas.fingpt_sentiment("AAPL") is None
+        # headline with no polarity cue -> None (never fabricates a number)
+        fetcher.get_news = lambda s, n=10: [{"title": "Company holds annual meeting"}]
+        assert aj_personas.fingpt_sentiment("AAPL") is None
+        # clearly bearish headlines -> a real lexicon-scored BEARISH prior
+        fetcher.get_news = lambda s, n=10: [
+            {"title": "Shares plunge as company misses estimates and warns on guidance"},
+            {"title": "Analyst downgrade triggers selloff"}]
+        out = aj_personas.fingpt_sentiment("AAPL")
+        assert out is not None and out["source"] == "lexicon"
+        assert out["label"] == "BEARISH" and out["score"] <= 4
+    finally:
+        if saved is not None:
+            fetcher.get_news = saved
 
 
 def test_council_includes_personas_when_enabled():

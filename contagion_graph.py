@@ -28,6 +28,13 @@ _cache_ts = {}    # type: Dict[str, float]
 _CACHE_TTL = 3600  # 1 hour
 _cache_lock = threading.Lock()  # build_graph/assess_contagion fan out concurrently
 
+# Minimum amount by which a lagged correlation's |corr| must exceed the
+# lag-0 (contemporaneous) |corr| before we accept a non-zero lead-lag edge.
+# Scanning 6 candidate lags and taking the max is a multiple-comparison
+# search that inflates the apparent best correlation even on independent
+# series; this margin is a Bonferroni-flavoured guard against that bias.
+_LAG_EDGE_MARGIN = 0.08
+
 
 def _get_cached(key):
     # type: (str) -> object
@@ -547,9 +554,16 @@ def _compute_lag_correlation(symbol1, symbol2, max_lag=5):
             if best_pos is not None:
                 returns2_by_pos[best_pos] = times2[t2]
 
-        best_corr = 0.0
-        best_lag = 0
-
+        # Compute lag-0 (contemporaneous) correlation first as the baseline.
+        # Taking the plain max |corr| over 6 candidate lags is a data-snooping
+        # search: with 6 trials the largest |corr| is upward-biased even on
+        # independent series. We therefore only ACCEPT a lagged edge if its
+        # |corr| beats the lag-0 baseline by a margin large enough to survive
+        # the multiple-comparison search; otherwise we report lag 0. This
+        # turns "the best of 6 lags" into "a lag that is meaningfully better
+        # than no lag at all".
+        lag0_corr = 0.0
+        lag_corrs = {}  # lag -> corr (for lags that had enough pairs)
         for lag in range(0, max_lag + 1):
             pairs_x = []
             pairs_y = []
@@ -565,9 +579,29 @@ def _compute_lag_correlation(symbol1, symbol2, max_lag=5):
                 continue
 
             corr = _pearson(pairs_x, pairs_y)
+            lag_corrs[lag] = corr
+            if lag == 0:
+                lag0_corr = corr
+
+        if not lag_corrs:
+            return (0.0, 0)
+
+        # Best non-zero lag by |corr|.
+        best_lag, best_corr = 0, lag0_corr
+        for lag, corr in lag_corrs.items():
+            if lag == 0:
+                continue
             if abs(corr) > abs(best_corr):
-                best_corr = corr
-                best_lag = lag
+                best_corr, best_lag = corr, lag
+
+        # Bonferroni-style margin: require the best lagged correlation to beat
+        # the lag-0 baseline by at least _LAG_EDGE_MARGIN in absolute value,
+        # AND to have the same sign as a real lead-lag relationship would. If
+        # the lagged edge isn't convincingly stronger than contemporaneous
+        # co-movement, fall back to lag 0 (no spurious "X leads Y by k days").
+        if best_lag != 0:
+            if abs(best_corr) - abs(lag0_corr) < _LAG_EDGE_MARGIN:
+                return (round(lag0_corr, 4), 0)
 
         return (round(best_corr, 4), best_lag)
 

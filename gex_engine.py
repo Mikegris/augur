@@ -61,19 +61,20 @@ def _norm_pdf(x):
     return math.exp(-0.5 * x * x) / math.sqrt(2.0 * math.pi)
 
 
-def _black_scholes_greeks(spot, strike, tte, iv, is_call=True, risk_free=0.05):
-    # type: (float, float, float, float, bool, float) -> dict
+def _black_scholes_greeks(spot, strike, tte, iv, is_call=True, risk_free=0.05, div_yield=0.0):
+    # type: (float, float, float, float, bool, float, float) -> dict
     """
-    Compute Black-Scholes delta and gamma.
+    Compute Black-Scholes(-Merton) delta and gamma with continuous dividend yield.
 
     Parameters
     ----------
-    spot : float   – current underlying price
-    strike : float – option strike price
-    tte : float    – time to expiry in years (must be > 0)
-    iv : float     – implied volatility (annualised, e.g. 0.30 = 30 %)
-    is_call : bool – True for calls, False for puts
-    risk_free : float – risk-free rate
+    spot : float      – current underlying price
+    strike : float    – option strike price
+    tte : float       – time to expiry in years (must be > 0)
+    iv : float        – implied volatility (annualised, e.g. 0.30 = 30 %)
+    is_call : bool    – True for calls, False for puts
+    risk_free : float – risk-free rate (annualised, continuous)
+    div_yield : float – continuous dividend yield q (annualised; default 0)
 
     Returns
     -------
@@ -84,19 +85,85 @@ def _black_scholes_greeks(spot, strike, tte, iv, is_call=True, risk_free=0.05):
 
     try:
         sqrt_t = math.sqrt(tte)
-        d1 = (math.log(spot / strike) + (risk_free + 0.5 * iv * iv) * tte) / (iv * sqrt_t)
+        # Merton drift carries the dividend yield: (r - q + 0.5*iv^2).
+        d1 = (math.log(spot / strike) + (risk_free - div_yield + 0.5 * iv * iv) * tte) / (iv * sqrt_t)
         # d2 = d1 - iv * sqrt_t  # not needed for gamma
 
-        gamma = _norm_pdf(d1) / (spot * iv * sqrt_t)
+        disc_q = math.exp(-div_yield * tte)
+        # Dividend-discount the gamma and delta (exp(-q*tte)).
+        gamma = disc_q * _norm_pdf(d1) / (spot * iv * sqrt_t)
 
         if is_call:
-            delta = _norm_cdf(d1)
+            delta = disc_q * _norm_cdf(d1)
         else:
-            delta = _norm_cdf(d1) - 1.0
+            delta = disc_q * (_norm_cdf(d1) - 1.0)
 
         return {"delta": delta, "gamma": gamma}
     except (ValueError, ZeroDivisionError, OverflowError):
         return {"delta": 0.0, "gamma": 0.0}
+
+
+# ---------------------------------------------------------------------------
+# Risk-free rate — pull the 13-week T-bill (^IRX) once, cache it, fall back to
+# a hardcoded 0.05 if the fetch fails. ^IRX quotes the annualized discount rate
+# in PERCENT (e.g. 5.2 -> 0.052).
+# ---------------------------------------------------------------------------
+_RISK_FREE_FALLBACK = 0.05
+_risk_free_cache = {"rate": None, "ts": 0.0}
+_RISK_FREE_TTL = 6 * 3600  # 6 hours — the policy rate barely moves intraday
+
+
+def _get_risk_free_rate():
+    # type: () -> float
+    """Annualized risk-free rate from ^IRX, cached; falls back to 0.05."""
+    now = time.time()
+    cached = _risk_free_cache.get("rate")
+    if cached is not None and (now - _risk_free_cache.get("ts", 0.0)) < _RISK_FREE_TTL:
+        return cached
+    rate = _RISK_FREE_FALLBACK
+    try:
+        irx = yf.Ticker("^IRX")
+        last = None
+        try:
+            last = irx.fast_info.get("lastPrice")
+        except Exception:
+            last = None
+        if last is None:
+            try:
+                last = irx.info.get("regularMarketPrice")
+            except Exception:
+                last = None
+        if last is not None:
+            val = float(last) / 100.0
+            # Sanity-bound to a plausible 0-25% band; ignore garbage.
+            if 0.0 <= val <= 0.25:
+                rate = val
+    except Exception as e:
+        logger.debug("gex risk-free: ^IRX fetch failed, using fallback: %s", e)
+    _risk_free_cache["rate"] = rate
+    _risk_free_cache["ts"] = now
+    return rate
+
+
+def _get_dividend_yield(ticker):
+    # type: (object) -> float
+    """Continuous dividend yield q from ticker.info; default 0.0 on any issue."""
+    try:
+        info = ticker.info or {}
+        dy = info.get("dividendYield")
+        if dy is None:
+            return 0.0
+        dy = float(dy)
+        # yfinance has historically returned this both as a fraction (0.012) and
+        # as a percent (1.2). Normalize: anything > 1 is treated as a percent.
+        if dy > 1.0:
+            dy = dy / 100.0
+        # Bound to a sane 0-20% band; ignore garbage.
+        if 0.0 <= dy <= 0.20:
+            return dy
+        return 0.0
+    except Exception:
+        return 0.0
 
 
 # ---------------------------------------------------------------------------
@@ -282,6 +349,10 @@ def compute_gex(symbol):
     if not spot:
         return {"error": "Could not retrieve spot price for {}".format(symbol)}
 
+    # Pull rate/dividend inputs once for the whole chain (cached / fail-open).
+    risk_free = _get_risk_free_rate()
+    div_yield = _get_dividend_yield(ticker)
+
     # Available expirations
     try:
         all_dates = ticker.options
@@ -342,7 +413,10 @@ def compute_gex(symbol):
                 if gamma_val is None:
                     if iv <= 0:
                         continue
-                    greeks = _black_scholes_greeks(spot, strike, tte, iv, is_call=is_call)
+                    greeks = _black_scholes_greeks(
+                        spot, strike, tte, iv, is_call=is_call,
+                        risk_free=risk_free, div_yield=div_yield,
+                    )
                     gamma_val = greeks["gamma"]
 
                 if gamma_val <= 0:
@@ -353,6 +427,13 @@ def compute_gex(symbol):
 
                 # Calls -> positive gamma (dealer short calls = long gamma)
                 # Puts  -> negative gamma (dealer short puts  = short gamma)
+                #
+                # NOTE: this call-long / put-short dealer sign is the
+                # INDUSTRY-STANDARD NAIVE PROXY — it assumes dealers are net
+                # short every call and net short every put. It is an assumption,
+                # NOT measured order flow (we have no per-trade buy/sell tape),
+                # so the directional sign of the resulting GEX can be wrong for
+                # any name where customer positioning differs from that default.
                 if is_call:
                     signed_gex = gex_value
                 else:

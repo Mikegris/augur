@@ -40,6 +40,12 @@ except Exception as _e:  # pragma: no cover
     fetcher = None
     log.warning("fetcher unavailable: %s", _e)
 
+try:
+    from sklearn.covariance import LedoitWolf  # type: ignore
+except Exception as _e:  # pragma: no cover - sklearn is bundled
+    LedoitWolf = None  # type: ignore
+    log.warning("sklearn LedoitWolf unavailable: %s", _e)
+
 
 TRADING_DAYS = 252
 DEFAULT_RF = 0.045
@@ -92,12 +98,61 @@ def _dated_log_returns(symbol: str, period: str = "2y"):
     return ret_dates, rets
 
 
+def _ledoit_wolf_cov(matrix: np.ndarray) -> np.ndarray:
+    """Ledoit-Wolf shrunk DAILY covariance from a (n_assets, T) return matrix.
+
+    WHY (C): the raw sample covariance is a noisy, often ill-conditioned
+    estimate (especially when T is not >> n_assets), which makes the
+    mean-variance optimiser chase estimation error and produce extreme,
+    unstable weights. Ledoit-Wolf shrinks the sample covariance toward a
+    structured target (scaled identity), giving a well-conditioned,
+    lower-MSE estimate. Falls OPEN to the plain sample covariance if sklearn
+    is missing or the fit fails.
+    """
+    sample = np.cov(matrix, ddof=1)
+    if sample.ndim == 0:
+        sample = np.array([[float(sample)]])
+    if LedoitWolf is None or matrix.shape[0] < 2:
+        return sample
+    try:
+        # LedoitWolf expects (n_samples, n_features) == (T, n_assets).
+        lw = LedoitWolf(assume_centered=False).fit(matrix.T)
+        cov = np.asarray(lw.covariance_, dtype=float)
+        if cov.shape == sample.shape and np.all(np.isfinite(cov)):
+            return cov
+    except Exception as e:  # pragma: no cover - defensive
+        log.debug("LedoitWolf shrinkage failed, using sample cov: %s", e)
+    return sample
+
+
+def _shrink_returns(mean_daily: np.ndarray, intensity: float = 0.5) -> np.ndarray:
+    """Shrink the per-asset mean returns toward the grand (cross-sectional)
+    mean (James-Stein-style). ``intensity=0`` reproduces the raw sample mean.
+
+    WHY (C): sample means are the dominant source of estimation error in
+    mean-variance optimisation; pulling each asset's mean toward the common
+    average dampens the optimiser's tendency to over-bet on whichever name
+    happened to have the best trailing return.
+    """
+    intensity = float(np.clip(intensity, 0.0, 1.0))
+    if mean_daily.size == 0 or intensity <= 0.0:
+        return mean_daily
+    grand = float(np.mean(mean_daily))
+    return (1.0 - intensity) * mean_daily + intensity * grand
+
+
 def _estimate_cov_and_mean(
     symbols: Sequence[str],
     period: str = "2y",
+    shrink_cov: bool = True,
+    return_shrink: float = 0.5,
 ) -> Tuple[np.ndarray, np.ndarray, List[str]]:
     """Pull daily returns for each symbol; align on the shortest series; return
     (annualized mean vector, annualized covariance, usable symbol list).
+
+    ``shrink_cov`` applies Ledoit-Wolf covariance shrinkage; ``return_shrink``
+    shrinks the mean vector toward its grand mean (James-Stein-style). Both
+    default ON for robustness but fail OPEN to the raw sample estimates.
 
     Symbols whose history is too short or whose fetch failed are silently
     dropped — callers should check the returned symbol list."""
@@ -127,7 +182,12 @@ def _estimate_cov_and_mean(
     matrix = np.vstack([[m[d] for d in common_dates] for m in maps])  # (n_assets, T)
 
     mean_daily = matrix.mean(axis=1)
-    cov_daily = np.cov(matrix, ddof=1)
+    if return_shrink and return_shrink > 0:
+        mean_daily = _shrink_returns(mean_daily, intensity=return_shrink)
+    if shrink_cov:
+        cov_daily = _ledoit_wolf_cov(matrix)  # Ledoit-Wolf shrinkage (C)
+    else:
+        cov_daily = np.cov(matrix, ddof=1)
     if cov_daily.ndim == 0:  # single-asset corner case
         cov_daily = np.array([[float(cov_daily)]])
 
@@ -211,6 +271,47 @@ def _initial_weights(n: int, bounds: List[Tuple[float, float]]) -> np.ndarray:
 # Markowitz mean-variance
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _constrained_max_sharpe(
+    mean: np.ndarray,
+    cov: np.ndarray,
+    rf: float,
+    bounds: List[Tuple[float, float]],
+) -> Tuple[np.ndarray, bool]:
+    """Long-only, fully-invested max-Sharpe weights for a GIVEN (mean, cov)
+    via the same SLSQP path markowitz uses. Returns (weights, converged).
+
+    WHY (C): Black-Litterman previously solved its posterior weights with the
+    UNCONSTRAINED closed form ``w* = (1/λ)Σ⁻¹μ̄`` and then clipped negatives +
+    renormalised. Clipping after an unconstrained solve does not honour the
+    box constraints jointly and biases the result; routing μ̄ through the
+    constrained optimiser yields weights that actually satisfy the long-only /
+    sum-to-one (and any max-weight) constraints. Falls OPEN to the clipped
+    closed form via the caller if SLSQP is unavailable or fails.
+    """
+    n = len(mean)
+
+    def fn(w: np.ndarray) -> float:
+        ret, vol, _ = _portfolio_stats(w, mean, cov, rf)
+        if vol < EPS:
+            return 1e6
+        return -(ret - rf) / vol
+
+    w0 = _initial_weights(n, bounds)
+    res = minimize(
+        fn, w0, method="SLSQP", bounds=bounds,
+        constraints=[_sum_to_one_constraint()],
+        options={"maxiter": 500, "ftol": 1e-9},
+    )
+    if not res.success:
+        return w0, False
+    w = np.array(res.x, dtype=float)
+    w = np.where(w < 0, 0.0, w)
+    s = w.sum()
+    if s > EPS:
+        w = w / s
+    return w, True
+
+
 def markowitz_optimize(
     symbols: Sequence[str],
     objective: str = "max_sharpe",
@@ -238,22 +339,37 @@ def markowitz_optimize(
     bounds = _build_bounds(n, min_w, max_w, long_only)
     base_constraints: List[Dict] = [_sum_to_one_constraint()]
 
+    # Optional turnover / transaction-cost penalty (C). Default 0 → existing
+    # behaviour unchanged. ``current_weights`` maps symbol→weight; the penalty
+    # is ``tc_bps`` (basis points) times one-way turnover Σ|w_i − w0_i|,
+    # subtracted from the objective so the optimiser trades off expected
+    # improvement against the cost of moving away from the current book.
+    tc_bps = float(cons.get("transaction_cost_bps", 0.0) or 0.0)
+    cur_w_map = cons.get("current_weights") or {}
+    w_prev = np.array([float(cur_w_map.get(s, 0.0)) for s in used], dtype=float)
+    tc_rate = tc_bps / 10000.0
+
+    def _turnover_cost(w: np.ndarray) -> float:
+        if tc_rate <= 0.0:
+            return 0.0
+        return tc_rate * float(np.sum(np.abs(w - w_prev)))
+
     # Define the objective function per mode.
     if objective == "max_sharpe":
         def fn(w: np.ndarray) -> float:
             ret, vol, _ = _portfolio_stats(w, mean, cov, rf)
             if vol < EPS:
                 return 1e6
-            return -(ret - rf) / vol
+            return -(ret - rf) / vol + _turnover_cost(w)
     elif objective == "min_vol":
         def fn(w: np.ndarray) -> float:
-            return float(np.dot(w, cov @ w))
+            return float(np.dot(w, cov @ w)) + _turnover_cost(w)
     elif objective == "target_return":
         target = float(cons.get("target_return", float(np.mean(mean))))
         base_constraints.append({"type": "eq", "fun": lambda w, t=target: float(np.dot(w, mean)) - t})
 
         def fn(w: np.ndarray) -> float:
-            return float(np.dot(w, cov @ w))
+            return float(np.dot(w, cov @ w)) + _turnover_cost(w)
     elif objective == "target_vol":
         target_v = float(cons.get("target_vol", 0.15))
         base_constraints.append(
@@ -261,7 +377,7 @@ def markowitz_optimize(
         )
 
         def fn(w: np.ndarray) -> float:
-            return -float(np.dot(w, mean))
+            return -float(np.dot(w, mean)) + _turnover_cost(w)
     else:
         return {"error": f"Unknown objective: {objective}"}
 
@@ -514,18 +630,33 @@ def black_litterman(
     else:
         mu_bar = pi.copy()
 
-    # ── Solve for unconstrained optimal weights given blended returns ──
-    # w* = (1 / lambda) * inv(Sigma) * mu_bar, then clip/normalize.
-    try:
-        w_star = np.linalg.solve(risk_aversion * Sigma, mu_bar)
-    except np.linalg.LinAlgError:
-        w_star = np.linalg.pinv(risk_aversion * Sigma) @ mu_bar
-    w_star = np.where(w_star < 0, 0.0, w_star)  # long-only projection
-    s = w_star.sum()
-    if s > EPS:
-        w_star = w_star / s
-    else:
-        w_star = np.full(n, 1.0 / n)
+    # ── Solve for long-only optimal weights given blended returns ──
+    # WHY (C): route the posterior mean μ̄ through the CONSTRAINED SLSQP
+    # max-Sharpe path instead of the unconstrained closed form
+    # ``w* = (1/λ)Σ⁻¹μ̄`` + clip. The closed form, clipped after the fact,
+    # does not jointly honour the long-only / sum-to-one constraints. We keep
+    # the closed form as the fail-OPEN fallback.
+    bl_converged = False
+    w_star = None
+    if minimize is not None:
+        try:
+            bounds = _build_bounds(n, 0.0, 1.0, long_only=True)
+            w_star, bl_converged = _constrained_max_sharpe(
+                mu_bar, Sigma, DEFAULT_RF, bounds)
+        except Exception as e:  # pragma: no cover - defensive
+            log.warning("BL constrained solve failed, using closed form: %s", e)
+            w_star = None
+    if w_star is None:
+        try:
+            w_star = np.linalg.solve(risk_aversion * Sigma, mu_bar)
+        except np.linalg.LinAlgError:
+            w_star = np.linalg.pinv(risk_aversion * Sigma) @ mu_bar
+        w_star = np.where(w_star < 0, 0.0, w_star)  # long-only projection
+        s = w_star.sum()
+        if s > EPS:
+            w_star = w_star / s
+        else:
+            w_star = np.full(n, 1.0 / n)
 
     ret, vol, sharpe = _portfolio_stats(w_star, mean, Sigma, DEFAULT_RF)
 
@@ -541,6 +672,7 @@ def black_litterman(
         "risk_aversion": risk_aversion,
         "tau": tau,
         "n_views_applied": len(P_rows),
+        "converged": bool(bl_converged),
     }
 
 

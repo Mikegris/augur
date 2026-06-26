@@ -513,8 +513,12 @@ def test_config_defaults_fail_closed():
               "health_autohalt", "auto_preset_escalation", "regime_adaptive", "tp_ladder"):
         check(fresh[k] is False, "defaults: {} starts disabled".format(k))
     for k in ("volatility_target_pct", "drawdown_throttle_pct", "max_book_correlation",
-              "profit_ratchet_pct", "atr_stop_mult"):
+              "profit_ratchet_pct"):
         check(fresh[k] == 0.0, "defaults: {} starts 0 (off)".format(k))
+    # ATR stop is now the DEFAULT exit (risk-reducing, strictly safer than off)
+    # per the quant audit (P4): it ships on with a non-zero multiplier.
+    check(fresh["atr_stop_mult"] > 0.0, "defaults: atr_stop_mult on (default exit)")
+    check(fresh["risk_based_sizing"] is False, "defaults: risk_based_sizing starts disabled")
     for k in ("momentum_filter_days", "earnings_blackout_days", "max_holding_days"):
         check(fresh[k] == 0, "defaults: {} starts 0 (off)".format(k))
 

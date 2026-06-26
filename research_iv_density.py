@@ -227,6 +227,77 @@ def _enforce_monotonic_decreasing(prices: list) -> list:
     return out
 
 
+def _pava_nondecreasing(y: "np.ndarray", w: "np.ndarray") -> "np.ndarray":
+    """Pool-Adjacent-Violators (PAVA) weighted isotonic regression onto the
+    NON-DECREASING cone. Pure-numpy, no extra dependency.
+
+    Returns the least-squares non-decreasing fit ŷ minimising
+    Σ w_i (y_i − ŷ_i)². Used to enforce convexity of the call-price curve by
+    monotonising its discrete slopes.
+    """
+    n = len(y)
+    if n == 0:
+        return y
+    # Each "block" tracks its weighted mean, total weight, and span.
+    vals = list(map(float, y))
+    wts = list(map(float, w))
+    means = []
+    weights = []
+    counts = []
+    for i in range(n):
+        means.append(vals[i])
+        weights.append(wts[i] if wts[i] > 0 else 1e-12)
+        counts.append(1)
+        # Merge backward while the previous block's mean exceeds this one.
+        while len(means) > 1 and means[-2] > means[-1]:
+            w2 = weights[-2] + weights[-1]
+            m2 = (means[-2] * weights[-2] + means[-1] * weights[-1]) / w2
+            c2 = counts[-2] + counts[-1]
+            means.pop(); weights.pop(); counts.pop()
+            means[-1] = m2; weights[-1] = w2; counts[-1] = c2
+    out = np.empty(n, dtype=float)
+    pos = 0
+    for m, c in zip(means, counts):
+        out[pos:pos + c] = m
+        pos += c
+    return out
+
+
+def _enforce_convex_decreasing(grid: "np.ndarray", C: "np.ndarray") -> "np.ndarray":
+    """Project a call-price curve C(K) onto the (non-increasing, CONVEX) cone.
+
+    WHY (C): the only no-arbitrage condition that guarantees a VALID density
+    is convexity of C(K) (since f(K)=e^{rT}·C''(K) ≥ 0). Enforcing mere
+    monotonicity still lets local concavities through, which the second
+    difference turns into negative densities that then get floored to 0 —
+    biasing probability mass. Here we (1) make the discrete slopes
+    s_i=ΔC/ΔK non-DECREASING via weighted isotonic regression (PAVA), which
+    is exactly discrete convexity, then (2) re-integrate the corrected slopes
+    back into a price curve, anchored at C[0]. The result has C''≥0 by
+    construction, so far fewer floored-negative density regions remain.
+    Fails OPEN to the input on any error.
+    """
+    try:
+        n = len(grid)
+        if n < 3:
+            return C
+        dK = np.diff(grid)
+        if not np.all(dK > 0):
+            return C
+        slopes = np.diff(C) / dK                  # length n-1
+        # Weight each slope by its interval length (proper L2 projection).
+        fixed = _pava_nondecreasing(slopes, dK)   # non-decreasing slopes
+        C_new = np.empty(n, dtype=float)
+        C_new[0] = C[0]
+        C_new[1:] = C[0] + np.cumsum(fixed * dK)
+        if not np.all(np.isfinite(C_new)):
+            return C
+        return C_new
+    except Exception as e:  # pragma: no cover - defensive
+        log.debug("convexity projection failed, using monotonic-only C: %s", e)
+        return C
+
+
 def _make_uniform_grid(strikes: list, n: int = 200) -> "np.ndarray":
     """Evenly-spaced strike grid spanning [min, max], for finite-difference
     differentiation. ~200 points keeps the spacing fine enough that the
@@ -272,6 +343,12 @@ def _density_from_calls(strikes: list, mids: list, T: float, r: float,
 
     # Replace any NaN/inf the spline emitted (out-of-support, extrapolation).
     C_grid = np.where(np.isfinite(C_grid), C_grid, 0.0)
+
+    # Enforce CONVEXITY of C(K) (C) — the true no-arb condition for a valid
+    # density. This makes the second difference non-negative by construction,
+    # so the Breeden-Litzenberger density has far fewer floored-negative
+    # regions. Applied on top of the earlier monotonic-decreasing clamp.
+    C_grid = _enforce_convex_decreasing(grid, C_grid)
 
     # Centered finite-difference second derivative.
     n = len(grid)

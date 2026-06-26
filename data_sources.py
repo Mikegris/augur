@@ -11,7 +11,10 @@ Providers:
     DefiLlama            — api.llama.fi
     mempool.space        — mempool.space/api
     Treasury fiscaldata  — fiscaldata.treasury.gov
-    CBOE put/call        — cboe.com daily CSV
+    CBOE VIX history     — cboe.com daily CSV (VIX OHLC). NOTE: the legacy-named
+                           `cboe_put_call_ratio()` NEVER carried put/call data —
+                           it only ever fetched VIX. It is intentionally a
+                           NotImplementedError redirect to `cboe_vix_history()`.
     FinanceDatabase      — github.com/JerBouma/FinanceDatabase
     SEC EDGAR XBRL       — data.sec.gov/api/xbrl
 """

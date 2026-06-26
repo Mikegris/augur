@@ -105,12 +105,32 @@ _SECTOR_ETFS: Dict[str, str] = {
     "XLU":  "Utilities",
 }
 
-# Typical release-lag in calendar days, applied to the FRED observation
-# date to approximate the print's market-reaction date.
+# Typical release-lag in calendar days, applied to the FRED observation date
+# (which is the START of the REFERENCE period, not the release date) to
+# approximate the print's actual market-reaction date.
+#
+# FRED stamps an observation with the first day of the period it measures:
+# March CPI is dated 2024-03-01 but is RELEASED ~mid-April — i.e. ~6 weeks
+# after the observation date, NOT 14 days. The old 14-day shift landed the
+# "release" inside the very month the data measures, mis-dating the market
+# reaction by ~a month and pairing the forward-return window with the wrong
+# session. We can't pin the exact BLS/BEA release day without a real release
+# calendar (none is bundled), so we use the empirically-typical lag from the
+# reference-period start to first publication:
+#
+#   * monthly   (CPI/PCE/PAYEMS/UNRATE/retail): published the following month
+#                → ~6 weeks ≈ 44 days from the 1st of the reference month.
+#   * quarterly (GDP advance estimate): ~30 days after quarter-end, and the
+#                obs date is the quarter START, so ≈ 120 days.
+#   * daily series (yields, WTI): the obs date IS the data date → 0 lag.
+#
+# A more precise per-series lag (or the actual release calendar) would be
+# strictly better; this is documented as an approximation.
 _RELEASE_LAG_DAYS = {
-    "monthly":   14,  # CPI/NFP/etc print ~mid-month for the prior month
-    "quarterly": 30,
+    "monthly":   44,
+    "quarterly": 120,
     "daily":     0,
+    "weekly":    7,
 }
 
 # Friendlier display labels for the per-release UI header.
@@ -453,12 +473,24 @@ def _build_episode(rd: datetime.date,
 
 def _portfolio_projection(holdings: List[dict],
                           avg_factors: Dict[str, float],
-                          spy_5d_distribution: List[float]) -> Optional[dict]:
+                          spy_5d_distribution: List[float],
+                          episode_factor_returns: Optional[List[Dict[str, float]]] = None
+                          ) -> Optional[dict]:
     """Project portfolio 5-day return from factor exposures + the historical
-    average per-factor 5d return; bracket with IQR of the SPY 5d sample.
+    average per-factor 5d return; bracket with the IQR of the PROJECTED
+    QUANTITY ITSELF across episodes.
 
     `avg_factors` and `spy_5d_distribution` are *percent* values. We
     interpret `exposure[f] * avg_factor_return_5d[f]` as a percentage too.
+
+    `episode_factor_returns` is the per-episode {factor: 5d_return_pct} list;
+    when supplied we re-run the same Σ beta·factor projection for every
+    historical episode to build the projected-return distribution, then take
+    ITS IQR / extremes. The old code took SPY's IQR and merely rescaled it by
+    market beta — which ignores the book's SMB/HML/Mom/etc. tilts entirely, so
+    a market-neutral but factor-tilted book got a band of ~0. Bracketing with
+    the projected quantity's own cross-episode dispersion is the honest band.
+    Falls back to the old SPY-IQR×beta path when episode data isn't supplied.
     """
     if not holdings or research_factors is None:
         return None
@@ -484,22 +516,52 @@ def _portfolio_projection(holdings: List[dict],
         contrib[f] = round(c, 4)
         total += c
 
-    # IQR / extremes from the SPY 5-day historical distribution, scaled by
-    # the portfolio's market beta when available. This is a *very* rough
-    # bracket — but it keeps the band honest: a high-beta book gets a
-    # wider expected range than a low-beta book.
     mkt_beta = (exposures.get("Mkt-RF") or {}).get("beta")
     scale = float(mkt_beta) if mkt_beta is not None else 1.0
-    q1, _med, q3 = _quartiles(spy_5d_distribution)
-    iqr = [None, None]
-    if q1 is not None and q3 is not None:
-        iqr = [round(q1 * scale, 4), round(q3 * scale, 4)]
 
+    # Preferred bracket: the IQR / extremes of the PROJECTED portfolio return
+    # across episodes (project each episode through the same factor betas).
+    projected_dist: List[float] = []
+    if episode_factor_returns:
+        for ep_fac in episode_factor_returns:
+            if not isinstance(ep_fac, dict):
+                continue
+            used = 0
+            ep_proj = 0.0
+            for f, blk in exposures.items():
+                beta = (blk or {}).get("beta")
+                if beta is None:
+                    continue
+                rv = ep_fac.get(f)
+                if rv is None:
+                    continue
+                try:
+                    ep_proj += float(beta) * float(rv)
+                    used += 1
+                except (TypeError, ValueError):
+                    continue
+            if used > 0:
+                projected_dist.append(ep_proj)
+
+    iqr = [None, None]
     best_case: Optional[float] = None
     worst_case: Optional[float] = None
-    if spy_5d_distribution:
-        best_case = round(max(spy_5d_distribution) * scale, 4)
-        worst_case = round(min(spy_5d_distribution) * scale, 4)
+    band_basis = "projected_quantity_iqr"
+    if len(projected_dist) >= 2:
+        q1, _med, q3 = _quartiles(projected_dist)
+        if q1 is not None and q3 is not None:
+            iqr = [round(q1, 4), round(q3, 4)]
+        best_case = round(max(projected_dist), 4)
+        worst_case = round(min(projected_dist), 4)
+    else:
+        # Fallback: SPY 5-day IQR rescaled by market beta (old behaviour).
+        band_basis = "spy_iqr_x_market_beta"
+        q1, _med, q3 = _quartiles(spy_5d_distribution)
+        if q1 is not None and q3 is not None:
+            iqr = [round(q1 * scale, 4), round(q3 * scale, 4)]
+        if spy_5d_distribution:
+            best_case = round(max(spy_5d_distribution) * scale, 4)
+            worst_case = round(min(spy_5d_distribution) * scale, 4)
 
     # Per-holding winners/losers via individual factor exposures.
     per_symbol: List[dict] = []
@@ -530,6 +592,7 @@ def _portfolio_projection(holdings: List[dict],
     out = {
         "expected_5d_pct": round(total, 4),
         "iqr_5d": iqr,
+        "iqr_basis": band_basis,
         "best_case": best_case,
         "worst_case": worst_case,
         "factor_contributions": contrib,
@@ -674,7 +737,10 @@ def macro_translate(release_id: str,
         if portfolio_holdings:
             spy_5d_dist = [e["sp500_5d_pct"] for e in episodes
                            if e.get("sp500_5d_pct") is not None]
-            proj = _portfolio_projection(portfolio_holdings, avg_factors, spy_5d_dist)
+            ep_factor_rets = [e.get("factor_returns_5d") for e in episodes
+                              if e.get("factor_returns_5d")]
+            proj = _portfolio_projection(portfolio_holdings, avg_factors, spy_5d_dist,
+                                         ep_factor_rets)
             if proj is not None:
                 out["portfolio_projection"] = proj
 

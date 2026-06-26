@@ -1,10 +1,13 @@
 """
 Synthetic Insider Composite — AUGUR wealth intelligence
 
-Combines 6 independently weak public signals into a composite that
-approximates insider knowledge.  No single signal is actionable alone,
-but when 3+ fire simultaneously it has historically preceded major moves
-by 2-6 weeks.
+Combines 6 independently weak public signals into a composite that aims to
+surface accumulation/conviction visible in public data.  No single signal is
+actionable alone; the design intent is that simultaneous agreement across
+several channels (the convergence count) is more informative than any one
+channel.  The lead-time and hit-rate of the composite are not independently
+backtested here — treat the score as a heuristic convergence read, not a
+calibrated forecast.
 
 Alert levels:  DORMANT -> AWAKENING -> CONVERGING -> CRITICAL
 """
@@ -90,7 +93,7 @@ def _score_options_flow(symbol):
 
     except Exception as e:
         logger.warning("Options flow scoring failed for %s: %s", symbol, e)
-        return {"score": 50, "detail": "data unavailable", "firing": False, "weight": 0.20}
+        return {"score": 50, "detail": "data unavailable", "firing": False, "weight": 0.20, "available": False}
 
 
 # ---------------------------------------------------------------------------
@@ -100,11 +103,11 @@ def _score_volume_anomaly(symbol):
     try:
         bars = fetcher.get_chart_data(symbol, period="1mo", interval="1d")
         if not bars or len(bars) < 5:
-            return {"score": 50, "detail": "insufficient data", "firing": False, "weight": 0.10}
+            return {"score": 50, "detail": "insufficient data", "firing": False, "weight": 0.10, "available": False}
 
         volumes = [b["volume"] for b in bars if b.get("volume")]
         if len(volumes) < 5:
-            return {"score": 50, "detail": "insufficient volume data", "firing": False, "weight": 0.10}
+            return {"score": 50, "detail": "insufficient volume data", "firing": False, "weight": 0.10, "available": False}
 
         avg_5 = sum(volumes[-5:]) / max(len(volumes[-5:]), 1)
         avg_20 = sum(volumes[-20:]) / max(len(volumes[-20:]), 1)
@@ -133,7 +136,7 @@ def _score_volume_anomaly(symbol):
 
     except Exception as e:
         logger.warning("Volume anomaly scoring failed for %s: %s", symbol, e)
-        return {"score": 50, "detail": "data unavailable", "firing": False, "weight": 0.10}
+        return {"score": 50, "detail": "data unavailable", "firing": False, "weight": 0.10, "available": False}
 
 
 # ---------------------------------------------------------------------------
@@ -203,7 +206,7 @@ def _score_insider_cluster(symbol):
 
     except Exception as e:
         logger.warning("Insider cluster scoring failed for %s: %s", symbol, e)
-        return {"score": 50, "detail": "data unavailable", "firing": False, "weight": 0.25}
+        return {"score": 50, "detail": "data unavailable", "firing": False, "weight": 0.25, "available": False}
 
 
 # ---------------------------------------------------------------------------
@@ -252,7 +255,7 @@ def _score_congress_cluster(symbol):
 
     except Exception as e:
         logger.warning("Congress cluster scoring failed for %s: %s", symbol, e)
-        return {"score": 50, "detail": "data unavailable", "firing": False, "weight": 0.15}
+        return {"score": 50, "detail": "data unavailable", "firing": False, "weight": 0.15, "available": False}
 
 
 # ---------------------------------------------------------------------------
@@ -275,7 +278,7 @@ def _score_institutional_signal(symbol):
 
     except Exception as e:
         logger.warning("Institutional signal scoring failed for %s: %s", symbol, e)
-        return {"score": 50, "detail": "data unavailable", "firing": False, "weight": 0.10}
+        return {"score": 50, "detail": "data unavailable", "firing": False, "weight": 0.10, "available": False}
 
 
 # ---------------------------------------------------------------------------
@@ -305,7 +308,7 @@ def _score_technical_regime(symbol):
 
     except Exception as e:
         logger.warning("Technical regime scoring failed for %s: %s", symbol, e)
-        return {"score": 50, "detail": "data unavailable", "firing": False, "weight": 0.20}
+        return {"score": 50, "detail": "data unavailable", "firing": False, "weight": 0.20, "available": False}
 
 
 # ---------------------------------------------------------------------------
@@ -354,7 +357,7 @@ def compute_composite(symbol):
                 return fn(symbol)
             except Exception as e:
                 logger.debug("synthetic_insider channel error %s: %s", symbol, e)
-                return {"score": 50, "detail": "data unavailable", "firing": False, "weight": weight}
+                return {"score": 50, "detail": "data unavailable", "firing": False, "weight": weight, "available": False}
 
         raw_channels = safe_executor.parallel_map(
             _run_channel, channel_specs, max_workers=6,
@@ -366,22 +369,38 @@ def compute_composite(symbol):
         channels = []
         for (fn, weight), res in zip(channel_specs, raw_channels):
             if res is None:
-                res = {"score": 50, "detail": "timed out", "firing": False, "weight": weight}
+                res = {"score": 50, "detail": "timed out", "firing": False, "weight": weight, "available": False}
             channels.append(res)
         ch_options, ch_volume, ch_insider, ch_congress, ch_inst, ch_tech = channels
 
-        # Weighted composite
-        composite = (
-            ch_options["score"] * 0.20
-            + ch_volume["score"] * 0.10
-            + ch_insider["score"] * 0.25
-            + ch_congress["score"] * 0.15
-            + ch_inst["score"] * 0.10
-            + ch_tech["score"] * 0.20
-        )
+        # Weighted composite — renormalize the weights over only the channels
+        # that actually returned data. A channel that errored/timed out is
+        # tagged `available: False` (score==50 placeholder); feeding that 50 into
+        # the weighted mean would contaminate the composite (pulling a quiet read
+        # up and a loud read down). A channel that genuinely computed a score has
+        # no `available` key, so absence is treated as available=True.
+        _weighted_ch = [
+            (ch_options, 0.20),
+            (ch_volume, 0.10),
+            (ch_insider, 0.25),
+            (ch_congress, 0.15),
+            (ch_inst, 0.10),
+            (ch_tech, 0.20),
+        ]
+        avail_ch = [(ch, w) for ch, w in _weighted_ch if ch.get("available", True)]
+        total_w = sum(w for _, w in avail_ch)
+        if avail_ch and total_w > 0:
+            composite = sum(ch["score"] * w for ch, w in avail_ch) / total_w
+        else:
+            composite = 50.0
         composite = _clamp(int(round(composite)))
 
+        # Fraction of channels with live data.
+        coverage = round(len(avail_ch) / float(len(_weighted_ch)), 3)
+
         channels_list = [ch_options, ch_volume, ch_insider, ch_congress, ch_inst, ch_tech]
+        # Convergence count is preserved unchanged: count channels that FIRED
+        # (a dead channel never fires, so it can't inflate convergence).
         convergence_count = sum(1 for ch in channels_list if ch["firing"])
 
         # Alert level
@@ -409,6 +428,7 @@ def compute_composite(symbol):
             "composite_score": composite,
             "alert_level": alert_level,
             "convergence_count": convergence_count,
+            "coverage": coverage,
             "channels": {
                 "options_flow": ch_options,
                 "volume_anomaly": ch_volume,

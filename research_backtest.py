@@ -79,6 +79,10 @@ log = logging.getLogger("augur.backtest")
 
 _CACHE_TTL = 6 * 3600
 _TRADING_DAYS_PER_YEAR = 252
+# Default one-way transaction cost (basis points) charged on position changes
+# in the backtest pnl (C). 5bps ≈ a liquid US equity round-trip half-spread +
+# commission. Set transaction_cost_bps=0 in params to disable.
+_DEFAULT_TC_BPS = 5.0
 
 
 # ───────────────────────────── Signal protocol ──────────────────────────────
@@ -608,23 +612,67 @@ def _run(
                     position[k] = 0.0
         prev_max_exit = exit_idx
 
+    # Transaction-cost rate (C): per-turnover cost in basis points charged on
+    # the change in absolute position. Default _DEFAULT_TC_BPS so realised
+    # returns / Sharpe reflect trading frictions; set 0 to recover the
+    # frictionless behaviour. Reads from params so callers can override.
+    try:
+        tc_bps = float(sig_params.get("transaction_cost_bps", _DEFAULT_TC_BPS))
+    except Exception:
+        tc_bps = _DEFAULT_TC_BPS
+    tc_rate = max(0.0, tc_bps) / 10000.0
+
     # Per-bar pnl = position[t] * (close[t+1]/close[t] - 1). Build this once
-    # the position vector is fully populated.
+    # the position vector is fully populated. Subtract a transaction cost on
+    # every bar where the held position CHANGES (one-way turnover), modelling
+    # the cost of getting into / out of / flipping the position.
     pnl_by_bar: List[float] = [0.0]   # day 0 has no prior return
+    total_turnover = 0.0
+    total_tc = 0.0
+    prev_pos = 0.0
     for t in range(n - 1):
         p = position[t]
+        # Turnover at the start of this bar = |position[t] - position[t-1]|.
+        turnover = abs(float(p) - prev_pos)
+        cost = tc_rate * turnover
+        total_turnover += turnover
+        total_tc += cost
+        prev_pos = float(p)
         if p == 0.0:
-            pnl_by_bar.append(0.0)
+            pnl_by_bar.append(-cost if cost else 0.0)
             continue
         prev = closes[t]
         nxt  = closes[t + 1]
         if prev <= 0 or not math.isfinite(prev) or not math.isfinite(nxt):
-            pnl_by_bar.append(0.0)
+            pnl_by_bar.append(-cost if cost else 0.0)
             continue
         r = (nxt / prev) - 1.0
-        pnl_by_bar.append(float(p) * r)
+        pnl_by_bar.append(float(p) * r - cost)
+    # Charge the final unwind back to flat (close the book at the end).
+    if tc_rate > 0 and prev_pos != 0.0 and pnl_by_bar:
+        final_cost = tc_rate * abs(prev_pos)
+        total_turnover += abs(prev_pos)
+        total_tc += final_cost
+        pnl_by_bar[-1] -= final_cost
 
     metrics = _compute_metrics(pnl_by_bar, dates, signal_log)
+
+    # Leakage accounting (C): the ml_forecast adapter reuses a single current
+    # forecast across all historical bars (documented look-ahead), so its
+    # hit-rate is NOT a valid out-of-sample number. Flag it explicitly without
+    # removing the adapter or altering its computed values.
+    signal_name = _resolve_signal_name(signal_fn)
+    is_leaky = signal_name in ("ml_forecast", "adapter_ml_forecast")
+    metrics["transaction_cost_bps"] = round(float(tc_bps), 4)
+    metrics["total_transaction_cost_pct"] = round(float(total_tc) * 100.0, 4)
+    metrics["total_turnover"] = round(float(total_turnover), 4)
+    metrics["validated"] = (not is_leaky)
+    if is_leaky:
+        metrics["leakage_warning"] = (
+            "adapter_ml_forecast reuses one current forecast across all bars "
+            "(look-ahead bias) — hit_rate/sharpe are illustrative, NOT a "
+            "leak-free out-of-sample evaluation."
+        )
 
     # Trim the signals list to keep response payload small but still useful.
     # The top 5 / bottom 5 are what the UI shows; full list capped at 200.

@@ -111,7 +111,7 @@ except Exception:  # pragma: no cover
 FEATURE_NAMES: Tuple[str, ...] = (
     "ml_prob_up",          # ml_forecast prob_up_20d, mapped (p - .5) * 2
     "smart_money",         # smart_money composite 0..100, mapped (s-50)/50
-    "gex_regime",          # +0.3 LONG/POSITIVE, -0.3 SHORT/NEGATIVE, 0 NEUT
+    "gex_regime",          # vol-regime axis: +1 SHORT/NEG (amplifying), -1 LONG/POS (dampening), 0 NEUT
     "narrative_phase",     # phase map ∈ {-0.5, …, +0.5}
     "insider_form4_net",   # (buy - sell) / (buy + sell), already [-1, +1]
     "factor_alpha",        # alpha_annual_pct, saturated at ±15% → ±1
@@ -121,6 +121,13 @@ FEATURE_NAMES: Tuple[str, ...] = (
 ANALOG_K = 5      # top-k closest historical analogs
 ANALOG_POOL = 200  # candidates we read from the DB before ranking
 _CACHE_TTL = 3 * 3600  # 3 hours
+
+# Analog-distance controls (standardized-Euclidean retrieval).
+_MIN_SHARED_DIMS = 3      # require ≥3 shared features before trusting a match
+# Max per-shared-dimension RMS distance (in standard deviations) before an
+# "analog" is dropped as too far. ~1.5σ RMS per feature is already a loose
+# neighbourhood; beyond it the row isn't really analogous.
+_MAX_ANALOG_RMS_Z = 1.5
 
 # Phase-to-scalar mapping (matches synth_consensus's recipe so analogs
 # computed via either path align).
@@ -270,10 +277,18 @@ def _f_gex_regime(symbol: str, ctx: Dict[str, Any]) -> Optional[float]:
         return None
     r = str(regime).upper()
     ctx["_raw"]["gex_regime"] = regime
-    if "LONG" in r or "POSITIVE" in r:
-        return +0.3
+    # GEX is direction-SYMMETRIC (vol-amplifying vs vol-dampening), NOT a
+    # bullish/bearish signal. The old +0.3 LONG / −0.3 SHORT coding made this
+    # feature a signed direction, so an analog matched partly on "bearish GEX"
+    # — a phantom axis. Recode as a VOLATILITY-REGIME magnitude axis instead:
+    # short/negative gamma (reflexive, vol-amplifying) = +1, long/positive
+    # (pinning, vol-dampening) = −1, neutral = 0. This is still a legitimate,
+    # standardizable matching feature, but it no longer encodes price
+    # direction.
     if "SHORT" in r or "NEGATIVE" in r:
-        return -0.3
+        return +1.0
+    if "LONG" in r or "POSITIVE" in r:
+        return -1.0
     return 0.0
 
 
@@ -454,10 +469,13 @@ def _vec_from_metadata(signal_name: str, metadata: Dict[str, Any]) -> Dict[str, 
         regime = metadata.get("regime")
         if regime:
             r = str(regime).upper()
-            if "LONG" in r or "POSITIVE" in r:
-                vec["gex_regime"] = +0.3
-            elif "SHORT" in r or "NEGATIVE" in r:
-                vec["gex_regime"] = -0.3
+            # Vol-regime magnitude axis (see _f_gex_regime): short/negative
+            # gamma (vol-amplifying) = +1, long/positive (vol-dampening) = −1,
+            # neutral = 0. NOT a bullish/bearish direction.
+            if "SHORT" in r or "NEGATIVE" in r:
+                vec["gex_regime"] = +1.0
+            elif "LONG" in r or "POSITIVE" in r:
+                vec["gex_regime"] = -1.0
             else:
                 vec["gex_regime"] = 0.0
     if name == "narrative":
@@ -493,18 +511,68 @@ def _vec_from_pattern_json(raw_json: str) -> Dict[str, Optional[float]]:
 
 
 # ---------------------------------------------------------------------------
-# Cosine distance over partially-missing vectors
+# Standardized-Euclidean distance over partially-missing vectors
 # ---------------------------------------------------------------------------
 
-def _cosine_distance(a: Dict[str, Optional[float]], b: Dict[str, Optional[float]]) -> Optional[float]:
-    """Cosine distance in [0, 2] over features present in BOTH vectors.
+def _pool_feature_stats(
+    current: Dict[str, Optional[float]],
+    candidate_vecs: List[Dict[str, Optional[float]]],
+) -> Dict[str, Tuple[float, float]]:
+    """Per-feature (mean, std) across the candidate pool + the current vector.
 
-    Returns ``None`` if there is no shared dimension (so the caller can
-    drop the analog).
+    z-standardization replaces the old hand-coded per-feature scalars: each
+    feature is centered and scaled by its OWN spread, so a feature that ranges
+    over ±1 and one that barely moves contribute comparably to the distance.
+    Std<=0 (a constant feature) maps to std=1 so its standardized value is just
+    the (zero) deviation — it can't blow up the distance.
     """
-    dot = 0.0
-    na = 0.0
-    nb = 0.0
+    stats: Dict[str, Tuple[float, float]] = {}
+    for k in FEATURE_NAMES:
+        vals: List[float] = []
+        cv = current.get(k)
+        if cv is not None:
+            try:
+                vals.append(float(cv))
+            except Exception:
+                pass
+        for vec in candidate_vecs:
+            v = vec.get(k)
+            if v is None:
+                continue
+            try:
+                vals.append(float(v))
+            except Exception:
+                continue
+        n = len(vals)
+        if n == 0:
+            stats[k] = (0.0, 1.0)
+            continue
+        mean = sum(vals) / n
+        if n >= 2:
+            var = sum((x - mean) ** 2 for x in vals) / (n - 1)
+            std = math.sqrt(var) if var > 0 else 0.0
+        else:
+            std = 0.0
+        stats[k] = (mean, std if std > 1e-9 else 1.0)
+    return stats
+
+
+def _std_euclidean_distance(
+    a: Dict[str, Optional[float]],
+    b: Dict[str, Optional[float]],
+    stats: Dict[str, Tuple[float, float]],
+) -> Optional[Tuple[float, int]]:
+    """Standardized Euclidean distance over features present in BOTH vectors.
+
+    Each shared feature is z-standardized (using the pool stats) before the
+    squared-difference is accumulated, so no hand-tuned per-feature scalar is
+    needed. Returns ``(rms_z_distance, shared)`` where ``rms_z_distance`` is
+    the per-shared-dimension RMS (so the ceiling is dimension-count
+    independent), or ``None`` when fewer than ``_MIN_SHARED_DIMS`` features are
+    shared (caller drops the analog — fixes the old "one shared feature = a
+    perfect analog" bug).
+    """
+    ssq = 0.0
     shared = 0
     for k in FEATURE_NAMES:
         av = a.get(k)
@@ -516,16 +584,16 @@ def _cosine_distance(a: Dict[str, Optional[float]], b: Dict[str, Optional[float]
             bf = float(bv)
         except Exception:
             continue
-        dot += af * bf
-        na += af * af
-        nb += bf * bf
+        mean, std = stats.get(k, (0.0, 1.0))
+        za = (af - mean) / std
+        zb = (bf - mean) / std
+        d = za - zb
+        ssq += d * d
         shared += 1
-    if shared == 0 or na <= 0 or nb <= 0:
+    if shared < _MIN_SHARED_DIMS:
         return None
-    sim = dot / math.sqrt(na * nb)
-    # Numerical safety
-    sim = max(-1.0, min(1.0, sim))
-    return 1.0 - sim
+    rms = math.sqrt(ssq / shared)
+    return rms, shared
 
 
 # ---------------------------------------------------------------------------
@@ -588,17 +656,33 @@ def _row_to_vector(row: sqlite3.Row) -> Dict[str, Optional[float]]:
 
 
 def _find_analogs(current: Dict[str, Optional[float]], k: int) -> List[Dict[str, Any]]:
-    """Top-k analogs ranked by cosine distance to ``current``.
+    """Top-k analogs ranked by standardized-Euclidean distance to ``current``.
+
+    Features are z-standardized across the candidate pool, analogs sharing
+    fewer than ``_MIN_SHARED_DIMS`` features are dropped, and analogs beyond
+    the ``_MAX_ANALOG_RMS_Z`` ceiling are discarded as too far.
 
     Each analog dict has: symbol, signal_name, issued_at, horizon_days,
-    pattern_distance, outcome { direction, realized_return, hit }.
+    pattern_distance, shared_dims, outcome { direction, realized_return, hit }.
     """
     rows = _load_candidate_rows(ANALOG_POOL)
+    # Reconstruct every candidate vector once, then z-standardize each feature
+    # across the whole pool (+ current) before measuring distance. This is what
+    # removes the hand-tuned per-feature scalars: the spread is learned from the
+    # pool, not hard-coded.
+    cand_pairs: List[Tuple[sqlite3.Row, Dict[str, Optional[float]]]] = [
+        (r, _row_to_vector(r)) for r in rows
+    ]
+    stats = _pool_feature_stats(current, [v for _, v in cand_pairs])
     scored: List[Tuple[float, Dict[str, Any]]] = []
-    for r in rows:
-        vec = _row_to_vector(r)
-        d = _cosine_distance(current, vec)
-        if d is None:
+    for r, vec in cand_pairs:
+        res = _std_euclidean_distance(current, vec, stats)
+        if res is None:
+            continue  # <_MIN_SHARED_DIMS shared features → not a real analog
+        d, shared = res
+        # Max-distance ceiling: drop rows that aren't actually close. A far
+        # "analog" poisons every base-rate computed from it.
+        if d > _MAX_ANALOG_RMS_Z:
             continue
         realized = r["realized_return"]
         try:
@@ -616,7 +700,8 @@ def _find_analogs(current: Dict[str, Optional[float]], k: int) -> List[Dict[str,
             "signal_name": r["signal_name"],
             "issued_at": r["issued_at"],
             "horizon_days": int(r["horizon_days"]) if r["horizon_days"] is not None else None,
-            "pattern_distance": round(d, 4),
+            "pattern_distance": round(d, 4),  # per-dim RMS in standard deviations (lower = closer)
+            "shared_dims": shared,
             "outcome": {
                 "direction": r["predicted_direction"],
                 "realized_return_pct": round(realized_pct, 4) if realized_pct is not None else None,

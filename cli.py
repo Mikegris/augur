@@ -2214,6 +2214,11 @@ def run_command(command_str):
             "reflexivity":      cmd_reflexivity,
             "liquidity":        cmd_liquidity,
             "alt-data":         cmd_alt_data,
+            # Jarvis read-only commands (mirror main()): ask is persist=False
+            # (no portfolio mutation), briefing/health are pure snapshots.
+            "ask":          cmd_ask,
+            "briefing":     cmd_briefing,
+            "health":       cmd_health,
             "settings":     cmd_settings,
             "serve":        cmd_serve,
         }

@@ -6536,10 +6536,6 @@ function buildSignalCard(s) {
 
   const signalColors = {'STRONG BUY': 'col-positive', 'BUY': 'col-green', 'NEUTRAL': 'col-yellow', 'CAUTION': 'col-amber', 'AVOID': 'col-negative'};
 
-  // ML detail panel
-  const ml = (components.ml_forecast || {}).ml_detail || {};
-  const mlPanel = _buildMLDetailPanel(ml, sym, cardId);
-
   return `
     <div class="smart-money-card">
       <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:10px">
@@ -6564,11 +6560,6 @@ function buildSignalCard(s) {
       ${s.computed_in_ms ? `<div style="font-size:9px;color:var(--text-dim);margin-top:6px;text-align:right">computed in ${(s.computed_in_ms/1000).toFixed(1)}s</div>` : ''}
     </div>
   `;
-}
-
-function _buildMLDetailPanel(ml, symbol, panelId) {
-  // Pre-build HTML to be inserted when panel opens
-  return '';
 }
 
 async function toggleMLPanel(panelId, symbol) {
@@ -7925,10 +7916,6 @@ async function assessContagionImpact() {
     if (loadEl2) loadEl2.innerHTML = '<span class="col-negative">Impact error: ' + _esc(e.message) + '</span>';
   }
 }
-
-// ══════════════════════════════════════════════════════════════════════════════
-// ALPHA ENGINE — NARRATIVE VELOCITY ENGINE
-// ══════════════════════════════════════════════════════════════════════════════
 
 // ══════════════════════════════════════════════════════════════════════════════
 // FORECAST ENSEMBLE — calibrated meta-forecast fusing every signal

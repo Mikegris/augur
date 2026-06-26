@@ -366,12 +366,25 @@ def get_earnings_dossier(symbol):
                 atm_call = calls.iloc[(calls["strike"] - current_price).abs().argsort()[:1]]
                 atm_put = puts.iloc[(puts["strike"] - current_price).abs().argsort()[:1]]
 
-                c_price = _safe_float(atm_call["lastPrice"].iloc[0])
-                p_price = _safe_float(atm_put["lastPrice"].iloc[0])
+                # Prefer bid/ask MID over (stale) lastPrice; fall back to
+                # lastPrice only when a side has no live quotes.
+                def _leg_mid(df):
+                    bid = _safe_float(df["bid"].iloc[0]) if "bid" in df.columns else None
+                    ask = _safe_float(df["ask"].iloc[0]) if "ask" in df.columns else None
+                    if bid and ask and bid > 0 and ask > 0:
+                        return (bid + ask) / 2.0
+                    return _safe_float(df["lastPrice"].iloc[0])
+
+                c_price = _leg_mid(atm_call)
+                p_price = _leg_mid(atm_put)
 
                 if c_price and p_price and current_price:
                     straddle_cost = round(c_price + p_price, 2)
-                    implied_move_pct = round(straddle_cost / current_price * 100, 2)
+                    # Raw straddle/spot over-states the expected absolute move
+                    # (straddle prices ~1.25-sigma; E|move| ~= 0.7979*sigma).
+                    # Apply the ~0.85 straddle->expected-move correction factor.
+                    implied_move_pct = round(
+                        straddle_cost / current_price * 100 * 0.85, 2)
                     options_expiry_used = target_expiry
     except Exception as e:
         logger.error("dossier options %s: %s", symbol, e)

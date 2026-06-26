@@ -93,6 +93,47 @@ def _current_equity() -> float:
         return 0.0
 
 
+def _paper_cash() -> float:
+    """Configured paper cash balance (aj_paper_cash), or 0.0. This is the cash
+    leg of account equity used to base weight/sector caps on EQUITY rather than
+    invested notional. 0.0 (the default) makes equity == positions market value,
+    preserving the prior notional-based behaviour for an unfunded book."""
+    try:
+        import database as _db
+        raw = _db.get_settings().get("aj_paper_cash")
+        return float(aj_db.money(raw)) if raw is not None else 0.0
+    except Exception:
+        return 0.0
+
+
+def account_equity(positions: Optional[Dict[str, Any]] = None,
+                   marks: Optional[Dict[str, Optional[float]]] = None) -> float:
+    """Account equity = cash (aj_paper_cash) + current market value of all open
+    paper positions. The correct base for per-symbol / sector weight caps (a
+    first position is then sized against equity, not always ~100% of an empty
+    'book'). Falls back to the paper book / live marks when not passed in.
+    Fail-OPEN: any error yields just the positions market value (>= 0)."""
+    try:
+        if positions is None:
+            positions = (_paper_book().get("positions") or {})
+        syms = list(positions.keys())
+        if marks is None:
+            try:
+                import aj_risk
+                marks = aj_risk._marks(syms) if syms else {}
+            except Exception:
+                marks = {}
+        mv = 0.0
+        for s, p in positions.items():
+            mk = marks.get(s)
+            px = mk if mk is not None else float(p.get("avg_cost") or 0)
+            mv += float(p.get("qty") or 0) * float(px or 0)
+        return max(0.0, _paper_cash() + mv)
+    except Exception:
+        log.debug("account_equity failed -> 0", exc_info=True)
+        return 0.0
+
+
 def _earnings_days_away(symbol: str) -> Optional[int]:
     """Calendar days until the next earnings date, or None if unknown."""
     try:
@@ -136,15 +177,65 @@ def _sector_of(symbol: str) -> Optional[str]:
 # ── technical primitives (reuse portfolio_insights where possible) ────────────
 
 def _rsi(closes: List[float], period: int = 14) -> Optional[float]:
+    """Wilder's RSI: seed with the first `period` deltas, then smooth the
+    average gain/loss recursively (avg = (prev*(p-1)+cur)/p). True Wilder
+    smoothing rather than a flat trailing-window mean. None if too short."""
     try:
-        import portfolio_insights as pi
-        return pi.rsi(closes, period)
+        if not closes or len(closes) <= period or period < 1:
+            return None
+        deltas = [closes[i] - closes[i - 1] for i in range(1, len(closes))]
+        if len(deltas) < period:
+            return None
+        gains = [d if d > 0 else 0.0 for d in deltas]
+        losses = [-d if d < 0 else 0.0 for d in deltas]
+        avg_gain = sum(gains[:period]) / period
+        avg_loss = sum(losses[:period]) / period
+        for i in range(period, len(deltas)):
+            avg_gain = (avg_gain * (period - 1) + gains[i]) / period
+            avg_loss = (avg_loss * (period - 1) + losses[i]) / period
+        if avg_loss == 0:
+            return 100.0 if avg_gain > 0 else 50.0
+        rs = avg_gain / avg_loss
+        return round(100.0 - (100.0 / (1.0 + rs)), 1)
     except Exception:
         return None
 
 
-def _ann_vol(closes: List[float]) -> Optional[float]:
+def _gk_annualized_vol(bars: List[Dict[str, Any]]) -> Optional[float]:
+    """Garman-Klass annualized volatility (%) from OHLC bars — uses the high/low
+    range and the open→close move, ~5x more efficient than close-to-close.
+    GK daily variance = 0.5*(ln(H/L))^2 - (2ln2-1)*(ln(C/O))^2. None if the bars
+    lack usable OHLC (caller falls back to close-to-close)."""
     try:
+        terms: List[float] = []
+        for b in bars:
+            o = float(b.get("open"))
+            h = float(b.get("high"))
+            lo = float(b.get("low"))
+            c = float(b.get("close"))
+            if o <= 0 or h <= 0 or lo <= 0 or c <= 0 or h < lo:
+                continue
+            hl = math.log(h / lo)
+            co = math.log(c / o)
+            terms.append(0.5 * hl * hl - (2.0 * math.log(2.0) - 1.0) * co * co)
+        if len(terms) < 2:
+            return None
+        daily_var = sum(terms) / len(terms)
+        if daily_var <= 0:
+            return None
+        return round(math.sqrt(daily_var) * math.sqrt(252) * 100.0, 1)
+    except Exception:
+        return None
+
+
+def _ann_vol(closes: List[float], bars: Optional[List[Dict[str, Any]]] = None) -> Optional[float]:
+    """Annualized volatility (%). Prefers the Garman-Klass OHLC estimator when
+    bars are available (more efficient), falling back to close-to-close."""
+    try:
+        if bars:
+            gk = _gk_annualized_vol(bars)
+            if gk is not None and gk > 0:
+                return gk
         import portfolio_insights as pi
         return pi.annualized_vol(closes)
     except Exception:
@@ -192,8 +283,10 @@ def _correlation(a: List[float], b: List[float]) -> Optional[float]:
 
 
 def _atr(bars: List[Dict[str, Any]], period: int = 14) -> Optional[float]:
-    """Average True Range from OHLC bars; None if insufficient."""
-    if len(bars) < period + 1:
+    """Wilder's Average True Range from OHLC bars: seed with the mean of the
+    first `period` true ranges, then smooth recursively (ATR = (prev*(p-1)+TR)/p).
+    True Wilder smoothing rather than a flat trailing mean. None if insufficient."""
+    if len(bars) < period + 1 or period < 1:
         return None
     trs: List[float] = []
     for i in range(1, len(bars)):
@@ -206,11 +299,29 @@ def _atr(bars: List[Dict[str, Any]], period: int = 14) -> Optional[float]:
         trs.append(max(hi - lo, abs(hi - pc), abs(lo - pc)))
     if len(trs) < period:
         return None
-    return sum(trs[-period:]) / period
+    atr = sum(trs[:period]) / period
+    for i in range(period, len(trs)):
+        atr = (atr * (period - 1) + trs[i]) / period
+    return atr
 
 
 def _clamp(x: float, lo: float, hi: float) -> float:
     return max(lo, min(hi, x))
+
+
+def _wilson_lower_bound(wins: int, n: int, z: float = 1.96) -> float:
+    """Wilson score interval LOWER bound for a binomial proportion. Used to
+    require statistically-supported evidence before a small-sample veto/adapt:
+    with few trades the lower bound stays near 0 even at a high raw win-rate, so
+    a 1/3 or 2/5 streak can't trigger a confident action. n<=0 -> 0.0."""
+    if n <= 0:
+        return 0.0
+    phat = wins / n
+    z2 = z * z
+    denom = 1.0 + z2 / n
+    centre = phat + z2 / (2 * n)
+    margin = z * math.sqrt((phat * (1 - phat) + z2 / (4 * n)) / n)
+    return max(0.0, (centre - margin) / denom)
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -242,16 +353,26 @@ def _kelly_factor(cfg: Dict[str, Any], decision: Optional[Dict[str, Any]]) -> fl
     trades = _realized_trades()
     wins = [t for t in trades if float(t.get("realized") or 0) > 0]
     losses = [t for t in trades if float(t.get("realized") or 0) < 0]
-    if len(trades) >= 5 and wins and losses:
-        p = len(wins) / len(trades)
+    # Realized payoff b = avg-win/avg-loss whenever BOTH legs have history (used
+    # by the cold-start branch too, instead of assuming 1:1).
+    if wins and losses:
         avg_win = sum(float(t.get("realized") or 0) for t in wins) / len(wins)
         avg_loss = -sum(float(t.get("realized") or 0) for t in losses) / len(losses)
-        b = (avg_win / avg_loss) if avg_loss > 0 else 1.0
+        b_realized = (avg_win / avg_loss) if avg_loss > 0 else 1.0
     else:
-        # cold start: imply p from the forecast edge, payoff 1:1
+        b_realized = None
+    if len(trades) >= 5 and wins and losses:
+        p = len(wins) / len(trades)
+        b = b_realized or 1.0
+    else:
+        # cold start: imply p from the forecast edge. `edge_pts` is already
+        # (prob_up_cal - 0.5) x 100 — an ALREADY-calibrated edge in points — so
+        # p = 0.5 + edge_pts/100 (NOT /200, which would re-halve a calibrated
+        # edge). Clamp to a sane band. Derive payoff from realized win/loss when
+        # any history exists, else assume 1:1.
         edge = abs(float((decision or {}).get("edge_pts") or 0))
-        p = _clamp(0.5 + edge / 200.0, 0.5, 0.85)   # 10pp edge → p≈0.55
-        b = 1.0
+        p = _clamp(0.5 + edge / 100.0, 0.5, 0.85)   # 10pp edge → p≈0.60
+        b = b_realized if (b_realized and b_realized > 0) else 1.0
     kelly = p - (1.0 - p) / b if b > 0 else 0.0
     bet = _clamp(frac * kelly, 0.0, 1.0)
     # 0.20 bet fraction is the "neutral" reference (=1.0x base sizing). Floor at
@@ -266,7 +387,15 @@ def _vol_target_factor(symbol: str, cfg: Dict[str, Any]) -> float:
     target = float(cfg.get("volatility_target_pct") or 0)
     if target <= 0:
         return 1.0
-    av = _ann_vol(_closes(symbol, "1y"))
+    # Prefer the Garman-Klass OHLC estimator when bars are available (more
+    # efficient than close-to-close); fall back to the close series otherwise.
+    av = None
+    try:
+        av = _gk_annualized_vol(_bars(symbol, "6mo"))
+    except Exception:
+        av = None
+    if not av or av <= 0:
+        av = _ann_vol(_closes(symbol, "1y"))
     if not av or av <= 0:
         return 1.0
     # portfolio_insights.annualized_vol always returns a PERCENT (e.g. 25.0, and
@@ -300,8 +429,18 @@ def _symbol_perf_factor(symbol: str, cfg: Dict[str, Any]) -> float:
     if n < 2:
         return 1.0
     wr = wins / n
-    if n >= 3 and wr < 0.34 and net < 0:
-        return 0.0                          # chronic loser — skip the name
+    # Chronic-loser veto: require a Wilson UPPER bound on the win-rate below 0.5
+    # (so we're statistically confident the name is a loser) AND n>=4 — not just
+    # a fragile 1/3-style raw streak. A small sample keeps the upper bound high
+    # and the name is throttled (below) rather than hard-skipped.
+    if n >= 4 and net < 0:
+        z2 = 1.96 * 1.96
+        denom = 1.0 + z2 / n
+        centre = wr + z2 / (2 * n)
+        margin = 1.96 * math.sqrt((wr * (1 - wr) + z2 / (4 * n)) / n)
+        wilson_upper = (centre + margin) / denom
+        if wilson_upper < 0.5:
+            return 0.0                      # chronic loser — skip the name
     if net > 0 and wr >= 0.5:
         return _clamp(1.0 + wr * 0.6, 1.0, 1.3)
     if net < 0:
@@ -332,6 +471,42 @@ def _drawdown_factor(cfg: Dict[str, Any]) -> float:
     return _clamp(1.0 - dd / thr, 0.0, 1.0)
 
 
+def _correlation_budget_factor(symbol: str, cfg: Dict[str, Any]) -> float:
+    """Portfolio correlation/vol budget (opt-in): when the candidate is highly
+    correlated with the existing book, scale the aggregate target DOWN so two
+    correlated names don't each get full size. A BOUNDED multiplier in
+    [floor, 1.0] — it can only REDUCE risk, never increase it. Off (1.0) unless
+    `correlation_size_budget` (the avg-correlation above which throttling
+    begins) is set > 0. Reuses the existing `_correlation` helper."""
+    budget = float(cfg.get("correlation_size_budget") or 0)
+    if budget <= 0:
+        return 1.0
+    try:
+        positions = (_paper_book().get("positions") or {})
+        others = [s for s in positions if str(s).upper() != symbol.upper()]
+        if not others:
+            return 1.0
+        sym_ret = _returns(_closes(symbol, "6mo"))
+        corrs = []
+        for s in others:
+            c = _correlation(sym_ret, _returns(_closes(s, "6mo")))
+            if c is not None:
+                corrs.append(max(0.0, c))      # only positive corr adds risk
+        if not corrs:
+            return 1.0
+        avg_c = sum(corrs) / len(corrs)
+        if avg_c <= budget:
+            return 1.0
+        # Linearly throttle from 1.0 at the budget down toward a floor at corr=1.
+        span = max(1e-6, 1.0 - budget)
+        frac = _clamp((avg_c - budget) / span, 0.0, 1.0)
+        floor = _clamp(float(cfg.get("correlation_size_floor") or 0.25), 0.05, 1.0)
+        return _clamp(1.0 - frac * (1.0 - floor), floor, 1.0)
+    except Exception:
+        log.debug("correlation budget factor failed -> 1.0", exc_info=True)
+        return 1.0
+
+
 def sizing_multiplier(symbol: str, side: str, cfg: Dict[str, Any],
                       decision: Optional[Dict[str, Any]] = None) -> float:
     """Combined 1-5 multiplier on the base order target. 1.0 when all off.
@@ -346,12 +521,17 @@ def sizing_multiplier(symbol: str, side: str, cfg: Dict[str, Any],
             _compound_factor(cfg),
             _symbol_perf_factor(symbol, cfg),
             _drawdown_factor(cfg),
+            _correlation_budget_factor(symbol, cfg),
         ]
         if any(f <= 0 for f in factors):
             return 0.0
-        m = 1.0
-        for f in factors:
-            m *= f
+        # Combine in LOG-space (sum of logs -> exp) rather than raw multiplication
+        # so five independent factors don't compound fragilely into an extreme
+        # product; mathematically equal to the product but numerically gentler.
+        log_sum = sum(math.log(f) for f in factors)
+        m = math.exp(log_sum)
+        if not math.isfinite(m):
+            return 1.0
         return _clamp(m, 0.0, 3.0)
     except Exception:
         log.exception("sizing_multiplier failed -> neutral 1.0")
@@ -454,20 +634,22 @@ def entry_block_reason(symbol: str, side: str, qty: float, price: float,
                 # resolve each held symbol's sector once (avoids O(positions)
                 # repeated lookups and keeps None-handling consistent)
                 sectors = {s: _sector_of(s) for s in positions}
-                total = 0.0
                 sec_val = 0.0
                 for s, p in positions.items():
                     mk = marks.get(s)
                     px = mk if mk is not None else float(p.get("avg_cost") or 0)
                     mv = float(p.get("qty") or 0) * px
-                    total += mv
                     if sectors.get(s) == sec:
                         sec_val += mv
                 add = qty * price
-                total += add
                 sec_val += add
-                if total > 0 and sec_val / total * 100.0 > scap:
-                    return "{} sector {:.0f}% > {:g}% cap".format(sec, sec_val / total * 100.0, scap)
+                # Weight against ACCOUNT EQUITY (cash + positions MV incl. the
+                # add), not just invested notional — so the cap is blind neither
+                # to cash nor to leverage. With no configured cash (default),
+                # equity == positions MV and behaviour is unchanged.
+                equity = account_equity(positions, marks) + add
+                if equity > 0 and sec_val / equity * 100.0 > scap:
+                    return "{} sector {:.0f}% > {:g}% cap".format(sec, sec_val / equity * 100.0, scap)
 
         # 18: pyramiding discipline — when ON, only add to a winner, capped
         if cfg.get("pyramiding") and held > 0:
@@ -642,16 +824,25 @@ def detect_regime() -> str:
     return "chop"
 
 
-def recent_hit_rate(n: int = 20) -> Optional[float]:
-    """Win-rate over the most recent n realized paper trades. Scratch trades
-    (realized == 0) are excluded from the denominator so they don't depress the
-    rate and over-tighten the adaptive thresholds."""
+def recent_hit_rate_detail(n: int = 20) -> Optional[Tuple[float, int, int]]:
+    """(win_rate, wins, decisive_n) over the most recent n realized paper trades,
+    or None when too few decisive trades. Scratch trades (realized == 0) are
+    excluded. Exposes wins/n so callers can apply a Wilson confidence bound
+    before adapting on a small sample."""
     trades = _realized_trades()[-n:]
     decisive = [t for t in trades if float(t.get("realized") or 0) != 0]
     if len(decisive) < 5:
         return None
     wins = sum(1 for t in decisive if float(t.get("realized") or 0) > 0)
-    return wins / len(decisive)
+    return wins / len(decisive), wins, len(decisive)
+
+
+def recent_hit_rate(n: int = 20) -> Optional[float]:
+    """Win-rate over the most recent n realized paper trades. Scratch trades
+    (realized == 0) are excluded from the denominator so they don't depress the
+    rate and over-tighten the adaptive thresholds."""
+    d = recent_hit_rate_detail(n)
+    return d[0] if d is not None else None
 
 
 def effective_config(cfg: Dict[str, Any]) -> Dict[str, Any]:
@@ -659,14 +850,26 @@ def effective_config(cfg: Dict[str, Any]) -> Dict[str, Any]:
     applied. A no-op when both are off, so callers can always route through it."""
     eff = dict(cfg)
     try:
-        # 16: adaptive thresholds — tune to recent realized hit-rate
+        # 16: adaptive thresholds — tune to recent realized hit-rate, but only
+        # on statistically-supported evidence: tighten when the Wilson UPPER
+        # bound is still < 0.40 (confident the streak is bad), loosen when the
+        # Wilson LOWER bound is > 0.55 (confident it's good). A small sample
+        # keeps the bounds wide and the thresholds untouched (no fragile nudge
+        # off a 3-of-5 streak).
         if cfg.get("adaptive_thresholds"):
-            hr = recent_hit_rate(20)
-            if hr is not None:
-                if hr < 0.40:           # bleeding — demand more edge
+            det = recent_hit_rate_detail(20)
+            if det is not None:
+                _hr, _wins, _ntr = det
+                lo = _wilson_lower_bound(_wins, _ntr)
+                z2 = 1.96 * 1.96
+                _denom = 1.0 + z2 / _ntr
+                _centre = _hr + z2 / (2 * _ntr)
+                _margin = 1.96 * math.sqrt((_hr * (1 - _hr) + z2 / (4 * _ntr)) / _ntr)
+                hi = (_centre + _margin) / _denom
+                if hi < 0.40:           # confidently bleeding — demand more edge
                     eff["buy_prob_threshold"] = _clamp(float(eff.get("buy_prob_threshold") or 0.55) + 0.03, 0.5, 0.75)
                     eff["min_edge_pct_pts"] = float(eff.get("min_edge_pct_pts") or 0) + 1.0
-                elif hr > 0.60:          # hot hand — capture a touch more
+                elif lo > 0.55:          # confident hot hand — capture a touch more
                     eff["buy_prob_threshold"] = _clamp(float(eff.get("buy_prob_threshold") or 0.55) - 0.02, 0.50, 0.70)
         # 17: regime-adaptive profile
         if cfg.get("regime_adaptive"):

@@ -88,6 +88,8 @@ DEFAULTS: Dict[str, Any] = {
     "relative_strength_filter": False, # 8: only buy names outperforming SPY over the lookback
     "relative_strength_lookback_days": 20,
     "max_book_correlation":   0.0,     # 9: block a buy whose avg corr to the book exceeds this; 0=off
+    "correlation_size_budget": 0.0,    # portfolio corr/vol budget: avg-corr above which a buy's size is throttled DOWN; 0=off
+    "correlation_size_floor": 0.25,    #     floor multiplier the correlation throttle can shrink size to
     "earnings_blackout_days": 0,       # 10: skip buys within N days of earnings; 0=off
     "max_sector_weight_pct":  0.0,     # 11: cap any one GICS sector's % of book; 0=off
     # exit intelligence (12-15)
@@ -95,8 +97,19 @@ DEFAULTS: Dict[str, Any] = {
     "profit_ratchet_pct":     0.0,     # 13: once up this %, lock in a floor gain; 0=off
     "profit_ratchet_lock_pct": 0.0,    #     floor gain % the ratchet protects
     "tp_ladder":              False,   # 14: scale out in thirds at take_profit_pct, 1.5x, 2x
-    "atr_stop_mult":          0.0,     # 15: stop distance = mult x ATR(14); 0=off
+    # 15: ATR volatility stop is now the DEFAULT exit (stop distance = mult x
+    # ATR(14)). It is risk-REDUCING, so a non-zero default is strictly safer than
+    # leaving it off; set to 0 to disable. Fixed-% TP/SL remain available as a
+    # fallback / complement when ATR is unavailable.
+    "atr_stop_mult":          3.0,
     "atr_period":             14,
+    # Risk-based position sizing: size each trade so it risks ~risk_per_trade_pct
+    # of account equity to its ATR-based stop (qty ~ equity*r% / atr_stop_dist),
+    # bounded by the existing notional cap. OFF by default (safer/existing
+    # notional-target sizing); falls back to notional sizing when ATR/equity
+    # unavailable.
+    "risk_based_sizing":      False,
+    "risk_per_trade_pct":     1.0,     # % of equity risked to the stop when risk_based_sizing on
     # adaptive brain (16-20)
     "adaptive_thresholds":    False,   # 16: nudge buy/sell thresholds from recent realized hit-rate
     "regime_adaptive":        False,   # 17: switch threshold/size profile on bull/bear/chop regime
@@ -179,7 +192,8 @@ _BOOL_KEYS = {"trading_enabled", "live_trading_enabled", "robinhood_enabled",
               "kelly_sizing", "compound_sizing", "symbol_performance_weighting",
               "relative_strength_filter", "tp_ladder", "adaptive_thresholds",
               "regime_adaptive", "pyramiding", "signal_scorecard",
-              "opportunity_radar", "auto_run_enabled", "health_autohalt",
+              "opportunity_radar", "risk_based_sizing",
+              "auto_run_enabled", "health_autohalt",
               "auto_preset_escalation", "daily_reflection", "premarket_briefing",
               # council layer
               "council_enabled", "council_analyst_fundamentals",
@@ -203,8 +217,10 @@ _FLOAT_KEYS = {"max_order_notional_usd", "max_daily_loss_usd",
                "kelly_fraction", "volatility_target_pct",
                "compound_base_equity_usd", "drawdown_throttle_pct",
                "mean_reversion_rsi_max", "max_book_correlation",
+               "correlation_size_budget", "correlation_size_floor",
                "max_sector_weight_pct", "profit_ratchet_pct",
                "profit_ratchet_lock_pct", "atr_stop_mult",
+               "risk_per_trade_pct",
                "pyramid_min_gain_pct",
                # council coequal gate
                "coequal_min_alpha", "coequal_max_boost",

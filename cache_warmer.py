@@ -75,7 +75,6 @@ FUNDAMENTALS_INTERVAL = 12 * 3600
 # it perpetually warm (which would cost ~4 calls/hr/symbol). A cold news
 # fetch is one cheap HTTP request, so we deliberately don't chase the TTL.
 NEWS_INTERVAL = 6 * 3600
-BENCHMARK_INTERVAL = 12 * 3600     # daily-bar chart TTL is 12h — aligned
 CHART_INTERVAL = 12 * 3600         # default research charts (6mo daily, TTL 12h — aligned)
 SCORE_INTERVAL = 6 * 3600          # research_tracker scoring loop
 HYPOTHESIS_SCORE_INTERVAL = 24 * 3600  # research_hypothesis daily scoring
@@ -597,7 +596,6 @@ def status() -> dict:
             "quotes_interval": QUOTES_INTERVAL,
             "fundamentals_interval": FUNDAMENTALS_INTERVAL,
             "news_interval": NEWS_INTERVAL,
-            "benchmark_interval": BENCHMARK_INTERVAL,
             "score_interval": SCORE_INTERVAL,
             "hypothesis_score_interval": HYPOTHESIS_SCORE_INTERVAL,
             "cluster_interval": CLUSTER_INTERVAL,

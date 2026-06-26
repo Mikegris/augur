@@ -119,6 +119,11 @@ def log_ensemble(symbol: str, horizon_days: int, result: Dict[str, Any]) -> None
             key = sig.get("key")
             if key not in COMPONENT_KEYS:
                 continue
+            md = {"prob_up": sig.get("prob_up"), "weight": sig.get("weight")}
+            # Persist the narrative phase so narrative_phase_prob() can calibrate
+            # phase→P(up) from realized outcomes (A4).
+            if sig.get("phase"):
+                md["phase"] = sig.get("phase")
             research_tracker.log_forecast(
                 _component_signal(key),
                 symbol=symbol,
@@ -127,7 +132,7 @@ def log_ensemble(symbol: str, horizon_days: int, result: Dict[str, Any]) -> None
                 magnitude=None,
                 confidence=None,
                 issue_price=None,
-                metadata={"prob_up": sig.get("prob_up"), "weight": sig.get("weight")},
+                metadata=md,
             )
         except Exception as e:
             log.debug("log_ensemble component %s failed: %s", sig.get("key"), e)
@@ -259,13 +264,78 @@ def component_leaderboard(since: Optional[str] = None) -> List[Dict[str, Any]]:
     return out
 
 
+# Minimum same-phase scored outcomes before we trust a calibrated phase prob.
+_MIN_N_FOR_PHASE = 20
+# Tiny TTL cache for the per-phase calibration query.
+_phase_cache: Dict[Any, Tuple[float, Optional[float]]] = {}
+_phase_cache_lock = threading.Lock()
+_PHASE_TTL = 600
+
+
+def narrative_phase_prob(phase: str) -> Optional[float]:
+    """Calibrated P(up | narrative phase) from REALIZED outcomes (A4).
+
+    Reads the scored ``ens:narrative`` ledger rows, keeps those whose stored
+    metadata phase matches ``phase``, and returns the realized frequency of
+    up-moves (realized_return > 0) for that phase — a genuinely calibrated
+    phase→probability. Returns None when there isn't enough same-phase history
+    (the common cold-start case), so the caller falls back to the documented
+    prior. Never raises.
+    """
+    if not phase:
+        return None
+    phase = phase.upper()
+    key = ("phase", phase)
+    with _phase_cache_lock:
+        hit = _phase_cache.get(key)
+    if hit is not None and (time.time() - hit[0]) < _PHASE_TTL:
+        return hit[1]
+
+    result: Optional[float] = None
+    try:
+        import research_tracker
+        rows = research_tracker.get_scored_rows(_component_signal("narrative"))
+        ups = 0
+        n = 0
+        for r in rows:
+            if r.get("hit") is None:
+                continue
+            md = r.get("metadata") or {}
+            rp = (md.get("phase") or "").upper()
+            if rp != phase:
+                continue
+            rr = r.get("realized_return")
+            if rr is None:
+                continue
+            try:
+                rr = float(rr)
+            except (TypeError, ValueError):
+                continue
+            n += 1
+            if rr > 0:
+                ups += 1
+        if n >= _MIN_N_FOR_PHASE:
+            result = max(0.05, min(0.95, ups / float(n)))
+    except Exception as e:
+        log.debug("narrative_phase_prob failed: %s", e)
+        result = None
+
+    with _phase_cache_lock:
+        _phase_cache[key] = (time.time(), result)
+    return result
+
+
 # --------------------------------------------------------------------------
 # 4. ADAPT — feed realized component skill back into the fusion weights.
 # --------------------------------------------------------------------------
 
 _MIN_N_FOR_ADAPT = 20      # need this many scored directional calls to trust a tilt
 _MAX_TILT = 0.6            # a component's weight can swing at most ±60%
-_TILT_GAIN = 2.0           # maps (hit_rate - 0.5) into a multiplier
+# C: the leaderboard ranks components on BRIER SKILL, so tilt the fusion
+# weights on Brier skill too (consistency). brier_skill is centered at 0 —
+# >0 beats climatology, <0 is worse — and typically lands in roughly
+# [-0.3, 0.3], so a gain of ~3 maps a strong +0.2 skill into a ~+0.6 tilt.
+_TILT_GAIN = 3.0           # maps brier_skill into a weight multiplier
 
 # Tiny TTL cache so we don't re-query the ledger on every uncached forecast.
 _weights_cache: Dict[Any, Tuple[float, Dict[str, float]]] = {}
@@ -305,15 +375,25 @@ def adaptive_weights(base_weights: Dict[str, float],
             mult = 1.0
             try:
                 # WHY (Q9): filter the track record to this horizon so we tilt
-                # on the component's hit-rate AT this horizon, not a pooled
-                # average across all horizons.
+                # on the component's skill AT this horizon, not a pooled average
+                # across all horizons.
                 rec = research_tracker.get_track_record(
                     _component_signal(k), horizon_days=horizon_days)
                 n = rec.get("n_directional") or 0
-                hr = rec.get("hit_rate")
-                if n >= _MIN_N_FOR_ADAPT and hr is not None:
-                    raw = 1.0 + _TILT_GAIN * (float(hr) - 0.5)
-                    mult = max(1.0 - _MAX_TILT, min(1.0 + _MAX_TILT, raw))
+                if n >= _MIN_N_FOR_ADAPT:
+                    # C: tilt on BRIER SKILL (consistency with the leaderboard
+                    # ranking) rather than raw hit-rate. Brier skill rewards
+                    # well-calibrated probabilities, not just directional luck.
+                    rows = research_tracker.get_scored_rows(
+                        _component_signal(k))
+                    if horizon_days is not None:
+                        rows = [r for r in rows
+                                if r.get("horizon_days") == horizon_days]
+                    cal = _brier_from_rows(rows)
+                    skill = cal.get("brier_skill")
+                    if skill is not None and (cal.get("n") or 0) >= _MIN_N_FOR_ADAPT:
+                        raw = 1.0 + _TILT_GAIN * float(skill)
+                        mult = max(1.0 - _MAX_TILT, min(1.0 + _MAX_TILT, raw))
             except Exception:
                 mult = 1.0
             adjusted[k] = w * mult
