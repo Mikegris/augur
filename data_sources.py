@@ -262,7 +262,10 @@ def defillama_tvl_summary():
     # by everything beyond the 15th chain.
     if isinstance(chains_raw, list):
         all_chains_with_tvl = [c for c in chains_raw if isinstance(c.get("tvl"), (int, float))]
-        total = sum(float(c["tvl"]) for c in all_chains_with_tvl)
+        # Floor the sum at positive TVL: the chains endpoint can transiently
+        # return negative/zero-coerced tvl that subtracts from a legitimate
+        # total. Filtering to > 0 excludes those without dropping real chains.
+        total = sum(float(c["tvl"]) for c in all_chains_with_tvl if float(c["tvl"]) > 0)
         chains_sorted = sorted(all_chains_with_tvl, key=lambda c: c["tvl"], reverse=True)[:15]
         chains = [{
             "name": c.get("name"),
@@ -302,7 +305,11 @@ def defillama_top_yields(limit=20):
     if not data:
         return []
     pools = data.get("data") or []
-    pools = [p for p in pools if (p.get("stablecoin") and p.get("apy"))]
+    # Keep the presence check separate from the value: a pool reporting
+    # apy == 0 (a parked stable) is real data, not missing data, so drop only
+    # pools with no apy reading at all. The descending sort already orders any
+    # genuine 0% pool last, so no top-yield pool is lost.
+    pools = [p for p in pools if (p.get("stablecoin") and p.get("apy") is not None)]
     pools.sort(key=lambda p: p.get("apy") or 0, reverse=True)
     return [{
         "project": p.get("project"),

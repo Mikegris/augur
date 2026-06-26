@@ -65,10 +65,12 @@ _RATING_ACTION = {
     Rating.BUY: Action.BUY, Rating.OVERWEIGHT: Action.BUY, Rating.HOLD: Action.HOLD,
     Rating.UNDERWEIGHT: Action.SELL, Rating.SELL: Action.SELL,
 }
+# Symmetric about the 5.0 neutral midpoint: each bearish band mirrors its
+# bullish counterpart (1/9, 3/7, 4.5/5.5), so band→score never skews consensus.
 _BAND_SCORE = {
-    SentimentBand.VERY_BEARISH: 0.0, SentimentBand.BEARISH: 2.0,
-    SentimentBand.SLIGHTLY_BEARISH: 4.0, SentimentBand.SLIGHTLY_BULLISH: 6.0,
-    SentimentBand.BULLISH: 8.0, SentimentBand.VERY_BULLISH: 10.0,
+    SentimentBand.VERY_BEARISH: 1.0, SentimentBand.BEARISH: 3.0,
+    SentimentBand.SLIGHTLY_BEARISH: 4.5, SentimentBand.SLIGHTLY_BULLISH: 5.5,
+    SentimentBand.BULLISH: 7.0, SentimentBand.VERY_BULLISH: 9.0,
 }
 
 
@@ -137,7 +139,35 @@ def _str_list(v: Any, cap: int = 12) -> List[str]:
     return [x for x in items if x][:cap]
 
 
-_JSON_OBJ_RE = re.compile(r"\{.*\}", re.DOTALL)
+def _balanced_json_objects(s: str):
+    """Yield each top-level {...} substring by scanning brace depth, respecting
+    string literals/escapes so braces inside strings don't confuse the count.
+    Robust to multiple objects or stray braces in surrounding prose."""
+    depth = 0
+    start = -1
+    in_str = False
+    esc = False
+    for i, ch in enumerate(s):
+        if in_str:
+            if esc:
+                esc = False
+            elif ch == "\\":
+                esc = True
+            elif ch == '"':
+                in_str = False
+            continue
+        if ch == '"':
+            in_str = True
+        elif ch == "{":
+            if depth == 0:
+                start = i
+            depth += 1
+        elif ch == "}":
+            if depth > 0:
+                depth -= 1
+                if depth == 0 and start >= 0:
+                    yield s[start:i + 1]
+                    start = -1
 
 
 def extract_json(text: Any) -> Dict[str, Any]:
@@ -148,19 +178,23 @@ def extract_json(text: Any) -> Dict[str, Any]:
     if not text:
         return {}
     s = str(text)
-    # strip code fences
-    s = re.sub(r"```(?:json)?", "", s)
+    # strip only leading/trailing code fences (don't touch backticks that may
+    # legitimately appear inside JSON string values mid-document)
+    s = re.sub(r"^\s*```(?:json)?\s*", "", s)
+    s = re.sub(r"\s*```\s*$", "", s)
     try:
         return json.loads(s)
     except Exception:
         pass
-    m = _JSON_OBJ_RE.search(s)
-    if m:
+    # Walk brace-matched candidates (first valid object wins); tolerant of
+    # multiple objects or trailing braces in prose where a greedy regex fails.
+    for candidate in _balanced_json_objects(s):
         try:
-            obj = json.loads(m.group(0))
-            return obj if isinstance(obj, dict) else {}
+            obj = json.loads(candidate)
         except Exception:
-            return {}
+            continue
+        if isinstance(obj, dict):
+            return obj
     return {}
 
 
@@ -190,7 +224,9 @@ class AnalystReport:
     def from_llm(cls, analyst: str, text: Any, *, band_is_sentiment: bool = False,
                  evidence_refs: Optional[List[str]] = None) -> "AnalystReport":
         d = extract_json(text)
-        band_raw = d.get("band") or d.get("sentiment") or d.get("rating") or ""
+        # Keep rating vocabulary out of the band field: only genuine band/
+        # sentiment keys feed the (SentimentBand-typed) band column.
+        band_raw = d.get("band") or d.get("sentiment") or ""
         band = parse_band(band_raw).value if band_is_sentiment else str(band_raw)
         score = d.get("score")
         if score is None and band_is_sentiment:
@@ -200,8 +236,7 @@ class AnalystReport:
             confidence=d.get("confidence", 0.5),
             key_points=d.get("key_points") or d.get("points") or [],
             evidence_refs=evidence_refs or d.get("evidence") or [],
-            narrative=d.get("narrative") or d.get("summary") or (
-                str(text)[:1200] if not d else ""),
+            narrative=d.get("narrative") or d.get("summary") or str(text)[:1200],
         )
 
     def render(self) -> str:
@@ -269,9 +304,10 @@ class TraderProposal:
         return cls(
             action=parse_action(d.get("action") or d.get("decision")),
             reasoning=d.get("reasoning") or d.get("rationale") or (str(text)[:1000] if not d else ""),
-            entry_price=d.get("entry_price") or d.get("entry"),
-            stop_loss=d.get("stop_loss") or d.get("stop"),
-            position_hint=d.get("position_sizing") or d.get("position_hint") or d.get("size"),
+            entry_price=d["entry_price"] if "entry_price" in d else d.get("entry"),
+            stop_loss=d["stop_loss"] if "stop_loss" in d else d.get("stop"),
+            position_hint=d["position_sizing"] if "position_sizing" in d else (
+                d["position_hint"] if "position_hint" in d else d.get("size")),
         )
 
     def render(self) -> str:
@@ -369,9 +405,17 @@ class CouncilDecision:
                    **prov)
 
     def signed_score(self) -> float:
-        """Signed conviction in [-1, +1]: positive = bullish, for sizing math."""
+        """Signed conviction in [-1, +1]: positive = bullish, for sizing math.
+        Magnitude comes from the rating; the SIGN is reconciled with the
+        executable action so sizing never sees a bullish score paired with a
+        SELL action (the arbiter can override action independently of rating)."""
         base = _RATING_SCORE.get(self.rating, 0.0) / 2.0
-        return max(-1.0, min(1.0, base)) * self.conviction
+        score = max(-1.0, min(1.0, base)) * self.conviction
+        if self.action is Action.SELL and score > 0.0:
+            score = -score
+        elif self.action is Action.BUY and score < 0.0:
+            score = -score
+        return score
 
     def render(self) -> str:
         return ("**COUNCIL {sym}** → {r}/{a} conviction={c:.0%} "

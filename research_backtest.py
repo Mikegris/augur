@@ -524,6 +524,9 @@ def _run(
     # signals).
     position = np.zeros(n - 1, dtype=float)
     signal_log: List[Dict[str, Any]] = []
+    # Track how far the most-recent signal's position extended so a newer
+    # signal can clear a still-open longer prior position past its own exit.
+    prev_max_exit = 0
 
     for t in range(_MIN_LOOKBACK, n):
         # The signal sees strictly past bars only — slice up to (but not
@@ -596,6 +599,14 @@ def _run(
         for k in range(entry_idx, exit_idx):
             if k < len(position):
                 position[k] = pos_val
+        # If an OLDER longer-horizon signal had stamped bars past this signal's
+        # exit, flatten them: "most recent dominates" means the newer signal
+        # supersedes the older one entirely, not just over its overlap window.
+        if prev_max_exit > exit_idx:
+            for k in range(exit_idx, prev_max_exit):
+                if k < len(position):
+                    position[k] = 0.0
+        prev_max_exit = exit_idx
 
     # Per-bar pnl = position[t] * (close[t+1]/close[t] - 1). Build this once
     # the position vector is fully populated.

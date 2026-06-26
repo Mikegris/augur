@@ -329,10 +329,16 @@ def adaptive_weights(base_weights: Dict[str, float],
         return dict(base_weights)
 
 
-def weights_are_adapted(base_weights: Dict[str, float]) -> bool:
+def weights_are_adapted(base_weights: Dict[str, float],
+                        horizon_days: Optional[int] = None) -> bool:
     """True if adaptive_weights would meaningfully differ from base (i.e. at
-    least one component has crossed the min-sample threshold)."""
-    adj = adaptive_weights(base_weights)
+    least one component has crossed the min-sample threshold).
+
+    `horizon_days` must match the horizon the applied weights are computed at,
+    so the 'adapted' label agrees with the weights actually used (a component
+    can have enough pooled history but too little at a specific horizon, or
+    vice-versa). Defaults to pooled (None) for backward compatibility."""
+    adj = adaptive_weights(base_weights, horizon_days)
     for k in base_weights:
         if abs(adj.get(k, 0.0) - base_weights.get(k, 0.0)) > 1e-6:
             return True

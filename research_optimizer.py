@@ -563,7 +563,12 @@ def compare_to_current(
     try:
         _, cov, used = _estimate_cov_and_mean(syms, period=period)
         if used:
-            d = np.array([delta.get(s, delta.get(s.upper(), 0.0)) for s in used])
+            # `used` is always upper-cased by _estimate_cov_and_mean, but `delta`
+            # is keyed by whatever case the caller passed (often lowercase). Map
+            # delta to upper-case keys so the lookup matches regardless of input
+            # casing — otherwise the TE silently collapses to ~0.
+            dmap = {k.upper(): v for k, v in delta.items()}
+            d = np.array([dmap.get(s.upper(), 0.0) for s in used])
             te = math.sqrt(max(float(d @ cov @ d), 0.0))
             te_pct = round(te * 100, 4)
     except Exception as e:

@@ -519,9 +519,16 @@ def _optimizer_verdict(
     weights = res.get("weights") or {}
     optimal = float(weights.get(cand_sym, 0.0))
 
-    proposed_nav = sum(h["market_value"] for h in proposed) or 1.0
+    # Compare like-for-like: the optimizer's weights sum to 1.0 over `symbols`
+    # (a fully-invested allocation that ignores cash and non-universe holdings),
+    # so the candidate's "proposed size" must also be its fraction of that same
+    # invested universe — not of the whole proposed-book NAV (which includes
+    # cash and other names). Using full-book NAV here would systematically
+    # understate proposed_size and mis-flag UNDERSIZED on cash-heavy books.
+    universe_mv = sum(h["market_value"] for h in proposed
+                      if h["symbol"] in symbols) or 1.0
     cand_mv = next((h["market_value"] for h in proposed if h["symbol"] == cand_sym), 0.0)
-    proposed_size = cand_mv / proposed_nav
+    proposed_size = cand_mv / universe_mv
 
     # Verdict band.
     if optimal <= 0.001 and proposed_size > 0.001:

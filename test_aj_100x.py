@@ -83,10 +83,12 @@ def test_01_kelly_sizing():
 
 def test_02_volatility_target():
     _reset_alpha_patches()
-    # a calm name (low vol) gets upsized toward the target; a wild name downsized
-    A._ann_vol = lambda closes: 0.16          # ~1%/day
+    # a calm name (low vol) gets upsized toward the target; a wild name downsized.
+    # _ann_vol returns annualized vol as a PERCENT (portfolio_insights.annualized_vol
+    # multiplies by 100), so 16.0 ≈ 1%/day and 64.0 ≈ 4%/day.
+    A._ann_vol = lambda closes: 16.0          # ~1%/day
     calm = A._vol_target_factor("AAPL", {"volatility_target_pct": 2.0})
-    A._ann_vol = lambda closes: 0.64          # ~4%/day
+    A._ann_vol = lambda closes: 64.0          # ~4%/day
     wild = A._vol_target_factor("AAPL", {"volatility_target_pct": 2.0})
     check(calm > 1.0 and wild < 1.0, "02 vol-target: calm up ({:.2f}), wild down ({:.2f})".format(calm, wild))
     check(A._vol_target_factor("AAPL", {}) == 1.0, "02 vol-target: off → 1.0")

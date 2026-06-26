@@ -1,0 +1,762 @@
+[
+ {
+  "id": "S074",
+  "action": "fixed",
+  "note": "Moved the _PENDING_CLARIFY.pop() out of the pre-dispatch position into each success path: forecast branch pops only after _answer_forecast returns; agent branch pops only after a truthy r with an answer. A raising/empty dispatch now leaves the entry in place for TTL-bounded retry, matching the documented fail-safe comment."
+ },
+ {
+  "id": "S075",
+  "action": "fixed",
+  "note": "_ideas_line: replaced 'composite_score is not None' filter and max() key with _finite() guards, and format the top score through _finite(), so NaN scores no longer corrupt the max() pick or render as 'nan'."
+ },
+ {
+  "id": "S076",
+  "action": "fixed",
+  "note": "_maybe_learn._run: wrapped the auto-count re-check + jarvis_add_memory in 'with db._write_lock:' so concurrent learn threads cannot all pass the 30-fact cap. Re-checks count under the lock right before insert (RLock, so reentrant add is safe); avoids holding the lock across the LLM call."
+ },
+ {
+  "id": "S079",
+  "action": "rejected",
+  "note": "Proposed fix keys driver off a.get('day_pnl'), but portfolio_attribution sets day_pnl = pulse.get('day_pnl') \u2014 identical value. The fix does not change behavior nor resolve the stated None-with-real-rows concern. Not a genuine defect."
+ },
+ {
+  "id": "S080",
+  "action": "deferred",
+  "note": "Changing share_of_move_pct from net to gross denominator alters the documented metric ('Share of the net move') and the shape returned in data:a to UI/callers and the 999 clamp; low confidence and behavior-changing. Deferred to avoid breaking consumers."
+ },
+ {
+  "id": "S082",
+  "action": "fixed",
+  "note": "_portfolio_pulse: movers filter and sort key now use _finite(r.get('day_change_pct')) so a NaN change_pct can't pass the gate and corrupt best/worst (movers[-1]/[0]) ordering or render as '+nan%'."
+ },
+ {
+  "id": "S087",
+  "action": "fixed",
+  "note": "_answer_basis: guarded the shares denominator with abs(shares) > 1e-9 (via _has_shares) instead of falsy-only, and gated the live-mark tail on _has_shares, so float-dust residual lots no longer produce an astronomical avg basis / exploded mv/pnl/%."
+ },
+ {
+  "id": "S089",
+  "action": "fixed",
+  "note": "deep_dossier: consensus now = aligned-to-lean share (bulls if net>0, bears if net<0, else neutrals) / n, instead of max bloc size (which counted neutrals). Ties the conviction gate to directional agreement; matches the already-correct headline 'aligned' computation."
+ },
+ {
+  "id": "S077",
+  "action": "fixed",
+  "note": "Covered by the S075 _ideas_line edit: top score now formatted via _finite(top['composite_score']), removing the 'score nan' render."
+ },
+ {
+  "id": "S078",
+  "action": "fixed",
+  "note": "_answer_ideas: top filter now uses _finite(r.get('composite_score')) and the listing formats _finite(r['composite_score']), matching _idea_insights and dropping NaN/inf scores."
+ },
+ {
+  "id": "S081",
+  "action": "fixed",
+  "note": "_et_now fallback: now strips tzinfo via .replace(tzinfo=None) so it returns a naive ET wall-clock value rather than a UTC-labelled datetime shifted 5h, removing the mislabelled-tz trap. Consumers read .hour/.minute/.weekday()/%I:%M so behavior is unchanged; documented EST-only (DST still approximate, as the docstring already states)."
+ },
+ {
+  "id": "S083",
+  "action": "fixed",
+  "note": "Resolved by the S075/S078 edits: all three idea-rendering paths (_idea_insights, _ideas_line, _answer_ideas) now use _finite consistently for filtering and formatting composite_score, so the 'top' pick agrees across surfaces."
+ },
+ {
+  "id": "S084",
+  "action": "rejected",
+  "note": "Defaulting winner=s1 (focus the first compared ticker) is a sensible, intentional navigation default, not a defect. The proposed change to omit action.symbol alters the action return shape the UI relies on; low impact, current behavior defensible."
+ },
+ {
+  "id": "S085",
+  "action": "rejected",
+  "note": "Producer contract is unambiguous: research_tracker computes hit_rate = hits/n in [0,1] (rounded), so 'hr*100 if hr<=1 else hr' always takes the *100 branch correctly. The cited misclassification (1 meaning 1% -> 100%) cannot occur. The conditional is harmless defensive code; no wrong output. Same for _forecast_line."
+ },
+ {
+  "id": "S086",
+  "action": "fixed",
+  "note": "_debate_ask 52-week-range: wrapped the percentage in max(0.0, min(100.0, ...)), mirroring the clamp in _symbol_line, so a price below the stale 52-wk low or above the high no longer prints negative/over-100% into the LLM evidence pack."
+ },
+ {
+  "id": "S088",
+  "action": "fixed",
+  "note": "_answer_trading_agent activity: replaced float(o.get('qty') or 0) with _finite(o.get('qty')) or 0.0, so a non-numeric qty in one order row degrades to 0.0 for that entry instead of raising and collapsing the whole trading-agent answer via the broad outer except."
+ },
+ {
+  "id": "S060",
+  "action": "fixed",
+  "note": "Clamped aj_audit limit to max(1, _safe_int(...)) matching the file's convention (lines 775/2237/2248); blocks ?limit=-1 -> LIMIT -1 full-chain dump."
+ },
+ {
+  "id": "S061",
+  "action": "fixed",
+  "note": "Clamped aj_proposals limit to max(1, _safe_int(..., 50)); prevents negative limit returning the whole table."
+ },
+ {
+  "id": "S062",
+  "action": "fixed",
+  "note": "Clamped aj_orders limit to max(1, _safe_int(..., 50)); same negative-limit fix."
+ },
+ {
+  "id": "S063",
+  "action": "fixed",
+  "note": "Clamped research_track_calls limit to max(1, _safe_int(..., 20)) before passing to research_tracker.get_recent_calls."
+ },
+ {
+  "id": "S064",
+  "action": "fixed",
+  "note": "Added math.isfinite guard for shares/price/fees in add_transaction (mirrors add_position) rejecting NaN/inf with 400; left action-specific sign semantics intact (no positivity check, since SELL etc. are valid)."
+ },
+ {
+  "id": "S065",
+  "action": "fixed",
+  "note": "Changed acc = f['accession'] to f.get('accession') with continue-if-missing in intel_feed Pass 1, matching the .get() pattern used for every other field; stops KeyError 500 on a malformed upstream filing."
+ },
+ {
+  "id": "S066",
+  "action": "fixed",
+  "note": "Made each charged rate-limit stamp globally unique via now + monotonic itertools.count()*1e-6 (1e-9 was lost to float64 precision at epoch-second magnitude). Verified refund removes only the caller's own slots while a concurrent charge's slots stay intact; window/MAX boundary unchanged. Added 'import itertools'."
+ },
+ {
+  "id": "S067",
+  "action": "deferred",
+  "note": "Real concurrency race (re-query 'latest run for symbol' can attach another run's reports), but the only sound fix requires aj_council.run() to return/surface the run_id, which lives in aj_council.py \u2014 outside my permitted file set. Re-deriving within app.py cannot be made safe. Deferred to avoid a risky/incomplete change."
+ },
+ {
+  "id": "S068",
+  "action": "fixed",
+  "note": "Both jarvis_act paths now capture stamps from _jarvis_act_charge and call _jarvis_act_refund(stamps) when the executor raises, before _err(e) \u2014 mirrors aj_run_route so transient executor failures don't permanently drain the 10/min budget."
+ },
+ {
+  "id": "S069",
+  "action": "fixed",
+  "note": "Changed dividend income_weight guard from 'if total_annual_income' (exact-zero only) to 'if total_annual_income > 0', preventing weight blow-up when the denominator is negative or tiny float dust."
+ },
+ {
+  "id": "S070",
+  "action": "fixed",
+  "note": "Added _market_date() helper (America/New_York via zoneinfo, UTC fallback per codebase convention in aj_positions/aj_rules) and used it to key the daily snapshot instead of UTC, so afternoon-ET snapshots aren't filed under the next calendar day."
+ },
+ {
+  "id": "S071",
+  "action": "fixed",
+  "note": "Normalized alert symbols to upper() when building alert_syms and when reading prices.get(...) in the snapshot alert check, so a legacy lower/mixed-case alert row matches the UPPER-keyed prices/get_quotes_batch dict (defense-in-depth)."
+ },
+ {
+  "id": "S072",
+  "action": "rejected",
+  "note": "Misreads the contract: fetcher.get_chart_data is typed/documented to return a list and compute_indicators takes a list, so the Series/DataFrame ambiguous-truth 500 cannot occur. 'if data' on a list is correct (empty list -> no indicators is the intended behavior). No change."
+ },
+ {
+  "id": "S073",
+  "action": "fixed",
+  "note": "Guarded hn_sentiment.fetch_mentions / wiki_attention.fetch_pageviews with 'or {}' (no AttributeError on None) and required positive evidence for status 'live' (HN: mention_count present; Wiki: non-empty stats/points), else 'quiet'/'error' \u2014 so empty no-error responses no longer inflate sources_live / the composite."
+ },
+ {
+  "id": "S001",
+  "action": "fixed",
+  "note": "Changed degraded-status term from `len(backed) < len(reports)` to `not backed` (line ~350), so a single zero-confidence/neutral analyst no longer downgrades and un-caches an otherwise-ok run; full abstention still degrades."
+ },
+ {
+  "id": "S002",
+  "action": "fixed",
+  "note": "Replaced `Budget(int(cfg.get('council_max_calls_per_cycle', 40) or 0))` with explicit None-guard (`int(raw) if raw is not None else 40`) so a missing/falsy config no longer silently yields a 0-call always-dead council; an intentional 0 is preserved."
+ },
+ {
+  "id": "S006",
+  "action": "deferred",
+  "note": "Real: realized P&L divided by lifetime gross buy notional double-counts basis for multi-round-trip symbols. Correct per-round-trip basis requires closed-lot cost-basis data not exposed by aj_positions/aj_analytics, which I'm not allowed to edit. No safe one-module fix."
+ },
+ {
+  "id": "S009",
+  "action": "fixed",
+  "note": "Made _arbiter transcript builder use defensive `t.get('role','?')`/`t.get('content','')` (mirroring _persist) so a malformed risk-turn dict from aj_debate degrades rather than raising past fail-closed handling."
+ },
+ {
+  "id": "S003",
+  "action": "fixed",
+  "note": "Moved `budget.n_calls += 1` into the `if r:` branch so only completed model calls count toward the per-cycle cap; transport failures no longer exhaust the cost budget and persisted n_calls matches the routing ledger."
+ },
+ {
+  "id": "S004",
+  "action": "deferred",
+  "note": "Real efficiency miss (no in-flight dedup under concurrent identical runs), but doesn't cause incorrect results, only redundant cost. Suggested threading.Event guard is a new feature that risks waiters blocking forever if the first run raises; too risky for a surgical fix."
+ },
+ {
+  "id": "S005",
+  "action": "rejected",
+  "note": "Not real: database.get_conn() unconditionally sets conn.row_factory = sqlite3.Row on every fresh connection (database.py:37), so `r['alpha_return']`/`r['q']`/etc. column-name access is always valid. Premise does not hold."
+ },
+ {
+  "id": "S007",
+  "action": "deferred",
+  "note": "Real horizon mismatch (benchmark uses run-ts->now vs actual buy-fill->sell-fill), but a correct fix needs both fill endpoints and changes _spy_return_since's 'to now' semantics; it's coupled to S006's basis scoping. Not a safe one-liner within this module."
+ },
+ {
+  "id": "S008",
+  "action": "fixed",
+  "note": "Removed the `start = start or bars[0]` stale fallback in _spy_return_since; now returns 0.0 when no bar is at-or-after the timestamp instead of fabricating a ~6mo benchmark return. Skipped the ms-vs-seconds normalization: fetcher consistently emits unix seconds, so it's not a real concern here."
+ },
+ {
+  "id": "S010",
+  "action": "fixed",
+  "note": "Added coherence reconciliation in _arbiter: when the LLM action directly contradicts the rating's implied direction (BUY-while-bearish / SELL-while-bullish), keep the rating-derived action and record the conflict in dissent instead of persisting an incoherent (rating, action) pair."
+ },
+ {
+  "id": "S011",
+  "action": "fixed",
+  "note": "Changed run()'s `if not dec.dissent: dec.dissent = dissent` to merge consensus analyst-spread dissent with the arbiter dissent (`'; '.join(...)[:400]`) so the analyst-disagreement signal isn't discarded when the arbiter also dissents."
+ },
+ {
+  "id": "S014",
+  "action": "fixed",
+  "note": "Recentered _BAND_SCORE symmetrically about 5.0 neutral midpoint (VERY_BEARISH=1, BEARISH=3, SLIGHTLY_BEARISH=4.5, SLIGHTLY_BULLISH=5.5, BULLISH=7, VERY_BULLISH=9) so bearish/bullish bands mirror each other and a slightly-bearish read no longer maps to the SELL/UNDERWEIGHT tier via _score_to_rating."
+ },
+ {
+  "id": "S012",
+  "action": "fixed",
+  "note": "Replaced greedy `{.*}` regex with _balanced_json_objects() brace-matching scan that respects string literals/escapes and yields the first parseable top-level object. Tolerant of multiple objects or stray braces in prose; honors the documented 'first JSON object' contract."
+ },
+ {
+  "id": "S015",
+  "action": "fixed",
+  "note": "TraderProposal.from_llm now resolves entry_price/stop_loss/position_hint with explicit `in` presence checks instead of `or` chains, so a present-but-zero primary key no longer incorrectly defers to an alias. _opt_pos_float still makes the validity decision."
+ },
+ {
+  "id": "S016",
+  "action": "fixed",
+  "note": "AnalystReport narrative fallback to str(text)[:1200] is no longer gated on `if not d`; raw text is used whenever both narrative and summary keys are absent, even when other fields parsed. Dict-derived fields still take precedence."
+ },
+ {
+  "id": "S017",
+  "action": "fixed",
+  "note": "signed_score() now reconciles its sign with the executable action (flips sign if action is SELL and score>0, or BUY and score<0). Magnitude still from rating. Prevents bullish score paired with arbiter-overridden SELL action; HOLD/coherent cases unchanged (test signed_score()>0.99 still holds)."
+ },
+ {
+  "id": "S013",
+  "action": "fixed",
+  "note": "Code-fence stripping now anchors to start/end (`^\\s*```(?:json)?\\s*` and `\\s*```\\s*$`) instead of globally removing every backtick run, preserving backticks inside JSON string values. The new brace scanner still recovers objects when a leading prose line precedes the fence."
+ },
+ {
+  "id": "S018",
+  "action": "fixed",
+  "note": "Removed d.get('rating') from band_raw source so Rating vocabulary (BUY/SELL) no longer leaks into the SentimentBand-typed band column for non-sentiment analysts. Band now sourced only from genuine band/sentiment keys; sentiment-analyst score derivation via _BAND_SCORE remains consistent."
+ },
+ {
+  "id": "S030",
+  "action": "fixed",
+  "note": "Added explicit `import importlib.util` before `importlib.util.find_spec` in fingpt_sentiment (aj_personas.py:103). importlib.util is a submodule not guaranteed loaded by `import importlib`; the missing import could intermittently raise AttributeError (swallowed), permanently disabling the optional prior."
+ },
+ {
+  "id": "S031",
+  "action": "fixed",
+  "note": "Hardened council_report (aj_personas.py:143): wrapped float(conv) in try/except (TypeError, ValueError)->0.0 so a malformed/non-numeric conviction in a dict-shaped decision no longer aborts the whole brief, and defaulted None rating/action to '?' instead of rendering 'None/None'."
+ },
+ {
+  "id": "S032",
+  "action": "fixed",
+  "note": "fingpt_sentiment (aj_personas.py:120): reject NaN (`score != score` -> return None) and clamp score to [0,10] BEFORE deriving the label, preventing a NaN score being emitted in the result dict with a misleading NEUTRAL label."
+ },
+ {
+  "id": "S046",
+  "action": "fixed",
+  "note": "aj_operator._council_advise (line ~178): added an explicit short-circuit when budget['max'] <= 0 returning brief 'council topk=0 (disabled)' so a council_topk=0 config is unambiguous in the audit trail instead of the misleading 'topk reached'. Pure brief-string change; no behavior/cost change."
+ },
+ {
+  "id": "S029",
+  "action": "rejected",
+  "note": "Not a real defect. Lens strings end in '.' and template is '{lens} Analyze' yielding '...companies. Analyze' which reads correctly. The finder itself concludes the text is 'acceptable' and asks to 'confirm intended'. Purely stylistic; no garbling or crash. No edit."
+ },
+ {
+  "id": "S044",
+  "action": "deferred",
+  "note": "Moving budget['n'] increment to after a successful consult would weaken the cost bound: a flapping/erroring council would be re-consulted for every BUY candidate in the cycle (unbounded expensive calls), the opposite safety concern. Counting attempts (including errors) is a defensible cost-bound design. Risk of changing cost behavior tests/operators rely on; deferred."
+ },
+ {
+  "id": "S045",
+  "action": "rejected",
+  "note": "The 0.5 advisory shrink floor is an intentional design choice (a positive council view forces at least half the rule-sized buy), not a defect. Finder confidence is low. Lowering/removing it changes money/sizing math the advisory invariant and tests may depend on; no edit."
+ },
+ {
+  "id": "S033",
+  "action": "deferred",
+  "note": "Real maintainability concern (importing private _safe/_fmt/_neutral from aj_analysts), but the fix requires creating a new public module or re-exports and editing aj_analysts, which is outside my two assigned files (aj_personas.py, aj_operator.py). Cannot safely resolve within scope; deferred."
+ },
+ {
+  "id": "S102",
+  "action": "rejected",
+  "note": "safe_executor.parallel_map preallocates a result list indexed by position and documents same-order one-per-input results; the positional zip(to_fetch, resolved) is correct, reorder concern does not apply."
+ },
+ {
+  "id": "S103",
+  "action": "fixed",
+  "note": "Replaced dead inner resp.raise_for_status() on the 429 path with raise RuntimeError('coingecko 429; cooling down'), matching the cool-down branch; kept outer raise_for_status() for non-429 errors."
+ },
+ {
+  "id": "S104",
+  "action": "fixed",
+  "note": "Guarded each prices[] element (isinstance list/tuple and len>=2) before tuple-unpack in get_crypto_chart so a malformed bar is skipped instead of blanking the whole chart."
+ },
+ {
+  "id": "S105",
+  "action": "fixed",
+  "note": "get_quote 'volume' now uses last_volume or regular_market_volume, falling back to three_month_average_volume, matching Yahoo-direct/finviz/batch current-volume semantics."
+ },
+ {
+  "id": "S114",
+  "action": "rejected",
+  "note": "Inline split()[0] parse already matches the established _first_num semantics used at lines 431-432 for the same keys; range-value premise unverified and would equally affect fundamentals path. No real behavior difference to fix."
+ },
+ {
+  "id": "S042",
+  "action": "fixed",
+  "note": "compute_day_pnl now calls _session_open_unrealized only when basis!='realized' (else uses current unreal), skipping the settings write/prune/cache-invalidation on the realized hot path. Return shape and day_pnl math unchanged."
+ },
+ {
+  "id": "S043",
+  "action": "fixed",
+  "note": "Tightened _order_price guard to require limit_price>0, and added an explicit fail-closed block in evaluate() before sizing that rejects a limit order with missing/non-positive limit price."
+ },
+ {
+  "id": "S049",
+  "action": "rejected",
+  "note": "reconcile/divergence/broker.positions()/_local_positions do not exist in aj_risk.py; the function lives in aj_execution.py (line 301), outside the assigned files. Misattributed file."
+ },
+ {
+  "id": "S023",
+  "action": "fixed",
+  "note": "_fmt keep-filter now computes each value once and drops NaN floats (which would serialize as the invalid JSON token 'NaN') in addition to None."
+ },
+ {
+  "id": "S091",
+  "action": "fixed",
+  "note": "Added _WATCH_SYM_RE mirroring jarvis_watches._SYM_RE (leading letter required) and used it in the add_watch confirm gate; numeric-only symbols like '123' no longer pass the gate then fail at exec. Verified gate==exec acceptance."
+ },
+ {
+  "id": "S024",
+  "action": "fixed",
+  "note": "News headlines list now filters out entries with missing/falsy titles, matching the existing pattern; avoids feeding [null,null] as evidence."
+ },
+ {
+  "id": "S025",
+  "action": "rejected",
+  "note": "Not a real defect \u2014 design/wording opinion. Code passes fingpt evidence as intended; blending into score would change scoring behavior (risky), and the comment is an accurate description."
+ },
+ {
+  "id": "S035",
+  "action": "fixed",
+  "note": "forecast_horizon_days now normalized: int(h) only when h is a positive number, else 20. Preserves the 0->20 behavior while guarding negatives that previously passed unguarded to ensemble_forecast."
+ },
+ {
+  "id": "S037",
+  "action": "fixed",
+  "note": "_run now treats trivially-empty serialized evidence ('[]','{}','\"\"','null') and whitespace-only strings as absent, so analysts whose engines all returned empty containers fall through to the neutral/low-confidence fallback instead of querying the model on nothing."
+ },
+ {
+  "id": "S095",
+  "action": "fixed",
+  "note": "counterfactual_review limit guard changed from 'if n' to 'if n is not None', matching the convention used by other numeric tools; explicit limit=0 now clamps to 1 instead of silently defaulting to 10."
+ },
+ {
+  "id": "S097",
+  "action": "fixed",
+  "note": "limit_capped now compares int(requested) > 25 instead of raw float, so 25.x (which returns the full 25) no longer falsely reports data was withheld."
+ },
+ {
+  "id": "S019",
+  "action": "fixed",
+  "note": "Real off-by-one: [-max(0,n):] becomes [0:] (whole list) at n=0. Guarded both same/cross with `x[-n:] if n>0 else []` so requesting zero recents returns none. Verified n_same=0/n_cross=0 -> []."
+ },
+ {
+  "id": "S020",
+  "action": "fixed",
+  "note": "Real exposure: naive split on ENTRY_END sentinel. Smallest safe fix is append-side sanitization: body now escapes embedded `<!-- ENTRY_END -->` and `<!-- ts=` before writing, so framing cannot be broken. Verified an entry containing the sentinel parses intact."
+ },
+ {
+  "id": "S021",
+  "action": "fixed",
+  "note": "Real O(n^2): append() re-read+rewrote whole log every call despite 'append-only' design. Replaced read/temp/replace with lock-guarded open(path,'a') + flush + fsync of a complete framed entry. Updated docstring atomicity claim to match."
+ },
+ {
+  "id": "S036",
+  "action": "fixed",
+  "note": "Real: symbol only upper-cased, not whitespace-stripped, so 'BRK B' wrote `symbol=BRK B` and parser's \\S+ dropped the entry. Now `re.sub(r'\\s+','',upper).replace('-->','')`. Verified 'BRK B' -> 'BRKB' and parses."
+ },
+ {
+  "id": "S022",
+  "action": "fixed",
+  "note": "Docstring promised global reverse-chronological but impl surfaces same-symbol block first then cross-symbol block (a deliberate product choice). Chose the safe fix: corrected the docstring to document the actual same-first-then-cross contract; no behavior change so consumers relying on same-first ordering are unaffected."
+ },
+ {
+  "id": "S054",
+  "action": "fixed",
+  "note": "Real edge case: s[:11] truncated 'September 5, 2026' losing year and breaking %b for full month names. Dropped the slice (parse full stripped string per format) and added '%B %d, %Y' for full month names. ISO/slash formats still parse; parse_iso runs first as primary path."
+ },
+ {
+  "id": "S057",
+  "action": "fixed",
+  "note": "Real: only caller feeds av from portfolio_insights.annualized_vol which ALWAYS returns a percent, yet `av*100 if av<5.0` mis-detected a genuine 4% name as a fraction and inflated it 100x -> factor floored. Removed the magnitude guess; treat av as percent unconditionally. Comment updated."
+ },
+ {
+  "id": "S059",
+  "action": "fixed",
+  "note": "Real scale-out defect: rung-2 sold half then back-marked rung-1 fired (fired.update({1,2})), permanently foreclosing rung-1's third on a gap-up. Changed to fired.add(2) so a later cycle can still fire rung-1 per the thirds ladder. Left rung-3's {1,2,3} marking intact since rung-3 sells the full remaining qty ('dump the rest')."
+ },
+ {
+  "id": "S039",
+  "action": "fixed",
+  "note": "Real cross-broker bug in _resolve_open_orders: it SELECTed non-terminal orders across all modes then queried the single passed-in broker. Scoped the SELECT to the broker's mode (AND mode = ?, derived from broker.mode), mirroring _local_positions. cancel_all_open already routes per-row to the correct broker for live orders, so no change needed there for this defect."
+ },
+ {
+  "id": "S040",
+  "action": "fixed",
+  "note": "Real state-machine bug: an 'accepted' result with a complete fill set was unconditionally downgraded to 'partially_filled', stranding it non-terminal. Moved the order_qty lookup above the accepted-case check and set state to 'filled' when filled_qty >= order_qty*(1-1e-6), else 'partially_filled'. Reused the same order_qty for the existing short-fill check."
+ },
+ {
+  "id": "S026",
+  "action": "fixed",
+  "note": "Real prompt-bloat: risk_debate history grew quadratically by re-feeding the full transcript each turn. Capped carried history to the last 2000 chars before formatting; full turns are still returned unchanged for persistence/UI."
+ },
+ {
+  "id": "S034",
+  "action": "fixed",
+  "note": "Real KeyError risk: research_manager indexed t['role']/t['content'] directly. Switched to t.get('role','?') / t.get('content','') so malformed/replayed turn records degrade instead of crashing."
+ },
+ {
+  "id": "S041",
+  "action": "fixed",
+  "note": "Real accounting bug: paper branch did `_set_state(...,'canceled'); n += 1` unconditionally, overcounting when the CAS transition lost the race. Guarded the increment on `if _set_state(oid,'canceled')`, mirroring the live branch."
+ },
+ {
+  "id": "S048",
+  "action": "fixed",
+  "note": "Real audit-fidelity gap: audit() logged raw fill.get('qty'/'price'/'fees_usd') while aj_fills stored coerced qv/pv/fv. Now audits the coerced qv/pv/fv plus the resolved filled_at so the hash-chained record reconciles with the persisted row."
+ },
+ {
+  "id": "S027",
+  "action": "rejected",
+  "note": "Not a real defect \u2014 the finder itself concludes current code is safe: untrusted text (reports_md/mem) is passed as .format ARGS, never as the template, so literal braces cannot break str.format. No change warranted."
+ },
+ {
+  "id": "S028",
+  "action": "rejected",
+  "note": "Not a real defect \u2014 the finder confirms the bull/bear round-index pairing (i//2) is consistent and the loop bound range(2*rounds) is correct; explicitly 'No logic change required'. Purely a documentation note."
+ },
+ {
+  "id": "S109",
+  "action": "fixed",
+  "note": "database.py add_position: snap existing['shares'] dust to 0 into a new prior_shares var BEFORE computing total_shares/total_cost, and use prior_shares in the weighted-average math so a residual + buy no longer biases avg_cost low. Over-sell check now keys off the cleaned prior."
+ },
+ {
+  "id": "S090",
+  "action": "fixed",
+  "note": "jarvis_policy.check_proposal: factored coercion into _coerce() and added a shares*price notional fallback after the _AMOUNT_FIELDS loop so add_holding/record_trade (which carry shares+price, no amount field) are now capped by max_single_buy_usd. Verified: 100x$50 over a $1000 cap fires; 5x$50 passes."
+ },
+ {
+  "id": "S116",
+  "action": "fixed",
+  "note": "smart_money._score_sec_sentiment: was hard-pinned to 5 because get_recent_filings never sets 'ai_signal'. Finder's suggested analyze_filing_sentiment() does not exist anywhere, so used the offered alternative: derive signal from the 8-K item codes the function actually returns (new _SEC_ITEM_SIGNAL map; picks furthest-from-neutral code per filing). Return shape (int 0-10) and neutral fallbacks unchanged. Verified bankruptcy/impairment->0, acquisition->8, neutral item->5."
+ },
+ {
+  "id": "S108",
+  "action": "fixed",
+  "note": "database.get_transactions ORDER BY now normalizes created_at to its date via substr(t.created_at,1,10) so dated and undated same-day rows compare as pure dates, tie-broken by full created_at."
+ },
+ {
+  "id": "S093",
+  "action": "fixed",
+  "note": "jarvis_policy._pick: relaxed pass now honors usd=False by skipping usd-marked ($/k) tokens, mirroring the pct guard, so a dollar figure can't be parsed as a position count. Verified '$50 across positions' -> None, 'max 8 positions' -> 8."
+ },
+ {
+  "id": "S127",
+  "action": "fixed",
+  "note": "smart_money._compute_score_uncached: tuple unpacks for part[0]/part[3] now guard arity (isinstance tuple and len==2) not just None, so a malformed slot degrades to the neutral default instead of raising ValueError and aborting the whole score."
+ },
+ {
+  "id": "S112",
+  "action": "fixed",
+  "note": "ai_summarizer._generate_idea_thesis_uncached: bull_ratio and forecast_pct isinstance checks now exclude bool (and not isinstance(x, bool)) so a boolean sentiment flag can't render a fabricated '100% bull' / '+1.00%' figure into the LLM prompt."
+ },
+ {
+  "id": "S113",
+  "action": "fixed",
+  "note": "ai_summarizer.tts_speech miss-path: under the lock, re-pop+reinsert ck as newest then evict oldest-first while never evicting ck itself, so a racing op observing stale insertion order can't discard the just-synthesized (paid) audio. Hit-path already atomic; behavior otherwise unchanged."
+ },
+ {
+  "id": "S051",
+  "action": "fixed",
+  "note": "Confirmed real: aj_autonomy.health_check trips CRITICAL/autohalt on fill_rate<0.4 with total>=6. Excluded rejected/canceled/expired from the `submitted` denominator so rejection bursts can't spuriously deflate fill_rate and halt trading."
+ },
+ {
+  "id": "S107",
+  "action": "fixed",
+  "note": "Real stampede: timed-out non-owner waiters fetched concurrently without re-claiming the slot. Converted the wait into a bounded re-claim loop \u2014 first late waiter CAS-claims the slot (becomes owner, caches, repopulates _inflight); others re-wait. reclaim_budget=2 preserves the never-block-forever fallthrough."
+ },
+ {
+  "id": "S110",
+  "action": "fixed",
+  "note": "Real (minor): `p.get('apy')` dropped present-but-zero apy pools indistinguishably from missing data. Changed to `p.get('apy') is not None`; descending sort already orders 0% pools last so no top-yield pool is lost."
+ },
+ {
+  "id": "S111",
+  "action": "fixed",
+  "note": "Real: total summed every chain row including transient negative tvl. Added `if float(c['tvl']) > 0` floor to the sum only; sort/truncation unchanged so legitimate chains are unaffected."
+ },
+ {
+  "id": "S106",
+  "action": "fixed",
+  "note": "Real (low): _lru_key returned legacy 2-tuple expiry t[1] (a different clock) vs 3-tuple last_access t[2], so a hot 3-tuple could be evicted before a stale 2-tuple. Anchored 2-tuples to 0.0 so they always sort oldest/evict first."
+ },
+ {
+  "id": "S099",
+  "action": "fixed",
+  "note": "Real: unguarded `f_res, q_res = parallel_map(...)` would raise on a None/short return. Replaced with `results = parallel_map(...) or [None, None]` plus length-checked index/coerce to {}, matching the serial path's empty-dict fallback."
+ },
+ {
+  "id": "S092",
+  "action": "rejected",
+  "note": "Not an actionable defect: the finder's own description/fix state the strict '>' boundary and oversell-reset are correct and 'No behavior change required if the approximation is acceptable'. Code matches the '>20%' card text. No edit."
+ },
+ {
+  "id": "S056",
+  "action": "rejected",
+  "note": "Out of scope / wrong file: notify_fill is defined in aj_analytics.py:194, not aj_metrics.py (only 146 lines, no notify_fill). aj_analytics.py is not an assigned file, so not edited."
+ },
+ {
+  "id": "S132",
+  "action": "rejected",
+  "note": "Already correct: ai_summarizer._record_ai_call() is already placed immediately after create() returns and BEFORE json.loads (lines 347-354), so parse/handling failures still count. Recording when create() itself raises would over-count calls that were never dispatched/billed; current placement is the sound design the fix asks for."
+ },
+ {
+  "id": "S131",
+  "action": "fixed",
+  "note": "Replaced the bogus `elif cov.ndim == 1: cov.reshape(1,1)` (which would drop assets / crash for N>1) with `np.atleast_2d(cov)` else-branch, keeping only the ndim==0 single-asset scalar guard. No-op for the normal (N,N) case."
+ },
+ {
+  "id": "S139",
+  "action": "deferred",
+  "note": "Real truncation risk on weekend/holiday horizons, but the safe fix needs the close bar's actual date (whether it's >~1 trading day before `due`), which _close_price_on_or_before does not return. Adding a re-check path risks changing resolution behavior callers/tests depend on; deferred rather than guess."
+ },
+ {
+  "id": "S138",
+  "action": "fixed",
+  "note": "Added magnitude floor to the initial_nav guard: `if initial_nav and abs(initial_nav) > 1e-6` so a tiny residual NAV (e.g. $0.01) no longer yields an absurd implied_return_pct. Left the surviving-NAV base semantics unchanged to preserve return shape."
+ },
+ {
+  "id": "S146",
+  "action": "fixed",
+  "note": "Initialized `top_half_pct = None` before the `if ranks:` block and simplified the return to `round(top_half_pct, 1) if top_half_pct is not None else None`, removing the implicit ranks/top_half_pct coupling."
+ },
+ {
+  "id": "S151",
+  "action": "deferred",
+  "note": "Genuine lock-free read/write of module-global _dynamic_crypto_id_map across worker threads, but a safe fix means relocating the population into get_full_crypto_universe (under _full_crypto_lock) or adding a dedicated lock, which restructures shared-state flow used by the parallel fan-out. GIL makes single-key assignment non-corrupting; deferred to avoid behavior risk."
+ },
+ {
+  "id": "S142",
+  "action": "fixed",
+  "note": "Code uses tanh(avg*1.6) and the inline comment at 648-650 is already correct (|avg|=0.5 -> ~83.2). Only the module docstring (line 21) disagreed, saying `tanh(weighted_avg\u00b72)`; updated it to `\u00b71.6` to match the code/comment contract."
+ },
+ {
+  "id": "S150",
+  "action": "fixed",
+  "note": "Added `if not isinstance(rec, dict): return static_w, None, 0` after the get_track_record try block, so a None/non-dict tracker result returns the static weight instead of raising AttributeError that would escape _dynamic_weight and abort _compute."
+ },
+ {
+  "id": "S038",
+  "action": "fixed",
+  "note": "PaperBroker._orders was per-instance but get_broker() builds a fresh PaperBroker() per call, so reconcile/cancel always saw 'unknown'. Promoted the order map to a module-level _PAPER_ORDERS dict shared by all instances; __init__ now binds self._orders to it. All submit/cancel/get_order logic unchanged."
+ },
+ {
+  "id": "S050",
+  "action": "fixed",
+  "note": "Dust floor at aj_strategy.py:79 fired for sells, silently dropping exit orders for small residual positions. Gated the block on side != 'sell' so the min_order_notional floor applies only to entries; exits always pass. Simplified the now-redundant inner check."
+ },
+ {
+  "id": "S115",
+  "action": "rejected",
+  "note": "Index math is in-bounds: n_days <= len(vix_closes)-20 guarantees smallest idx = len-n_days >= 20 > 0. The finder itself cleared it ('No change required'). No defect."
+ },
+ {
+  "id": "S129",
+  "action": "fixed",
+  "note": "compare_to_current TE collapsed to ~0 when callers passed lowercase weights, since 'used' is always upper-cased but delta kept caller's case and s/s.upper() both missed. Built dmap = {k.upper(): v} and looked up by s.upper()."
+ },
+ {
+  "id": "S118",
+  "action": "fixed",
+  "note": "Reordered transaction-type regex alternation longest-first to r'\\b(PE|SE|P|S)\\b' in both the after_ticker and pre_date searches so exercise codes PE/SE win over single-letter P/S. Verified ordering behavior."
+ },
+ {
+  "id": "S121",
+  "action": "fixed",
+  "note": "Revenue %% was credited to the first ticker in dict-insertion order appearing in the 400-char window, not the nearest. Rewrote to collect each candidate's occurrence positions within the window (word-boundary ticker match + name substring) and assign pct to the minimum-distance candidate relative to the percentage position. Kept the 1-char-ticker word-boundary guard."
+ },
+ {
+  "id": "S117",
+  "action": "rejected",
+  "note": "Verified against installed yfinance 1.2.0: earnings_history.surprisePercent is the Yahoo quoteSummary 'raw' value (a fraction, e.g. 0.05), while earnings_dates 'Surprise(%)' is already a percent. The calendar path's *100 is correct and the two paths are consistent in output scale. The defect's premise (surprisePercent already a percent) is wrong for this version."
+ },
+ {
+  "id": "S130",
+  "action": "deferred",
+  "note": "Confirmed real: forecast_ensemble.py:331 applies adaptive_weights at horizon_days but line 332 calls weights_are_adapted(base) pooled, so weights_source can mislabel. Added the optional horizon_days param to weights_are_adapted (backward-compatible; in-file caller at accountability_report stays pooled and consistent) to enable the fix. The observable mislabel fix requires passing horizon_days at forecast_ensemble.py:332, which is outside my assigned files, so the behavioral fix is deferred."
+ },
+ {
+  "id": "S119",
+  "action": "rejected",
+  "note": "Already addressed: code at lines 403-416 carries a comment noting the prev_cum==0 guard was removed and the sign-change test handles prev==0. The prev_strike-is-not-None gate is structurally required (need two strikes to interpolate a flip PRICE); interpolating a flip below the lowest strike against an implicit zero-origin would yield a meaningless price. Strike-to-strike measurement is the standard correct method. No real defect."
+ },
+ {
+  "id": "S137",
+  "action": "fixed",
+  "note": "ml_forecast.py: the df.iloc[:-20] slice is an intentional leakage embargo but the comment ('all rows with a known forward return') was wrong/misleading. Aligned the comment to the code (embargo the freshest 20 labelled rows) without changing the slice, since altering the production training set would change model behavior."
+ },
+ {
+  "id": "S141",
+  "action": "fixed",
+  "note": "opportunity_scanner.py:316 \u2014 sm_data.get('score',0) returns None when compute_score yields {'score':None}; the default only fires on a missing key. Added 'if sm_score is None: sm_score = 50' right after the get so both the components and no-components paths see a numeric value, preventing the (None/100.0) TypeError that silently dropped symbols."
+ },
+ {
+  "id": "S122",
+  "action": "rejected",
+  "note": "reflexivity_detector.py:286 \u2014 proximity = max(0, 100 - pct_from_low) is already bounded to [0,100] (pct_from_low>=0 by definition, upper end is 100 at price~low). The finder's suggested fix max(0,100-min(pct_from_low,100)) is a no-op vs the current code. The 'arbitrary scaling' critique is semantic, not a bug; no correct edit exists that the suggestion improves."
+ },
+ {
+  "id": "S136",
+  "action": "fixed",
+  "note": "research_backtest.py:596 \u2014 signals are processed chronologically and each writes only its own [entry,exit) span, so an older longer-horizon position bled past a newer short signal's exit, contradicting 'most recent dominates'. Added prev_max_exit tracking and flatten position[exit_idx:prev_max_exit] to 0 when a newer signal supersedes an older longer one."
+ },
+ {
+  "id": "S133",
+  "action": "fixed",
+  "note": "research_factors.py:128 \u2014 an isolated unparseable non-date line inside the daily block previously broke the loop, discarding all remaining daily rows. Now an isolated non-date line is skipped (continue) and only a run of >=2 consecutive non-date lines (real section transition) triggers break; legitimate blank-line section break is unchanged."
+ },
+ {
+  "id": "S135",
+  "action": "fixed",
+  "note": "research_iv_density.py:442 \u2014 window was only adopted if len>=_MIN_STRIKES, so a thin near-the-money window reverted to the full chain and leaked deep-wing curvature noise into the spline. Changed to adopt the window whenever non-empty; the existing min-strikes guard then correctly rejects a too-thin window instead of scoring the noisy full chain."
+ },
+ {
+  "id": "S120",
+  "action": "fixed",
+  "note": "sec_edgar.py:568 \u2014 the empty-primary_doc fallback fetched a -index.json that EDGAR does not serve (the module's own _best_document_from_index documents this), so it always 404'd and dropped Form 4 filings. Replaced with -index.html parsing: build the dashed accession, fetch the index HTML, and pick the .xml row whose type is '4' (falling back to the first .xml row)."
+ },
+ {
+  "id": "S147",
+  "action": "fixed",
+  "note": "synth_whatif.py _optimizer_verdict: changed proposed_size denominator from full proposed-book NAV to sum of market_values of just the optimizer universe (symbols), so the candidate's actual fraction is comparable to the optimizer's fully-invested weight. Fixes systematic UNDERSIZED mis-flagging on cash-heavy books. Return shape unchanged."
+ },
+ {
+  "id": "S124",
+  "action": "fixed",
+  "note": "synthetic_insider.py _score_congress_cluster: replaced sales filter startswith('S') with the explicit set ('S','S (partial)','SE','S (Exchange)','E (Exchange)') to match congress.get_congress_summary's taxonomy; now classifies 'E (Exchange)' as a sell consistently."
+ },
+ {
+  "id": "S053",
+  "action": "fixed",
+  "note": "aj_autonomy.py build_briefing: replaced raw key=lambda t: -t[1] with a NaN-safe _score_key mirroring aj_alpha.rank_universe (coerce non-floats, sink NaN). Added 'import math'. Top-K ordering now deterministic even with a NaN radar score."
+ },
+ {
+  "id": "S047",
+  "action": "fixed",
+  "note": "aj_db.py _nth_weekday: changed days[min(n-1, len(days)-1)] to days[n-1] if len(days) >= n else None, so a non-existent Nth weekday returns None (caller drops None) instead of aliasing to the last occurrence."
+ },
+ {
+  "id": "S058",
+  "action": "fixed",
+  "note": "aj_eval.py compare_by_role: added SUM(CASE WHEN ok IS NOT NULL THEN 1 END) AS ok_rows and divide oks by ok_rows, mirroring model_leaderboard so NULL-ok rows no longer deflate per-role ok_rate."
+ },
+ {
+  "id": "S052",
+  "action": "fixed",
+  "note": "aj_routing.py lines 121 and 140: changed 'if max_tokens' to 'if max_tokens is not None' so a caller-supplied max_tokens=0 yields a bounded retry budget (256) rather than an unbounded None completion."
+ },
+ {
+  "id": "S055",
+  "action": "deferred",
+  "note": "Real on early-close days, but a correct fix needs a half-day (1pm ET) calendar that does not exist in the codebase and market_session() also reports 'regular' on those days. Building one surgically in aj_rules is not minimal/safe; impact is fail-open (occasionally allows a buy near a real early close), not a safety-gate weakening. Deferred to avoid a risky cross-module change."
+ },
+ {
+  "id": "S123",
+  "action": "fixed",
+  "note": "alt_data_engine.py _score_revenue_momentum line 115: dropped the redundant 'and rev_growth is not None' (rev_growth is guaranteed non-None after the line-99 guard). Behavior identical; intent clarified."
+ },
+ {
+  "id": "S096",
+  "action": "fixed",
+  "note": "jarvis_claude.available(): added module-level _probe_lock and wrapped the TTL check + global assignment in it, so concurrent Flask worker threads can't interleave the read-modify-write on _probe_at/_probe_ok. Behavior unchanged otherwise."
+ },
+ {
+  "id": "S100",
+  "action": "fixed",
+  "note": "jarvis_research._web_research_uncached: moved ai_summarizer._record_ai_call() to immediately after governed_call returns (before output_text extraction), so empty/partial-but-billed web searches still count against the daily cap, mirroring jarvis_semmem.embed."
+ },
+ {
+  "id": "S128",
+  "action": "fixed",
+  "note": "alt_signals._cget: on an expired (non-None) entry, now pops the key under the lock before returning None, keeping the cache (incl. expired _NEG sentinels) bounded by liveness instead of only the size-triggered sweep in _cset. Callers already re-fetch on miss, so no behavior change."
+ },
+ {
+  "id": "S140",
+  "action": "rejected",
+  "note": "Not a genuine defect. Code already uses _BASE_WEIGHTS.get(k,0.1) consistently in BOTH numerator and total_w, so renormalized weights always sum to 1 (finder itself calls it 'self-consistent'/'OK'). Every raw_signals key is in _BASE_WEIGHTS so the 0.1 fallback is dead. Changing 0.1->0.0 is a cosmetic, no-effect edit with marginal risk; left as-is."
+ },
+ {
+  "id": "S125",
+  "action": "deferred",
+  "note": "Real edge case for near-zero spread series (e.g. T10Y2Y) producing wild delta_pct. But the proposed blanket abs(prev)>0.5 floor would also suppress delta_pct for legitimately small-valued non-spread series (low rates, etc.), changing displayed dashboard values broadly. A safe fix needs per-series metadata (a 'is_spread'/no-pct flag in SERIES_CATALOG) that the finder's one-liner doesn't provide; deferring rather than over-suppress valid percentages."
+ },
+ {
+  "id": "S101",
+  "action": "deferred",
+  "note": "Real conflation: 'if limit and limit > 0' treats limit=0 as unset. But the two safe rewrites ('if limit is not None and limit > 0') behave IDENTICALLY to current code for limit=0 (both skip slicing) -> no-op. The only behavior-changing option (limit=0 => empty result) is left ambiguous by the finder ('decide intended semantics') and would change a public entry point's contract with no caller/test requiring it. Deferring per 'when in doubt, prefer deferred over a risky change'."
+ },
+ {
+  "id": "S153",
+  "action": "rejected",
+  "note": "Not a defect: warm_pool already tracks _last_run_skipped (set at line 504) distinct from _last_run_count/_last_run_errors, so a no-op fully-skipped pass IS distinguishable in status. The remaining asks (a dedicated no-op state flag, chronic-failure key tracking) are feature enhancements, not corrections of broken behavior; current counting is correct."
+ },
+ {
+  "id": "S098",
+  "action": "rejected",
+  "note": "Deliberate, documented design, not a defect. STARTTLS fallback is already gated: it only proceeds plaintext when will_authenticate is False (no creds), and re-raises when creds exist. Adding a smtp_allow_plaintext opt-in gate that aborts credential-less sends is a behavior/feature change (would silently break existing plaintext-relay configs) and weakens no safety gate by leaving it. Out of scope for a surgical defect fix; left as the intended trade-off."
+ },
+ {
+  "id": "S094",
+  "action": "fixed",
+  "note": "jarvis_watches.py _fetch_quotes: -USD retry no longer overwrites a valid equity quote when only change_pct was missing. If the bare quote already has a valid positive price, only the missing change_pct is filled from the retry; full overwrite still happens only when the bare price itself is bad."
+ },
+ {
+  "id": "S126",
+  "action": "fixed",
+  "note": "narrative_engine.py _detect_phase: replaced normalized_14d = cnt_14/2.0 approximation with explicit prior_week = cnt_14 - cnt_7 and compare cnt_7 < prior_week. Exact declining-volume test, removes boundary double-count bias. Message text updated to '... vs N in the prior week'."
+ },
+ {
+  "id": "S134",
+  "action": "fixed",
+  "note": "research_eventstudy.py abnormal_return_curve: added 'import warnings' and wrapped the two nanmean calls in np.errstate(invalid='ignore') + warnings.catch_warnings() ignoring RuntimeWarning, matching the research_factors convention. NaN output sentinel preserved."
+ },
+ {
+  "id": "S145",
+  "action": "fixed",
+  "note": "synth_cluster.py _component_narrative: velocity now coerced via float() with try/except (TypeError, ValueError) -> 0.0, so a non-numeric velocity_score no longer raises in the >=40 / <=-40 comparison."
+ },
+ {
+  "id": "S143",
+  "action": "fixed",
+  "note": "synth_divmap.py _insider_form4_net_60d: added timedelta import; replaced cutoff_ts=time.time()-60*86400 + dt_obj.timestamp() comparison with naive cutoff_dt = datetime.utcnow()-timedelta(days=60) and 'if dt_obj < cutoff_dt'. Removes local-tz drift. 'time' module still used elsewhere, import kept."
+ },
+ {
+  "id": "S152",
+  "action": "deferred",
+  "note": "synth_groundhyp.py _base_rate: re-orienting analog outcomes by similarity sign or filtering by a distance floor would materially change the reported hit_rate/avg/iqr statistics and depends on uncertain sign/distance conventions in the analog rows. Any change risks altering numbers callers/tests depend on; deferred per fail-safe rule."
+ },
+ {
+  "id": "S144",
+  "action": "deferred",
+  "note": "synth_macrotranslate.py _portfolio_projection: the multi-factor expected_5d_pct vs SPY-beta-scaled band inconsistency is real, but every offered fix (clamping expected_5d, or rescaling the band) changes a reported number the UI/tests consume. Clamping would also mask genuine multi-factor signal. Deferred to avoid changing return values."
+ },
+ {
+  "id": "S148",
+  "action": "fixed",
+  "note": "Confirmed real: _composite_score only matched 'BULL'/'BEAR' substrings, so when narrative_phase fell back to a dominant_narrative topic bucket (GROWTH, SCANDAL, REGULATORY...) it contributed nothing and bearish buckets read as neutral. Added _NARRATIVE_BULL/_NARRATIVE_BEAR sets mirroring synth_divmap and extended the phase test to also match these buckets (phase is already uppercased)."
+ }
+]

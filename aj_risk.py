@@ -181,7 +181,12 @@ def compute_day_pnl(basis: Optional[str] = None) -> Dict[str, Any]:
         warnings.append("unrealized P&L unavailable")
     unreal = aj_db.money(unreal)
 
-    unreal_open = _session_open_unrealized(unreal)
+    # On the realized basis the unrealized baseline is never used in day_pnl,
+    # so skip the session-open snapshot (a settings write + prune + cache
+    # invalidation) on the hot risk-gate read path. This also avoids stamping
+    # the "open" baseline to an arbitrary intra-day mark if the operator later
+    # switches basis to realized_plus_unrealized mid-session.
+    unreal_open = _session_open_unrealized(unreal) if basis != "realized" else unreal
 
     if basis == "realized":
         day_pnl = realized
@@ -236,7 +241,7 @@ def _trades_today() -> int:
 
 def _order_price(symbol: str, order_type: str, limit_price: Optional[float],
                  asset_type: str = "") -> Optional[float]:
-    if order_type == "limit" and limit_price:
+    if order_type == "limit" and limit_price is not None and float(limit_price) > 0:
         return float(limit_price)
     mark = _marks([symbol]).get(symbol)
     if mark is None:
@@ -510,6 +515,20 @@ def evaluate(proposal: Dict[str, Any]) -> RiskDecision:
             if not _VALID_SYMBOL.match(symbol):
                 _record("block", "open-universe: invalid symbol", caps, None, pid)
                 return RiskDecision(decision="block", reason="invalid symbol {}".format(symbol))
+
+        # A limit order MUST carry a positive limit price. Reject a missing or
+        # non-positive limit_price here, before sizing — otherwise the gate
+        # would fall back to the live mark and approve/size a malformed limit
+        # against a price the order can never fill at (fail-closed).
+        if order_type == "limit":
+            try:
+                _lp_ok = limit_price is not None and float(limit_price) > 0
+            except (TypeError, ValueError):
+                _lp_ok = False
+            if not _lp_ok:
+                _record("block", "limit order missing/invalid limit price", caps, None, pid)
+                return RiskDecision(decision="block",
+                                    reason="limit order requires a positive limit price")
 
         # price + notional
         try:

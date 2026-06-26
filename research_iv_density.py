@@ -437,9 +437,13 @@ def _compute(symbol: str, expiry: Optional[str], smooth: bool) -> dict:
     # meaningful probability mass; for tighter expiries it's even more
     # conservative than needed.
     windowed = [c for c in clean if 0.5 * spot <= c["strike"] <= 2.0 * spot]
-    # If the chain doesn't reach down to 0.5·spot we keep what we have; the
-    # min-strikes check below guards against pathological cases.
-    if len(windowed) >= _MIN_STRIKES:
+    # Always prefer the windowed set when it has ANY strikes — keeping the full
+    # chain merely because the window is thin would reintroduce exactly the
+    # deep-ITM/OTM curvature noise the window exists to remove. Only fall back
+    # to the full chain when the window is empty (chain never reaches near
+    # spot). The min-strikes check below then correctly rejects a too-thin
+    # window instead of silently scoring the noisy full chain.
+    if windowed:
         clean = windowed
     if len(clean) < _MIN_STRIKES:
         return _error(sym,

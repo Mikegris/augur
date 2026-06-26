@@ -314,6 +314,12 @@ def _score_equity(symbol, profile, weights):
         sm_data = smart_money.compute_score(symbol)
         if not sm_data.get("error"):
             sm_score = sm_data.get("score", 0)
+            # A missing OR None score is "no information" → neutral 50, not 0
+            # (max-bearish). None would otherwise propagate to the composite
+            # loop as (None/100.0) and raise TypeError, silently dropping the
+            # symbol — the crypto-bias failure mode this neutral default fixes.
+            if sm_score is None:
+                sm_score = 50
             result["details"]["smart_money"] = {
                 "score": sm_score,
                 "signal": sm_data.get("signal", "N/A"),

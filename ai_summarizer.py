@@ -428,9 +428,17 @@ def tts_speech(text, voice="onyx"):
             return None
         _record_ai_call()
         with _tts_lock:
+            # Re-check membership and (re)insert as the newest entry under the
+            # lock, then evict oldest-first while never evicting the entry we
+            # just paid to synthesize — so a racing op that observed stale
+            # ordering can't discard fresh audio.
+            _tts_cache.pop(ck, None)
             _tts_cache[ck] = audio
             while len(_tts_cache) > _TTS_CACHE_MAX:
-                _tts_cache.pop(next(iter(_tts_cache)))
+                oldest = next(iter(_tts_cache))
+                if oldest == ck:
+                    break
+                _tts_cache.pop(oldest)
         return audio
     except Exception as e:
         log.debug("tts_speech failed: %s", e)
@@ -1243,13 +1251,17 @@ def _generate_idea_thesis_uncached(idea, model, key):
     ) or "n/a"
 
     forecast_pct = idea.get("forecast_pct")
-    forecast_str = f"{forecast_pct:+.2f}% (30d)" if isinstance(forecast_pct, (int, float)) else "n/a"
+    forecast_str = (f"{forecast_pct:+.2f}% (30d)"
+                    if isinstance(forecast_pct, (int, float)) and not isinstance(forecast_pct, bool)
+                    else "n/a")
 
     # ── New factor blocks (may be partial / NA for crypto or sparse coverage) ──
     soc = idea.get("social") or {}
+    _bull_ratio = soc.get("bull_ratio")
     social_line = (
         f"StockTwits: {soc.get('stocktwits_bull') or 0} bull / {soc.get('stocktwits_bear') or 0} bear "
-        f"({(soc.get('bull_ratio') * 100):.0f}% bull)" if isinstance(soc.get("bull_ratio"), (int, float))
+        f"({(_bull_ratio * 100):.0f}% bull)"
+        if isinstance(_bull_ratio, (int, float)) and not isinstance(_bull_ratio, bool)
         else "StockTwits: no data"
     )
     social_line += f" · Reddit mentions: {soc.get('reddit_mentions') or 0}"

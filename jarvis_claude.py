@@ -74,6 +74,7 @@ _DEFAULT_ALLOWED_TOOLS = "Read Grep Glob WebSearch WebFetch"
 _PROBE_TTL = 60.0
 _probe_at = 0.0
 _probe_ok = False
+_probe_lock = threading.Lock()
 
 
 def _setting(key: str, default: str = "") -> str:
@@ -97,15 +98,18 @@ def available() -> bool:
     """True when Claude Code can be invoked: binary present AND not disabled by
     the `jarvis_claude_enabled` setting (defaults to enabled when present)."""
     global _probe_at, _probe_ok
-    now = time.time()
-    if now - _probe_at < _PROBE_TTL:
-        return _probe_ok
-    ok = _claude_bin() is not None
-    if ok and _setting("jarvis_claude_enabled", "1").strip().lower() in ("0", "off", "false", "no"):
-        ok = False
-    _probe_ok = ok
-    _probe_at = now
-    return ok
+    # Serialize the TTL check + refresh so concurrent Flask worker threads can't
+    # interleave the read-modify-write on the module-level probe globals.
+    with _probe_lock:
+        now = time.time()
+        if now - _probe_at < _PROBE_TTL:
+            return _probe_ok
+        ok = _claude_bin() is not None
+        if ok and _setting("jarvis_claude_enabled", "1").strip().lower() in ("0", "off", "false", "no"):
+            ok = False
+        _probe_ok = ok
+        _probe_at = now
+        return ok
 
 
 def _portfolio_brief() -> str:

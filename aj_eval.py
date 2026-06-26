@@ -54,15 +54,19 @@ def compare_by_role(since: Optional[str] = None) -> Dict[str, List[Dict[str, Any
     params = (since,) if since else ()
     rows = aj_db.query(
         "SELECT role, chosen_model, COUNT(*) AS calls, SUM(ok) AS oks, "
+        "SUM(CASE WHEN ok IS NOT NULL THEN 1 END) AS ok_rows, "
         "AVG(latency_ms) AS lat FROM aj_routing {} "
         "GROUP BY role, chosen_model".format(where), params)
     by_role: Dict[str, List[Dict[str, Any]]] = {}
     for r in rows:
         role = r["role"] or "(none)"
         calls = r["calls"] or 0
+        # mirror model_leaderboard: NULL-ok telemetry is excluded from the
+        # denominator so it can't deflate the rate.
+        ok_rows = r["ok_rows"] or 0
         by_role.setdefault(role, []).append({
             "model": r["chosen_model"], "calls": calls,
-            "ok_rate": round((r["oks"] or 0) / calls, 3) if calls else None,
+            "ok_rate": round((r["oks"] or 0) / ok_rows, 3) if ok_rows else None,
             "avg_latency_ms": int(r["lat"] or 0)})
     for role in by_role:
         by_role[role].sort(key=lambda x: (-(x["ok_rate"] or 0), x["avg_latency_ms"]))

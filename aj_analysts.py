@@ -58,7 +58,12 @@ def _fmt(obj: Any, keep: Optional[List[str]] = None, limit: int = 1500) -> str:
         return ""
     try:
         if isinstance(obj, dict) and keep:
-            obj = {k: obj.get(k) for k in keep if obj.get(k) is not None}
+            # Compute each value once; drop missing (None) and NaN floats — NaN
+            # would otherwise serialize as the literal token 'NaN', which is
+            # invalid JSON in the evidence snippet the model is shown.
+            vals = ((k, obj.get(k)) for k in keep)
+            obj = {k: v for k, v in vals
+                   if v is not None and not (isinstance(v, float) and v != v)}
         s = json.dumps(obj, default=str, separators=(",", ":"))
         return s[:limit]
     except Exception:
@@ -81,7 +86,13 @@ def _neutral(analyst: str, why: str = "") -> AnalystReport:
 def _run(analyst: str, symbol: str, evidence: Dict[str, str], call: CallFn,
          band_is_sentiment: bool = False) -> AnalystReport:
     """Shared harness: assemble evidence → deep-think → parse AnalystReport."""
-    ev = {k: v for k, v in evidence.items() if v}
+    # Treat trivially-empty serialized values (_fmt emits json.dumps([]) == '[]'
+    # etc., all truthy) as absent so an analyst whose engines all returned empty
+    # containers falls through to the neutral fallback instead of asking the
+    # model to opine on nothing.
+    _EMPTY = ("[]", "{}", '""', "null")
+    ev = {k: v for k, v in evidence.items()
+          if isinstance(v, str) and v.strip() and v.strip() not in _EMPTY}
     if not ev:
         # No evidence at all — still ask the model nothing; return neutral.
         return _neutral(analyst, "no evidence engines returned data")
@@ -141,7 +152,8 @@ def news(symbol: str, call: CallFn = default_call,
         import fetcher
         headlines = _safe(fetcher.get_news, symbol, 8)
         if isinstance(headlines, list):
-            ev["headlines"] = _fmt([h.get("title") for h in headlines if isinstance(h, dict)])
+            ev["headlines"] = _fmt([h.get("title") for h in headlines
+                                    if isinstance(h, dict) and h.get("title")])
     except Exception:
         pass
     try:
@@ -196,7 +208,10 @@ def technical(symbol: str, call: CallFn = default_call,
         pass
     try:
         import forecast_ensemble
-        horizon = int((cfg or {}).get("forecast_horizon_days", 20) or 20)
+        h = (cfg or {}).get("forecast_horizon_days", 20)
+        # Normalize 0 / negative / non-int to the default rather than passing an
+        # invalid horizon to ensemble_forecast (the `or 20` idiom masks 0 too).
+        horizon = int(h) if isinstance(h, (int, float)) and h > 0 else 20
         fc = _safe(forecast_ensemble.ensemble_forecast, symbol, horizon)
         if isinstance(fc, dict) and isinstance(fc.get("ensemble"), dict):
             e = fc["ensemble"]

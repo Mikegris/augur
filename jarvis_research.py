@@ -75,6 +75,10 @@ def _web_research_uncached(query: str) -> Dict[str, Any]:
                 "current as of today. No investment advice — facts and framing "
                 "only. Question: " + query),
         ))
+        # The request was billed the moment governed_call returned, regardless
+        # of downstream parsing (empty text, missing citations). Record it BEFORE
+        # extracting output so an empty/partial response can't under-count spend
+        # against the daily cap (mirrors jarvis_semmem.embed's ordering).
         ai_summarizer._record_ai_call()
         text = (getattr(resp, "output_text", None) or "").strip()
         citations = _extract_citations(resp)

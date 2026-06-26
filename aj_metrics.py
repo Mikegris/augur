@@ -52,7 +52,16 @@ def order_stats() -> Dict[str, Any]:
     by_state = {r["state"]: r["n"] for r in rows}
     total = sum(by_state.values())
     filled = by_state.get("filled", 0) + by_state.get("partially_filled", 0)
-    submitted = total - by_state.get("new", 0)
+    # Denominator = orders that actually reached a working/fillable state.
+    # Exclude "new" (never submitted) AND terminal non-fillable states
+    # (rejected/canceled/expired): those can never appear in `filled`, so
+    # counting them structurally deflates fill_rate. A normal burst of
+    # gate/broker rejections must not drag fill_rate under the autonomy
+    # health-check threshold and spuriously trip the kill switch.
+    submitted = (total - by_state.get("new", 0)
+                 - by_state.get("rejected", 0)
+                 - by_state.get("canceled", 0)
+                 - by_state.get("expired", 0))
     fill_rate = (filled / submitted) if submitted else None
     return {"by_state": by_state, "total": total,
             "fill_rate": round(fill_rate, 3) if fill_rate is not None else None,

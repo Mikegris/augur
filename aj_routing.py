@@ -118,7 +118,7 @@ def route(messages: List[Dict[str, Any]], role: str = "", complexity: float = 0.
                 # to cross the floor rather than burning latency for nothing.
                 if not ok and max_escalations >= 1:
                     escalated = 1
-                    retry_tokens = (max_tokens + 256) if max_tokens else None
+                    retry_tokens = (max_tokens + 256) if max_tokens is not None else None
                     text = _ai()._ollama_chat(messages, max_tokens=retry_tokens)
                     ok = _meets_floor(text, quality_floor)
             else:
@@ -137,7 +137,7 @@ def route(messages: List[Dict[str, Any]], role: str = "", complexity: float = 0.
                 # Don't turn an intended-unbounded (None) completion into a hard
                 # 256-token cap on the retry — that truncates the very output
                 # that failed the floor for being too short.
-                retry_tokens = (max_tokens + 256) if max_tokens else None
+                retry_tokens = (max_tokens + 256) if max_tokens is not None else None
                 text = _ai().chat_any(messages, max_tokens=retry_tokens,
                                       json_mode=json_mode)
                 ok = _meets_floor(text, quality_floor)

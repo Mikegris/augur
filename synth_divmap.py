@@ -42,7 +42,7 @@ import hashlib
 import logging
 import math
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import safe_executor
@@ -171,7 +171,10 @@ def _insider_form4_net_60d(symbol: str) -> Optional[Dict[str, Any]]:
     if not txns:
         return None
 
-    cutoff_ts = time.time() - 60 * 86400
+    # Compare in the same naive frame as the parsed filing date; using
+    # .timestamp() on a naive datetime would interpret it in the host's local
+    # timezone and drift the 60-day boundary on non-UTC hosts.
+    cutoff_dt = datetime.utcnow() - timedelta(days=60)
     net_value = 0.0
     n = 0
     for t in txns:
@@ -184,7 +187,7 @@ def _insider_form4_net_60d(symbol: str) -> Optional[Dict[str, Any]]:
                 dt_obj = datetime.strptime(dt_str[:10], "%Y-%m-%d")
             except ValueError:
                 continue
-            if dt_obj.timestamp() < cutoff_ts:
+            if dt_obj < cutoff_dt:
                 continue
             val = float(t.get("value") or 0.0)
             if val <= 0:

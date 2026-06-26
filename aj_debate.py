@@ -77,8 +77,12 @@ def research_manager(symbol: str, reports: List[AnalystReport],
     debate to judge or the model is unavailable (council falls back)."""
     if not turns:
         return None
-    transcript = "\n".join("{}: {}".format(t["role"].upper(), t["content"])
-                           for t in turns)
+    # .get with defaults so a malformed/partial turn record (e.g. reconstructed
+    # from persisted audit data on replay) degrades rather than KeyError-ing out
+    # of the manager synthesis.
+    transcript = "\n".join(
+        "{}: {}".format(str(t.get("role", "?")).upper(), t.get("content", ""))
+        for t in turns)
     sys = _MGR_SYS.format(symbol=symbol)
     prompt = "Analyst reports:\n{r}\n\nDebate:\n{t}\n\nYour decision (JSON):".format(
         r=_reports_md(reports), t=transcript)
@@ -142,7 +146,11 @@ def risk_debate(symbol: str, proposal: TraderProposal, portfolio_text: str,
         if not text:
             break
         text = str(text).strip()
-        history += "\n{}: {}".format(persp.upper(), text)
+        # Bound the carried transcript so the prompt doesn't grow quadratically
+        # across turns (re-sending every prior turn at full length would inflate
+        # token cost and risk blowing the council's per-cycle budget cap). The
+        # full turns are still returned below for persistence/UI.
+        history = (history + "\n{}: {}".format(persp.upper(), text))[-2000:]
         turns.append({"debate": "risk", "role": persp, "round": i // 3,
                       "content": text})
     return turns

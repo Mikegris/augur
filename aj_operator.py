@@ -175,6 +175,8 @@ def _council_advise(symbol: str, decision: Dict[str, Any], cfg: Dict[str, Any],
             return proceed
     except Exception:
         return proceed
+    if budget.get("max", 0) <= 0:
+        return {**proceed, "brief": "council topk=0 (disabled)"}
     if budget.get("n", 0) >= budget.get("max", 0):
         return {**proceed, "brief": "council topk reached"}
     budget["n"] = budget.get("n", 0) + 1

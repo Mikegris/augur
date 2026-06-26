@@ -40,6 +40,11 @@ def _cget(k):
         v = _cache.get(k)
         if v is not None and v[1] > time.time():
             return v[0]
+        # Evict an expired entry on read so the map stays bounded by liveness,
+        # not only by the size-triggered sweep in _cset. Keeps one-shot keys
+        # (and expired _NEG sentinels) from lingering indefinitely.
+        if v is not None:
+            _cache.pop(k, None)
         return None
 
 

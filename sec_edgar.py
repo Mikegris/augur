@@ -564,14 +564,31 @@ def get_form4_transactions(ticker, limit=30):
         results = []
 
         if not primary_doc:
+            # The -index.json URL does not exist on EDGAR; parse the -index.html
+            # table for the Form 4 XML, mirroring _best_document_from_index.
             try:
-                index_url = f"{EDGAR_ARCHIVES}/{cik_int}/{acc_nodash}/{acc_nodash}-index.json"
-                idx_resp = _edgar_get(index_url)
-                idx_data = idx_resp.json()
-                for doc_entry in idx_data.get("documents", []):
-                    if doc_entry.get("type") == "4" and doc_entry.get("document", "").endswith(".xml"):
-                        primary_doc = doc_entry["document"]
+                acc_dashed = "-".join([acc_nodash[:10], acc_nodash[10:12], acc_nodash[12:]])
+                index_url = f"{EDGAR_ARCHIVES}/{cik_int}/{acc_nodash}/{acc_dashed}-index.html"
+                idx_resp = _edgar_get(index_url, timeout=15)
+                from bs4 import BeautifulSoup as _BS
+                soup = _BS(idx_resp.text, "html.parser")
+                fallback_xml = None
+                for tr in soup.find_all("tr"):
+                    tds = tr.find_all("td")
+                    if len(tds) < 3:
+                        continue
+                    fname_tag = tds[2].find("a") if len(tds) > 2 else None
+                    fname = fname_tag.get_text(strip=True) if fname_tag else tds[2].get_text(strip=True)
+                    dtype = tds[3].get_text(strip=True) if len(tds) > 3 else ""
+                    if not fname.lower().endswith(".xml"):
+                        continue
+                    if dtype == "4":
+                        primary_doc = fname
                         break
+                    if fallback_xml is None:
+                        fallback_xml = fname
+                if not primary_doc and fallback_xml:
+                    primary_doc = fallback_xml
             except Exception:
                 pass
 

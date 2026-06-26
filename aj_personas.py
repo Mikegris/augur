@@ -100,6 +100,7 @@ def fingpt_sentiment(symbol: str) -> Optional[Dict[str, Any]]:
     try:
         # Lazy: only import if the operator installed the optional stack.
         import importlib
+        import importlib.util
         if importlib.util.find_spec("transformers") is None:
             return None
         import fetcher
@@ -118,8 +119,11 @@ def fingpt_sentiment(symbol: str) -> Optional[Dict[str, Any]]:
         if helper is None or not hasattr(helper, "score_headlines"):
             return None
         score = float(helper.score_headlines(titles))   # 0..10
+        if score != score:                               # reject NaN
+            return None
+        score = max(0.0, min(10.0, score))
         label = "BULLISH" if score >= 6 else ("BEARISH" if score <= 4 else "NEUTRAL")
-        return {"score": max(0.0, min(10.0, score)), "label": label, "source": "fingpt"}
+        return {"score": score, "label": label, "source": "fingpt"}
     except Exception:
         log.debug("fingpt_sentiment unavailable", exc_info=True)
         return None
@@ -140,8 +144,13 @@ def council_report(decisions: List[Any]) -> str:
         action = g("action")
         action = getattr(action, "value", action)
         conv = g("conviction") or 0.0
+        try:
+            convf = float(conv)
+        except (TypeError, ValueError):
+            convf = 0.0
         lines.append("## {sym} — {r}/{a} (conviction {c:.0%})".format(
-            sym=g("symbol"), r=rating, a=action, c=float(conv)))
+            sym=g("symbol"), r=(rating if rating is not None else "?"),
+            a=(action if action is not None else "?"), c=convf))
         if g("thesis"):
             lines.append("- **Thesis:** {}".format(str(g("thesis"))[:400]))
         if g("dissent"):

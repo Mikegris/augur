@@ -60,13 +60,16 @@ def _make_call(cfg: Dict[str, Any], budget: Budget,
     def call(tier: str, role: str, system: str, prompt: str) -> Optional[str]:
         if budget.exhausted():
             return None
-        budget.n_calls += 1
         mt = deep_tok if tier == aj_routing.DEEP else quick_tok
         try:
             r = aj_routing.complete_tiered(
                 prompt, tier=tier, system=system, role=role, max_tokens=mt,
                 sensitivity=aj_routing.PUBLIC, cycle_id=cycle_id)
             if r:
+                # count only completed model calls toward the per-cycle cap so a
+                # transport failure can't exhaust the budget (cost guard) and the
+                # persisted n_calls matches the authoritative routing ledger.
+                budget.n_calls += 1
                 budget.cost_usd += float(r.get("cost_usd", 0.0) or 0.0)
                 return r.get("text") if r.get("ok") else None
         except Exception:
@@ -308,7 +311,8 @@ def run(symbol: str, cfg: Optional[Dict[str, Any]] = None,
     if cached is not None:
         return cached
 
-    budget = Budget(int(cfg.get("council_max_calls_per_cycle", 40) or 0))
+    raw_max = cfg.get("council_max_calls_per_cycle", 40)
+    budget = Budget(int(raw_max) if raw_max is not None else 40)
     the_call = call or _make_call(cfg, budget, cycle_id)
     t0 = time.time()
     reports = _run_analysts(symbol, cfg, the_call)
@@ -347,7 +351,7 @@ def run(symbol: str, cfg: Optional[Dict[str, Any]] = None,
     backed = [r for r in reports if r.confidence > 0.0]
     if not reports:
         status = "error"
-    elif budget.hit_cap or len(backed) < len(reports) or (rounds > 0 and not debate_ran):
+    elif budget.hit_cap or not backed or (rounds > 0 and not debate_ran):
         status = "degraded"
     else:
         status = "ok"
@@ -359,8 +363,11 @@ def run(symbol: str, cfg: Optional[Dict[str, Any]] = None,
         dec.cost_usd = budget.cost_usd
         dec.latency_ms = elapsed
         dec.n_calls = budget.n_calls
-        if not dec.dissent:
-            dec.dissent = dissent
+        # Merge the arbiter's dissent with the consensus analyst-spread dissent so
+        # the analyst disagreement signal (e.g. "X bullish vs Y bearish") isn't
+        # lost when the arbiter also returns its own dissent.
+        if dissent and dissent != dec.dissent:
+            dec.dissent = "; ".join(filter(None, [dec.dissent, dissent]))[:400]
     else:
         dec = CouncilDecision.from_plan(
             symbol, plan, proposal, confidence=conf,
@@ -398,7 +405,8 @@ def _arbiter(symbol: str, plan: ResearchPlan, proposal: Optional[TraderProposal]
     arbitrate or the model is unavailable (caller falls back to the plan)."""
     if call is None or (not risk_turns and proposal is None):
         return None
-    transcript = "\n".join("{}: {}".format(t["role"].upper(), t["content"])
+    transcript = "\n".join("{}: {}".format(str(t.get("role", "?")).upper(),
+                                            t.get("content", ""))
                            for t in risk_turns) or "(no risk debate)"
     mem = ("\nPrior lessons:\n" + memory_text) if memory_text else ""
     prompt = ("Research stance:\n{plan}\n\nTrader proposal:\n{prop}\n\n"
@@ -420,10 +428,22 @@ def _arbiter(symbol: str, plan: ResearchPlan, proposal: Optional[TraderProposal]
     # arbiter may override conviction explicitly; honor a valid action too
     if d.get("conviction") is not None:
         dec.conviction = clamp(d.get("conviction"), 0.0, 1.0, dec.conviction)
-    if d.get("action"):
-        from aj_schemas import parse_action
-        dec.action = parse_action(d.get("action"), default=dec.action)
     dec.dissent = str(d.get("dissent") or "")
+    if d.get("action"):
+        from aj_schemas import parse_action, Action, _RATING_ACTION
+        proposed = parse_action(d.get("action"), default=dec.action)
+        implied = _RATING_ACTION.get(rating, Action.HOLD)
+        # Reconcile: a BUY-while-bearish (or SELL-while-bullish) pair is incoherent
+        # — downstream sizing reads rating-based signed_score() while the operator
+        # reads action, so keep the rating-derived action and record the conflict.
+        contradicts = ((proposed == Action.BUY and implied == Action.SELL) or
+                       (proposed == Action.SELL and implied == Action.BUY))
+        if contradicts:
+            note = "arbiter action {} contradicts rating {} — kept {}".format(
+                proposed.value, rating.value, implied.value)
+            dec.dissent = "; ".join(filter(None, [dec.dissent, note]))[:400]
+        else:
+            dec.action = proposed
     if d.get("time_horizon") and str(d.get("time_horizon")).lower() != "null":
         dec.time_horizon = str(d.get("time_horizon"))
     return dec
@@ -516,7 +536,11 @@ def _spy_return_since(ts_iso: str) -> float:
             if dt is not None and bt is not None and bt >= dt.timestamp():
                 start = b.get("close")
                 break
-        start = start or bars[0].get("close")
+        # No bar at-or-after the timestamp (fresh/clock-skewed ts) => no benchmark
+        # window. Return 0.0 rather than falling back to the oldest 6-month bar,
+        # which would fabricate a huge, wrong benchmark return and corrupt alpha.
+        if start is None:
+            return 0.0
         end = bars[-1].get("close")
         if start and end and start > 0:
             return (float(end) - float(start)) / float(start)

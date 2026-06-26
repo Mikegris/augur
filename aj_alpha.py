@@ -116,9 +116,10 @@ def _earnings_days_away(symbol: str) -> Optional[int]:
 
 def _parse_date(s: str):
     from datetime import datetime, timezone
-    for fmt in ("%Y-%m-%d", "%m/%d/%Y", "%b %d, %Y"):
+    s = str(s or "").strip()
+    for fmt in ("%Y-%m-%d", "%m/%d/%Y", "%b %d, %Y", "%B %d, %Y"):
         try:
-            return datetime.strptime(s[:11].strip(), fmt).replace(tzinfo=timezone.utc)
+            return datetime.strptime(s, fmt).replace(tzinfo=timezone.utc)
         except Exception:
             continue
     return None
@@ -268,11 +269,11 @@ def _vol_target_factor(symbol: str, cfg: Dict[str, Any]) -> float:
     av = _ann_vol(_closes(symbol, "1y"))
     if not av or av <= 0:
         return 1.0
-    # Normalize to PERCENT: portfolio_insights.annualized_vol already returns a
-    # percent (e.g. 25.0), but accept a fraction (0.25) too. Without this guard
-    # a percent input was multiplied by 100 again, inflating daily vol 100x and
-    # collapsing every factor to the floor.
-    av_pct = av * 100.0 if av < 5.0 else av
+    # portfolio_insights.annualized_vol always returns a PERCENT (e.g. 25.0, and
+    # 4.0 for a genuinely quiet name). A magnitude-based fraction/percent guess
+    # mis-detected real low-vol percents (<5.0) as fractions and inflated them
+    # 100x, collapsing the factor to its floor — so treat `av` as percent here.
+    av_pct = av
     daily_vol_pct = av_pct / math.sqrt(252)
     if daily_vol_pct <= 0:
         return 1.0
@@ -563,7 +564,9 @@ def extra_exit_signals(cfg: Dict[str, Any]) -> List[Dict[str, Any]]:
                     continue
                 if gain >= 1.5 * tp and 2 not in fired:
                     out.append(_exit(sym, round(qty / 2, 6), "tp-ladder rung-2 +{:.1f}%".format(gain), mark))
-                    fired.update({1, 2})
+                    # Only mark rung-2 fired: rung-1 wasn't sold here, so a later
+                    # cycle may still scale out its third per the thirds ladder.
+                    fired.add(2)
                     ladder_fired[key] = sorted(fired)
                     ladder_dirty = True
                     continue

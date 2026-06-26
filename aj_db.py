@@ -393,7 +393,7 @@ def _us_market_holidays(year: int) -> set:
         c = _cal.Calendar()
         days = [d for d in c.itermonthdates(year, month)
                 if d.month == month and d.weekday() == weekday]
-        return days[min(n - 1, len(days) - 1)] if days else None
+        return days[n - 1] if len(days) >= n else None
 
     def _last_weekday(month, weekday):
         c = _cal.Calendar()

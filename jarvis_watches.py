@@ -322,7 +322,24 @@ def _fetch_quotes(symbols: List[str], crypto: set) -> Dict[str, Dict[str, Any]]:
         for fetch_sym, user_sym in retry.items():
             q = raw2.get(fetch_sym)
             qp = (q or {}).get("price") if isinstance(q, dict) else None
-            if isinstance(qp, (int, float)) and not isinstance(qp, bool) and qp > 0:
+            if not (isinstance(qp, (int, float)) and not isinstance(qp, bool)
+                    and qp > 0):
+                continue
+            existing = out.get(user_sym)
+            ep = (existing or {}).get("price") if isinstance(existing, dict) else None
+            existing_price_ok = (isinstance(ep, (int, float))
+                                 and not isinstance(ep, bool) and ep > 0)
+            if existing_price_ok:
+                # The bare quote already has a valid positive price — only the
+                # change_pct was missing. Don't overwrite a legitimate equity
+                # quote with a possibly-unrelated -USD instrument; just fill the
+                # missing change_pct field from the retry.
+                ec = existing.get("change_pct")
+                if not (isinstance(ec, (int, float)) and not isinstance(ec, bool)):
+                    rc = q.get("change_pct")
+                    if isinstance(rc, (int, float)) and not isinstance(rc, bool):
+                        existing["change_pct"] = rc
+            else:
                 out[user_sym] = q
     return out
 

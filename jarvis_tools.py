@@ -30,6 +30,10 @@ _RESULT_CHAR_BUDGET = 1800
 # At most ONE interior separator (BRK.B, RDS-A are valid; "A.", "X-",
 # "A.B.C.D" are not). Total length capped at ~10.
 _SYM_RE = re.compile(r"^[A-Za-z0-9]{1,9}(?:[.\-][A-Za-z0-9]{1,4})?$")
+# Mirrors jarvis_watches._SYM_RE exactly (requires a leading letter) so the
+# add_watch confirm gate accepts only symbols the executor will accept —
+# purely numeric tokens like "123" must NOT pass the gate then fail at exec.
+_WATCH_SYM_RE = re.compile(r"^[A-Z][A-Z0-9]{0,5}([.\-][A-Z0-9]{1,4})?$")
 
 
 def _sym(args: Dict[str, Any]) -> str:
@@ -141,7 +145,7 @@ def _t_recent_transactions(args):
          "price": t.get("price"), "total": t.get("total")} for t in txns]}
     # Surface the upper cap so the model doesn't report 25 as the full set a
     # user asked for (e.g. 'show my last 50 trades').
-    if requested is not None and requested > 25:
+    if requested is not None and int(requested) > 25:
         out["limit_capped"] = True
         out["note"] = "capped at 25 most recent (more exist)"
     return out
@@ -803,7 +807,7 @@ def _t_counterfactual_review(args):
         return {"note": "counterfactual engine unavailable"}
     sym = _sym(args) if args.get("symbol") else None
     n = _num_arg(args.get("limit"))
-    limit = int(max(1, min(n, 10))) if n else 10
+    limit = int(max(1, min(n, 10))) if n is not None else 10
     r = jarvis_counterfactual.analyze(symbol=sym, limit=limit) or {}
     if r.get("error"):
         return {"error": str(r["error"])[:200]}
@@ -1726,9 +1730,9 @@ def valid_proposal_args(name: str, args: Dict[str, Any]) -> bool:
                 return False
             sym = str(c.get("symbol") or "").strip().upper()
             if c.get("metric") in _WATCH_SYMBOL_METRICS:
-                if not sym or not _SYM_RE.match(sym):
+                if not sym or not _WATCH_SYM_RE.match(sym):
                     return False
-            elif sym and not _SYM_RE.match(sym):
+            elif sym and not _WATCH_SYM_RE.match(sym):
                 return False
         return True
     if name == "set_policy_rule":

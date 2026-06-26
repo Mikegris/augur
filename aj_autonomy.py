@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 from typing import Any, Dict, List, Optional
 
 import aj_db
@@ -280,8 +281,18 @@ def build_briefing(cfg: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         import aj_operator, aj_alpha
         universe = aj_operator._scan_universe() or list(cfg.get("symbol_allowlist") or [])
         k = max(1, int(cfg.get("opportunity_radar_top_k") or 5))
+
+        # NaN-safe ordering, mirroring aj_alpha.rank_universe's _score_key:
+        # coerce non-floats and sink NaN to the bottom so a degenerate score
+        # can't make the top-K ordering undefined.
+        def _score_key(t):
+            try:
+                fv = float(t[1])
+            except (TypeError, ValueError):
+                return float("inf")
+            return float("inf") if math.isnan(fv) else -fv
         scored = sorted(((s, aj_alpha._radar_score(s)) for s in universe),
-                        key=lambda t: -t[1])[:k]
+                        key=_score_key)[:k]
         ideas = []
         for sym, score in scored:
             closes = aj_alpha._closes(sym, "1y")

@@ -264,14 +264,17 @@ def _detect_phase(windows, velocity, total_count):
 
     # EXHAUSTION: consensus + declining volume
     if is_consensus:
-        # Normalize 14d count to a 7-day equivalent
-        normalized_14d = cnt_14 / 2.0 if cnt_14 > 0 else 0
-        if normalized_14d > 0 and cnt_7 < normalized_14d:
+        # Compare the recent 7-day count against the prior week explicitly
+        # (cnt_14 includes the last 7 days, so the prior week is the
+        # difference). This is exact and avoids the /2 approximation and any
+        # boundary double-count bias.
+        prior_week = cnt_14 - cnt_7
+        if prior_week > 0 and cnt_7 < prior_week:
             return (
                 "EXHAUSTION",
                 "{} narrative dominates at {:.0f}% but article volume is declining "
-                "({} articles in 7d vs {:.0f} expected).".format(
-                    dom_7, pct_7, cnt_7, normalized_14d
+                "({} articles in 7d vs {} in the prior week).".format(
+                    dom_7, pct_7, cnt_7, prior_week
                 ),
             )
         return (

@@ -195,17 +195,22 @@ def _apply_broker_result(order_id: int, res: Dict[str, Any],
     if state not in ("new", "submitted", "accepted", "partially_filled",
                      "filled", "canceled", "rejected", "expired", "unknown"):
         state = "unknown"
-    # If broker says filled but we recorded partials, trust fill aggregates.
-    if agg["filled_qty"] > 0 and state == "accepted":
-        state = "partially_filled"
-    # If the broker LABELS it filled but our recorded fills are short of the
-    # order qty, don't accept the terminal 'filled' — keep it reconcilable so a
-    # later poll can pull the missing fills (a terminal order is never revisited
-    # by _resolve_open_orders).
     try:
         order_qty = float((aj_db.get_row("aj_orders", order_id) or {}).get("qty") or 0)
     except Exception:
         order_qty = 0.0
+    # If broker says 'accepted' but we recorded fills, trust the aggregates: a
+    # complete fill set (filled_qty >= order_qty) is terminal 'filled'; anything
+    # short is genuinely partial. Relative tolerance so the comparison scales
+    # across asset classes.
+    if agg["filled_qty"] > 0 and state == "accepted":
+        state = ("filled" if order_qty > 0
+                 and agg["filled_qty"] >= order_qty * (1 - 1e-6)
+                 else "partially_filled")
+    # If the broker LABELS it filled but our recorded fills are short of the
+    # order qty, don't accept the terminal 'filled' — keep it reconcilable so a
+    # later poll can pull the missing fills (a terminal order is never revisited
+    # by _resolve_open_orders).
     # Relative tolerance so the short-fill test scales across asset classes (a
     # fixed absolute epsilon is meaningful for fractional crypto but negligible
     # for large equity quantities).
@@ -259,8 +264,11 @@ def _record_fill(order_id: int, fill: Dict[str, Any], cycle_id: Optional[str]) -
     fid = aj_db.insert(
         "aj_fills", order_id=order_id, broker_fill_id=bfid,
         qty=qv, price=pv, fees_usd=fv, filled_at=at)
-    aj_db.audit("fill", {"order_id": order_id, "qty": fill.get("qty"),
-                         "price": fill.get("price"), "fees": fill.get("fees_usd")},
+    # Audit the SAME coerced values that were persisted to aj_fills so the
+    # hash-chained record reconciles with the queryable row (raw fill.get(...)
+    # values may be None/str when the stored value coerced to 0.0).
+    aj_db.audit("fill", {"order_id": order_id, "qty": qv,
+                         "price": pv, "fees": fv, "filled_at": at},
                 cycle_id=cycle_id, ref_id=order_id)
     return fid
 
@@ -357,9 +365,15 @@ def _resolve_open_orders(broker: aj_broker.BrokerClient,
     against broker truth; unresolved 'unknown' leaves the order blocked.
     NEVER blind-resubmit."""
     out = {"expired_new": 0, "resolved": 0, "still_unknown": 0}
+    # Scope to the mode (paper vs live) of the broker actually being reconciled:
+    # broker.get_order(boid) only knows ids minted by its own venue, so a paper
+    # broker must not interrogate live order ids (and vice-versa) — that would
+    # force every other-venue order to bogus 'unknown'. Mirrors _local_positions,
+    # which also scopes by broker.mode.
+    bmode = "paper" if getattr(broker, "mode", "live") == "paper" else "live"
     open_orders = aj_db.query(
-        "SELECT * FROM aj_orders WHERE state IN "
-        "('new','submitted','accepted','partially_filled','unknown')")
+        "SELECT * FROM aj_orders WHERE mode = ? AND state IN "
+        "('new','submitted','accepted','partially_filled','unknown')", (bmode,))
     for o in open_orders:
         oid = o["id"]
         state = o["state"]
@@ -453,8 +467,12 @@ def cancel_all_open(reason: str = "manual") -> int:
                     aj_db.audit("order", {"order_id": oid, "cancel_unconfirmed": rstate,
                                           "reason": reason}, ref_id=oid)
                 continue
-            _set_state(oid, "canceled")
-            n += 1
+            # Only count when the CAS transition actually applied — a concurrent
+            # writer that already moved this order to a terminal state makes
+            # _set_state return False, and counting it would overstate the
+            # orders_canceled total kill_switch surfaces. Mirrors the live branch.
+            if _set_state(oid, "canceled"):
+                n += 1
             aj_db.audit("order", {"order_id": oid, "canceled": reason}, ref_id=oid)
         except Exception:
             log.exception("cancel failed for order %s", oid)
