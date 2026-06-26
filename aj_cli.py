@@ -216,7 +216,7 @@ def cmd_preset(argv):
 def cmd_verify(argv):
     import aj_db, database as dbase
     aj_db.aj_init()
-    gates = ("mcp_read", "opencode", "robinhood", "alpaca", "ccxt")
+    gates = ("mcp_read", "opencode", "robinhood", "alpaca", "ccxt", "council")
     raw = dbase.get_settings()
     out = {}
     for g in gates:

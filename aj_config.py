@@ -113,6 +113,26 @@ DEFAULTS: Dict[str, Any] = {
     "auto_preset_escalation": False,   # 23: auto conservative<->moderate<->aggressive on performance
     "daily_reflection":       False,   # 24: write an end-of-day self-review journal entry
     "premarket_briefing":     False,   # 25: build a pre-market ranked opportunity briefing
+    # ── Analyst Council layer (merge plan) — ALL opt-in, fail-closed ─────────
+    # Advisory multi-agent reasoning. The council can VETO/REDUCE a signal or
+    # (in coequal mode) raise conviction within existing caps; it can NEVER
+    # create an order the risk gate would block nor bypass any gate. Requires
+    # both council_enabled AND the VERIFY-COUNCIL gate (aj_verify_council=pass).
+    "council_enabled":        False,   # master switch for the council layer
+    "council_policy":         "advisory",  # advisory | confirm | coequal
+    "council_topk":           3,       # run council only for top-K scan candidates
+    "max_research_rounds":    1,       # bull/bear debate rounds (hard-terminated)
+    "max_risk_rounds":        1,       # aggressive/conservative/neutral rounds
+    "council_max_calls_per_cycle": 40, # hard cap on LLM calls/cycle (cost guard)
+    "council_cache_ttl_min":  360,     # memoize a decision per (symbol,date,hash)
+    "council_deep_max_tokens": 1024,   # token budget for deep-think analysis
+    "council_quick_max_tokens": 512,   # token budget for quick-think summarization
+    "council_analyst_fundamentals": True,
+    "council_analyst_news":         True,
+    "council_analyst_sentiment":    True,
+    "council_analyst_technical":    True,
+    "personas_enabled":       False,   # Phase 6: investor-persona analysts (opt-in)
+    "fingpt_sentiment_enabled": False, # Phase 6: FinGPT numeric sentiment prior (opt-in)
 }
 
 _BOOL_KEYS = {"trading_enabled", "live_trading_enabled", "robinhood_enabled",
@@ -123,7 +143,12 @@ _BOOL_KEYS = {"trading_enabled", "live_trading_enabled", "robinhood_enabled",
               "relative_strength_filter", "tp_ladder", "adaptive_thresholds",
               "regime_adaptive", "pyramiding", "signal_scorecard",
               "opportunity_radar", "auto_run_enabled", "health_autohalt",
-              "auto_preset_escalation", "daily_reflection", "premarket_briefing"}
+              "auto_preset_escalation", "daily_reflection", "premarket_briefing",
+              # council layer
+              "council_enabled", "council_analyst_fundamentals",
+              "council_analyst_news", "council_analyst_sentiment",
+              "council_analyst_technical", "personas_enabled",
+              "fingpt_sentiment_enabled"}
 _LIST_KEYS = {"symbol_allowlist", "session_whitelist"}
 _FLOAT_KEYS = {"max_order_notional_usd", "max_daily_loss_usd",
                "paper_slippage_bps", "paper_spread_fraction", "fee_bps",
@@ -148,9 +173,15 @@ _INT_KEYS = {"max_trades_per_day", "forecast_horizon_days", "scan_universe_max",
              "momentum_filter_days", "relative_strength_lookback_days",
              "earnings_blackout_days", "max_holding_days", "atr_period",
              "pyramid_max_adds", "opportunity_radar_top_k",
-             "auto_run_interval_min"}
+             "auto_run_interval_min",
+             # council layer
+             "council_topk", "max_research_rounds", "max_risk_rounds",
+             "council_max_calls_per_cycle", "council_cache_ttl_min",
+             "council_deep_max_tokens", "council_quick_max_tokens"}
 _STR_KEYS = {"daily_loss_basis", "halt_rearm", "default_broker",
-             "entry_order_type"}
+             "entry_order_type", "council_policy"}
+
+_VALID_COUNCIL_POLICY = ("advisory", "confirm", "coequal")
 
 _PREFIX = "aj_"
 _VALID_LOSS_BASIS = ("realized_plus_unrealized", "realized")
@@ -267,6 +298,10 @@ def get_config() -> Dict[str, Any]:
         cfg["default_broker"] = "paper"   # unknown venue => safe internal paper
     if str(cfg.get("entry_order_type")).lower() not in ("market", "limit"):
         cfg["entry_order_type"] = "market"
+    if str(cfg.get("council_policy")).lower() not in _VALID_COUNCIL_POLICY:
+        cfg["council_policy"] = "advisory"   # unknown policy => safest advisory
+    else:
+        cfg["council_policy"] = str(cfg["council_policy"]).lower()
     cfg["session_whitelist"] = [s.lower() for s in cfg["session_whitelist"]
                                 if s.lower() in _TRADABLE_SESSIONS] or ["regular"]
     # numeric guards: caps/counts can never be negative; probs clamp to [0,1].
@@ -324,6 +359,9 @@ def _serialize(key: str, value: Any) -> str:
         return "manual"
     if key == "entry_order_type" and str(value).lower() not in ("market", "limit"):
         return "market"
+    if key == "council_policy":
+        v = str(value).lower()
+        return v if v in _VALID_COUNCIL_POLICY else "advisory"
     if key == "default_broker" and \
             str(value).lower() not in {b.lower() for b in _valid_brokers()}:
         return "paper"
@@ -400,3 +438,26 @@ def is_trade_path_enabled() -> bool:
     """True only when the master switch is on. Convenience for callers that
     want to short-circuit before building a proposal."""
     return bool(get_config().get("trading_enabled"))
+
+
+# ── Analyst Council gating ────────────────────────────────────────────────────
+# The council is doubly gated: the config flag AND a one-time operator
+# acknowledgement (VERIFY-COUNCIL) that the layer is costly + non-deterministic.
+# This mirrors VERIFY-ALPACA / VERIFY-OPENCODE / VERIFY-MCP-READ.
+
+def council_verify_passed() -> bool:
+    """True iff the operator has closed the VERIFY-COUNCIL gate."""
+    try:
+        return str(db.get_settings().get("aj_verify_council")) == "pass"
+    except Exception:
+        return False
+
+
+def council_active(cfg: Optional[Dict[str, Any]] = None) -> bool:
+    """True only when the council may run: enabled in config AND VERIFY-COUNCIL
+    passed. Any read error => False (fail-closed: council stays off)."""
+    try:
+        c = cfg if cfg is not None else get_config()
+        return bool(c.get("council_enabled")) and council_verify_passed()
+    except Exception:
+        return False

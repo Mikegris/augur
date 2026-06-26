@@ -32,7 +32,7 @@ import database as db
 log = logging.getLogger("augur.aj_db")
 
 # ── schema version target (bump when adding a numbered migration step) ────────
-AJ_SCHEMA_TARGET = 2
+AJ_SCHEMA_TARGET = 3
 _SCHEMA_KEY = "aj_schema_version"
 
 # ── DDL (§5). CREATE TABLE IF NOT EXISTS is safe to re-run; column ADDs go
@@ -174,6 +174,68 @@ _DDL_V2 = [
     )""",
 ]
 
+# Migration step 3 (Analyst Council layer, merge plan §5.6). Additive only —
+# new advisory tables; no existing table is altered. Every council artifact is
+# also folded into the aj_audit hash chain via audit(); these tables are the
+# queryable/UI copy.
+_DDL_V3 = [
+    """CREATE TABLE IF NOT EXISTS aj_council_runs (
+        id            INTEGER PRIMARY KEY,
+        ts            TEXT NOT NULL,
+        cycle_id      TEXT,
+        symbol        TEXT NOT NULL,
+        policy        TEXT,
+        status        TEXT,
+        rating        TEXT,
+        action        TEXT,
+        conviction    REAL,
+        thesis        TEXT,
+        price_target  REAL,
+        time_horizon  TEXT,
+        stop_hint     REAL,
+        dissent       TEXT,
+        cost_usd      REAL DEFAULT 0,
+        latency_ms    INTEGER DEFAULT 0,
+        n_calls       INTEGER DEFAULT 0,
+        decision_json TEXT
+    )""",
+    "CREATE INDEX IF NOT EXISTS idx_aj_council_runs_sym ON aj_council_runs(symbol)",
+    "CREATE INDEX IF NOT EXISTS idx_aj_council_runs_cycle ON aj_council_runs(cycle_id)",
+    """CREATE TABLE IF NOT EXISTS aj_analyst_reports (
+        id              INTEGER PRIMARY KEY,
+        council_run_id  INTEGER NOT NULL,
+        ts              TEXT NOT NULL,
+        analyst         TEXT NOT NULL,
+        band            TEXT,
+        score           REAL,
+        confidence      REAL,
+        narrative       TEXT,
+        report_json     TEXT
+    )""",
+    "CREATE INDEX IF NOT EXISTS idx_aj_analyst_reports_run ON aj_analyst_reports(council_run_id)",
+    """CREATE TABLE IF NOT EXISTS aj_debate_turns (
+        id              INTEGER PRIMARY KEY,
+        council_run_id  INTEGER NOT NULL,
+        ts              TEXT NOT NULL,
+        debate          TEXT NOT NULL CHECK (debate IN ('research','risk')),
+        role            TEXT NOT NULL,
+        round           INTEGER,
+        content         TEXT
+    )""",
+    "CREATE INDEX IF NOT EXISTS idx_aj_debate_turns_run ON aj_debate_turns(council_run_id)",
+    """CREATE TABLE IF NOT EXISTS aj_reflections (
+        id              INTEGER PRIMARY KEY,
+        ts              TEXT NOT NULL,
+        symbol          TEXT NOT NULL,
+        situation_hash  TEXT,
+        raw_return      REAL,
+        alpha_return    REAL,
+        benchmark       TEXT,
+        lesson          TEXT
+    )""",
+    "CREATE INDEX IF NOT EXISTS idx_aj_reflections_sym ON aj_reflections(symbol)",
+]
+
 
 # ── migrations (§6) ───────────────────────────────────────────────────────────
 
@@ -247,6 +309,13 @@ def aj_migrate() -> int:
                 cur.execute(stmt)
             conn.commit()
             current = 2
+        # Step 3 — analyst-council advisory tables (additive only).
+        if current < 3:
+            cur = conn.cursor()
+            for stmt in _DDL_V3:
+                cur.execute(stmt)
+            conn.commit()
+            current = 3
         set_setting_raw(_SCHEMA_KEY, str(current))
         log.info("aj_migrate: schema at version %d", current)
         return current
@@ -667,6 +736,8 @@ import re as _re
 _ALLOWED_TABLES = frozenset({
     "aj_proposals", "aj_orders", "aj_fills", "aj_risk_events", "aj_routing",
     "aj_recon", "aj_cycles", "aj_equity", "aj_cycle_log", "aj_position_state",
+    # Analyst Council (step 3) — advisory artifacts, also audit-chained.
+    "aj_council_runs", "aj_analyst_reports", "aj_debate_turns", "aj_reflections",
 })
 _IDENT_RE = _re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
