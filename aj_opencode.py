@@ -21,7 +21,11 @@ log = logging.getLogger("augur.aj_opencode")
 # Paths the sandbox may NEVER read/write (Appendix C). Candidate generation has
 # no business touching the book, locks, or secrets.
 FORBIDDEN_PATHS: List[str] = [
-    "wealth.db", "wealth.db-*", "*.lock", ".aj_*", "secrets/*", "config/*",
+    # Block the whole wealth.db family as a prefix/substring, not just the exact
+    # name — renamed copies (wealth.db.bak), WAL/SHM (wealth.db-wal) and any
+    # backup variant must all be denied.
+    "wealth.db", "wealth.db-*", "wealth.db*", "*wealth.db*",
+    "*.lock", ".aj_*", "secrets/*", "config/*",
 ]
 
 

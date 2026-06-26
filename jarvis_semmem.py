@@ -114,9 +114,12 @@ def embed(texts):
         from openai import OpenAI
         client = OpenAI(api_key=key, timeout=10)
         resp = client.embeddings.create(model=EMBED_MODEL, input=safe)
+        # The request was billed the moment it returned, regardless of shape —
+        # record it BEFORE validating length so a malformed/partial response
+        # can't slip through as "free" and under-count spend against the cap.
+        ai_summarizer._record_ai_call()  # one batched request = one call
         if not resp.data or len(resp.data) != len(texts):
             return failed
-        ai_summarizer._record_ai_call()  # one batched request = one call
         # API may return out of order in theory; .index makes it explicit.
         out = [None] * len(texts)
         for item in resp.data:
@@ -218,13 +221,18 @@ def recall(query, k=6, kinds=None):
         # Cosine = dot / (|a||b|). OpenAI vectors arrive ~unit-norm, but
         # normalize explicitly so a stale or truncated row can't produce
         # a bogus >1 score.
-        norms = np.linalg.norm(mat, axis=1) * (np.linalg.norm(q) or 1.0)
+        qn = float(np.linalg.norm(q))
+        if not np.isfinite(qn) or qn == 0.0:
+            return []  # zero/NaN query vector → every score is 0/NaN, no recall
+        norms = np.linalg.norm(mat, axis=1) * qn
         norms[norms == 0] = 1.0  # guard zero vectors → score 0, not NaN
-        scores = (mat @ q) / norms
+        scores = np.nan_to_num((mat @ q) / norms)  # corrupt rows → 0, not NaN
         order = np.argsort(scores)[::-1]
         out = []
         for i in order:
             s = float(scores[i])
+            if not np.isfinite(s):
+                continue  # never break on a non-finite score; just skip it
             if s < MIN_SCORE:
                 break  # sorted desc — everything after is below threshold
             r = cands[i][0]

@@ -16,6 +16,7 @@ Sub-indicators (0-100 each):
 """
 
 import logging
+import threading
 import time
 from datetime import datetime, timezone
 from typing import Dict, List, Optional
@@ -30,20 +31,23 @@ log = logging.getLogger(__name__)
 
 _cache = {}       # type: Dict[str, object]
 _cache_ts = {}    # type: Dict[str, float]
+_cache_lock = threading.Lock()
 _CACHE_TTL = 300
 
 
 def _cached_get(key):
     # type: (str) -> Optional[object]
-    ts = _cache_ts.get(key)
-    if ts is not None and (time.time() - ts) < _CACHE_TTL:
-        return _cache.get(key)
-    return None
+    with _cache_lock:
+        ts = _cache_ts.get(key)
+        if ts is not None and (time.time() - ts) < _CACHE_TTL:
+            return _cache.get(key)
+        return None
 
 
 def _cached_set(key, value):
-    _cache[key] = value
-    _cache_ts[key] = time.time()
+    with _cache_lock:
+        _cache[key] = value
+        _cache_ts[key] = time.time()
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────────

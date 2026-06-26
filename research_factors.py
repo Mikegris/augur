@@ -155,7 +155,10 @@ def _merge_frames(
     rf = np.zeros(n, dtype=float)
     for i, d in enumerate(dates):
         mkt, smb, hml, rmw, cma, r = ff5[d]
-        (m,) = mom[d]
+        # Defensive: take the first momentum column rather than unpacking
+        # exactly one — if French ever appends a second column, `(m,) = ...`
+        # would raise ValueError and abort the whole factor merge.
+        m = mom[d][0]
         fac[i, 0] = mkt
         fac[i, 1] = smb
         fac[i, 2] = hml
@@ -377,8 +380,8 @@ def _regress(
     fac_dates: List[str],
     fac: np.ndarray,
     rf: np.ndarray,
-) -> Optional[Tuple[np.ndarray, np.ndarray, np.ndarray, float, int, str]]:
-    """Align stock + factor frames on date, run OLS, return (coef,t,p,R2,n,as_of)."""
+) -> Optional[Tuple[np.ndarray, np.ndarray, np.ndarray, float, int, str, np.ndarray]]:
+    """Align stock + factor frames on date, run OLS, return (coef,t,p,R2,n,as_of,resid)."""
     fac_index = {d: i for i, d in enumerate(fac_dates)}
     aligned_y: List[float] = []
     aligned_X: List[List[float]] = []
@@ -398,7 +401,7 @@ def _regress(
     coef, t, p, r2, resid = _ols(y, X)
     # idiosyncratic vol: annualised residual standard deviation
     n = len(aligned_y)
-    return coef, t, p, r2, n, last_date
+    return coef, t, p, r2, n, last_date, resid
 
 
 def factor_exposure(symbol: str, period_years: int = 5) -> dict:
@@ -428,19 +431,11 @@ def factor_exposure(symbol: str, period_years: int = 5) -> dict:
         res = _regress(stock_dates, stock_ret, list(fac_dates), fac, rf)
         if res is None:
             return _empty_envelope(sym, period_years, "insufficient overlap with factor history")
-        coef, t, p, r2, n, last_date = res
+        coef, t, p, r2, n, last_date, resid_arr = res
         alpha_daily = float(coef[0])
-        # residual stdev for idiosyncratic vol — re-derive cheaply
-        fac_index = {d: i for i, d in enumerate(fac_dates)}
-        resid_list: List[float] = []
-        for d, r in zip(stock_dates, stock_ret):
-            i = fac_index.get(d)
-            if i is None:
-                continue
-            yhat = coef[0] + float(np.dot(coef[1:], fac[i]))
-            excess = float(r) - float(rf[i])
-            resid_list.append(excess - yhat)
-        resid_arr = np.asarray(resid_list, dtype=float)
+        # residual stdev for idiosyncratic vol — reuse the regression's own
+        # residuals (same alignment) so idio vol is exactly consistent with
+        # the reported R²/coefficients.
         idio_vol_pct = float(np.std(resid_arr, ddof=1) * math.sqrt(252.0) * 100.0)
         return {
             "symbol": sym,

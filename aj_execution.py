@@ -22,6 +22,8 @@ log = logging.getLogger("augur.aj_execution")
 
 # ── order state machine (§12.1, Appendix E) ──────────────────────────────────
 _TERMINAL = {"filled", "canceled", "rejected", "expired"}
+_KNOWN_STATES = {"new", "submitted", "accepted", "partially_filled",
+                 "filled", "canceled", "rejected", "expired", "unknown"}
 _TRANSITIONS = {
     # a 'new' order that never reached a broker may be abandoned
     # (canceled/expired) — this is the safe terminal for a crashed-mid-submit
@@ -91,7 +93,13 @@ def execute_trade(proposal: Dict[str, Any], decision: Dict[str, Any],
 
     symbol = str(proposal.get("symbol") or "").upper()
     side = str(proposal.get("side") or "").lower()
-    qty = float(decision.get("qty") or proposal.get("qty") or 0)
+    # The risk gate computed the authoritative size in decision['qty']; honor it
+    # explicitly (even a 0) rather than via truthiness, only falling back to the
+    # proposal qty when the gate left it unset.
+    dqty = decision.get("qty")
+    qty = float(dqty if dqty is not None else (proposal.get("qty") or 0))
+    if qty <= 0:
+        return {"ok": False, "reason": "non-positive order qty ({})".format(qty)}
     order_type = str(proposal.get("order_type") or "market").lower()
     limit_price = proposal.get("limit_price")
     mode = decision.get("mode") or "paper"
@@ -128,6 +136,7 @@ def execute_trade(proposal: Dict[str, Any], decision: Dict[str, Any],
                           "client_order_id": client_order_id},
                 cycle_id=cycle_id, ref_id=order_id)
 
+    broker = None
     try:
         broker = aj_broker.get_broker(venue)
         broker.connect()
@@ -136,7 +145,6 @@ def execute_trade(proposal: Dict[str, Any], decision: Dict[str, Any],
             "symbol": symbol, "side": side, "qty": qty, "order_type": order_type,
             "limit_price": limit_price, "client_order_id": client_order_id,
             "asset_type": _asset_type(symbol)})
-        broker.disconnect()
     except aj_broker.BrokerNotEnabled as e:
         _set_state(order_id, "rejected", broker_order_id=None)
         aj_db.audit("order", {"order_id": order_id, "rejected": str(e)},
@@ -149,6 +157,14 @@ def execute_trade(proposal: Dict[str, Any], decision: Dict[str, Any],
                     cycle_id=cycle_id, ref_id=order_id)
         log.exception("submit failed -> unknown (order %s)", order_id)
         return {"ok": False, "order_id": order_id, "state": "unknown", "reason": str(e)}
+    finally:
+        # Always release the broker session — a leaked live connection on a
+        # failed submit holds a socket/auth session open (PaperBroker is a no-op).
+        if broker is not None:
+            try:
+                broker.disconnect()
+            except Exception:
+                log.exception("broker.disconnect failed after submit (order %s)", order_id)
 
     return _apply_broker_result(order_id, res, cycle_id)
 
@@ -160,8 +176,22 @@ def _apply_broker_result(order_id: int, res: Dict[str, Any],
     # record fills (§12.3) — append + recompute aggregates per fill
     for f in fills:
         _record_fill(order_id, f, cycle_id)
-    agg = _recompute_order(order_id)
     state = res.get("state") or "accepted"
+    # Some brokers report a terminal 'filled' state separately from fill detail
+    # (no fills array). Synthesize a single fill from the result's aggregate so
+    # a genuinely filled order isn't stranded in 'unknown' for lack of detail.
+    if (not fills and str(state).lower() in ("filled", "partially_filled")
+            and float(res.get("filled_qty") or 0) > 0
+            and float(res.get("avg_fill_price") or 0) > 0):
+        already = aj_db.query("SELECT id FROM aj_fills WHERE order_id=?", (order_id,))
+        if not already:
+            _record_fill(order_id, {
+                "broker_fill_id": "{}-agg".format(boid) if boid else None,
+                "qty": res.get("filled_qty"),
+                "price": res.get("avg_fill_price"),
+                "fees_usd": res.get("fees_usd"),
+            }, cycle_id)
+    agg = _recompute_order(order_id)
     if state not in ("new", "submitted", "accepted", "partially_filled",
                      "filled", "canceled", "rejected", "expired", "unknown"):
         state = "unknown"
@@ -176,7 +206,11 @@ def _apply_broker_result(order_id: int, res: Dict[str, Any],
         order_qty = float((aj_db.get_row("aj_orders", order_id) or {}).get("qty") or 0)
     except Exception:
         order_qty = 0.0
-    if state == "filled" and order_qty > 0 and agg["filled_qty"] + 1e-6 < order_qty:
+    # Relative tolerance so the short-fill test scales across asset classes (a
+    # fixed absolute epsilon is meaningful for fractional crypto but negligible
+    # for large equity quantities).
+    if (state == "filled" and order_qty > 0
+            and agg["filled_qty"] < order_qty * (1 - 1e-6)):
         state = "partially_filled" if agg["filled_qty"] > 0 else "unknown"
     _set_state(order_id, state, broker_order_id=boid,
                avg_fill_price=agg["avg_fill_price"], filled_qty=agg["filled_qty"],
@@ -189,7 +223,11 @@ def _apply_broker_result(order_id: int, res: Dict[str, Any],
             try:
                 aj_db.update("aj_proposals", pid, status="executed")
             except Exception:
-                pass
+                # Order/fills are already recorded; a failed status flip leaves
+                # the proposal looking unexecuted (re-propose risk) — surface it
+                # rather than swallowing the inconsistency silently.
+                log.exception(
+                    "failed to mark proposal %s executed (order %s)", pid, order_id)
     return {"ok": True, "order_id": order_id, "state": state,
             "filled_qty": agg["filled_qty"], "avg_fill_price": agg["avg_fill_price"],
             "fees_usd": agg["fees_usd"], "broker_order_id": boid}
@@ -234,7 +272,11 @@ def _recompute_order(order_id: int) -> Dict[str, Any]:
     fees = sum(float(r["fees_usd"]) for r in rows)
     if total_qty > 0:
         notional = sum(float(r["qty"]) * float(r["price"]) for r in rows)
-        avg = notional / total_qty
+        # Round the volume-weighted average price to a fixed precision so the
+        # division residue (0.1+0.2-style float drift) never propagates into
+        # stored P&L. 8 dp preserves fractional/crypto price granularity that
+        # money()'s cent rounding would destroy.
+        avg = round(notional / total_qty, 8)
     else:
         avg = None
     return {"filled_qty": total_qty, "avg_fill_price": avg,
@@ -261,7 +303,7 @@ def reconcile(broker: Optional[aj_broker.BrokerClient] = None,
     # Case-fold so a broker reporting mode 'LIVE' still triggers the live halt;
     # default to treating an uncertain mode as live (fail-closed) for the halt
     # decision below.
-    is_live = str(getattr(broker, "mode", "")).strip().lower() == "live"
+    is_live = str(getattr(broker, "mode", "live")).strip().lower() != "paper"
     detail: Dict[str, Any] = {"resolved": resolved, "scopes": {}}
     try:
         local = {p["symbol"].upper(): float(p["qty"]) for p in _local_positions(broker)}
@@ -338,15 +380,21 @@ def _resolve_open_orders(broker: aj_broker.BrokerClient,
         try:
             truth = broker.get_order(boid)
             tstate = truth.get("state")
-            if tstate and tstate != "unknown":
+            if tstate in _KNOWN_STATES and tstate != "unknown":
                 # adopt broker truth; record any fills it reports
                 for f in (truth.get("fills") or []):
                     _record_fill(oid, f, cycle_id)
                 agg = _recompute_order(oid)
-                _set_state(oid, tstate, avg_fill_price=agg["avg_fill_price"],
-                           filled_qty=agg["filled_qty"], fees_usd=agg["fees_usd"])
-                out["resolved"] += 1
+                # Only count as resolved if the transition was actually applied;
+                # an unexpected/illegal transition leaves the order reconcilable.
+                if _set_state(oid, tstate, avg_fill_price=agg["avg_fill_price"],
+                              filled_qty=agg["filled_qty"], fees_usd=agg["fees_usd"]):
+                    out["resolved"] += 1
+                else:
+                    out["still_unknown"] += 1
             else:
+                # blank/unknown or an unrecognized broker state string → keep
+                # the order reconcilable rather than adopting a bogus state.
                 _set_state(oid, "unknown")
                 out["still_unknown"] += 1
         except Exception:
@@ -388,7 +436,23 @@ def cancel_all_open(reason: str = "manual") -> int:
         try:
             if o.get("mode") == "live" and o.get("broker_order_id"):
                 broker = aj_broker.get_broker(o.get("broker"))
-                broker.cancel(o["broker_order_id"])
+                res = broker.cancel(o["broker_order_id"]) or {}
+                rstate = str(res.get("state") or "").strip().lower()
+                # Only flip local state to canceled when the venue actually
+                # reports a terminal cancel. A non-terminal/ambiguous result
+                # means the live order may still be open — leave it 'unknown'
+                # for reconciliation so kill_switch's still-open count is honest.
+                if rstate in ("canceled", "rejected", "expired", "filled"):
+                    _set_state(oid, rstate)
+                    if rstate == "canceled":
+                        n += 1
+                    aj_db.audit("order", {"order_id": oid, "cancel_result": rstate,
+                                          "reason": reason}, ref_id=oid)
+                else:
+                    _set_state(oid, "unknown")
+                    aj_db.audit("order", {"order_id": oid, "cancel_unconfirmed": rstate,
+                                          "reason": reason}, ref_id=oid)
+                continue
             _set_state(oid, "canceled")
             n += 1
             aj_db.audit("order", {"order_id": oid, "canceled": reason}, ref_id=oid)

@@ -10,6 +10,7 @@ Models (all trained on the stock's own history — no mock data):
 """
 
 import logging
+import threading
 import time as _time
 import numpy as np
 import pandas as pd
@@ -22,6 +23,36 @@ log = logging.getLogger(__name__)
 _forecast_cache = {}   # symbol -> result dict
 _cache_times = {}      # symbol -> timestamp
 _CACHE_TTL = 3600      # 1 hour
+# ml_forecast runs from multiple Flask request threads and from
+# forecast_ensemble's ThreadPoolExecutor concurrently. Without locking, a
+# check-then-act on the cache lets many threads retrain the SAME symbol at
+# once (2-5s each, thundering herd) and exposes partially-written dict state
+# to readers. _cache_lock guards every read/write of the cache dicts;
+# _symbol_locks gives each symbol its own lock so concurrent callers of one
+# symbol coalesce onto a single in-flight training while DIFFERENT symbols
+# still run in parallel.
+_cache_lock = threading.Lock()
+_symbol_locks = {}     # symbol -> threading.Lock
+
+
+def _symbol_lock(symbol):
+    """Return (creating if needed) the per-symbol single-flight lock."""
+    with _cache_lock:
+        lk = _symbol_locks.get(symbol)
+        if lk is None:
+            lk = threading.Lock()
+            _symbol_locks[symbol] = lk
+        return lk
+
+
+def _cache_get(symbol):
+    """Thread-safe fresh-cache lookup. Returns the cached result or None."""
+    with _cache_lock:
+        if symbol in _forecast_cache:
+            cached_at = _cache_times.get(symbol, 0)
+            if (_time.time() - cached_at) < _CACHE_TTL:
+                return _forecast_cache[symbol]
+    return None
 
 # ── Feature Engineering ───────────────────────────────────────────────────────
 
@@ -133,8 +164,8 @@ def _rf_predict(hist):
     from sklearn.ensemble import RandomForestClassifier
     from sklearn.preprocessing import StandardScaler
 
-    df, feature_cols = _build_features(hist)
-    df = df.dropna(subset=feature_cols + ["fwd_ret_20d"])
+    df_full, feature_cols = _build_features(hist)
+    df = df_full.dropna(subset=feature_cols + ["fwd_ret_20d"])
 
     if len(df) < 120:
         return None  # not enough data
@@ -154,8 +185,11 @@ def _rf_predict(hist):
     scaler = StandardScaler()
     X_train_scaled = scaler.fit_transform(X_train)
 
-    # Latest features (no forward return needed)
-    df_full, _ = _build_features(hist)
+    # Latest features (no forward return needed). Reuse the feature frame
+    # built above — the latest row is identical and the only reason it was
+    # dropped from `df` is the missing fwd_ret_20d label, which we don't need
+    # for prediction. Recomputing _build_features(hist) here just doubled the
+    # feature-engineering cost on the hot path.
     latest = df_full[feature_cols].iloc[-1:]
     if latest.isnull().any(axis=1).iloc[0]:
         return None
@@ -517,16 +551,31 @@ def ml_forecast(symbol, bypass_cache=False):
     All models train on the stock's own data — no mock logic.
     Results are cached for 1 hour to avoid expensive retraining.
     """
-    import fetcher
-    import pandas as pd
-
     symbol = symbol.upper()
 
-    # Check cache first
-    if not bypass_cache and symbol in _forecast_cache:
-        cached_at = _cache_times.get(symbol, 0)
-        if (_time.time() - cached_at) < _CACHE_TTL:
-            return _forecast_cache[symbol]
+    # Check cache first (thread-safe).
+    if not bypass_cache:
+        cached = _cache_get(symbol)
+        if cached is not None:
+            return cached
+
+    # Single-flight: serialize concurrent callers of THIS symbol so only one
+    # thread trains while the rest wait and then pick up the fresh cache.
+    # Different symbols still train in parallel (per-symbol lock).
+    lock = _symbol_lock(symbol)
+    with lock:
+        if not bypass_cache:
+            cached = _cache_get(symbol)
+            if cached is not None:
+                return cached
+        return _ml_forecast_compute(symbol)
+
+
+def _ml_forecast_compute(symbol):
+    """Actually fetch history, train models, cache and return the forecast.
+    Called only while holding the per-symbol single-flight lock."""
+    import fetcher
+    import pandas as pd
 
     import time
     t0 = time.time()
@@ -626,8 +675,9 @@ def ml_forecast(symbol, bypass_cache=False):
 
     results["computed_in_ms"] = round((time.time() - t0) * 1000)
 
-    # Store in cache
-    _forecast_cache[symbol] = results
-    _cache_times[symbol] = _time.time()
+    # Store in cache (thread-safe; readers see a fully-built result).
+    with _cache_lock:
+        _forecast_cache[symbol] = results
+        _cache_times[symbol] = _time.time()
 
     return results

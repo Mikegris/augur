@@ -130,15 +130,21 @@ def _t_away_digest(args):
 
 def _t_recent_transactions(args):
     import database as db
-    n = _num_arg(args.get("limit"))
-    n = int(max(1, min(n, 25))) if n else 10
+    requested = _num_arg(args.get("limit"))
+    n = int(max(1, min(requested, 25))) if requested is not None else 10
     txns = db.get_transactions(limit=n)
     if not txns:
         return {"note": "no transactions on record"}
-    return {"transactions": [
+    out = {"transactions": [
         {"date": t.get("date"), "symbol": t.get("symbol"),
          "action": t.get("action"), "shares": t.get("shares"),
          "price": t.get("price"), "total": t.get("total")} for t in txns]}
+    # Surface the upper cap so the model doesn't report 25 as the full set a
+    # user asked for (e.g. 'show my last 50 trades').
+    if requested is not None and requested > 25:
+        out["limit_capped"] = True
+        out["note"] = "capped at 25 most recent (more exist)"
+    return out
 
 
 def _t_market_regime(args):
@@ -148,7 +154,8 @@ def _t_market_regime(args):
 
 def _t_forecast(args):
     import forecast_ensemble
-    horizon = int(args.get("horizon_days") or 20)
+    n = _num_arg(args.get("horizon_days"))
+    horizon = int(n) if n is not None else 20
     horizon = max(5, min(horizon, 120))
     f = forecast_ensemble.ensemble_forecast(_sym(args), horizon_days=horizon) or {}
     ens = f.get("ensemble") or {}
@@ -264,8 +271,8 @@ def _t_stress_test(args):
     holdings = db.get_portfolio()
     if not holdings:
         return {"note": "no positions"}
-    syms = [h["symbol"] for h in holdings if h["asset_type"] != "crypto"]
-    crypto = [h["symbol"] for h in holdings if h["asset_type"] == "crypto"]
+    syms = [h["symbol"] for h in holdings if h.get("asset_type") != "crypto"]
+    crypto = [h["symbol"] for h in holdings if h.get("asset_type") == "crypto"]
     prices: Dict[str, Any] = {}
     if syms:
         prices.update(fetcher.get_quotes_batch(syms))
@@ -275,12 +282,18 @@ def _t_stress_test(args):
             k = (s + "-USD").upper()
             if k in cp:
                 prices[s] = cp[k]
+    # Annotate COPIES — never mutate the dict rows returned by get_portfolio(),
+    # which may be cached/shared; writing derived fields there would pollute
+    # other readers.
+    annotated = []
     for h in holdings:
-        cp_ = prices.get(h["symbol"], {}).get("price")
-        cur = cp_ if cp_ is not None else h["avg_cost"]
-        h["market_value"] = round(cur * h["shares"], 2)
+        h = dict(h)
+        cp_ = prices.get(h.get("symbol"), {}).get("price")
+        cur = cp_ if cp_ is not None else h.get("avg_cost", 0)
+        h["market_value"] = round(cur * h.get("shares", 0), 2)
         h["current_price"] = cur
-    return fetcher.get_portfolio_stress_test(holdings, custom_drop_pct=drop)
+        annotated.append(h)
+    return fetcher.get_portfolio_stress_test(annotated, custom_drop_pct=drop)
 
 
 def _t_portfolio_risk(args):
@@ -301,6 +314,8 @@ def _t_portfolio_risk(args):
                     "max_dd": m.get("max_drawdown"),
                     "var_95": m.get("var_95"),
                     "total_return": m.get("total_return")}
+    if not per:
+        return {"note": "risk metrics unavailable for current holdings"}
     out = {"period": period, "per_symbol": per}
     if raw.get("_missing_symbols"):
         out["missing_symbols"] = raw["_missing_symbols"]
@@ -326,10 +341,16 @@ def _t_portfolio_correlation(args):
         return {"error": (raw or {}).get("error") or "correlation unavailable"}
     pairs.sort(key=lambda p: -p[2])
     fmt = lambda p: {"pair": "{}/{}".format(p[0], p[1]), "corr": p[2]}
-    return {"period": period, "n_symbols": len(cols),
-            "avg_pairwise_corr": round(sum(p[2] for p in pairs) / len(pairs), 4),
-            "most_correlated": [fmt(p) for p in pairs[:5]],
-            "least_correlated": [fmt(p) for p in pairs[-5:][::-1]]}
+    out = {"period": period, "n_symbols": len(cols),
+           "avg_pairwise_corr": round(sum(p[2] for p in pairs) / len(pairs), 4)}
+    # Split the sorted list at its midpoint so a pair never lands in BOTH the
+    # most- and least-correlated buckets (the buckets overlapped whenever there
+    # were <=10 pairs). Each side is still capped at 5 and ordered as before:
+    # most_correlated descending, least_correlated ascending.
+    half = len(pairs) // 2
+    out["most_correlated"] = [fmt(p) for p in pairs[:len(pairs) - half][:5]]
+    out["least_correlated"] = [fmt(p) for p in pairs[len(pairs) - half:][::-1][:5]]
+    return out
 
 
 def _t_dividends(args):
@@ -430,7 +451,7 @@ def _t_historical_analogs(args):
 def _t_benchmark_compare(args):
     import database as db
     import fetcher
-    from datetime import datetime, timedelta
+    from datetime import datetime, timedelta, timezone
     bench = str(args.get("benchmark") or "SPY").strip().upper()
     if not _SYM_RE.match(bench):
         raise ValueError("invalid benchmark symbol")
@@ -445,24 +466,35 @@ def _t_benchmark_compare(args):
         return {"note": "not enough portfolio history "
                         "(need 2+ daily snapshots inside the period)"}
     first, last = window[0], window[-1]
-    port_ret = round((float(last["total_value"]) /
-                      float(first["total_value"]) - 1) * 100, 2)
+    fv = _num_arg(first.get("total_value"))
+    lv = _num_arg(last.get("total_value"))
+    if fv is None or lv is None or fv <= 0 or lv <= 0:
+        return {"note": "portfolio snapshots have bad total_value; "
+                        "cannot compute a meaningful return"}
+    port_ret = round((lv / fv - 1) * 100, 2)
     bars = [b for b in (fetcher.get_benchmark_history(symbol=bench,
                                                       period=period) or [])
             if b.get("value")]
     # Align the benchmark to the first snapshot we actually have, so a short
     # snapshot history isn't compared against a full period of benchmark.
+    aligned_ok = False
     try:
         start_epoch = int(datetime.strptime(
-            str(first["date"])[:10], "%Y-%m-%d").timestamp())
+            str(first["date"])[:10], "%Y-%m-%d").replace(
+                tzinfo=timezone.utc).timestamp())
         aligned = [b for b in bars if int(b.get("time") or 0) >= start_epoch]
         if len(aligned) >= 2:
             bars = aligned
+            aligned_ok = True
     except Exception:
         pass
+    # If we couldn't align the benchmark to our (short) snapshot window, the
+    # full-period bars cover a LONGER span than the portfolio return — an
+    # apples-to-oranges excess. Decline to compute bench_ret rather than
+    # silently compare mismatched windows.
     bench_ret = (round((float(bars[-1]["value"]) /
                         float(bars[0]["value"]) - 1) * 100, 2)
-                 if len(bars) >= 2 else None)
+                 if (aligned_ok and len(bars) >= 2) else None)
     out = {"period": period, "window_start": first.get("date"),
            "window_end": last.get("date"),
            "portfolio_return_pct": port_ret,
@@ -483,7 +515,7 @@ def _t_what_if(args):
     mv = 0.0
     note = None
     if action == "remove":
-        if args.get("market_value"):
+        if "market_value" in args and args.get("market_value") not in (None, ""):
             note = "market_value ignored for a full remove"
     else:
         mv = _num_arg(args.get("market_value")) or 0
@@ -555,7 +587,7 @@ def _t_price_history(args):
     from datetime import datetime as _dt
     sym = _quote_symbol(_sym(args))
     n = _num_arg(args.get("days"))
-    days = int(max(5, min(n, 365))) if n else 30
+    days = int(max(5, min(n, 365))) if n is not None else 30
     # Fetch the smallest cached period that covers the window — get_chart_data
     # is the same heavily-cached path the /api/chart routes ride.
     period = ("1mo" if days <= 31 else
@@ -564,18 +596,28 @@ def _t_price_history(args):
     bars = [b for b in (fetcher.get_chart_data(sym, period=period, interval="1d") or [])
             if b.get("close")]
     cutoff = _t.time() - days * 86400
-    window = [b for b in bars if (b.get("time") or 0) >= cutoff] or bars
+    recent = [b for b in bars if (b.get("time") or 0) >= cutoff]
+    # If the cutoff filtered out (almost) every bar — stale cache, or a small
+    # `days` against a longer fetched period — fall back to the full period
+    # rather than return nothing, but flag that the window is WIDER than asked
+    # so the stats aren't mislabeled as exactly the requested N days.
+    widened = len(recent) < 2
+    window = recent if not widened else bars
     if len(window) < 2:
         return {"note": "no daily history available for {}".format(sym)}
     start, end = window[0]["close"], window[-1]["close"]
     lows = [(b.get("low") or b["close"]) for b in window]
     highs = [(b.get("high") or b["close"]) for b in window]
     _day = lambda b: _dt.utcfromtimestamp(int(b.get("time") or 0)).strftime("%Y-%m-%d")
-    return {"symbol": sym, "days": days, "bars": len(window),
-            "start_date": _day(window[0]), "end_date": _day(window[-1]),
-            "start": round(start, 2), "end": round(end, 2),
-            "low": round(min(lows), 2), "high": round(max(highs), 2),
-            "return_pct": round((end / start - 1) * 100, 2) if start else None}
+    out = {"symbol": sym, "days": days, "bars": len(window),
+           "start_date": _day(window[0]), "end_date": _day(window[-1]),
+           "start": round(start, 2), "end": round(end, 2),
+           "low": round(min(lows), 2), "high": round(max(highs), 2),
+           "return_pct": round((end / start - 1) * 100, 2) if start else None}
+    if widened:
+        out["note"] = ("window wider than requested: insufficient recent bars, "
+                       "stats cover {} to {}".format(out["start_date"], out["end_date"]))
+    return out
 
 
 # The headline macro series — FRED ids → prompt-friendly labels. CPI is an
@@ -603,10 +645,15 @@ def _t_macro_snapshot(args):
             pts = s.get("points") or []
             if not pts:
                 continue
-            entry: Dict[str, Any] = {"value": pts[-1]["value"], "date": pts[-1]["date"]}
+            latest = pts[-1].get("value")
+            if latest is None:
+                # A null latest observation can't anchor a value or a YoY;
+                # skip the series rather than emit a null to the LLM.
+                continue
+            entry: Dict[str, Any] = {"value": latest, "date": pts[-1].get("date")}
             if sid == "CPIAUCSL" and len(pts) >= 13 and pts[-13].get("value"):
                 entry["yoy_pct"] = round(
-                    (pts[-1]["value"] / pts[-13]["value"] - 1) * 100, 2)
+                    (latest / pts[-13]["value"] - 1) * 100, 2)
             out[label] = entry
         except Exception:
             continue
@@ -621,7 +668,9 @@ def _t_crypto_market(args):
     mcap = _num_arg(g.get("total_market_cap_usd"))
     if mcap is None:
         return {"note": "crypto global data unavailable right now"}
-    rnd = lambda v, p=2: round(v, p) if _num_arg(v) is not None else None
+    def rnd(v, p=2):
+        f = _num_arg(v)
+        return round(f, p) if f is not None else None
     return {"total_market_cap_usd": round(mcap),
             "total_market_cap_t": round(mcap / 1e12, 2),
             "btc_dominance_pct": rnd(g.get("btc_dominance"), 1),
@@ -843,7 +892,9 @@ def _t_add_alert(args):
     alert_type = str(args.get("alert_type") or "").lower()
     if alert_type not in ("above", "below"):
         raise ValueError("alert_type must be 'above' or 'below'")
-    price = float(args.get("price"))
+    price = _num_arg(args.get("price"))
+    if price is None:
+        raise ValueError("price required")
     if not (0 < price < 10_000_000):
         raise ValueError("price out of range")
     alert_id = db.add_price_alert(sym, alert_type, price)
@@ -1143,6 +1194,7 @@ def _t_agent_positions(args):
             "unrealized_pct": r.get("unrealized_pct"),
             "weight_pct": r.get("weight_pct"), "age_days": r.get("age_days"),
         } for r in rows[:30]],
+        "positions_truncated": len(rows) > 30,
     }
 
 
@@ -1169,7 +1221,8 @@ def _t_agent_performance(args):
                               "unrealized_usd": a.get("unrealized")}
                              for a in attrib[:5]],
         "top_detractors": [{"symbol": a.get("symbol"), "total_usd": a.get("total")}
-                           for a in attrib[-3:] if a.get("total", 0) < 0],
+                           for a in sorted(attrib, key=lambda a: a.get("total", 0))[:3]
+                           if a.get("total", 0) < 0],
         "note": "Agent's PAPER trading performance — separate from your real portfolio.",
     }
 
@@ -1193,7 +1246,9 @@ def _t_agent_activity(args):
 def _safe_int_local(v, default):
     try:
         n = int(v)
-        return n if n > 0 else default
+        # Clamp to the documented max (25) so a model can't issue an
+        # unbounded LIMIT query.
+        return min(n, 25) if n > 0 else default
     except (TypeError, ValueError):
         return default
 
@@ -1627,9 +1682,10 @@ def valid_proposal_args(name: str, args: Dict[str, Any]) -> bool:
         sym = str(args.get("symbol") or "").strip().upper()
         if not _SYM_RE.match(sym):
             return False
-        try:
-            price = float(args.get("price"))
-        except (TypeError, ValueError):
+        # Mirror the executor's tolerant _num_arg coercion (it strips %, $, ,)
+        # so a formatted price like "$200" isn't rejected before the confirm.
+        price = _num_arg(args.get("price"))
+        if price is None:
             return False
         return 0 < price < 10_000_000
     if name == "add_to_watchlist":
@@ -1642,7 +1698,11 @@ def valid_proposal_args(name: str, args: Dict[str, Any]) -> bool:
         if shares is None or not (0 < shares < 1e12):
             return False
         price = _num_arg(args.get("price"))
-        if price is None or not (0 <= price < 10_000_000):
+        # add_holding at $0 cost basis is almost always a model error (it
+        # corrupts cost-basis analytics); require price>0 there. record_trade
+        # keeps >=0 (a $0 transfer/journal entry is legitimate).
+        lo = 0 if name == "record_trade" else 1e-9
+        if price is None or not (lo <= price < 10_000_000):
             return False
         if name == "record_trade":
             side = str(args.get("side") or args.get("action") or "").strip().upper()
@@ -1677,7 +1737,7 @@ def valid_proposal_args(name: str, args: Dict[str, Any]) -> bool:
             # Text variant — parse_rule resolves it at EXECUTION time; a
             # non-empty phrase is enough to offer a confirm.
             return bool(str(args.get("text") or "").strip())
-        if not re.match(r"^[A-Za-z][A-Za-z0-9_]{1,39}$", kind):
+        if not re.match(r"^[A-Za-z][A-Za-z0-9_]{0,39}$", kind):
             return False
         val = _num_arg(args.get("value"))
         if val is None:
@@ -1757,6 +1817,10 @@ def execute_read(name: str, args: Dict[str, Any]) -> str:
     except Exception as e:
         log.debug("tool %s failed: %s", name, e)
         return json.dumps({"error": str(e)[:200]})
+    # A backend that returns None (e.g. an empty options-flow fetch) would
+    # serialize to the opaque string "null"; hand the model a structured note.
+    if result is None:
+        result = {"note": "no data"}
     s = json.dumps(result, default=str)
     if len(s) > _RESULT_CHAR_BUDGET:
         # Keep VALID JSON, but DON'T drop whole keys — the substantive data
@@ -1769,6 +1833,13 @@ def execute_read(name: str, args: Dict[str, Any]) -> str:
                 trimmed = list(result)
                 while trimmed and len(json.dumps(trimmed, default=str)) > _RESULT_CHAR_BUDGET - 60:
                     trimmed.pop()
+                # A single oversized element pops the list empty — don't drop
+                # ALL data; keep the first element (stringified+truncated) so
+                # the model still sees something.
+                if not trimmed and result:
+                    one = json.dumps(result[0], default=str)[:_RESULT_CHAR_BUDGET - 80]
+                    return json.dumps({"items": [one], "truncated": True,
+                                       "total": len(result)}, default=str)
                 return json.dumps({"items": trimmed, "truncated": True,
                                    "total": len(result)}, default=str)
             if isinstance(result, dict):
@@ -1799,6 +1870,28 @@ def execute_read(name: str, args: Dict[str, Any]) -> str:
                     if longest_k is None or longest_len <= 1:
                         break
                     trimmed[longest_k] = trimmed[longest_k][:max(1, longest_len // 2)]
+                # A dict whose bulk lives in a NESTED dict (e.g. per_symbol /
+                # factors) has no top-level list or long string, so neither pass
+                # above shrank anything. Halve the entries of the longest
+                # nested dict/list value until it fits — preserving valid JSON
+                # and a subset of rows instead of nuking the whole payload.
+                for _ in range(40):
+                    if len(json.dumps(trimmed, default=str)) <= _RESULT_CHAR_BUDGET:
+                        break
+                    longest_k, longest_len = None, 0
+                    for k, v in trimmed.items():
+                        if isinstance(v, (dict, list)) and len(v) > 1:
+                            vlen = len(json.dumps(v, default=str))
+                            if vlen > longest_len:
+                                longest_k, longest_len = k, vlen
+                    if longest_k is None:
+                        break
+                    v = trimmed[longest_k]
+                    keep = max(1, len(v) // 2)
+                    if isinstance(v, dict):
+                        trimmed[longest_k] = dict(list(v.items())[:keep])
+                    else:
+                        trimmed[longest_k] = v[:keep]
                 if len(json.dumps(trimmed, default=str)) <= _RESULT_CHAR_BUDGET:
                     return json.dumps(trimmed, default=str)
         except Exception:
@@ -1813,6 +1906,11 @@ def execute_mutating(name: str, args: Dict[str, Any]) -> Dict[str, Any]:
     spec = TOOLS.get(name)
     if not spec or not spec["mutating"]:
         return {"error": "not a confirmable action"}
+    # Re-validate args here too (not just on the batch path / route) so a
+    # direct execute_mutating() with malformed args is rejected uniformly
+    # before reaching each fn's internal guards.
+    if not valid_proposal_args(name, args or {}):
+        return {"error": "invalid arguments"}
     try:
         return spec["fn"](args or {})
     except Exception as e:

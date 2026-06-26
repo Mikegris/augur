@@ -73,11 +73,57 @@ DEFAULTS: Dict[str, Any] = {
     "risk_off_vix":           0.0,     # skip NEW buys when VIX is above this
     "dry_run":                False,   # propose + gate but NEVER execute (preview)
     "notify_fills":           False,   # macOS notification on a fill
+    # ── 100x layer (aj_alpha / aj_autonomy) — all opt-in, fail-closed ────────
+    # sizing intelligence (1-5)
+    "kelly_sizing":           False,   # 1: fractional-Kelly sizing from realized win-rate/edge
+    "kelly_fraction":         0.5,     #    fraction of full Kelly (half-Kelly default)
+    "volatility_target_pct":  0.0,     # 2: target per-position daily-vol %; 0=off
+    "compound_sizing":        False,   # 3: scale order size with the agent's equity
+    "compound_base_equity_usd": 10000.0,  #  equity baseline for compounding ratio
+    "symbol_performance_weighting": False,  # 4: up/down-size by per-symbol realized record
+    "drawdown_throttle_pct":  0.0,     # 5: equity-drawdown % at which size is fully throttled; 0=off
+    # entry alpha (6-11)
+    "momentum_filter_days":   0,       # 6: only buy if price > N-day SMA; 0=off
+    "mean_reversion_rsi_max": 0.0,     # 7: only buy if RSI(14) <= this; 0=off
+    "relative_strength_filter": False, # 8: only buy names outperforming SPY over the lookback
+    "relative_strength_lookback_days": 20,
+    "max_book_correlation":   0.0,     # 9: block a buy whose avg corr to the book exceeds this; 0=off
+    "earnings_blackout_days": 0,       # 10: skip buys within N days of earnings; 0=off
+    "max_sector_weight_pct":  0.0,     # 11: cap any one GICS sector's % of book; 0=off
+    # exit intelligence (12-15)
+    "max_holding_days":       0,       # 12: force-exit a position older than N days; 0=off
+    "profit_ratchet_pct":     0.0,     # 13: once up this %, lock in a floor gain; 0=off
+    "profit_ratchet_lock_pct": 0.0,    #     floor gain % the ratchet protects
+    "tp_ladder":              False,   # 14: scale out in thirds at take_profit_pct, 1.5x, 2x
+    "atr_stop_mult":          0.0,     # 15: stop distance = mult x ATR(14); 0=off
+    "atr_period":             14,
+    # adaptive brain (16-20)
+    "adaptive_thresholds":    False,   # 16: nudge buy/sell thresholds from recent realized hit-rate
+    "regime_adaptive":        False,   # 17: switch threshold/size profile on bull/bear/chop regime
+    "pyramiding":             False,   # 18: allow adding to a winning position
+    "pyramid_max_adds":       2,       #     max additional adds per position
+    "pyramid_min_gain_pct":   3.0,     #     position must be up this % to pyramid
+    "signal_scorecard":       False,   # 19: track per-signal realized accuracy (analytics/adaptive)
+    "opportunity_radar":      False,   # 20: rank the scan universe, trade only the top-K
+    "opportunity_radar_top_k": 5,
+    # autonomous operation (21-25)
+    "auto_run_enabled":       False,   # 21: run cycles automatically during market hours
+    "auto_run_interval_min":  30,      #     minutes between automatic cycles
+    "health_autohalt":        False,   # 22: self-halt on fill-rate collapse / divergence / unknown orders
+    "auto_preset_escalation": False,   # 23: auto conservative<->moderate<->aggressive on performance
+    "daily_reflection":       False,   # 24: write an end-of-day self-review journal entry
+    "premarket_briefing":     False,   # 25: build a pre-market ranked opportunity briefing
 }
 
 _BOOL_KEYS = {"trading_enabled", "live_trading_enabled", "robinhood_enabled",
               "auto_approve_paper", "use_llm_synthesis", "allow_any_symbol",
-              "conviction_sizing", "dry_run", "notify_fills"}
+              "conviction_sizing", "dry_run", "notify_fills",
+              # 100x layer
+              "kelly_sizing", "compound_sizing", "symbol_performance_weighting",
+              "relative_strength_filter", "tp_ladder", "adaptive_thresholds",
+              "regime_adaptive", "pyramiding", "signal_scorecard",
+              "opportunity_radar", "auto_run_enabled", "health_autohalt",
+              "auto_preset_escalation", "daily_reflection", "premarket_briefing"}
 _LIST_KEYS = {"symbol_allowlist", "session_whitelist"}
 _FLOAT_KEYS = {"max_order_notional_usd", "max_daily_loss_usd",
                "paper_slippage_bps", "paper_spread_fraction", "fee_bps",
@@ -86,11 +132,23 @@ _FLOAT_KEYS = {"max_order_notional_usd", "max_daily_loss_usd",
                "order_notional_target_usd",
                "min_order_notional_usd", "entry_limit_offset_bps",
                "take_profit_pct", "stop_loss_pct", "trailing_stop_pct",
-               "max_symbol_weight_pct", "max_slippage_bps", "risk_off_vix"}
+               "max_symbol_weight_pct", "max_slippage_bps", "risk_off_vix",
+               # 100x layer
+               "kelly_fraction", "volatility_target_pct",
+               "compound_base_equity_usd", "drawdown_throttle_pct",
+               "mean_reversion_rsi_max", "max_book_correlation",
+               "max_sector_weight_pct", "profit_ratchet_pct",
+               "profit_ratchet_lock_pct", "atr_stop_mult",
+               "pyramid_min_gain_pct"}
 _INT_KEYS = {"max_trades_per_day", "forecast_horizon_days", "scan_universe_max",
              "order_ttl_cycles", "exit_cooldown_min", "max_open_positions",
              "max_trades_per_symbol_per_day", "trade_skip_open_min",
-             "trade_skip_close_min"}
+             "trade_skip_close_min",
+             # 100x layer
+             "momentum_filter_days", "relative_strength_lookback_days",
+             "earnings_blackout_days", "max_holding_days", "atr_period",
+             "pyramid_max_adds", "opportunity_radar_top_k",
+             "auto_run_interval_min"}
 _STR_KEYS = {"daily_loss_basis", "halt_rearm", "default_broker",
              "entry_order_type"}
 
@@ -125,7 +183,10 @@ def _coerce_bool(v: Any) -> bool:
     return str(v).strip().lower() in ("1", "true", "yes", "on")
 
 
-def _coerce_list(v: Any) -> List[str]:
+def _coerce_list(v: Any, upper: bool = True) -> List[str]:
+    """Normalize a value into a de-duped list of strings. `upper` uppercases
+    each entry (correct for ticker symbols); session names must use upper=False
+    so the persisted value stays case-consistent with _TRADABLE_SESSIONS."""
     if isinstance(v, list):
         items = v
     else:
@@ -139,15 +200,34 @@ def _coerce_list(v: Any) -> List[str]:
             items = [x for x in s.replace(",", " ").split() if x]
     out: List[str] = []
     for it in items:
-        t = str(it).strip().upper()
+        t = str(it).strip()
+        t = t.upper() if upper else t.lower()
         if t and t not in out:
             out.append(t)
     return out
 
 
+import re as _re
+
+# A number with optional sign, optional '$', and commas ONLY as proper
+# thousands separators (e.g. 1,234,567.89). '1,2' / '12,5' / '1,2,3' do NOT
+# match and fall back to the safe default rather than being silently
+# re-interpreted as a larger value — critical for cap inputs.
+_THOUSANDS_RE = _re.compile(r"^[+-]?\$?(\d{1,3}(,\d{3})+|\d+)(\.\d+)?$")
+
+
 def _coerce_float(v: Any, default: float = 0.0) -> float:
+    if isinstance(v, (int, float)) and not isinstance(v, bool):
+        f = float(v)
+        return f if f == f and f not in (float("inf"), float("-inf")) else default
+    s = str(v).strip()
     try:
-        f = float(str(v).replace(",", "").replace("$", "").strip())
+        if "," in s:
+            # commas allowed only as well-formed thousands separators
+            if not _THOUSANDS_RE.match(s):
+                return default
+            s = s.replace(",", "")
+        f = float(s.replace("$", ""))
         return f if f == f and f not in (float("inf"), float("-inf")) else default
     except Exception:
         return default
@@ -169,11 +249,13 @@ def get_config() -> Dict[str, Any]:
         if key in _BOOL_KEYS:
             cfg[key] = _coerce_bool(val)
         elif key in _LIST_KEYS:
-            cfg[key] = _coerce_list(val)
+            cfg[key] = _coerce_list(val, upper=(key != "session_whitelist"))
         elif key in _FLOAT_KEYS:
             cfg[key] = _coerce_float(val, DEFAULTS[key])
         elif key in _INT_KEYS:
-            cfg[key] = int(_coerce_float(val, DEFAULTS[key]))
+            # round (not truncate): a fractional '0.6' must not silently collapse
+            # to 0 and disable a guard the operator believed they enabled.
+            cfg[key] = int(round(_coerce_float(val, DEFAULTS[key])))
         else:
             cfg[key] = str(val)
     # sanitize enums (an out-of-band stored value must not weaken the gate)
@@ -181,36 +263,70 @@ def get_config() -> Dict[str, Any]:
         cfg["daily_loss_basis"] = "realized_plus_unrealized"
     if cfg["halt_rearm"] not in _VALID_REARM:
         cfg["halt_rearm"] = "manual"
-    if str(cfg["default_broker"]).lower() not in _valid_brokers():
+    if str(cfg["default_broker"]).lower() not in {b.lower() for b in _valid_brokers()}:
         cfg["default_broker"] = "paper"   # unknown venue => safe internal paper
     if str(cfg.get("entry_order_type")).lower() not in ("market", "limit"):
         cfg["entry_order_type"] = "market"
     cfg["session_whitelist"] = [s.lower() for s in cfg["session_whitelist"]
                                 if s.lower() in _TRADABLE_SESSIONS] or ["regular"]
     # numeric guards: caps/counts can never be negative; probs clamp to [0,1].
+    # A negative is an invalid/typo'd value — reset it to the DEFAULT rather than
+    # to 0.0. For protective limits where 0 means 'disabled' (e.g. max_slippage_bps,
+    # take_profit_pct), forcing 0.0 would silently turn the guard OFF; resetting to
+    # the default preserves the intended posture instead of weakening it.
     for k in _FLOAT_KEYS:
         if cfg.get(k, 0) < 0:
-            cfg[k] = 0.0
+            cfg[k] = float(DEFAULTS[k])
     for k in _INT_KEYS:
         if cfg.get(k, 0) < 0:
-            cfg[k] = 0
+            cfg[k] = int(DEFAULTS[k])
     if cfg.get("scan_universe_max", 0) < 1:
         cfg["scan_universe_max"] = 1
     for k in _PROB_KEYS:
         v = cfg.get(k, 0.5)
         cfg[k] = min(1.0, max(0.0, v))
+    # Gate sanity: buy threshold must sit at/above the sell threshold. An inverted
+    # pair (buy < sell) makes almost every prob both a buy AND a sell candidate —
+    # reset both to their safe defaults so the gate can't be silently inverted.
+    if cfg["sell_prob_threshold"] > cfg["buy_prob_threshold"]:
+        cfg["buy_prob_threshold"] = float(DEFAULTS["buy_prob_threshold"])
+        cfg["sell_prob_threshold"] = float(DEFAULTS["sell_prob_threshold"])
     return cfg
 
 
 def _serialize(key: str, value: Any) -> str:
+    # Validate/clamp to the SAME rules get_config applies on read, so the
+    # persisted setting is never out-of-range or an invalid enum/session. This
+    # keeps the round-trip lossless and protects any direct reader of the raw
+    # setting (get_config still re-sanitizes defensively on read).
     if key in _BOOL_KEYS:
         return "true" if _coerce_bool(value) else "false"
     if key in _LIST_KEYS:
-        return json.dumps(_coerce_list(value))
+        items = _coerce_list(value, upper=(key != "session_whitelist"))
+        if key == "session_whitelist":
+            items = [s for s in items if s in _TRADABLE_SESSIONS] or ["regular"]
+        return json.dumps(items)
     if key in _FLOAT_KEYS:
-        return str(_coerce_float(value, DEFAULTS[key]))
+        f = _coerce_float(value, DEFAULTS[key])
+        if f < 0:
+            f = float(DEFAULTS[key])
+        if key in _PROB_KEYS:
+            f = min(1.0, max(0.0, f))
+        return str(f)
     if key in _INT_KEYS:
-        return str(int(_coerce_float(value, DEFAULTS[key])))
+        i = int(round(_coerce_float(value, DEFAULTS[key])))
+        if i < 0:
+            i = int(DEFAULTS[key])
+        return str(i)
+    if key == "daily_loss_basis" and str(value) not in _VALID_LOSS_BASIS:
+        return "realized_plus_unrealized"
+    if key == "halt_rearm" and str(value) not in _VALID_REARM:
+        return "manual"
+    if key == "entry_order_type" and str(value).lower() not in ("market", "limit"):
+        return "market"
+    if key == "default_broker" and \
+            str(value).lower() not in {b.lower() for b in _valid_brokers()}:
+        return "paper"
     return str(value)
 
 
@@ -262,7 +378,14 @@ PRESETS: Dict[str, Dict[str, Any]] = {
 
 def apply_preset(name: str) -> Optional[Dict[str, Any]]:
     """Apply a risk/strategy preset. Returns the full config, or None if the
-    preset name is unknown."""
+    preset name is unknown.
+
+    NOTE: presets are ADDITIVE OVERLAYS — they set only the keys listed in
+    PRESETS and leave every other tunable (incl. advanced 100x guards such as
+    max_book_correlation, atr_stop_mult, kelly_sizing) at its current value.
+    Switching presets therefore does NOT reset those untouched guards; the
+    operator manages them explicitly. This is deliberate so a preset switch can
+    never silently weaken a guard the operator set by hand."""
     p = PRESETS.get(str(name or "").lower())
     if not p:
         return None

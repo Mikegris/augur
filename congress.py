@@ -6,6 +6,7 @@ House Financial Disclosure website to extract real stock trades.
 
 import re
 import io
+import time
 import zipfile
 import logging
 import threading
@@ -55,8 +56,14 @@ _PDF_PARSE_GATE = threading.BoundedSemaphore(2)
 # congress permanently. `hung` is kept only as telemetry. Any successful
 # parse resets the streak.
 _BUSY_TRIP = 5
+# Time-based half-open: once the breaker has been open this long, allow a
+# single retry by clearing the streak. Without this, if every parse leaks its
+# gate permits no parse can ever succeed, busy_streak never resets, and the
+# breaker stays open for the life of the process — blanking Congress until a
+# restart. The half-open window lets it periodically retry and self-heal.
+_BREAKER_HALFOPEN_S = 300
 _hung_lock = threading.Lock()
-_breaker = {"hung": 0, "busy_streak": 0}
+_breaker = {"hung": 0, "busy_streak": 0, "tripped_at": 0.0}
 
 
 def _note_hung_parse():
@@ -67,16 +74,27 @@ def _note_hung_parse():
 def _note_gate_busy():
     with _hung_lock:
         _breaker["busy_streak"] += 1
+        if _breaker["busy_streak"] == _BUSY_TRIP:
+            _breaker["tripped_at"] = time.time()
 
 
 def _note_parse_ok():
     with _hung_lock:
         _breaker["busy_streak"] = 0
+        _breaker["tripped_at"] = 0.0
 
 
 def _parse_circuit_open():
     with _hung_lock:
-        return _breaker["busy_streak"] >= _BUSY_TRIP
+        if _breaker["busy_streak"] < _BUSY_TRIP:
+            return False
+        # Half-open: after the cooldown, clear the streak so the next parse is
+        # attempted. If it busies out again the breaker simply re-trips.
+        if (time.time() - _breaker["tripped_at"]) >= _BREAKER_HALFOPEN_S:
+            _breaker["busy_streak"] = 0
+            _breaker["tripped_at"] = 0.0
+            return False
+        return True
 
 # Negative-result TTL: timeouts, parse failures, 404s and legitimately
 # trade-less PTRs were never cached, so every sweep re-downloaded and

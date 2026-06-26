@@ -184,17 +184,25 @@ def prob_of_target(
     # is also flat-out wrong for DOWNSIDE targets (a portfolio almost certain
     # to terminate above a low target still has high touch probability, not a
     # small multiple of a tiny terminal prob).
+    # Clamp once and reuse so the reported horizon matches the sim that ran.
+    hd = int(max(1, min(horizon_days, _MAX_HORIZON)))
+    np_clamped = int(max(100, min(n_paths, _MAX_PATHS)))
     clean = _clean_holdings(holdings)
     if not clean:
-        sim = _empty_response(holdings, horizon_days, method, n_paths,
+        sim = _empty_response(holdings, hd, method, np_clamped,
                               reason="No valid holdings supplied")
     else:
-        sim = _simulate_uncached(clean, int(max(100, min(n_paths, _MAX_PATHS))),
-                                 int(max(1, min(horizon_days, _MAX_HORIZON))),
+        sim = _simulate_uncached(clean, np_clamped, hd,
                                  (method or "historical_bootstrap").lower(), seed)
     initial_nav = sim.get("initial_nav", 0.0) or 0.0
     target_nav = float(target_nav)
     paths = sim.pop("_paths", None)
+    # prob_touch from real paths is a discrete-daily approximation (intraday /
+    # inter-step crossings aren't modeled, so it can slightly understate the
+    # true touch probability). In the empty/failed-sim fallback it collapses
+    # onto the terminal probability and is only a rough Normal approximation;
+    # flag that case so consumers don't treat prob_touch as exact.
+    prob_touch_approximate = False
     if paths is None or getattr(paths, "size", 0) == 0:
         # No paths (empty/failed sim) — approximate via the terminal
         # distribution Normal fit. Touch is then unknowable; report terminal.
@@ -204,6 +212,7 @@ def prob_of_target(
         z = (target_nav - mu) / sd if sd else 0.0
         prob_term = float(0.5 * math.erfc(z / math.sqrt(2)))
         prob_touch = prob_term
+        prob_touch_approximate = True
     else:
         terminal = paths[:, -1]
         # Direction matters: an UP-target is "ever ≥ target", a DOWN-target
@@ -219,11 +228,12 @@ def prob_of_target(
     return {
         "target_nav": round(target_nav, 2),
         "initial_nav": round(initial_nav, 2),
-        "horizon_days": horizon_days,
-        "n_paths": sim.get("n_paths", n_paths),
+        "horizon_days": hd,
+        "n_paths": sim.get("n_paths", np_clamped),
         "method": sim.get("method", method),
         "prob_terminal_ge_target": round(prob_term, 4),
         "prob_touch_target": round(prob_touch, 4),
+        "prob_touch_approximate": prob_touch_approximate,
         "implied_return_pct": round(implied_return_pct, 2) if implied_return_pct is not None else None,
         "as_of": sim.get("as_of"),
     }
@@ -503,6 +513,10 @@ def _simulate_uncached(clean: List[Dict[str, Any]], n_paths: int,
                        seed: Optional[int]) -> Dict[str, Any]:
     """Actual heavy lifting — separated so cache_store.coalesce can wrap it."""
     t0 = time.time()
+    # Guarantee _summarize's terminal statistics (std ddof=1, percentiles) are
+    # always well-defined regardless of caller path: need at least 2 paths.
+    n_paths = int(max(2, min(n_paths, _MAX_PATHS)))
+    horizon_days = int(max(1, min(horizon_days, _MAX_HORIZON)))
     symbols = [h["symbol"] for h in clean]
     R, kept, dropped = _build_returns_matrix(symbols)
 
@@ -530,8 +544,24 @@ def _simulate_uncached(clean: List[Dict[str, Any]], n_paths: int,
 
     # Build weight vector in the same order as the columns of R.
     mv_by_sym = {h["symbol"]: h["market_value"] for h in surviving}
-    weights = np.array([mv_by_sym.get(s, 0.0) / surviving_mv for s in kept],
-                       dtype=np.float64)
+    raw_mv = np.array([mv_by_sym.get(s, 0.0) for s in kept], dtype=np.float64)
+    # Surface silent weight loss: a kept column that doesn't resolve to a
+    # positive market value (e.g. a name mangled by pandas column coercion)
+    # would otherwise get 0.0 weight and vanish from the portfolio without
+    # ever appearing in dropped_symbols. Record + renormalize over the rest.
+    zero_w = [kept[i] for i in range(len(kept)) if raw_mv[i] <= 0.0]
+    if zero_w:
+        for s in zero_w:
+            if s not in dropped:
+                dropped.append(s)
+    eff_mv = float(raw_mv.sum())
+    if eff_mv <= 0:
+        resp = _empty_response(clean, horizon_days, method, n_paths,
+                               reason="All holdings dropped due to missing history")
+        resp["dropped_symbols"] = dropped
+        resp["initial_nav"] = round(initial_nav, 2)
+        return resp
+    weights = raw_mv / eff_mv
 
     rng = np.random.default_rng(seed) if seed is not None else np.random.default_rng()
 

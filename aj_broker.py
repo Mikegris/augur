@@ -106,8 +106,11 @@ class PaperBroker(BrokerClient):
     def _fees(self, notional: float, asset_type: str) -> float:
         cfg = aj_config.get_config()
         bps = cfg.get("crypto_fee_bps") if asset_type == "crypto" else cfg.get("fee_bps")
+        # Clamp bps to >=0 so a misconfigured negative fee_bps cannot silently
+        # zero out (or refund) fees — fail-safe toward charging, never free trades.
+        bps = max(0.0, float(bps or 0))
         fee = max(float(cfg.get("min_fee_usd") or 0),
-                  abs(notional) * float(bps or 0) / 1e4)
+                  abs(notional) * bps / 1e4)
         return aj_db.money(fee)
 
     def _adverse_bps(self) -> float:

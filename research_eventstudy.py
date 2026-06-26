@@ -350,10 +350,15 @@ def _summary_stats(curves: np.ndarray, dates: List[str],
     else:
         avg_T0 = float(np.nanmean(curves[:, t0])) * 100.0
 
-    # Post-event 5d performance: T+5 vs T0
+    # Post-event 5d performance: T+5 vs T0. The +5 horizon is only fully
+    # observed when the right window reaches T+5 (window_days >= 5). For
+    # smaller windows min() would clamp post_idx to the last column and the
+    # "5d" fields would silently report a shorter horizon — so flag those as
+    # unavailable (None) rather than mislabel them.
+    full_post5 = (t0 + 5) <= (curves.shape[1] - 1)
     post_idx = min(t0 + 5, curves.shape[1] - 1)
     rel = curves[:, post_idx] - curves[:, t0]
-    avg_post5 = float(np.nanmean(rel)) * 100.0
+    avg_post5 = float(np.nanmean(rel)) * 100.0 if full_post5 else None
     # NaN-aware hit rate. `np.mean(rel > 0)` treats `nan > 0` as False, so
     # any windows with missing data depress the rate. Filter NaNs first so
     # the rate reflects only events with usable post-event returns.
@@ -367,10 +372,15 @@ def _summary_stats(curves: np.ndarray, dates: List[str],
     # PER-EPISODE move from just-before-event (T0-1) through T+5, so each
     # episode's magnitude counts before any sign cancellation.
     base_idx = t0 - 1 if t0 >= 1 else t0
-    per_episode_total = (1.0 + curves[:, post_idx]) / (1.0 + curves[:, base_idx]) - 1.0
-    finite_total = per_episode_total[np.isfinite(per_episode_total)]
-    avg_abs_move = (float(np.mean(np.abs(finite_total))) * 100.0
-                    if finite_total.size else None)
+    if full_post5:
+        per_episode_total = (1.0 + curves[:, post_idx]) / (1.0 + curves[:, base_idx]) - 1.0
+        finite_total = per_episode_total[np.isfinite(per_episode_total)]
+        avg_abs_move = (float(np.mean(np.abs(finite_total))) * 100.0
+                        if finite_total.size else None)
+    else:
+        # T+5 not fully observed (window_days < 5) — don't report a magnitude
+        # measured over a silently shortened horizon.
+        avg_abs_move = None
 
     # Best/worst individual end-of-window cumulative
     end_rets = curves[:, -1]
@@ -384,7 +394,7 @@ def _summary_stats(curves: np.ndarray, dates: List[str],
 
     return {
         "avg_T0_return_pct": round(avg_T0, 3),
-        "avg_post_event_5d_pct": round(avg_post5, 3),
+        "avg_post_event_5d_pct": round(avg_post5, 3) if avg_post5 is not None else None,
         "avg_abs_event_move_pct": round(avg_abs_move, 3) if avg_abs_move is not None else None,
         "hit_rate_positive_post": round(hit, 3),
         "best_window": best,
@@ -492,9 +502,15 @@ def _compute(symbol: str, event_type: str, window_days: int,
     # Abnormal return: symbol avg curve minus benchmark avg curve. When the
     # benchmark history is missing (e.g. SPY rate-limited), surface NaNs so
     # the UI can hide the band rather than show a misleading zero-line.
-    if has_bench and np.any(np.isfinite(bench_arr)):
-        bench_avg = np.nanmean(bench_arr, axis=0)
-        abnormal = avg - bench_avg
+    # Compute BOTH averages over the SAME subset of events (those that have a
+    # benchmark window) so abnormal = sym_avg - bench_avg is a like-for-like
+    # difference rather than differencing two non-matching event populations.
+    bench_mask = has_bench and np.array(
+        [np.any(np.isfinite(row)) for row in bench_arr], dtype=bool)
+    if has_bench and np.any(bench_mask):
+        bench_avg = np.nanmean(bench_arr[bench_mask], axis=0)
+        sym_avg_matched = np.nanmean(sym_arr[bench_mask], axis=0)
+        abnormal = sym_avg_matched - bench_avg
     else:
         abnormal = np.full_like(avg, np.nan)
 

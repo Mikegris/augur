@@ -27,15 +27,20 @@ import re
 _CRYPTO_SUFFIX = "-USD"
 
 
-def _held_qty(symbol: str) -> float:
-    """Current paper-book quantity for a symbol (0 if flat). Used to permit
-    risk-reducing sells of held positions past the allowlist."""
+def _held_qty(symbol: str) -> Optional[float]:
+    """Current paper-book quantity for a symbol (0.0 if flat, signed for
+    shorts). Returns None when the position is UNKNOWN (e.g. paper_book()
+    failed) so callers can distinguish 'flat' from 'could not determine' and
+    avoid silently blocking a legitimate risk-reducing exit. Used to permit
+    risk-reducing sells/covers of held positions past the allowlist."""
     try:
         import aj_positions
         book = aj_positions.paper_book()
-        return float((book.get("positions") or {}).get(symbol.upper(), {}).get("qty") or 0)
+        return float((book.get("positions") or {}).get(
+            (symbol or "").upper(), {}).get("qty") or 0)
     except Exception:
-        return 0.0
+        log.debug("_held_qty failed -> unknown", exc_info=True)
+        return None
 
 
 def _trading_enabled_fresh() -> bool:
@@ -76,7 +81,7 @@ def _marks(symbols: List[str]) -> Dict[str, Optional[float]]:
     for s in symbols:
         q = qmap.get(s) or {}
         p = q.get("price")
-        out[s] = float(p) if isinstance(p, (int, float)) and not isinstance(p, bool) and p == p and p not in (float("inf"), float("-inf")) else None
+        out[s] = float(p) if isinstance(p, (int, float)) and not isinstance(p, bool) and math.isfinite(p) and p > 0 else None
     return out
 
 
@@ -114,6 +119,22 @@ def _session_open_unrealized(current_unrealized: float) -> float:
         except Exception:
             pass
     aj_db.set_setting_raw(key, str(aj_db.money(current_unrealized)))
+    # Opportunistically prune prior ET days' snapshots so the settings table
+    # does not accumulate one row per trading day forever (which also bloats
+    # every get_settings() refresh that shallow-copies all rows).
+    try:
+        with db._write_lock:
+            conn = db.get_conn()
+            conn.execute(
+                "DELETE FROM settings WHERE key LIKE '__aj_unreal_open_%' "
+                "AND key <> ?", (key,))
+            conn.commit()
+        try:
+            db._invalidate_settings_cache()
+        except Exception:
+            pass
+    except Exception:
+        log.debug("unreal_open prune failed", exc_info=True)
     return aj_db.money(current_unrealized)
 
 
@@ -141,16 +162,16 @@ def compute_day_pnl(basis: Optional[str] = None) -> Dict[str, Any]:
     unreal = 0.0
     try:
         positions = book.get("positions") or {}
-        syms = list(positions.keys())
-        marks = _marks(syms)
+        # Resolve each held symbol to its quote-convention symbol FIRST (e.g.
+        # crypto 'BTC' -> 'BTC-USD') so the batch quote keys on the correct
+        # market and a bare crypto ticker never picks up an equity quote.
+        qsyms = {sym: _quote_symbol(sym, p.get("asset_type") or "")
+                 for sym, p in positions.items()}
+        marks = _marks(list(qsyms.values()))
         for sym, p in positions.items():
             qty = float(p.get("qty") or 0)
             avg = float(p.get("avg_cost") or 0)
-            mark = marks.get(sym)
-            if mark is None:
-                qsym = _quote_symbol(sym, p.get("asset_type") or "")
-                if qsym != sym:
-                    mark = _marks([qsym]).get(qsym)
+            mark = marks.get(qsyms[sym])
             if mark is None:
                 warnings.append("no quote for {} — contribution 0".format(sym))
                 continue
@@ -174,12 +195,39 @@ def compute_day_pnl(basis: Optional[str] = None) -> Dict[str, Any]:
 
 # ── helpers for the gate ──────────────────────────────────────────────────────
 
+def _et_day_bounds_utc() -> tuple:
+    """[start, end) ISO-UTC instants for the current ET trading date, so the
+    trades/day cap aligns with the ET session rather than resetting at 00:00
+    UTC (which lands mid-afterhours ET and effectively doubles the cap)."""
+    try:
+        from datetime import datetime, time, timedelta
+        from zoneinfo import ZoneInfo
+        et = ZoneInfo("America/New_York")
+        now_et = aj_db.utc_now().astimezone(et)
+        start_et = datetime.combine(now_et.date(), time.min, tzinfo=et)
+        end_et = start_et + timedelta(days=1)
+        from datetime import timezone
+        return (start_et.astimezone(timezone.utc).isoformat(),
+                end_et.astimezone(timezone.utc).isoformat())
+    except Exception:
+        return ("", "")
+
+
 def _trades_today() -> int:
     try:
-        rows = aj_db.query(
-            "SELECT COUNT(*) AS n FROM aj_orders "
-            "WHERE substr(COALESCE(submitted_at, created_at),1,10) = ? "
-            "AND state NOT IN ('rejected','canceled')", (_today(),))
+        start_utc, end_utc = _et_day_bounds_utc()
+        if start_utc and end_utc:
+            rows = aj_db.query(
+                "SELECT COUNT(*) AS n FROM aj_orders "
+                "WHERE COALESCE(submitted_at, created_at) >= ? "
+                "AND COALESCE(submitted_at, created_at) < ? "
+                "AND state NOT IN ('rejected','canceled')", (start_utc, end_utc))
+        else:
+            # Fallback to the UTC-date slice if tz resolution is unavailable.
+            rows = aj_db.query(
+                "SELECT COUNT(*) AS n FROM aj_orders "
+                "WHERE substr(COALESCE(submitted_at, created_at),1,10) = ? "
+                "AND state NOT IN ('rejected','canceled')", (_today(),))
         return int(rows[0]["n"]) if rows else 0
     except Exception:
         log.exception("_trades_today failed")
@@ -220,10 +268,16 @@ def _ips_block_reason(symbol: str, side: str, qty: float, price: float,
         def _breaches(res):
             return [v for v in (res.get("violations") or [])
                     if v.get("severity") == "breach"]
-        nb, na = len(_breaches(before)), len(_breaches(after))
-        if na > nb:
-            new = _breaches(after)[-1] if _breaches(after) else {}
-            return "IPS: {}".format(new.get("detail") or "post-trade rule breach")
+
+        def _key(v):
+            return (v.get("kind"), v.get("detail"))
+        # Block if the trade INTRODUCES any breach not already present — by
+        # identity, not count. A pure count comparison misses a trade that
+        # clears one pre-existing breach while creating a different one.
+        before_keys = {_key(v) for v in _breaches(before)}
+        new_breaches = [v for v in _breaches(after) if _key(v) not in before_keys]
+        if new_breaches:
+            return "IPS: {}".format(new_breaches[-1].get("detail") or "post-trade rule breach")
         return None
     except Exception:
         log.exception("_ips_block_reason failed -> block (fail-closed)")
@@ -237,10 +291,11 @@ def _project_pulse(symbol: str, side: str, qty: float, price: float,
     against the projected agent book (ADR-001 — not the real portfolio)."""
     import aj_positions
     book = aj_positions.paper_book()
+    positions = book.get("positions") or {}
     sym_u = symbol.upper()
     rows: Dict[str, Dict[str, Any]] = {}
-    marks = _marks(list(book["positions"].keys()))
-    for s, p in book["positions"].items():
+    marks = _marks(list(positions.keys()))
+    for s, p in positions.items():
         mark = marks.get(s) or float(p.get("avg_cost") or 0)
         rows[s] = {"symbol": s, "asset_type": p.get("asset_type") or "stock",
                    "shares": float(p.get("qty") or 0), "mark": mark}
@@ -271,7 +326,10 @@ def _project_pulse(symbol: str, side: str, qty: float, price: float,
 # ── halt / kill / re-arm (§11.3 step 7, §11.4) ───────────────────────────────
 
 def is_halted() -> bool:
-    return not bool(aj_config.get_config().get("trading_enabled"))
+    # Uncached read so a kill/halt is reflected immediately, matching the gate's
+    # _trading_enabled_fresh() view (the 5s settings cache would otherwise report
+    # 'not halted' for up to 5s after a kill_switch).
+    return not _trading_enabled_fresh()
 
 
 def _emit_alert(level: str, msg: str) -> None:
@@ -340,9 +398,12 @@ def rearm(actor: str = "human") -> Dict[str, Any]:
     current session to be tradable."""
     cfg = aj_config.get_config()
     if cfg.get("halt_rearm") == "session_open":
+        wl = cfg.get("session_whitelist", ["regular"])
         sess = aj_db.market_session()
-        if sess not in cfg.get("session_whitelist", ["regular"]):
-            return {"ok": False, "reason": "session {} not tradable".format(sess)}
+        if sess not in wl:
+            return {"ok": False, "reason":
+                    "session {} not in session_whitelist {} — re-arm allowed "
+                    "only during whitelisted sessions".format(sess, list(wl))}
     aj_config.set_config({"trading_enabled": True})
     aj_db.insert("aj_risk_events", created_at=aj_db.utc_now_iso(),
                  proposal_id=None, decision="rearm", reason="rearm by " + actor,
@@ -403,6 +464,22 @@ def evaluate(proposal: Dict[str, Any]) -> RiskDecision:
             _record("block", "session {} not whitelisted".format(session), caps, None, pid)
             return RiskDecision(decision="block", reason="session {} not tradable".format(session))
 
+        # Step 2b — daily-loss HALT, evaluated EARLY so an account already in
+        # breach halts regardless of THIS proposal's specifics (otherwise a
+        # proposal blocked by an unrelated later gate would never reach the
+        # halt check and the breach would go un-halted). Only halts on a real
+        # breach with a positive cap; the "no cap configured" case is handled
+        # as a per-order block in step 7 (it must not disable the master switch).
+        pnl = compute_day_pnl(cfg.get("daily_loss_basis"))
+        caps["day_pnl"] = pnl
+        max_loss = aj_db.money(cfg.get("max_daily_loss_usd") or 0)
+        if max_loss > 0 and pnl["day_pnl"] <= -max_loss:
+            halt("daily loss breach: day P&L ${:,.2f} vs limit ${:,.2f}".format(
+                pnl["day_pnl"], -max_loss), day_pnl=pnl["day_pnl"], proposal_id=pid, caps=caps)
+            return RiskDecision(decision="halt",
+                                reason="daily loss limit hit (day P&L ${:,.2f})".format(pnl["day_pnl"]),
+                                day_pnl=pnl["day_pnl"])
+
         # Step 3 — allowlist (EMPTY => all blocked) UNLESS open-universe mode is
         # explicitly enabled. In open-universe mode the allowlist gate is
         # bypassed, but the symbol must still be syntactically valid and
@@ -410,11 +487,21 @@ def evaluate(proposal: Dict[str, Any]) -> RiskDecision:
         # daily-loss, IPS) still binds — this is a deliberate, opt-in loosening
         # of one rail, never a removal of the gate.
         allow = cfg.get("symbol_allowlist") or []
-        # A SELL of a currently-held position is risk-reducing — always permit
-        # it past the allowlist (you can always close what you hold; exits and
-        # stop-losses must never be blocked by a since-narrowed allowlist).
+        # A SELL of a currently-held LONG (or a BUY-to-cover of a held SHORT) is
+        # risk-reducing — always permit it past the allowlist (you can always
+        # close what you hold; exits and stop-losses must never be blocked by a
+        # since-narrowed allowlist).
         held_now = _held_qty(symbol)
-        closing_sell = side == "sell" and held_now > 0
+        if held_now is None:
+            # Position UNKNOWN (paper_book unavailable): do NOT silently block a
+            # potential exit. A SELL can only reduce risk, so permit it past the
+            # allowlist; all other caps still bind below. A BUY is NOT permitted
+            # on unknown state — it could open a new long (risk-increasing), so
+            # a covering BUY still requires a confirmed short below.
+            closing_sell = side == "sell"
+        else:
+            closing_sell = (side == "sell" and held_now > 0) or \
+                           (side == "buy" and held_now < 0)
         if not cfg.get("allow_any_symbol") and not closing_sell:
             if symbol not in allow:
                 _record("block", "symbol not in allowlist", caps, None, pid)
@@ -425,14 +512,27 @@ def evaluate(proposal: Dict[str, Any]) -> RiskDecision:
                 return RiskDecision(decision="block", reason="invalid symbol {}".format(symbol))
 
         # price + notional
-        price = _order_price(symbol, order_type, limit_price)
+        try:
+            import aj_positions
+            _atype = aj_positions.infer_asset_type(symbol)
+        except Exception:
+            _atype = ""
+        price = _order_price(symbol, order_type, limit_price, _atype)
         if price is None or price <= 0:
             _record("block", "no usable price", caps, None, pid)
             return RiskDecision(decision="block", reason="no quote/price for {} (no trade)".format(symbol))
         if proposal.get("qty") is not None:
-            qty = float(proposal["qty"])
-        elif proposal.get("notional_usd"):
-            qty = float(proposal["notional_usd"]) / price
+            try:
+                qty = float(proposal["qty"])
+            except (TypeError, ValueError):
+                _record("block", "invalid qty", caps, None, pid)
+                return RiskDecision(decision="block", reason="invalid qty (not a number)")
+        elif proposal.get("notional_usd") is not None:
+            try:
+                qty = float(proposal["notional_usd"]) / price
+            except (TypeError, ValueError):
+                _record("block", "invalid notional", caps, None, pid)
+                return RiskDecision(decision="block", reason="invalid notional (not a number)")
         else:
             _record("block", "no qty/notional", caps, None, pid)
             return RiskDecision(decision="block", reason="proposal lacks qty and notional")
@@ -480,15 +580,18 @@ def evaluate(proposal: Dict[str, Any]) -> RiskDecision:
             _record("block", ereason, caps, None, pid)
             return RiskDecision(decision="block", reason=ereason)
 
-        # Step 7 — daily loss => HALT
-        pnl = compute_day_pnl(cfg.get("daily_loss_basis"))
-        caps["day_pnl"] = pnl
-        max_loss = aj_db.money(cfg.get("max_daily_loss_usd") or 0)
-        if not (max_loss > 0 and pnl["day_pnl"] > -max_loss):
-            halt("daily loss breach: day P&L ${:,.2f} vs limit ${:,.2f}".format(
-                pnl["day_pnl"], -max_loss), day_pnl=pnl["day_pnl"], proposal_id=pid, caps=caps)
-            return RiskDecision(decision="halt",
-                                reason="daily loss limit hit (day P&L ${:,.2f})".format(pnl["day_pnl"]),
+        # Step 7 — daily-loss cap (the breach => HALT was evaluated early in
+        # step 2b using `pnl`/`max_loss` computed above). Here we only enforce
+        # that a usable cap is configured: no cap => BLOCK this order (no trade)
+        # rather than disable the master switch.
+        if max_loss <= 0:
+            # No usable daily-loss cap configured: fail-closed by BLOCKING this
+            # order (no trade) rather than HALTing all trading + disabling the
+            # master switch — a missing cap is a config gap, not a loss breach.
+            _record("block", "no daily-loss cap configured", caps,
+                    pnl["day_pnl"], pid)
+            return RiskDecision(decision="block",
+                                reason="no daily-loss cap configured (no trade)",
                                 day_pnl=pnl["day_pnl"])
 
         # Step 8 — force paper unless live explicitly enabled

@@ -344,8 +344,12 @@ def check_portfolio(pulse: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     limit = by_kind.get("max_crypto_pct")
     if limit is not None:
         try:
-            csum = sum(h.get("weight_pct") or 0 for h in holdings
-                       if h.get("asset_type") == "crypto")
+            # Mirror the max_weight_pct coercion: a bool weight_pct (int
+            # subclass) or a non-numeric string must neither add 1 nor raise
+            # inside sum() and silently void the whole crypto check.
+            csum = sum(w for h in holdings if h.get("asset_type") == "crypto"
+                       for w in [h.get("weight_pct")]
+                       if isinstance(w, (int, float)) and not isinstance(w, bool))
             if csum > limit:
                 violations.append({
                     "kind": "max_crypto_pct",
@@ -384,10 +388,8 @@ def check_proposal(tool: Any, args: Any) -> Optional[str]:
     when the args carry an amount-ish numeric field; tools without one (and
     every other rule kind) pass silently."""
     try:
-        cap = None
-        for r in get_rules():
-            if r.get("kind") == "max_single_buy_usd":
-                cap = float(r["value"])
+        cap = next((float(r["value"]) for r in get_rules()
+                    if r.get("kind") == "max_single_buy_usd"), None)
         if cap is None or not isinstance(args, dict):
             return None
         for field in _AMOUNT_FIELDS:

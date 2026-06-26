@@ -38,6 +38,25 @@ def infer_asset_type(symbol: str) -> str:
     return "stock"
 
 
+def _et_date(dt) -> Optional[str]:
+    """ET (America/New_York) calendar date for a tz-aware/naive datetime.
+
+    Realized-today must share the ET trading-day boundary used by
+    aj_risk._session_date / the session-open unrealized baseline; slicing the
+    raw UTC ISO string instead rolls 'today' over at 00:00 UTC (~7-8pm ET),
+    splitting one ET session across two buckets. Falls back to UTC date."""
+    if dt is None:
+        return None
+    try:
+        from zoneinfo import ZoneInfo
+        return dt.astimezone(ZoneInfo("America/New_York")).strftime("%Y-%m-%d")
+    except Exception:
+        try:
+            return dt.strftime("%Y-%m-%d")
+        except Exception:
+            return None
+
+
 def paper_book(mode: str = "paper") -> Dict[str, Any]:
     """Net aj_fills into FIFO positions + realized P&L.
 
@@ -46,7 +65,7 @@ def paper_book(mode: str = "paper") -> Dict[str, Any]:
       realized_total, realized_today, fees_total, fees_today
     }
     """
-    today = aj_db.utc_now().strftime("%Y-%m-%d")
+    today = _et_date(aj_db.utc_now())
     lots: Dict[str, deque] = defaultdict(deque)   # SYM -> deque([qty, price])
     realized_total = 0.0
     realized_today = 0.0
@@ -68,7 +87,7 @@ def paper_book(mode: str = "paper") -> Dict[str, Any]:
         qty = float(r.get("qty") or 0)
         price = float(r.get("price") or 0)
         fees = float(r.get("fees") or 0)
-        is_today = str(r.get("filled_at") or "")[:10] == today
+        is_today = _et_date(aj_db.parse_iso(r.get("filled_at"))) == today
         realized = -fees                            # fees are realized cost
         fees_total += fees
         if is_today:
@@ -180,7 +199,11 @@ def realized_trades(mode: str = "paper") -> List[Dict[str, Any]]:
             if remaining > _EPS:
                 dq.append([-remaining, price])
         if closed_qty > _EPS:
-            net = aj_db.money(closed_pl - fees)
+            # Pro-rate the fill fee by the share that actually CLOSED, so a fill
+            # that both closes a lot and opens a new one books only the closing
+            # portion's fee against realized (the rest belongs to the new lot).
+            closed_fee = fees * (closed_qty / qty) if qty > _EPS else fees
+            net = aj_db.money(closed_pl - closed_fee)
             out.append({"symbol": sym, "side": side, "qty": closed_qty,
                         "realized": net, "price": price,
                         "filled_at": r.get("filled_at"), "win": net > 0})

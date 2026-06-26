@@ -9,6 +9,7 @@ Python 3.9 compatible (no match/case, no X | Y unions).
 
 import logging
 import re
+import threading
 import time
 from datetime import datetime, timezone
 from typing import Dict, List, Optional, Tuple
@@ -25,26 +26,32 @@ logger = logging.getLogger(__name__)
 _cache = {}       # type: Dict[str, object]
 _cache_ts = {}    # type: Dict[str, float]
 _CACHE_TTL = 3600  # 1 hour
+_cache_lock = threading.Lock()  # build_graph/assess_contagion fan out concurrently
 
 
 def _get_cached(key):
     # type: (str) -> object
-    if key in _cache and (time.time() - _cache_ts.get(key, 0)) < _CACHE_TTL:
-        return _cache[key]
-    return None
+    with _cache_lock:
+        if key in _cache and (time.time() - _cache_ts.get(key, 0)) < _CACHE_TTL:
+            return _cache[key]
+        return None
 
 
 def _set_cached(key, value):
     # type: (str, object) -> None
-    _cache[key] = value
-    _cache_ts[key] = time.time()
-    # Evict stale entries when cache grows large
-    if len(_cache) > 200:
-        cutoff = time.time() - _CACHE_TTL
-        stale = [k for k, t in _cache_ts.items() if t < cutoff]
-        for k in stale:
-            _cache.pop(k, None)
-            _cache_ts.pop(k, None)
+    with _cache_lock:
+        _cache[key] = value
+        _cache_ts[key] = time.time()
+        # Evict stale entries when cache grows large
+        if len(_cache) > 200:
+            cutoff = time.time() - _CACHE_TTL
+            # Snapshot keys before iterating so a concurrent writer can't
+            # mutate the dict mid-iteration (we hold the lock, but keep the
+            # snapshot pattern explicit and cheap).
+            stale = [k for k, t in list(_cache_ts.items()) if t < cutoff]
+            for k in stale:
+                _cache.pop(k, None)
+                _cache_ts.pop(k, None)
 
 
 # ---------------------------------------------------------------------------
@@ -139,6 +146,7 @@ KNOWN_COMPANIES = {
     "Lowe's": "LOW",
     "Disney": "DIS", "Walt Disney": "DIS",
     "Netflix": "NFLX",
+    "Snap": "SNAP", "Snap Inc": "SNAP", "Snapchat": "SNAP",
     "Spotify": "SPOT",
     # Industrials / Energy
     "Boeing": "BA",

@@ -343,7 +343,12 @@ def _options_pcr(symbol: str) -> Optional[Dict[str, Any]]:
     put_vol = sum(float(p.get("volume") or 0) for p in puts)
     if call_vol + put_vol < 100:  # too thin to read
         return None
-    pcr = (put_vol / call_vol) if call_vol > 0 else 5.0
+    if call_vol <= 0:
+        # No call volume at all: a PCR is undefined, and the old 5.0 sentinel
+        # forced a fixed -1 (max bearish) norm regardless of how little put
+        # volume there was. Skip the pair rather than emit a spurious extreme.
+        return None
+    pcr = put_vol / call_vol
     # Map PCR centered at 1.0 (parity): 0.5 → +1, 1.5 → -1.
     # We use a simple anchored-linear formula clamped to the axis.
     norm = _clamp((1.0 - pcr) / 0.5)
@@ -382,10 +387,15 @@ def _congress_net_60d(symbol: str) -> Optional[Dict[str, Any]]:
         except (ValueError, TypeError):
             continue
         ttype = "{} {}".format(t.get("txn_type") or "", t.get("txn_type_raw") or "").lower().strip()
-        if "purchase" in ttype or "buy" in ttype or ttype.startswith("p"):
+        # Branch on the RAW P/S code (mirrors synth_sectorflow/_consensus), not
+        # the combined label's first char: ttype starts with the human label
+        # ("sale s", "purchase p"), so a future label like "split"/"pending"
+        # would be miscounted by ttype.startswith("p"/"s").
+        raw = (t.get("txn_type_raw") or "").upper().strip()
+        if "purchase" in ttype or "buy" in ttype or raw.startswith("P"):
             net += amt
             n_buys += 1
-        elif "sale" in ttype or "sell" in ttype or ttype.startswith("s"):
+        elif "sale" in ttype or "sell" in ttype or raw.startswith("S"):
             net -= amt
             n_sells += 1
     if n_buys + n_sells == 0:

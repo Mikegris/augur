@@ -51,11 +51,14 @@ def update_position_state(book: Optional[Dict[str, Any]] = None) -> None:
     marks = _marks_for(list(positions.keys()))
     now = aj_db.utc_now_iso()
 
-    existing = {r["symbol"]: r for r in aj_db.query("SELECT * FROM aj_position_state")}
     with db_lock():
         conn = _conn()
+        # Read existing rows under the same lock as the writes below so the
+        # check-then-act (opened_at/peak_mark decisions) is atomic.
+        existing = {r["symbol"]: r for r in aj_db.query("SELECT * FROM aj_position_state")}
         for sym, p in positions.items():
-            mark = marks.get(sym) or float(p.get("avg_cost") or 0)
+            mark_val = marks.get(sym)
+            mark = mark_val if mark_val is not None else float(p.get("avg_cost") or 0)
             row = existing.get(sym)
             if row and row.get("opened_at"):
                 peak = max(float(row.get("peak_mark") or 0), mark)
@@ -123,34 +126,49 @@ def exit_signals(cfg: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
     tp = float(cfg.get("take_profit_pct") or 0)
     sl = float(cfg.get("stop_loss_pct") or 0)
     tr = float(cfg.get("trailing_stop_pct") or 0)
-    if tp <= 0 and sl <= 0 and tr <= 0:
-        return []
-    import aj_positions
-    book = aj_positions.paper_book()
-    positions = book.get("positions") or {}
-    marks = _marks_for(list(positions.keys()))
-    state = {r["symbol"]: r for r in aj_db.query("SELECT * FROM aj_position_state")}
     out: List[Dict[str, Any]] = []
-    for sym, p in positions.items():
-        qty = float(p.get("qty") or 0)
-        if qty <= 0:                      # only long positions exit on TP/SL here
-            continue
-        avg = float(p.get("avg_cost") or 0)
-        mark = marks.get(sym)
-        if mark is None or avg <= 0:
-            continue
-        gain_pct = (mark - avg) / avg * 100.0
-        reason = None
-        if tp > 0 and gain_pct >= tp:
-            reason = "take-profit +{:.1f}%".format(gain_pct)
-        elif sl > 0 and gain_pct <= -sl:
-            reason = "stop-loss {:.1f}%".format(gain_pct)
-        elif tr > 0:
-            peak = float((state.get(sym) or {}).get("peak_mark") or mark)
-            if peak > 0 and (peak - mark) / peak * 100.0 >= tr:
-                reason = "trailing-stop {:.1f}% off peak".format((peak - mark) / peak * 100.0)
-        if reason:
-            out.append({"symbol": sym, "qty": qty, "reason": reason, "mark": mark})
+    if tp > 0 or sl > 0 or tr > 0:        # core TP/SL/trailing (⑤⑥⑦)
+        import aj_positions
+        book = aj_positions.paper_book()
+        positions = book.get("positions") or {}
+        marks = _marks_for(list(positions.keys()))
+        state = {r["symbol"]: r for r in aj_db.query("SELECT * FROM aj_position_state")}
+        for sym, p in positions.items():
+            qty = float(p.get("qty") or 0)
+            if qty <= 0:                  # only long positions exit on TP/SL here
+                continue
+            avg = float(p.get("avg_cost") or 0)
+            mark = marks.get(sym)
+            if mark is None or avg <= 0:
+                continue
+            gain_pct = (mark - avg) / avg * 100.0
+            reason = None
+            if tp > 0 and gain_pct >= tp:
+                reason = "take-profit +{:.1f}%".format(gain_pct)
+            elif sl > 0 and gain_pct <= -sl:
+                reason = "stop-loss {:.1f}%".format(gain_pct)
+            elif tr > 0:
+                # Use an up-to-date peak: include the current mark in case the
+                # persisted peak_mark wasn't refreshed yet this cycle (else a
+                # stale low peak under-reports the drawdown and misses the stop).
+                peak = max(float((state.get(sym) or {}).get("peak_mark") or 0), mark)
+                if peak > 0 and (peak - mark) / peak * 100.0 >= tr:
+                    reason = "trailing-stop {:.1f}% off peak".format((peak - mark) / peak * 100.0)
+            if reason:
+                out.append({"symbol": sym, "qty": qty, "reason": reason, "mark": mark})
+
+    # 100x exit intelligence (time-stop · profit-ratchet · TP-ladder · ATR-stop).
+    # Merged here so they fire even when core TP/SL/trailing are off. First reason
+    # per symbol wins (a core exit already queued for a name is not double-added).
+    try:
+        import aj_alpha
+        have = {o["symbol"] for o in out}
+        for e in aj_alpha.extra_exit_signals(cfg):
+            if e.get("symbol") not in have:
+                out.append(e)
+                have.add(e["symbol"])
+    except Exception:
+        log.debug("alpha exits skipped", exc_info=True)
     return out
 
 
@@ -249,8 +267,12 @@ def enhanced_gate(symbol: str, side: str, qty: float, price: float,
         # ⑬ slippage guard (estimated adverse bps for a market order)
         smax = float(cfg.get("max_slippage_bps") or 0)
         if smax > 0:
+            # Mirror the paper fill model in aj_broker._adverse_bps so the guard's
+            # estimate tracks the real adverse-fill cost (slippage + a fraction of
+            # the nominal half-spread) rather than a hard-coded magic multiplier.
+            import aj_broker
             est = float(cfg.get("paper_slippage_bps") or 0) + \
-                0.5 * float(cfg.get("paper_spread_fraction") or 0) * 8  # nominal
+                float(cfg.get("paper_spread_fraction") or 0) * aj_broker._PAPER_SPREAD_BPS
             if str(cfg.get("entry_order_type") or "market").lower() == "market" and est > smax:
                 return "estimated slippage {:.1f}bps over cap {:g}bps".format(est, smax)
 
@@ -260,6 +282,16 @@ def enhanced_gate(symbol: str, side: str, qty: float, price: float,
             vix = current_vix()
             if vix is not None and vix > rvix:
                 return "risk-off: VIX {:.1f} > {:g}".format(vix, rvix)
+
+        # 100x entry alpha (momentum · mean-rev · rel-strength · correlation ·
+        # earnings blackout · sector cap · pyramiding). Itself fail-open.
+        try:
+            import aj_alpha
+            r = aj_alpha.entry_block_reason(symbol, side, qty, price, cfg)
+            if r:
+                return r
+        except Exception:
+            log.debug("alpha entry gate skipped", exc_info=True)
         return None
     except Exception as e:
         log.exception("enhanced_gate error -> block (fail-closed)")

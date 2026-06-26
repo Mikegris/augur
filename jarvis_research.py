@@ -63,7 +63,10 @@ def _web_research_uncached(query: str) -> Dict[str, Any]:
         client = OpenAI(api_key=key, timeout=40)
         # Responses API with the web_search tool — synthesized answer + cited
         # sources. Instruct it to stay current and grounded.
-        resp = client.responses.create(
+        # Route through the shared governor so this shares the process-wide
+        # concurrency cap + RPM pacing + cooperative 429/5xx backoff that the
+        # rest of the app's OpenAI calls are protected by.
+        resp = ai_summarizer.governed_call(lambda: client.responses.create(
             model=ai_summarizer.MODEL_HEAVY,
             tools=[{"type": "web_search"}],
             input=(
@@ -71,7 +74,7 @@ def _web_research_uncached(query: str) -> Dict[str, Any]:
                 "and answer in 2-4 tight sentences, grounded in what you find, "
                 "current as of today. No investment advice — facts and framing "
                 "only. Question: " + query),
-        )
+        ))
         ai_summarizer._record_ai_call()
         text = (getattr(resp, "output_text", None) or "").strip()
         citations = _extract_citations(resp)
@@ -156,11 +159,18 @@ def news_sentiment(query: str) -> Dict[str, Any]:
             series = []
         if not series:
             return {"query": query, "note": "no sentiment data for that topic."}
-        vals = [s["value"] for s in series if s.get("value") is not None]
+        # Sort chronologically by the GDELT date field (zero-padded
+        # YYYYMMDD... sorts lexically = chronologically) so the trend isn't
+        # inverted if the feed returns newest-first.
+        ordered = sorted((s for s in series if s.get("value") is not None),
+                         key=lambda s: str(s.get("date") or ""))
+        vals = [s["value"] for s in ordered]
         avg = round(sum(vals) / len(vals), 2) if vals else None
         trend = None
         if len(vals) >= 4:
-            trend = "improving" if vals[-1] > vals[0] else "deteriorating"
+            first, last = vals[0], vals[-1]
+            trend = ("improving" if last > first
+                     else "deteriorating" if last < first else "flat")
         return {"query": query, "avg_tone": avg, "trend": trend,
                 "points": len(vals),
                 "note": "GDELT tone: positive = upbeat coverage, negative = downbeat."}

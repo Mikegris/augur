@@ -1,0 +1,3602 @@
+[
+ {
+  "id": "D190",
+  "action": "rejected",
+  "note": "Crypto branch stores quotes under bare h['symbol']; applying .upper() to the lookup would break crypto lookups if a symbol were ever lowercase. DB uppercases symbols so both paths already match. Suggested fix is risky, concern hypothetical.",
+  "_bucket": 0
+ },
+ {
+  "id": "D193",
+  "action": "fixed",
+  "note": "Changed guard from `and prev_value` to `and prev_value > 0` so a tiny/negative prev_value can't explode day_pnl_pct; returns None instead.",
+  "_bucket": 0
+ },
+ {
+  "id": "D196",
+  "action": "rejected",
+  "note": "Finder confirms sign logic is correct; the dist-relative-to-price vs level is a messaging preference, not a defect. Changing the denominator would alter the displayed abs(dist_pct) value with no clear benefit.",
+  "_bucket": 0
+ },
+ {
+  "id": "D197",
+  "action": "fixed",
+  "note": "hit_rate now paired with the matching count from the same track_record block (n_directional, fallback n) instead of calibration's n. Also computed hr_pct once and reused (folds in D213).",
+  "_bucket": 0
+ },
+ {
+  "id": "D203",
+  "action": "fixed",
+  "note": "price now run through _finite(q.get('price')) with an early bail, so a NaN/inf price can't propagate into pos/off_hi/above_lo; range guards reuse the validated price.",
+  "_bucket": 0
+ },
+ {
+  "id": "D205",
+  "action": "rejected",
+  "note": "Finder's own conclusion: no fix needed, id is bounded by the regex. No crash.",
+  "_bucket": 0
+ },
+ {
+  "id": "D206",
+  "action": "rejected",
+  "note": "DB runs WAL with busy_timeout=5000; concurrent reads don't need the write lock, and reads elsewhere in the codebase don't hold it. Wrapping a read in _write_lock would diverge from the prevailing pattern. Low confidence, not a genuine defect for this concurrency model.",
+  "_bucket": 0
+ },
+ {
+  "id": "D207",
+  "action": "fixed",
+  "note": "Added module-level _PENDING_CLARIFY_LOCK; guarded the GC+insert in _set_pending_clarify and made the check-then-pop in ask() atomic (single pop under lock). Behavior preserved including expired-entry eviction.",
+  "_bucket": 0
+ },
+ {
+  "id": "D208",
+  "action": "fixed",
+  "note": "Added _SEMMEM_LOCK and a lock-protected check-then-set so index_memories() backfill truly fires at most once per process.",
+  "_bucket": 0
+ },
+ {
+  "id": "D191",
+  "action": "fixed",
+  "note": "unrealized_pct now None (not 0) when cost<=0; downstream best/worst ranking filters with _finite(...) is not None, so zero-cost positions are correctly excluded.",
+  "_bucket": 0
+ },
+ {
+  "id": "D194",
+  "action": "fixed",
+  "note": "_streak_card value filter changed from `if v` to `if v is not None`, preserving a legitimate 0.0 snapshot instead of splicing non-adjacent sessions.",
+  "_bucket": 0
+ },
+ {
+  "id": "D195",
+  "action": "rejected",
+  "note": "Finder is low confidence and notes the break-on-flat-day is intended. Changing flat-day handling alters streak semantics; risky behavior change.",
+  "_bucket": 0
+ },
+ {
+  "id": "D198",
+  "action": "fixed",
+  "note": "last_seen normalized with .replace('T',' ') before [:19] slice/strptime, so an ISO-T watermark no longer raises (which had bypassed the <30min guard and replayed the digest).",
+  "_bucket": 0
+ },
+ {
+  "id": "D199",
+  "action": "rejected",
+  "note": "Cosmetic phrasing threshold (48h vs 24h day label); finder calls it cosmetic and offers a subjective preference, not a defect.",
+  "_bucket": 0
+ },
+ {
+  "id": "D200",
+  "action": "rejected",
+  "note": "share_of_move_pct is a meaningful signed contribution; omitting it when sign opposes the net would drop data the LLM/agent consumes. Low confidence, semantics preference.",
+  "_bucket": 0
+ },
+ {
+  "id": "D201",
+  "action": "rejected",
+  "note": "Cosmetic clamp-at-999 phrasing; low confidence, behavior change to messaging only.",
+  "_bucket": 0
+ },
+ {
+  "id": "D202",
+  "action": "rejected",
+  "note": "Baseline 1.5x tolerance band is deliberate and _answer_why_window already surfaces actual span. Tightening would change attribution behavior; low confidence.",
+  "_bucket": 0
+ },
+ {
+  "id": "D204",
+  "action": "rejected",
+  "note": "Finder's own conclusion: no change required, documented for consistency.",
+  "_bucket": 0
+ },
+ {
+  "id": "D209",
+  "action": "rejected",
+  "note": "The 1050s deadline is deliberately sized to cover the agent loop; the comment documents that an earlier 300s cap cut off legitimate multi-round answers. The suggested 180-240s cap would reintroduce that regression.",
+  "_bucket": 0
+ },
+ {
+  "id": "D210",
+  "action": "fixed",
+  "note": "Added isinstance(c, dict) guard before c.get('url') so one malformed citation entry no longer aborts harvesting of all citations for the call.",
+  "_bucket": 0
+ },
+ {
+  "id": "D211",
+  "action": "rejected",
+  "note": "Fix is circular (about ensuring callers pass succeeded) and the analysis is muddy; low confidence, no clear surgical change.",
+  "_bucket": 0
+ },
+ {
+  "id": "D212",
+  "action": "fixed",
+  "note": "_answer_forecast now branches on prob being finite: omits the P(up) clause when prob_up is None, and never coerces a genuine 0.0 to 0.5. Uses _finite for robustness.",
+  "_bucket": 0
+ },
+ {
+  "id": "D214",
+  "action": "rejected",
+  "note": "Chips ordered by cost-basis proxy; switching to market value would require a live quote fetch in the clarify path (latency/failure risk) for a minor cosmetic ordering gain. Low confidence.",
+  "_bucket": 0
+ },
+ {
+  "id": "D215",
+  "action": "fixed",
+  "note": "Both _greeting() call sites now pass the ET time (_et_now/now_et) so the greeting and market phase share one clock. Error path falls back to None (local now), preserving prior behavior.",
+  "_bucket": 0
+ },
+ {
+  "id": "D216",
+  "action": "fixed",
+  "note": "Holding-day count now uses date arithmetic (datetime.now().date() - d0.date()).days, avoiding time-of-day/tz off-by-one near midnight.",
+  "_bucket": 0
+ },
+ {
+  "id": "D218",
+  "action": "fixed",
+  "note": "Recent-orders formatting uses str(o.get('side') or '').upper(), tolerating an explicit None side without AttributeError.",
+  "_bucket": 0
+ },
+ {
+  "id": "D219",
+  "action": "fixed",
+  "note": "Positions formatting switched to p.get('symbol')/p.get('market_value_usd') for consistency; _fmt_usd already tolerates None. No crash existed (keys guaranteed) but applied the safe .get() style.",
+  "_bucket": 0
+ },
+ {
+  "id": "D221",
+  "action": "rejected",
+  "note": "SQLite AUTOINCREMENT never yields id 0, and existence is re-validated via jarvis_conversation_exists; the id-0 scenario doesn't occur. Low confidence.",
+  "_bucket": 0
+ },
+ {
+  "id": "D222",
+  "action": "rejected",
+  "note": "The keyless branch (`symbol and not _agent_ready() and not _debatey`) already quotes a resolved held-name regardless of word count; a non-debate natural sentence is handled. Finder's premise is already satisfied by existing code.",
+  "_bucket": 0
+ },
+ {
+  "id": "D223",
+  "action": "fixed",
+  "note": "all-time detection now requires absence of day tokens ('today'/'day'), so 'how is my portfolio doing overall today' no longer flips best/worst to unrealized P&L.",
+  "_bucket": 0
+ },
+ {
+  "id": "D232",
+  "action": "rejected",
+  "note": "Leading-char validation is a deliberate US-equity assumption; finder rates low impact and suggests only relaxing if non-US tickers are in scope. Not a defect.",
+  "_bucket": 0
+ },
+ {
+  "id": "D244",
+  "action": "fixed",
+  "note": "Follow-up symbol inheritance now suppressed when the query carries market/portfolio scope words ('market','portfolio','my book','overall') unless it explicitly opens with 'what about/how about/and', so 'is the market overbought again' no longer hijacks a stale ticker.",
+  "_bucket": 0
+ },
+ {
+  "id": "D192",
+  "action": "rejected",
+  "note": "Finder's own conclusion: no change needed unless market_value can be negative, which it can't here.",
+  "_bucket": 0
+ },
+ {
+  "id": "D213",
+  "action": "fixed",
+  "note": "Resolved as part of D197: hr_pct computed once and reused for both the format and the >=55 comparison.",
+  "_bucket": 0
+ },
+ {
+  "id": "D217",
+  "action": "rejected",
+  "note": "Format uses {:g}/{:,.2f} which can't render a '?' placeholder; the '0 for missing-or-zero' display is reasonable and the suggested fix would require restructuring the numeric format for marginal gain. Low confidence.",
+  "_bucket": 0
+ },
+ {
+  "id": "D220",
+  "action": "fixed",
+  "note": "Mover card detail now built conditionally: when day_pnl is None it phrases '<sym> moved <pct> on your $X position.' instead of emitting an em-dash '\u2014' where the dollar P&L would be.",
+  "_bucket": 0
+ },
+ {
+  "id": "D231",
+  "action": "fixed",
+  "note": "semmem recall dedup now checks the inner text length (len(text) > 2) rather than the formatted quote length, so near-empty memories don't pollute the prompt.",
+  "_bucket": 0
+ },
+ {
+  "id": "D233",
+  "action": "fixed",
+  "note": "Instant 'X vs Y' keyless path word cap raised from <=4 to <=6 (still gated on _VS_RE match), so 'compare nvda vs amd please' reaches the side-by-side.",
+  "_bucket": 0
+ },
+ {
+  "id": "D234",
+  "action": "fixed",
+  "note": "Near-alert test changed to 0 <= dist_pct so an alert whose level exactly equals the current price (most imminent) is flagged as approaching for both above/below.",
+  "_bucket": 0
+ },
+ {
+  "id": "D235",
+  "action": "fixed",
+  "note": "Volume now also shown in K (1e3..1e6) instead of being dropped for sub-million-volume names.",
+  "_bucket": 0
+ },
+ {
+  "id": "D237",
+  "action": "rejected",
+  "note": "Finder's own conclusion: no change strictly required; pulse only includes priced rows so weight_pct is set.",
+  "_bucket": 0
+ },
+ {
+  "id": "D238",
+  "action": "fixed",
+  "note": "activity_snapshot warmer sort now filters to numeric ts before sorting, so one corrupt (None/str) cycle entry no longer raises TypeError and drops the whole warmer section.",
+  "_bucket": 0
+ },
+ {
+  "id": "D239",
+  "action": "fixed",
+  "note": "health_snapshot warmer age now filters cycle values to numeric before max(), so a malformed entry no longer misreports the warmer as dead.",
+  "_bucket": 0
+ },
+ {
+  "id": "D241",
+  "action": "fixed",
+  "note": "_answer_ideas now filters pool to composite_score-not-None before taking top 3 (matching _idea_insights), with an empty-result fallback, so unscored ideas aren't shown as 'score 0'.",
+  "_bucket": 0
+ },
+ {
+  "id": "D242",
+  "action": "rejected",
+  "note": "The engine's verdict/direction are themselves derived from the same prob_up (verdict via _verdict, direction via 0.52/0.48 bands ~equal to the dossier's 0.55/0.45). No independent magnitude-based disagreement exists, so the premise is false.",
+  "_bucket": 0
+ },
+ {
+  "id": "D153",
+  "action": "fixed",
+  "note": "[post-pass cross-file] Fixed cross-file: added _UNSET sentinel to database.update_position + route only forwards account_id when present (omit=keep, null=clear). Verified.",
+  "_bucket": 1
+ },
+ {
+  "id": "D154",
+  "action": "fixed",
+  "note": "Replaced the bare-substring match (sym in h_name / startswith) with a word-boundary regex (re.search(r'\\b'+sym+r'\\b', h_name)) plus an exact-ticker match when the holding carries one. Eliminates false positives for short tickers (A, ON, V).",
+  "_bucket": 1
+ },
+ {
+  "id": "D155",
+  "action": "fixed",
+  "note": "Removed the broken inline parse of a non-existent EDGAR `-index.json` (documents list) and reused the existing, correct edgar._best_document_from_index helper to resolve the primary document.",
+  "_bucket": 1
+ },
+ {
+  "id": "D156",
+  "action": "fixed",
+  "note": "Alert phase now infers crypto symbols from holdings+watchlist asset_type, fetches them as their -USD Yahoo pair, and maps the -USD result back to the bare symbol key so crypto price alerts can fire.",
+  "_bucket": 1
+ },
+ {
+  "id": "D157",
+  "action": "fixed",
+  "note": "Replaced inconsistent truthiness with `cur = price if price is not None else avg_cost` for market_value, and current_price now uses `round(price,4) if price is not None else None`, so a real 0.0 quote is valued correctly instead of falling back to 0/None.",
+  "_bucket": 1
+ },
+ {
+  "id": "D158",
+  "action": "fixed",
+  "note": "Made update_settings two-phase: validate all keys (mirroring api_keys.save_key's format gate without writing) into a plan, then commit db.set_setting/save_key only after every key passes \u2014 no more half-applied settings on a late 400.",
+  "_bucket": 1
+ },
+ {
+  "id": "D159",
+  "action": "fixed",
+  "note": "earnings_dossier now caches only a genuinely successful brief: `if brief and not (isinstance(brief,dict) and brief.get('error'))`, so error/cap envelopes aren't cached for 6h.",
+  "_bucket": 1
+ },
+ {
+  "id": "D162",
+  "action": "fixed",
+  "note": "Added a module-level _snapshot_started flag guarded by a lock (_start_snapshot_worker_once) so the worker starts at most once per process even under importlib.reload/repeated execution, in addition to the existing reloader-parent guard.",
+  "_bucket": 1
+ },
+ {
+  "id": "D166",
+  "action": "fixed",
+  "note": "Added _normalize_asset_type() (allowlist stock/crypto/etf/option, lowercased) and applied it in add_position and add_watchlist so a typo like 'CRYPTO' can't break crypto -USD pricing. add_transaction does not store asset_type so it was left unchanged.",
+  "_bucket": 1
+ },
+ {
+  "id": "D167",
+  "action": "fixed",
+  "note": "portfolio_import now rejects non-finite shares/avg_cost (math.isfinite) before the <=0 guard, so 'inf'/'nan' cells (which parse and slip past NaN comparisons) are skipped instead of written to the DB.",
+  "_bucket": 1
+ },
+ {
+  "id": "D174",
+  "action": "fixed",
+  "note": "aj_approve_route now atomically claims the proposal via aj_db.update_if(status==prev -> 'approving') and returns 409 if it loses the CAS, preventing concurrent double-execution. Releases the claim back to prev_status if execution doesn't fill.",
+  "_bucket": 1
+ },
+ {
+  "id": "D160",
+  "action": "rejected",
+  "note": "Finder's premise is wrong: the cited sibling (portfolio_ai_analysis) does NOT validate its model either, and model resolution/aliasing lives in ai_summarizer (env-configurable via AUGUR_OPENAI_MODEL_HEAVY). A hardcoded app.py allowlist would reject validly-configured models. Default already applies.",
+  "_bucket": 1
+ },
+ {
+  "id": "D161",
+  "action": "fixed",
+  "note": "Hardened the zip slot access: ai_result = pair[1] if isinstance(pair,(list,tuple)) and len(pair)>1 else {}.",
+  "_bucket": 1
+ },
+ {
+  "id": "D163",
+  "action": "fixed",
+  "note": "get_transactions route clamps limit with max(1, ...) so a negative limit can't become SQL LIMIT -1 (all rows). transactions_summary's intentional limit=10**9 is a separate route and untouched.",
+  "_bucket": 1
+ },
+ {
+  "id": "D164",
+  "action": "fixed",
+  "note": "scanner_history clamps limit with max(1, ...) (db.get_scan_history uses SQL LIMIT).",
+  "_bucket": 1
+ },
+ {
+  "id": "D165",
+  "action": "fixed",
+  "note": "congress_senate clamps limit with max(1, ...) (ds.get_senate_trades uses len>=limit, which a negative value truncates).",
+  "_bucket": 1
+ },
+ {
+  "id": "D168",
+  "action": "fixed",
+  "note": "_evaluate_jarvis_watches now sets an in-progress flag inside the lock (double-run guard) but advances _JARVIS_WATCH_EVAL_LAST only AFTER a successful evaluate_all, so a transient failure no longer skips the next tick. finally resets the flag.",
+  "_bucket": 1
+ },
+ {
+  "id": "D169",
+  "action": "fixed",
+  "note": "Replaced the None sentinel for the quotes-batch slot with a unique private object() (_QUOTES), eliminating collision if a holding's symbol is literally None.",
+  "_bucket": 1
+ },
+ {
+  "id": "D170",
+  "action": "fixed",
+  "note": "_mc_holdings_from_portfolio falls back to avg_cost when there's no live quote (cur = px if px is not None else avg_cost) instead of dropping the position; still skips genuinely non-positive values.",
+  "_bucket": 1
+ },
+ {
+  "id": "D171",
+  "action": "fixed",
+  "note": "portfolio_benchmark base_value now uses next((s['total_value'] for s in snapshots if s.get('total_value')), None) \u2014 the earliest POSITIVE snapshot (get_snapshots is ORDER BY date ASC) \u2014 avoiding normalization to a zero base.",
+  "_bucket": 1
+ },
+ {
+  "id": "D172",
+  "action": "fixed",
+  "note": "_social_composite now surfaces spike_pct only when wikipedia is live (_live(wk) and spike is not None), so a stale/non-live stats blob no longer leaks a spike figure that didn't feed buzz.",
+  "_bucket": 1
+ },
+ {
+  "id": "D173",
+  "action": "fixed",
+  "note": "Moved the _valid_ticker 400 check above the _sec_v2_unavailable 503 check in both intel_filings_v2 and intel_form4_v2 for consistent error semantics.",
+  "_bucket": 1
+ },
+ {
+  "id": "D175",
+  "action": "fixed",
+  "note": "Added _jarvis_act_refund(n) and call it on aj_run_route's 409 'already running' path so polling a busy Run no longer burns the 10/min budget on no-op refusals.",
+  "_bucket": 1
+ },
+ {
+  "id": "D176",
+  "action": "fixed",
+  "note": "scanner_profile_save now rejects a non-dict body (400) so a list/scalar can't break save_scanner_profile's dict.update() or corrupt the saved scan config.",
+  "_bucket": 1
+ },
+ {
+  "id": "D177",
+  "action": "fixed",
+  "note": "jarvis_tts_route: an unknown voice is still 400 only when the CLIENT explicitly passed it; a non-allowlisted voice coming from settings now falls back to 'onyx' instead of 400-ing every TTS call.",
+  "_bucket": 1
+ },
+ {
+  "id": "D178",
+  "action": "deferred",
+  "note": "Real reporting bias, but reliably distinguishing a failed dividend fetch from a genuine non-dividend payer requires a failure signal from the fetcher (both currently yield {}/div_rate 0). Adding a flag from {} alone would mislabel non-payers. Safe fix needs fetcher support outside app.py; existing fields must not change. Deferred.",
+  "_bucket": 1
+ },
+ {
+  "id": "D179",
+  "action": "fixed",
+  "note": "get_portfolio now gates day_change_pct on the same `day_chg is not None` condition as day_pnl/day_change, so the UI can't show a percent move beside a None day P&L.",
+  "_bucket": 1
+ },
+ {
+  "id": "D180",
+  "action": "fixed",
+  "note": "Addressed by the D156 fix: the alert phase remaps crypto -USD batch keys back to the bare alert symbol before prices.get(alert['symbol']), unifying the key convention for the alert lookup.",
+  "_bucket": 1
+ },
+ {
+  "id": "D292",
+  "action": "fixed",
+  "note": "Replaced arithmetic-mean compounding (1+r.mean())**252 with geometric CAGR (1+r).prod()**(252/len(r))-1, consistent with total_return; fixes overstated annualized_return and Calmar.",
+  "_bucket": 2
+ },
+ {
+  "id": "D295",
+  "action": "fixed",
+  "note": "In _finviz_quote_fallback, when prev is None but price+chg_pct present, derive prev = price/(1+chg_pct/100) so change/prev_close/change_pct stay mutually consistent.",
+  "_bucket": 2
+ },
+ {
+  "id": "D291",
+  "action": "fixed",
+  "note": "Both get_quote (line ~566) and _resolve (line ~672) now use getattr(info,'regular_market_price',None) instead of attribute access that raises on fast_info missing key.",
+  "_bucket": 2
+ },
+ {
+  "id": "D293",
+  "action": "fixed",
+  "note": "Sortino now uses full-sample downside deviation sqrt(mean(min(r-rf,0)^2)) instead of std of negatives-only subset; corrects understated denominator.",
+  "_bucket": 2
+ },
+ {
+  "id": "D294",
+  "action": "fixed",
+  "note": "_yahoo_chart_direct change now guards prev with explicit 'is not None' so a valid 0.0 prev_close isn't dropped; division still guarded on truthy prev.",
+  "_bucket": 2
+ },
+ {
+  "id": "D297",
+  "action": "fixed",
+  "note": "ATR is a simple 14-bar TR mean, not Wilder smoothing. Converting would change returned values consumers may depend on; applied the finder's minimal-fix option: documented it as ATR(simple). No behavior change.",
+  "_bucket": 2
+ },
+ {
+  "id": "D298",
+  "action": "fixed",
+  "note": "Wrapped per-entry dividend year parse in try/except (ValueError,TypeError) with continue so one malformed index row no longer aborts the whole 5y CAGR.",
+  "_bucket": 2
+ },
+ {
+  "id": "D300",
+  "action": "fixed",
+  "note": "exps now coerced via list(ticker.options or []) so a non-sliceable/None options response can't raise before slicing. Date-shape filter left to existing try/except around option_chain.",
+  "_bucket": 2
+ },
+ {
+  "id": "D301",
+  "action": "rejected",
+  "note": "No real defect: both code paths scale raw decimal IV by 100 exactly once and are internally consistent. Finder only asked to verify no double-scaling consumer exists; none found. Pure contract note.",
+  "_bucket": 2
+ },
+ {
+  "id": "D303",
+  "action": "rejected",
+  "note": "Already fixed in current code: losers_slice has an explicit 'if len(ranked) > len(gainers) else []' guard, so the ranked[-0:] whole-list overlap for len==1 cannot occur.",
+  "_bucket": 2
+ },
+ {
+  "id": "D335",
+  "action": "fixed",
+  "note": "get_crypto_chart now aligns volume by parallel index (total_volumes[idx]) instead of exact-ms timestamp key lookup that almost always missed and zeroed volume.",
+  "_bucket": 2
+ },
+ {
+  "id": "D293_note",
+  "action": "rejected",
+  "note": "duplicate-guard placeholder; ignore",
+  "_bucket": 2
+ },
+ {
+  "id": "D296",
+  "action": "rejected",
+  "note": "Not real: Wilder smoothing avg_loss recovers as soon as any later loss>0 enters; it is not permanently pinned. Flat-window case already maps rs=1 to RSI 50 correctly.",
+  "_bucket": 2
+ },
+ {
+  "id": "D299",
+  "action": "fixed",
+  "note": "Dropped the sectorKey fallback in stress test enrichment; sectorKey slugs never match display-name override keys, which understated sector-specific crisis drops.",
+  "_bucket": 2
+ },
+ {
+  "id": "D302",
+  "action": "fixed",
+  "note": "CoinGecko prev_close: guarded denominator explicitly (_denom not in (None,0)) and price 'is not None' so pct=-100 stays None and a legitimate 0.0 price isn't dropped.",
+  "_bucket": 2
+ },
+ {
+  "id": "D304",
+  "action": "fixed",
+  "note": "Removed dead/identical ternary 'fb(symbol) if fb is not _try_crypto_fallback else fb(symbol)' -> plain fb(symbol).",
+  "_bucket": 2
+ },
+ {
+  "id": "D305",
+  "action": "fixed",
+  "note": "get_news cache-hit now only serves when stored length covers the requested limit (len(hit)>=limit or >=fetch_n); a later limit=50 caller (narrative_engine) refetches instead of getting silently truncated to a prior small caller's 30.",
+  "_bucket": 2
+ },
+ {
+  "id": "D336",
+  "action": "fixed",
+  "note": "Both stress-test total_current_value sums (scenario loop + custom) now use the SAME market_value-or-(shares*avg_cost) fallback as per-position mv, so total_loss_pct denominator matches the numerator.",
+  "_bucket": 2
+ },
+ {
+  "id": "D337",
+  "action": "deferred",
+  "note": "Calmar=None on max_dd==0 is mathematically correct (infinite). Mapping to a sentinel/cap or a string label risks misleading numeric output or breaking UI/consumers expecting float-or-None. Left as-is to avoid behavior change.",
+  "_bucket": 2
+ },
+ {
+  "id": "D338",
+  "action": "fixed",
+  "note": "Unusual-options scan now skips contracts with last_price<=0 so $0-notional illiquid contracts don't surface as 'unusual' flow.",
+  "_bucket": 2
+ },
+ {
+  "id": "D340",
+  "action": "rejected",
+  "note": "Not reachable: _get_returns_df always extracts Close and flattens MultiIndex to symbol-level columns before get_correlation_matrix runs, so columns are flat strings; the all-missing tuple-stringification scenario cannot occur. Finder acknowledged this.",
+  "_bucket": 2
+ },
+ {
+  "id": "D181",
+  "action": "fixed",
+  "note": "stress_test now annotates dict-copies (h=dict(h)) into a new list instead of mutating the shared get_portfolio() rows; uses .get() with defaults for asset_type/avg_cost/shares.",
+  "_bucket": 3
+ },
+ {
+  "id": "D186",
+  "action": "fixed",
+  "note": "_t_add_alert now uses _num_arg(args.get('price')) and raises ValueError('price required') on None instead of float(None) TypeError.",
+  "_bucket": 3
+ },
+ {
+  "id": "D187",
+  "action": "fixed",
+  "note": "execute_mutating now calls valid_proposal_args at the top and returns {'error':'invalid arguments'} on failure, mirroring the batch path. Verified app.py route and tests still pass (they expect an error envelope).",
+  "_bucket": 3
+ },
+ {
+  "id": "D182",
+  "action": "fixed",
+  "note": "Covered by the D181 edit: both the syms and crypto comprehensions now use h.get('asset_type') instead of hard h['asset_type'] subscripts.",
+  "_bucket": 3
+ },
+ {
+  "id": "D183",
+  "action": "fixed",
+  "note": "recent_transactions clamp now tests `if n is not None else 10`, so an explicit limit=0 clamps to 1 instead of silently defaulting to 10.",
+  "_bucket": 3
+ },
+ {
+  "id": "D184",
+  "action": "fixed",
+  "note": "price_history days clamp now tests `if n is not None else 30`, so days=0 clamps to the floor of 5 instead of defaulting to 30.",
+  "_bucket": 3
+ },
+ {
+  "id": "D185",
+  "action": "fixed",
+  "note": "top_detractors now sorts attrib ascending by total and takes the first 3 (filtering total<0), removing the undocumented dependency on attribution()'s internal descending sort. Same result today, robust to future sort changes.",
+  "_bucket": 3
+ },
+ {
+  "id": "D188",
+  "action": "fixed",
+  "note": "execute_read list-truncation: if the while-pop empties the list for a single oversized element, it now keeps result[0] stringified+truncated as the one item rather than returning an empty items list.",
+  "_bucket": 3
+ },
+ {
+  "id": "D189",
+  "action": "fixed",
+  "note": "benchmark_compare now tracks aligned_ok; if the benchmark cannot be aligned to the snapshot window (<2 bars after start_epoch) bench_ret is set to None, so excess_return is omitted instead of comparing mismatched windows. When snapshots cover the full period, alignment still succeeds and bench_ret computes as before.",
+  "_bucket": 3
+ },
+ {
+  "id": "D227",
+  "action": "fixed",
+  "note": "macro_snapshot now reads pts[-1]['value'] into `latest` and skips the series if it is None, preventing both a null 'value' reaching the LLM and a TypeError in the CPI YoY numerator.",
+  "_bucket": 3
+ },
+ {
+  "id": "D240",
+  "action": "fixed",
+  "note": "benchmark_compare port_ret now validates first/last total_value via _num_arg and requires both >0, returning a note on bad snapshot data instead of dividing by a non-numeric/near-zero/negative value.",
+  "_bucket": 3
+ },
+ {
+  "id": "D228",
+  "action": "fixed",
+  "note": "portfolio_correlation now reports a single 'pairs' list when len(pairs)<=5, so a pair can no longer appear in both most_correlated and least_correlated; >5 pairs keep the original two-bucket output.",
+  "_bucket": 3
+ },
+ {
+  "id": "D229",
+  "action": "fixed",
+  "note": "portfolio_risk now returns {'note':'risk metrics unavailable for current holdings'} when the per-symbol dict ends up empty, instead of an empty per_symbol that the LLM might misread.",
+  "_bucket": 3
+ },
+ {
+  "id": "D236",
+  "action": "fixed",
+  "note": "_t_agent_positions now adds 'positions_truncated': len(rows)>30 so the model knows the rows[:30] list is capped.",
+  "_bucket": 3
+ },
+ {
+  "id": "D243",
+  "action": "fixed",
+  "note": "_safe_int_local now returns min(n,25) for n>0, enforcing the documented max-25 cap on aj_proposals/aj_orders LIMIT queries. Verified clamp.",
+  "_bucket": 3
+ },
+ {
+  "id": "D226",
+  "action": "fixed",
+  "note": "valid_proposal_args now requires price>0 for add_holding (lo=1e-9) while record_trade keeps price>=0, so a $0 cost-basis holding can no longer be created; a $0 record_trade transfer is still permitted. Verified both branches.",
+  "_bucket": 3
+ },
+ {
+  "id": "D224",
+  "action": "deferred",
+  "note": "Fixing _num_arg's %/$ stripping for shares/price specifically would require a separate strict helper and rewiring many call sites (custom_drop_pct legitimately needs the lenient strip). Broad, behavior-changing across many tools; low confidence \u2014 deferred to avoid breakage.",
+  "_bucket": 3
+ },
+ {
+  "id": "D225",
+  "action": "deferred",
+  "note": "Allowing resize_to with market_value=0 would route 0 into synth_whatif.whatif, an unvalidated path; current guard (reject 0) is safe. Distinguishing None vs 0 risks changing engine behavior with no test coverage. Low confidence \u2014 deferred.",
+  "_bucket": 3
+ },
+ {
+  "id": "D230",
+  "action": "deferred",
+  "note": "Extending _quote_symbol to suffix watchlist-only crypto has no reliable asset_type on watchlist rows and no safe known-crypto set; a naive change could mis-suffix equities sharing a crypto ticker. This is a feature enhancement with ambiguous correct behavior \u2014 deferred.",
+  "_bucket": 3
+ },
+ {
+  "id": "D008",
+  "action": "fixed",
+  "note": "After stamping today's __aj_unreal_open_<ET-date>, opportunistically DELETE all __aj_unreal_open_% rows except the current key (db._write_lock + commit + cache invalidate), preventing unbounded per-day settings growth. Wrapped in try/except (debug log).",
+  "_bucket": 4
+ },
+ {
+  "id": "D009",
+  "action": "deferred",
+  "note": "Real concern (mid-session first-observation bakes prior drawdown into baseline) but the suggested fix (capture only at premarket/first regular tick, else fall back to 0/prior-close) is a session-timing redesign that materially changes day_pnl semantics feeding the loss HALT. Too risky for a surgical edit.",
+  "_bucket": 4
+ },
+ {
+  "id": "D010",
+  "action": "fixed",
+  "note": "_project_pulse now uses positions = book.get('positions') or {} and iterates that, mirroring compute_day_pnl's defensive access; no more KeyError on a malformed paper_book().",
+  "_bucket": 4
+ },
+ {
+  "id": "D011",
+  "action": "fixed",
+  "note": "When max_daily_loss_usd<=0 (the default) the gate now records a 'no daily-loss cap configured' BLOCK (no trade) instead of calling halt()/disabling the master switch. Real loss breach (cap>0 and day_pnl<=-cap) still HALTs.",
+  "_bucket": 4
+ },
+ {
+  "id": "D013",
+  "action": "fixed",
+  "note": "evaluate() now infers asset_type via aj_positions.infer_asset_type(symbol) (lazy import, fallback '') and passes it to _order_price, so the -USD crypto quote fallback actually fires for bare crypto tickers.",
+  "_bucket": 4
+ },
+ {
+  "id": "D017",
+  "action": "fixed",
+  "note": "compute_day_pnl now resolves each held symbol to its quote-convention symbol via _quote_symbol(sym, asset_type) BEFORE the batch quote and keys marks on the resolved symbol, so crypto 'BTC' is quoted as 'BTC-USD' and never picks up an equity 'BTC' quote.",
+  "_bucket": 4
+ },
+ {
+  "id": "D053",
+  "action": "fixed",
+  "note": "Daily-loss breach HALT moved to step 2b (right after session check) so an account already in breach halts regardless of the proposal's other gates. pnl/max_loss computed once and reused; step 7 now only enforces the no-cap BLOCK (D011).",
+  "_bucket": 4
+ },
+ {
+  "id": "D007",
+  "action": "fixed",
+  "note": "_marks filter replaced with math.isfinite(p) and p>0, also rejecting zero/negative marks, consistent with _order_price's price<=0 rejection.",
+  "_bucket": 4
+ },
+ {
+  "id": "D012",
+  "action": "fixed",
+  "note": "float(qty)/float(notional) conversions wrapped in try/except returning precise 'invalid qty'/'invalid notional' blocks; notional_usd now tested with 'is not None' so an explicit 0.0 falls to qty=0 and is cleanly rejected by the existing finite/positive check rather than the generic gate-exception path.",
+  "_bucket": 4
+ },
+ {
+  "id": "D014",
+  "action": "fixed",
+  "note": "is_halted() now returns 'not _trading_enabled_fresh()' (uncached), matching the gate so UI/CLI status reflects a kill_switch immediately rather than up to 5s later.",
+  "_bucket": 4
+ },
+ {
+  "id": "D015",
+  "action": "fixed",
+  "note": "IPS post-trade check now compares breach identity ((kind, detail) key): blocks if any breach in 'after' is absent from 'before', instead of a pure count delta. Catches a trade that clears one breach while introducing a different one (conservative/fail-closed).",
+  "_bucket": 4
+ },
+ {
+  "id": "D016",
+  "action": "fixed",
+  "note": "Allowlist carve-out now also permits a risk-reducing BUY-to-cover when _held_qty(symbol)<0 (held short), mirroring the held-long SELL carve-out; other caps still bind.",
+  "_bucket": 4
+ },
+ {
+  "id": "D044",
+  "action": "fixed",
+  "note": "rearm() 'session_open' failure reason now names the session_whitelist and current session and notes re-arm is allowed only during whitelisted sessions. No control-flow change.",
+  "_bucket": 4
+ },
+ {
+  "id": "D049",
+  "action": "fixed",
+  "note": "_trades_today now counts orders within [00:00 ET, next 00:00 ET) computed as UTC ISO bounds (America/New_York), so the per-day cap aligns with the ET session instead of resetting at 00:00 UTC. Falls back to the prior UTC-date slice if tz resolution fails.",
+  "_bucket": 4
+ },
+ {
+  "id": "D050",
+  "action": "fixed",
+  "note": "_held_qty now returns None on failure (UNKNOWN) vs 0.0 (flat). When unknown, the gate permits a SELL past the allowlist (exits must never be silently blocked); a covering BUY is NOT permitted on unknown state since it could open a new long.",
+  "_bucket": 4
+ },
+ {
+  "id": "D058",
+  "action": "fixed",
+  "note": "_held_qty now uses (symbol or '').upper() so a None symbol yields a deterministic result rather than an AttributeError swallowed by the broad except.",
+  "_bucket": 4
+ },
+ {
+  "id": "D060",
+  "action": "fixed",
+  "note": "Kelly avg_win/avg_loss now use float(t.get('realized') or 0) instead of t['realized'], matching the None-safe access used for the win/loss filters two lines above; avoids KeyError being swallowed and neutralizing Kelly.",
+  "_bucket": 5
+ },
+ {
+  "id": "D065",
+  "action": "fixed",
+  "note": "Gate 11 now uses explicit None check: mk=marks.get(s); px=mk if mk is not None else avg_cost, so a legitimate 0.0 mark is no longer treated as missing. aj_rules line 250 part is outside my editable scope.",
+  "_bucket": 5
+ },
+ {
+  "id": "D066",
+  "action": "fixed",
+  "note": "TP-ladder now records fired rung numbers per symbol in a hidden settings key (__aj_tp_ladder_fired), fires each rung at most once per open position, and prunes the memory for symbols no longer held so a true re-entry resets the ladder. Stops the geometric over-selling on repeat cycles.",
+  "_bucket": 5
+ },
+ {
+  "id": "D069",
+  "action": "fixed",
+  "note": "Bear-regime branch now LOWERS sell_prob_threshold (base-0.03, clamped 0.30-0.50) so the agent exits more readily in a downturn, matching risk-off intent; was incorrectly raising it.",
+  "_bucket": 5
+ },
+ {
+  "id": "D061",
+  "action": "fixed",
+  "note": "Kelly factor floor lowered from 0.25 to 0.0 in _clamp(bet/0.20, 0.0, 2.5); a non-positive Kelly (zero/negative edge) now shrinks size toward zero (and 0.0 vetoes via sizing_multiplier) instead of being held at quarter-size. Verified existing kelly tests still pass.",
+  "_bucket": 5
+ },
+ {
+  "id": "D062",
+  "action": "fixed",
+  "note": "Folded into the D102 fix: _vol_target_factor now sources _ann_vol from a 1y window (was 6mo) for more reliable annualized vol, reducing silent fallbacks on short histories.",
+  "_bucket": 5
+ },
+ {
+  "id": "D063",
+  "action": "fixed",
+  "note": "Resolved via the D064 split: the correlation gate now uses its own closes_6mo local fetched with '6mo' instead of reusing a possibly-1y cached series.",
+  "_bucket": 5
+ },
+ {
+  "id": "D064",
+  "action": "fixed",
+  "note": "Replaced the single shared `closes` local with separate closes_1y (gates 6/7/8) and closes_6mo (gate 9 correlation), each lazily fetched with its own period, removing the order-dependent wrong-window behavior.",
+  "_bucket": 5
+ },
+ {
+  "id": "D067",
+  "action": "deferred",
+  "note": "Real only for the partial-reduce-then-re-add case (full flat already NULLs peak_mark in aj_rules.update_position_state). The correct fix resets/re-bases peak on re-open inside aj_rules, which is outside my editable file set; an aj_alpha-only workaround would be speculative (no per-open peak baseline). Deferred to avoid a risky change.",
+  "_bucket": 5
+ },
+ {
+  "id": "D068",
+  "action": "fixed",
+  "note": "recent_hit_rate now excludes scratch trades (realized == 0) from the denominator (and still requires >=5 decisive trades), so scratches no longer depress the adaptive hit-rate.",
+  "_bucket": 5
+ },
+ {
+  "id": "D070",
+  "action": "fixed",
+  "note": "rank_universe sort is now NaN/unscorable-safe via a custom key that sinks NaN/non-float scores to the bottom. The no-data sentinel suggestion was NOT applied because _radar_score is consumed by aj_autonomy.py (sorts on -score) which I cannot edit and which would TypeError on None; that sub-part is intentionally left.",
+  "_bucket": 5
+ },
+ {
+  "id": "D101",
+  "action": "fixed",
+  "note": "_earnings_days_away now returns (dt.date() - utc_now().date()).days instead of floor-dividing total_seconds(), fixing negative-rounding and boundary-day mislabeling that skewed the earnings blackout gate.",
+  "_bucket": 5
+ },
+ {
+  "id": "D071",
+  "action": "fixed",
+  "note": "Gate 11 now builds a sectors = {s: _sector_of(s) for s in positions} map once before the loop and reuses it, eliminating O(positions) repeated sector lookups per buy evaluation and making None-handling consistent.",
+  "_bucket": 5
+ },
+ {
+  "id": "D102",
+  "action": "fixed",
+  "note": "_vol_target_factor no longer multiplies by 100 a second time; it normalizes av to percent (av*100 only if av<5, i.e. a fraction) before /sqrt(252). The real annualized_vol returns percent (confirmed: it does *100.0), so the old code inflated daily vol 100x and floored every factor at 0.25. Normalization keeps both the production percent contract and the test's fractional mock correct.",
+  "_bucket": 5
+ },
+ {
+  "id": "D103",
+  "action": "fixed",
+  "note": "Pyramiding: unconfigured pyramid_min_gain_pct now falls back to +1% ('winner only', so a flat position isn't pyramided), and pyramid_max_adds <= 0 is treated as 'unlimited' (max_adds>0 and adds>=max_adds) instead of blocking every add the moment pyramiding is enabled. Existing pyramid test (explicit values) still passes.",
+  "_bucket": 5
+ },
+ {
+  "id": "D280",
+  "action": "fixed",
+  "note": "positions_text now uses p.get() with (x or 0) coercion for symbol/name/asset_type/shares/avg_cost/market_value/weight_pct/unrealized_pnl/unrealized_pct so one malformed/None holding can't force the whole portfolio to the rule-based fallback.",
+  "_bucket": 6
+ },
+ {
+  "id": "D277",
+  "action": "fixed",
+  "note": "Added guard in _retry_after_seconds: treat value as ms when matched key ends in -ms OR when num > cap*1000 (implausible seconds reading from a ms header surfaced under a seconds key).",
+  "_bucket": 6
+ },
+ {
+  "id": "D279",
+  "action": "fixed",
+  "note": "_rule_based_summarize now does text = text or '' before .lower(); also makes text[:3000] re.findall safe.",
+  "_bucket": 6
+ },
+ {
+  "id": "D281",
+  "action": "fixed",
+  "note": "Portfolio user_prompt now pre-formats summary fields via .get with numeric defaults (total_value/total_pnl/total_pnl_pct/total_cost/num_positions) instead of direct subscript.",
+  "_bucket": 6
+ },
+ {
+  "id": "D282",
+  "action": "fixed",
+  "note": "_rule_based_portfolio_analysis now uses p.get('symbol','?')/p.get('asset_type') with None-filtered set and (weight_pct or 0)/(unrealized_pct or 0) in concentration, strengths, risks, and position_insights.",
+  "_bucket": 6
+ },
+ {
+  "id": "D283",
+  "action": "fixed",
+  "note": "Earnings history/moves comps now use r.get('date','?')/m.get('date','?') and skip move rows whose move_pct isn't numeric via isinstance guard.",
+  "_bucket": 6
+ },
+ {
+  "id": "D284",
+  "action": "deferred",
+  "note": "Genuine fix (don't cache cap/error envelopes for the 12h TTL) lives in cache_store.coalesce/cache_get, which is outside my assigned file ai_summarizer.py. No safe in-file mitigation prevents the lower coalesce path from caching _do_call's cap envelope.",
+  "_bucket": 6
+ },
+ {
+  "id": "D278",
+  "action": "fixed",
+  "note": "safe_text changed to ((text or '')[:10000]).replace(...) so None text no longer raises before the slice.",
+  "_bucket": 6
+ },
+ {
+  "id": "D285",
+  "action": "fixed",
+  "note": "social_line bull_ratio guard changed from 'is not None' to isinstance(...,(int,float)); non-numeric truthy values (e.g. 'NA') now emit 'no data' instead of crashing the thesis builder.",
+  "_bucket": 6
+ },
+ {
+  "id": "D286",
+  "action": "fixed",
+  "note": "tts_speech now calls resp.close() (when available, guarded) after resp.read() to release the streaming HTTP response/connection back to the pool. Kept create() call shape and return behavior unchanged.",
+  "_bucket": 6
+ },
+ {
+  "id": "D287",
+  "action": "fixed",
+  "note": "Rule-based earnings signal now compares beat_rate with 'is not None' so a legitimate 0% beat rate is classified BEARISH instead of being dropped as falsy.",
+  "_bucket": 6
+ },
+ {
+  "id": "D288",
+  "action": "fixed",
+  "note": "overall_score uses 5 + round((total_pnl_pct or 0)/5) instead of int() truncation, scoring mild gains/losses symmetrically; clamp unchanged.",
+  "_bucket": 6
+ },
+ {
+  "id": "D289",
+  "action": "fixed",
+  "note": "summarize_filing AI-path except now log.debug's the exception before falling back to rule-based, making systematic JSON/refusal/None-content problems observable, consistent with other builders.",
+  "_bucket": 6
+ },
+ {
+  "id": "D290",
+  "action": "fixed",
+  "note": "IV-vs-historical label is now three-way: 'IV vs historical unavailable' when None/missing, overpricing when >0, underpricing when <0, in-line when 0; no longer asserts underpricing as fact on missing data.",
+  "_bucket": 6
+ },
+ {
+  "id": "D441",
+  "action": "fixed",
+  "note": "Changed fetch URL from '/api/contagion/'+symbol+'/impact' to '/api/contagion/impact/'+symbol to match the registered Flask route (app.py:1892).",
+  "_bucket": 7
+ },
+ {
+  "id": "D442",
+  "action": "fixed",
+  "note": "Read data.impacted_companies and per-row imp.impact_score / imp.contagion_risk (with old keys kept as fallbacks). Confirmed against contagion_graph.assess_contagion return shape.",
+  "_bucket": 7
+ },
+ {
+  "id": "D443",
+  "action": "fixed",
+  "note": "When data.connections absent, build connection rows from data.nodes joined with data.edges by target ticker (weight/revenue_pct/context/type); read data.company_name for the Company KPI. Matches build_graph output.",
+  "_bucket": 7
+ },
+ {
+  "id": "D444",
+  "action": "fixed",
+  "note": "Changed loopTypes keys to uppercase (EQUITY_FEEDBACK/DILUTION_SPIRAL/INDEX_INCLUSION/SHORT_SQUEEZE) to match backend loop 'type' and the loops[l.type] index. Cards now populate.",
+  "_bucket": 7
+ },
+ {
+  "id": "D445",
+  "action": "fixed",
+  "note": "Read loop.proximity_to_trigger_pct and loop.acceleration_timeline (with old keys as fallbacks). Matches reflexivity_detector._make_loop_result.",
+  "_bucket": 7
+ },
+ {
+  "id": "D446",
+  "action": "fixed",
+  "note": "Read data.fundamentals_snapshot (fallback to data.fundamentals). Matches detect_loops output.",
+  "_bucket": 7
+ },
+ {
+  "id": "D447",
+  "action": "fixed",
+  "note": "Convert data.channels dict to array via Object.entries, injecting channel name as 'channel' key, before .length/iteration. Matches compute_composite dict-of-channels shape.",
+  "_bucket": 7
+ },
+ {
+  "id": "D448",
+  "action": "fixed",
+  "note": "Read g.dealer_hedge_estimates dict and convert to array (move label as 'move', price/delta_shares from value). Matches compute_gex output.",
+  "_bucket": 7
+ },
+ {
+  "id": "D449",
+  "action": "fixed",
+  "note": "Read data.narrative_phase (fallback to data.phase). Matches analyze_narrative output; Phase KPI now colorizes.",
+  "_bucket": 7
+ },
+ {
+  "id": "D450",
+  "action": "fixed",
+  "note": "Read data.position_sizing_multiplier (fallback data.position_sizing) and convert data.indicators dict to array (name as 'indicator'). Matches compute_stress_score output.",
+  "_bucket": 7
+ },
+ {
+  "id": "D451",
+  "action": "fixed",
+  "note": "Render beat_probability as a label string (badge by BEAT/MISS substring) while still supporting numeric; read estimated_surprise_pct and confidence_level; convert signals dict to array before .length/loop. Matches nowcast_revenue.",
+  "_bucket": 7
+ },
+ {
+  "id": "D478",
+  "action": "fixed",
+  "note": "Derive total channels denominator from Object.keys(data.channels).length (fallback 6) instead of the non-existent data.total_channels.",
+  "_bucket": 7
+ },
+ {
+  "id": "D479",
+  "action": "fixed",
+  "note": "Moved the +0.1 inside the Math.min(1.0,...) clamp so opacity can no longer exceed 1.0; differentiates the top tickers correctly.",
+  "_bucket": 7
+ },
+ {
+  "id": "D018",
+  "action": "fixed",
+  "note": "Wrapped broker interaction in try/finally so broker.disconnect() always runs (best-effort, logged) even when submit() raises; broker initialized to None so a get_broker() failure skips disconnect. Prevents live-session/socket leak on failed submits.",
+  "_bucket": 8
+ },
+ {
+  "id": "D021",
+  "action": "fixed",
+  "note": "Made is_live fail-closed as the comment documents: now `str(getattr(broker,'mode','live')).strip().lower() != 'paper'`, so blank/unknown modes are treated as live for the halt decision.",
+  "_bucket": 8
+ },
+ {
+  "id": "D045",
+  "action": "fixed",
+  "note": "cancel_all_open now inspects broker.cancel() result: only flips local state to canceled (and counts it) when the venue reports a terminal state; ambiguous/non-terminal results set 'unknown' for reconciliation so kill_switch still-open count stays honest. Paper path unchanged.",
+  "_bucket": 8
+ },
+ {
+  "id": "D019",
+  "action": "fixed",
+  "note": "When broker reports terminal filled/partially_filled with no fills array, synthesize one fill from res filled_qty/avg_fill_price (guarded: qty>0 and price>0, and only if no fills already recorded), preventing a genuinely filled order from being stranded in 'unknown'.",
+  "_bucket": 8
+ },
+ {
+  "id": "D020",
+  "action": "fixed",
+  "note": "Rounded volume-weighted avg_fill_price to 8 dp to kill division float drift. Deliberately used round(...,8) not aj_db.money() because money() rounds to cents and would destroy legitimate fractional/crypto price granularity; 8dp preserves precision while removing 0.1+0.2-style residue.",
+  "_bucket": 8
+ },
+ {
+  "id": "D022",
+  "action": "fixed",
+  "note": "Added _KNOWN_STATES set; reconcile now validates broker tstate against it (unrecognized strings -> keep 'unknown'), and only increments out['resolved'] when _set_state returns True, else counts still_unknown.",
+  "_bucket": 8
+ },
+ {
+  "id": "D023",
+  "action": "fixed",
+  "note": "qty now honors decision['qty'] explicitly when not None (incl. 0) instead of via `or` truthiness, falling back to proposal qty only when unset; added a qty<=0 rejection before the DB insert.",
+  "_bucket": 8
+ },
+ {
+  "id": "D046",
+  "action": "fixed",
+  "note": "Replaced fixed 1e-6 absolute short-fill epsilon with relative tolerance: filled_qty < order_qty*(1-1e-6), so the partial-fill test scales correctly for fractional crypto and whole-share equity.",
+  "_bucket": 8
+ },
+ {
+  "id": "D024",
+  "action": "fixed",
+  "note": "Replaced the bare `except: pass` on the proposal->'executed' status update with log.exception so a failed status flip (re-propose risk) is surfaced, not silently swallowed.",
+  "_bucket": 8
+ },
+ {
+  "id": "D057",
+  "action": "rejected",
+  "note": "Misread: _set_state handles frm==to (e.g. filled->filled) in the first branch via update_if compare-and-set of extra (avg/filled_qty/fees) and returns True BEFORE reaching valid_transition, so terminal-state metadata updates are already written. The claimed False-return path does not occur.",
+  "_bucket": 8
+ },
+ {
+  "id": "D051",
+  "action": "deferred",
+  "note": "The suggested 'seed local from broker on first reconcile' would suppress genuine live divergences and weaken the fail-closed \u00a720.3 halt \u2014 a safety regression. Live fills are already recorded with mode='live'. The spurious-first-divergence concern is a design tradeoff, not a safe surgical fix; deferring to avoid weakening the risk gate.",
+  "_bucket": 8
+ },
+ {
+  "id": "D307",
+  "action": "fixed",
+  "note": "Added a `if shares < 0: raise ValueError(...)` guard in the insert (no-existing-row) branch of add_position so a brand-new SELL no longer inserts a phantom short with corrupted basis. Verified.",
+  "_bucket": 9
+ },
+ {
+  "id": "D310",
+  "action": "fixed",
+  "note": "save_snapshot now falls back to today's UTC date when date is falsy (NULL/empty), restoring UNIQUE-conflict dedupe. Verified two NULL-date snapshots collapse to one row.",
+  "_bucket": 9
+ },
+ {
+  "id": "D311",
+  "action": "fixed",
+  "note": "cache_filing coerces `ai_result = ai_result or {}` at top, preventing AttributeError mid-write when caller passes None. Verified.",
+  "_bucket": 9
+ },
+ {
+  "id": "D315",
+  "action": "fixed",
+  "note": "Wrapped the ALTER TABLE migrations + index creation + settings seeding + commit in `with _write_lock:` (the defect's recommended minimal scope). RLock is reentrant so _migrate_settings's nested acquire stays safe. Idempotent CREATE TABLE statements left as-is.",
+  "_bucket": 9
+ },
+ {
+  "id": "D339",
+  "action": "fixed",
+  "note": "Wrapped int(row['value']) in try/except (TypeError,ValueError) defaulting to 0, so a corrupt non-numeric __schema_version__ is treated as 'needs migration' instead of aborting.",
+  "_bucket": 9
+ },
+ {
+  "id": "D308",
+  "action": "fixed",
+  "note": "Changed ORDER BY to `COALESCE(t.date, t.created_at) DESC, t.created_at DESC` so NULL-date rows sort by created_at and aren't dropped by LIMIT. Return shape unchanged.",
+  "_bucket": 9
+ },
+ {
+  "id": "D309",
+  "action": "fixed",
+  "note": "Added trim() inside the BUY/SELL counters: `upper(trim(action))` so trailing-whitespace actions are counted correctly. Return shape unchanged.",
+  "_bucket": 9
+ },
+ {
+  "id": "D314",
+  "action": "fixed",
+  "note": "Rewrote the row builder as a loop with per-row safe composite parsing: missing/non-numeric composite stored as NULL (not 0.0) so a real zero stays distinct, AVG/MAX ignore gaps, and one bad row no longer aborts the executemany batch. Verified.",
+  "_bucket": 9
+ },
+ {
+  "id": "D306",
+  "action": "fixed",
+  "note": "[post-pass cross-file] Fixed cross-file: registered @app.teardown_appcontext calling db.close_thread_conn() to release per-request thread-local SQLite connections. Verified no route regression.",
+  "_bucket": 9
+ },
+ {
+  "id": "D312",
+  "action": "rejected",
+  "note": "Premise inaccurate: d comes from `dict(sqlite3.Row)` via SELECT *, so the key 'total_value_usd' is always present; `.get(...,0)` returns the actual value (None for NULL) and the default 0 only applies to an absent key, which never happens. NULL is already preserved as None, so there is no 0-masking bug to fix.",
+  "_bucket": 9
+ },
+ {
+  "id": "D313",
+  "action": "rejected",
+  "note": "Described bug does not occur: the except only catches int-coercion errors (OverflowError,ValueError,TypeError); a sqlite3.OperationalError already propagates (not swallowed as False), which matches the defect's own preferred fix. No conflation of DB-error with absent happens.",
+  "_bucket": 9
+ },
+ {
+  "id": "D117",
+  "action": "fixed",
+  "note": "Negative-guard loop now resets negative floats/ints to DEFAULTS[k] instead of forcing 0.0, so a negative value can't silently disable a protective limit (where 0=off). Matches the module's reset-to-default pattern.",
+  "_bucket": 10
+ },
+ {
+  "id": "D084",
+  "action": "fixed",
+  "note": "Sell now sizes to the full held_qty (close the position) instead of min(held_qty, target/price); the notional target is an opening budget, not an exit ceiling. No test sizes a sell, so safe. Buys unchanged.",
+  "_bucket": 10
+ },
+ {
+  "id": "D116",
+  "action": "fixed",
+  "note": "After prob clamping, added a gate-sanity check: if sell_prob_threshold > buy_prob_threshold (inverted gate), reset both to DEFAULTS so a prob can't be both buy and sell candidate.",
+  "_bucket": 10
+ },
+ {
+  "id": "D118",
+  "action": "fixed",
+  "note": "default_broker check now lowercases both sides ({b.lower() for b in _valid_brokers()}), so a valid broker whose registry key is mixed-case no longer resets to paper.",
+  "_bucket": 10
+ },
+ {
+  "id": "D119",
+  "action": "fixed",
+  "note": "Resolved together with D120: _coerce_list parameterized with upper flag; session_whitelist now persisted lowercase via upper=False in both get_config and _serialize, so persisted value agrees with _TRADABLE_SESSIONS. Runtime .lower() rescue kept for legacy values.",
+  "_bucket": 10
+ },
+ {
+  "id": "D120",
+  "action": "fixed",
+  "note": "Added _coerce_list(v, upper=True) flag; symbol_allowlist keeps uppercasing, session_whitelist uses upper=False. Call sites in get_config and _serialize updated.",
+  "_bucket": 10
+ },
+ {
+  "id": "D144",
+  "action": "fixed",
+  "note": "_serialize now validates/clamps before persisting to match get_config rules: negative floats->default, prob keys clamped [0,1], invalid enums (daily_loss_basis/halt_rearm/entry_order_type/default_broker) reset, non-tradable sessions filtered. Cross-field prob ordering stays in get_config (can't be done per-key).",
+  "_bucket": 10
+ },
+ {
+  "id": "D085",
+  "action": "fixed",
+  "note": "Added math.isfinite(price) guard (import math) so a NaN/inf price fails closed instead of slipping past price<=0 and propagating NaN qty/notional.",
+  "_bucket": 10
+ },
+ {
+  "id": "D086",
+  "action": "fixed",
+  "note": "When a buy is skipped because notional<min_notional AND max_order_notional<min_order_notional (contradictory config), now logs at WARNING with the two values so the operator sees the misconfig; normal dust-skips stay at debug. Sells excluded.",
+  "_bucket": 10
+ },
+ {
+  "id": "D121",
+  "action": "fixed",
+  "note": "_INT_KEYS now use int(round(...)) instead of int() (truncation) in get_config and _serialize, so fractional inputs like 0.6 don't collapse to 0 and disable a guard. Integer test inputs (30,60) unaffected.",
+  "_bucket": 10
+ },
+ {
+  "id": "D145",
+  "action": "fixed",
+  "note": "Resolved via documentation (finder's accepted alternative): added a docstring note that presets are additive overlays and deliberately do NOT reset untouched advanced guards. Chose this over reset-to-DEFAULTS because that would risk silently wiping/weakening operator-set guards; behavior unchanged.",
+  "_bucket": 10
+ },
+ {
+  "id": "D146",
+  "action": "fixed",
+  "note": "_coerce_float now accepts numeric values directly and, for strings, only strips commas when they form well-formed thousands separators (regex); ambiguous inputs like '1,2'/'12,5'/'1,2,3' fall back to the safe default instead of becoming a larger number. Verified '1,234.5','$1,234.5','1,000,000' still parse.",
+  "_bucket": 10
+ },
+ {
+  "id": "D001",
+  "action": "fixed",
+  "note": "Rewrote _acquire_lease as an atomic compare-and-set: claim via INSERT OR IGNORE when no lease row (rowcount==1 wins), else steal a stale lease via UPDATE ... WHERE key=? AND value=<exact-old-value> and only return True on rowcount==1. Acquisition now rests on DB-atomic statements, not the in-process-only _write_lock, closing the cross-process TOCTOU. Verified: two acquirers -> one True one False, re-acquire after release works.",
+  "_bucket": 11
+ },
+ {
+  "id": "D271",
+  "action": "fixed",
+  "note": "_fetch_quotes now also triggers the SYM-USD retry when the bare quote's change_pct is missing/non-numeric (not only when price is bad). A non-held coin (e.g. DOGE) whose bare ticker returns a price but no change_pct now falls back to DOGE-USD and resolves the correct asset. Verified with a mocked fetcher.",
+  "_bucket": 11
+ },
+ {
+  "id": "D272",
+  "action": "fixed",
+  "note": "Trigger UPDATE in evaluate_all now guards WHERE id=? AND armed=1 and only appends to triggered / mutates the dict when cur.rowcount>0. Prevents double-fire and stamping a watch deleted/rearmed in the unlocked-SELECT window. Verified: first eval fires once, second does not re-fire.",
+  "_bucket": 11
+ },
+ {
+  "id": "D002",
+  "action": "fixed",
+  "note": "release() restructured so the fcntl LOCK_UN and self._fh.close() are in independent try blocks; close() always runs even if flock(UN) raises, then self._fh=None. No FD leak.",
+  "_bucket": 11
+ },
+ {
+  "id": "D003",
+  "action": "fixed",
+  "note": "backup_db now opens dest inside a try that closes the source connection s and re-raises if sqlite3.connect(dest) fails, so the source FD no longer leaks.",
+  "_bucket": 11
+ },
+ {
+  "id": "D004",
+  "action": "fixed",
+  "note": "Added Good Friday (Western Easter via anonymous Gregorian computus, Easter Sunday minus 2 days) to _us_market_holidays. Verified correct for 2023-04-07, 2024-03-29, 2025-04-18, 2026-04-03. market_session now returns 'closed' on Good Friday. Early-close half-days left unmodeled (out of scope; errs safe).",
+  "_bucket": 11
+ },
+ {
+  "id": "D047",
+  "action": "fixed",
+  "note": "Added _check_table (frozenset whitelist of the 10 aj_* tables) and _check_cols (regex ^[A-Za-z_][A-Za-z0-9_]*$) and wired them into insert/update/update_if/get_row. Identifiers are validated before interpolation; values stay parameterized. All real callers use static table names + kwarg columns, unaffected. Verified malformed table/column names now raise ValueError.",
+  "_bucket": 11
+ },
+ {
+  "id": "D048",
+  "action": "fixed",
+  "note": "_check_table explicitly rejects table=='aj_audit' ('aj_audit is append-only; use audit()'), so the generic insert() can no longer write a chain-bypassing row. audit() path unaffected; verify_audit_chain still returns ok. Same edit as D047's helper.",
+  "_bucket": 11
+ },
+ {
+  "id": "D005",
+  "action": "fixed",
+  "note": "_applied_version now logs a warning (with the offending raw value) before returning 0 when int() fails, so corruption is observable instead of silently re-migrating. Initialized v=None to make the log safe.",
+  "_bucket": 11
+ },
+ {
+  "id": "D006",
+  "action": "fixed",
+  "note": "_canonical now falls back to json.dumps({'_unserializable': str(payload)}, sort_keys=True) (with a nested fallback) instead of bare str(payload), keeping the stored audit body valid canonical JSON. Verified with a circular-reference dict -> parseable JSON output.",
+  "_bucket": 11
+ },
+ {
+  "id": "D055",
+  "action": "deferred",
+  "note": "Adding a min-age threshold to find_stale_running_cycles would break test_aj_contract.py::test_crash_recovery_no_double_submit, which opens a cycle and immediately expects recover_crashed_cycles to report crashed==1. Single-instance locking already excludes the current cycle, so the residual risk only manifests if the lock fails open. Per hard rules (don't break a test-depended behavior), left unchanged.",
+  "_bucket": 11
+ },
+ {
+  "id": "D273",
+  "action": "fixed",
+  "note": "_crypto_symbols comprehension now filters isinstance(h, dict), so a single non-dict portfolio row (e.g. a tuple) no longer raises AttributeError into the broad except and blanks the whole crypto set. Verified: a tuple row is skipped while BTC/ETH still resolve.",
+  "_bucket": 11
+ },
+ {
+  "id": "D030",
+  "action": "rejected",
+  "note": "Not real. On the sell side lot[0] stays >=0 (take<=lot[0]); on cover side lot[0] stays <=0. So `lot[0]<=_EPS` and `lot[0]>=-_EPS` are already exactly equivalent to `abs(lot[0])<=_EPS`. Dropping a sub-1e-9-share residual is the intended epsilon behavior, not basis loss.",
+  "_bucket": 12
+ },
+ {
+  "id": "D031",
+  "action": "rejected",
+  "note": "Not real. The FIFO logic only opens the opposite side after fully consuming the front (same-signed) lots, so a deque is always single-signed; the long/short mix the finder posits ('somehow') cannot form. avg_cost=cost/tot_qty is well-defined.",
+  "_bucket": 12
+ },
+ {
+  "id": "D035",
+  "action": "deferred",
+  "note": "Real economics, but the intended/tested behavior books total fees (incl opening-fill fees) into realized_today: test_aj_unit.test_day_pnl_fifo_with_fees asserts realized_today==198.5 = 200-1.0(buy fee)-0.5(sell fee). Changing it breaks that test and the documented day-P&L contract. Deferred to avoid weakening a tested behavior.",
+  "_bucket": 12
+ },
+ {
+  "id": "D394",
+  "action": "fixed",
+  "note": "Real ZeroDivisionError: historical can be 0.0 (avg_abs_event_move_pct rounds to 0), giving ratio=0 then 1/ratio crashes. Added `if ratio <= 0.0:` branch before the ratio<=0.8 (1/ratio) path, returning a 'historical avg ~0' message. Verified all branches; cheap/expensive/fair unchanged.",
+  "_bucket": 12
+ },
+ {
+  "id": "D032",
+  "action": "rejected",
+  "note": "Harmless defensive guard, not a defect. Removing the `if tot_qty else 0.0` would remove divide-by-zero protection that future epsilon-filter changes might rely on; finder itself rates it harmless. Left in place (fail-safe).",
+  "_bucket": 12
+ },
+ {
+  "id": "D033",
+  "action": "fixed",
+  "note": "Real day-boundary mismatch: paper_book used UTC date + filled_at[:10] while aj_risk._session_date and the unrealized baseline use the ET (America/New_York) session date. Added _et_date() helper; 'today' and per-fill is_today now computed via parse_iso->ET date. Verified 00:30 UTC maps to prior ET day; same-day test still yields realized_today=198.5.",
+  "_bucket": 12
+ },
+ {
+  "id": "D034",
+  "action": "fixed",
+  "note": "Real: realized_trades charged the full fill fee to the closing portion even when the fill also opened a new lot. Now pro-rates closed_fee = fees*closed_qty/qty. No-op when closed_qty==qty; verified a 10-long-close + 5-short-open sell now nets 98.0 (was 97.0). Return shape unchanged.",
+  "_bucket": 12
+ },
+ {
+  "id": "D036",
+  "action": "deferred",
+  "note": "Real ambiguity (LINK/UNI/MATIC/DOT/ATOM collide with equities) but infer_asset_type drives marks/fees/exit rules app-wide and there is no disambiguating asset-type source in the paper book. Removing the hints could regress legitimate bare-ticker crypto handling. Deferred per 'prefer deferred over risky change'.",
+  "_bucket": 12
+ },
+ {
+  "id": "D393",
+  "action": "rejected",
+  "note": "Already handled. The `.isna()` call is wrapped in both an inner try/except (falls back to `future = ed`) and an outer try/except. Finder is low-confidence and states 'no change needed'. No real defect.",
+  "_bucket": 12
+ },
+ {
+  "id": "D052",
+  "action": "rejected",
+  "note": "Intentional design: lot math stays full-precision until a money() boundary (realized_* ARE rounded; positions are not). Rounding cost_basis/avg_cost in paper_book would alter avg_cost values downstream marks/tests depend on. Finder offers 'document as intentional' as an acceptable resolution. Low severity, no edit.",
+  "_bucket": 12
+ },
+ {
+  "id": "D059",
+  "action": "deferred",
+  "note": "Real in principle for cross-venue timestamp formats, but the canonical fix (normalize filled_at on insert) lives in the order/fill insert path outside my two assigned files; live mode is off and paper uses uniform utc_now_iso(). My D033 change already routes the today-comparison through parse_iso (format-robust). Deferred for the ordering fix as out-of-scope.",
+  "_bucket": 12
+ },
+ {
+  "id": "D395",
+  "action": "rejected",
+  "note": "Intentional documented design, not a defect. _make_event's comment (S10) deliberately builds the implied move from each symbol's OWN chain for FOMC/OPEX to avoid beta artifacts; per-symbol market-wide overlay is a feature. Finder is low-confidence and says 'likely intended'. Removing/deduping would delete that feature.",
+  "_bucket": 12
+ },
+ {
+  "id": "D077",
+  "action": "fixed",
+  "note": "Trailing-stop now uses peak = max(persisted peak_mark, current mark) in exit_signals (aj_rules.py:148-152), so a not-yet-refreshed/stale low peak can no longer under-report drawdown and miss the stop. peak==mark still yields 0 distance (won't false-fire).",
+  "_bucket": 13
+ },
+ {
+  "id": "D078",
+  "action": "fixed",
+  "note": "Slippage-guard estimate now derives the spread component from aj_broker._PAPER_SPREAD_BPS (the authoritative paper fill model) instead of the magic '0.5*frac*8'. Numerically identical today (0.5*frac*8 == frac*4.0) but can no longer drift from the real adverse-fill cost (aj_rules.py:262-268).",
+  "_bucket": 13
+ },
+ {
+  "id": "D081",
+  "action": "fixed",
+  "note": "Moved the 'SELECT * FROM aj_position_state' read inside the db_lock() block (aj_rules.py:54-58) so the check-then-act is atomic. Verified aj_db.query holds no lock and database._write_lock is a re-entrant RLock, so no deadlock.",
+  "_bucket": 13
+ },
+ {
+  "id": "D131",
+  "action": "deferred",
+  "note": "Word-boundary regex does NOT match substrings (verified: 'asset','reset','delivery' don't trigger) so the description's premise is partly false. Real residual is only over-blocking benign standalone words ('are we live?') \u2014 a SAFE direction. Letting reads win would let mixed commands like 'show positions and sell 100' bypass the confirm gate; deferred to preserve the fail-closed \u00a711 gate.",
+  "_bucket": 13
+ },
+ {
+  "id": "D079",
+  "action": "deferred",
+  "note": "No half-day/early-close calendar exists in this codebase \u2014 aj_db.market_session() itself uses a fixed 16:00 close, so the 390 constant matches it exactly. Negative-mins is moot because _minutes_into_regular is only consulted when session=='regular' (09:30-16:00). A proper fix needs a calendar in aj_db (outside my files).",
+  "_bucket": 13
+ },
+ {
+  "id": "D080",
+  "action": "deferred",
+  "note": "aj_orders has no cycle_id column, so the robust cycle-id fix needs a schema change outside my files. Swapping '>' to '>=' would count the order's OWN creating cycle as elapsed, firing TTL one cycle early (premature cancellation) \u2014 the dangerous direction. Strict '>' is the safer conservative choice; deferred.",
+  "_bucket": 13
+ },
+ {
+  "id": "D082",
+  "action": "fixed",
+  "note": "Replaced 'mark = marks.get(sym) or float(avg_cost)' with explicit None handling (aj_rules.py:60-61) so a legitimate 0.0 mark is no longer masked by avg_cost and can't corrupt the trailing-stop peak. Matches the None-check pattern already used in exit_signals.",
+  "_bucket": 13
+ },
+ {
+  "id": "D083",
+  "action": "rejected",
+  "note": "extra_exit_signals emits at most ONE signal per symbol per cycle (single loop with 'continue' after each exit), and full protective stops (time-stop/ratchet) are ordered BEFORE the TP ladder; ATR-stop (a loss condition) is mutually exclusive with the ladder (a gain condition). The described 'partial suppresses a same-cycle full stop' cannot occur.",
+  "_bucket": 13
+ },
+ {
+  "id": "D132",
+  "action": "rejected",
+  "note": "compute_day_pnl() always returns day_pnl via aj_db.money() which is declared/returns a float, never a string. The ValueError path described cannot occur in this codebase; the format spec is safe as-is.",
+  "_bucket": 13
+ },
+ {
+  "id": "D133",
+  "action": "fixed",
+  "note": "_summarize now reads live_trading_enabled from the status dict and reports 'on (live)' vs 'on (paper)' (aj_voice.py:68-72), so the spoken status no longer misreports a live-enabled state as paper.",
+  "_bucket": 13
+ },
+ {
+  "id": "D106",
+  "action": "rejected",
+  "note": "Boundary semantics nit only \u2014 the description itself calls the strict '<' returning False at exactly mins*60 'fine'. Cooldown being exclusive of the exact boundary second is reasonable and consistent; no behavioral defect to correct.",
+  "_bucket": 13
+ },
+ {
+  "id": "D134",
+  "action": "rejected",
+  "note": "Confirmed aj_positions.paper_book()['positions'] is a dict of {SYM: {...}} (aj_positions.py:112-124), so len() correctly counts distinct symbols = open positions. The spoken count is already accurate; no fix needed.",
+  "_bucket": 13
+ },
+ {
+  "id": "D321",
+  "action": "fixed",
+  "note": "cache_warmer _safe: _runner now closes thread-local DB/cache conns in finally (database.close_thread_conn / cache_store.close_thread_conn); added _inflight tracking + lock so a label whose prior timed-out worker is still alive is skipped (caps orphans at 1/label instead of 1/cadence).",
+  "_bucket": 14
+ },
+ {
+  "id": "D252",
+  "action": "fixed",
+  "note": "jarvis_lens _ownership: replaced min(t.get('date') or t.get('created_at','')) with str-coerced, falsy-filtered list and `first = min(dates) if dates else None`; guarded the holding-days block on `if buys and first`. Prevents TypeError comparing None to str that silently blanked the ownership panel.",
+  "_bucket": 14
+ },
+ {
+  "id": "D255",
+  "action": "fixed",
+  "note": "Chase loop now coerces price/shares via _num() and `continue`s when either is None, so a string-typed row can't raise TypeError and abort the (un-try-wrapped) temperament check.",
+  "_bucket": 14
+ },
+ {
+  "id": "D256",
+  "action": "rejected",
+  "note": "The finder's own conclusion is 'leave as is, coerce inputs'. The average-book reduction cost_total=avg*remaining is correct for an average cost basis; oversell clamp to 0 is acceptable. Input coercion handled by D255. No separate edit warranted.",
+  "_bucket": 14
+ },
+ {
+  "id": "D322",
+  "action": "fixed",
+  "note": "Added _book_lock guarding all writes to _last_cycle/_fail_count/_next_retry (in _safe, _record_failure, and the fundamentals/news/chart stamps) and snapshotting them under the lock in status(), eliminating 'dictionary changed size during iteration'.",
+  "_bucket": 14
+ },
+ {
+  "id": "D323",
+  "action": "fixed",
+  "note": "Gated _portfolio_symbols()/_watchlist_symbols() behind `quotes_due or quotes_crypto_due` so the 4 SELECTs no longer run on every 15s tick; symbol lists default to [] when neither quote leg is due. The fundamentals/news/chart re-fetches were left as-is since they already sit inside 12h/6h due-gates (not part of the per-tick waste).",
+  "_bucket": 14
+ },
+ {
+  "id": "D324",
+  "action": "deferred",
+  "note": "True fix requires an atomic conditional UPDATE (deliver only if rowcount==1) which needs a new helper in database.py \u2014 outside my allowed files (jarvis_lens.py, cache_warmer.py). set_setting uses INSERT OR REPLACE with no rowcount semantics. Timezone change is also a deliberate behavior change. Deferred rather than ship a partial/risky claim-then-send that could drop digests on delivery failure.",
+  "_bucket": 14
+ },
+ {
+  "id": "D253",
+  "action": "fixed",
+  "note": "_ownership now uses h.get('shares')/h.get('avg_cost') instead of subscripting; unrealized_pct guarded on avg_cost being present. A missing field no longer KeyErrors and blanks the entire ownership dict.",
+  "_bucket": 14
+ },
+ {
+  "id": "D254",
+  "action": "deferred",
+  "note": "Finder admits 'the current code is mostly consistent'. The (d,ts) sort already orders same-day BUY before SELL; the flip held=(d-last_buy).days is intentionally day-granular. Switching the flip math to full ts is speculative hardening that risks changing held-day counts callers/tests may depend on. Deferred.",
+  "_bucket": 14
+ },
+ {
+  "id": "D257",
+  "action": "fixed",
+  "note": "Sector slicing: top_n=min(3,max(1,half)) for len(ranked)>=1 and bottom only when len>=2, so a single-sector feed now surfaces as 'leading' instead of being dropped. Verified len 2/3/4 slices are unchanged (still disjoint).",
+  "_bucket": 14
+ },
+ {
+  "id": "D258",
+  "action": "rejected",
+  "note": "Finder explicitly says 'Acceptable as-is'. Every thunk catches Exception broadly and returns None; the serial generator-unpacking fallback is safe. No edit.",
+  "_bucket": 14
+ },
+ {
+  "id": "D259",
+  "action": "fixed",
+  "note": "Crypto appetite no longer asserts 'contracting' when mcap_change_24h is None; now 'expanding' if chg>0, 'contracting' if chg<0, else 'mixed'. Prevents a direction claim with no supporting number.",
+  "_bucket": 14
+ },
+ {
+  "id": "D248",
+  "action": "fixed",
+  "note": "HIGH: _coach_summary lead ('washes, all of them') could contradict the tail ('cost $X') because net sums sub-band wash deltas. Added a guard: when there are no regrets and no reliefs, force the wash tail regardless of net. net_usd return field unchanged.",
+  "_bucket": 15
+ },
+ {
+  "id": "D037",
+  "action": "fixed",
+  "note": "Made held comprehension defensive: book.get('positions') or {} and p.get('qty', 0.0) so a malformed position dict can't KeyError and crash the cycle.",
+  "_bucket": 15
+ },
+ {
+  "id": "D038",
+  "action": "deferred",
+  "note": "Realized-scoring per-lot basis for multiple same-symbol exits in one pass. Finder itself calls it borderline; a correct fix (per-sell lot basis or recompute from realized_trades) risks changing realized P&L/scorecard behavior. Deferred.",
+  "_bucket": 15
+ },
+ {
+  "id": "D040",
+  "action": "deferred",
+  "note": "reconcile() BrokerNotEnabled distinct handling lives in aj_execution (not my file); the call-site comment explicitly makes reconcile non-fatal so an unverified live venue doesn't crash a paper cycle. Promoting to halt would contradict intended fail-open semantics. Deferred.",
+  "_bucket": 15
+ },
+ {
+  "id": "D041",
+  "action": "rejected",
+  "note": "Finder concludes 'no change strictly required'; acquire() closes _fh on failure and lock.release() is already in a finally. No real defect.",
+  "_bucket": 15
+ },
+ {
+  "id": "D043",
+  "action": "fixed",
+  "note": "Normalized sizing dict in _propose_and_execute: qty via .get, notional defaults to money(qty*price) when absent, so a sizer omitting 'notional' no longer KeyErrors mid-insert. Current behavior preserved (size_order always supplies both).",
+  "_bucket": 15
+ },
+ {
+  "id": "D249",
+  "action": "fixed",
+  "note": "Added additive 'partial' flag (len(txns) >= _TXN_LIMIT) to analyze()'s returned dict so callers know the global 200-row cap may have truncated older sells. Consumer (jarvis_tools) reads keys via .get, so additive key is safe.",
+  "_bucket": 15
+ },
+ {
+  "id": "D250",
+  "action": "fixed",
+  "note": "Added 'if proceeds <= 0: continue' before computing the wash band so zero/penny proceeds don't yield a ~0 band that mislabels every nonzero delta as regret/relief.",
+  "_bucket": 15
+ },
+ {
+  "id": "D251",
+  "action": "deferred",
+  "note": "FIFO future-dated-lot consumption. Finder labels it borderline; changing the consume/pop logic alters avg_hold_days/quick_flips on bad-data edge cases. Preferring deferred over a risky behavior change.",
+  "_bucket": 15
+ },
+ {
+  "id": "D039",
+  "action": "fixed",
+  "note": "Changed sizing['price'] to sizing.get('price') in the fill notification so a missing price degrades to None instead of relying on the broad except to swallow a KeyError.",
+  "_bucket": 15
+ },
+ {
+  "id": "D042",
+  "action": "deferred",
+  "note": "Stale session label for premarket briefing. Documented snapshot semantics; re-evaluating market_session() at decision time would subtly change when briefings fire for marginal gain. Deferred.",
+  "_bucket": 15
+ },
+ {
+  "id": "D056",
+  "action": "rejected",
+  "note": "Not real in current code: _propose_and_execute returns normally and r['symbol']=sig['symbol'] runs immediately after with only try-guarded/append code following, so an executed exit cannot be dropped from the _exited dedup set.",
+  "_bucket": 15
+ },
+ {
+  "id": "D341",
+  "action": "fixed",
+  "note": "Tracking-error lookup now case-insensitive: delta.get(s, delta.get(s.upper(), 0.0)) so upper-cased `used` symbols match original-case delta keys instead of silently yielding all-zero tracking error.",
+  "_bucket": 16
+ },
+ {
+  "id": "D373",
+  "action": "fixed",
+  "note": "black_litterman now normalizes mkt_caps keys to upper (caps_norm) before lookup, so caller-supplied caps in original/lower case aren't all-missed and silently collapsed to equal market weights.",
+  "_bucket": 16
+ },
+ {
+  "id": "D372",
+  "action": "fixed",
+  "note": "risk_parity now sanitizes res.x with np.where(np.isfinite(w), w, 0.0) before clipping/normalizing and falls back to equal weights when sum<=EPS, preventing all-NaN weight vectors from a diverged SLSQP.",
+  "_bucket": 16
+ },
+ {
+  "id": "D371",
+  "action": "fixed",
+  "note": "markowitz_optimize adds an additive 'warning' key when target_return/target_vol solve fails (infeasible under constraints; returning feasible start). Return shape unchanged for the converged path; key is optional/additive.",
+  "_bucket": 16
+ },
+ {
+  "id": "D325",
+  "action": "fixed",
+  "note": "Added _session_lock and _get_session() with double-checked locking; _get now uses _get_session(). Concurrent first callers can no longer each build a Session or use one mid-init before headers are applied.",
+  "_bucket": 16
+ },
+ {
+  "id": "D326",
+  "action": "fixed",
+  "note": "defillama_tvl_summary protocols now filtered with isinstance(p.get('tvl'),(int,float)) before sorting (matching the chains branch), avoiding str-vs-float TypeError on string tvl rows.",
+  "_bucket": 16
+ },
+ {
+  "id": "D327",
+  "action": "fixed",
+  "note": "mempool_btc_stats tip_height now guards isinstance(blocks,list) and isinstance(blocks[0],dict), so an error-body dict or non-dict list no longer raises and 500s the panel.",
+  "_bucket": 16
+ },
+ {
+  "id": "D328",
+  "action": "fixed",
+  "note": "treasury_yield_curve wraps the per-row float() of avg_interest_rate_amt in try/except (TypeError,ValueError)->None, so '*'/'null' placeholders no longer 500 the whole fetch.",
+  "_bucket": 16
+ },
+ {
+  "id": "D329",
+  "action": "fixed",
+  "note": "cboe_vix_history now skips blank trailing rows (any(row.values())) and parses CLOSE/HIGH/LOW via a guarded _num() helper that returns None on non-numeric values like 'N/A'.",
+  "_bucket": 16
+ },
+ {
+  "id": "D331",
+  "action": "fixed",
+  "note": "_cache_set: after the expired sweep, if still >200, evicts soonest-to-expire entries (sorted by expiry) down to the cap, so an all-fresh cache no longer grows unbounded.",
+  "_bucket": 16
+ },
+ {
+  "id": "D332",
+  "action": "fixed",
+  "note": "gdelt_tone_timeline now selects the series whose 'series' label contains 'tone', falling back to index 0 to preserve prior behavior, so a reordered GDELT response won't chart the wrong metric. Also filters non-dict timeline entries.",
+  "_bucket": 16
+ },
+ {
+  "id": "D330",
+  "action": "deferred",
+  "note": "SEC XBRL 'end' is always ISO YYYY-MM-DD so lexicographic sort == chronological (finder concedes this); the only non-cosmetic part of the suggested fix (prefer 10-K/annual frames) would change which value latest() returns for headline metrics, a behavior change callers/tests may depend on. Deferred to avoid altering returned figures on speculation.",
+  "_bucket": 16
+ },
+ {
+  "id": "D399",
+  "action": "fixed",
+  "note": "Wrapped _c_price_momentum label build in try/except and switched the position guard to `is not None` (matching the pieces computation above), so non-numeric pct/price/hi/lo no longer crash inside .format() and legitimate 0.0 values are handled consistently. Return shape unchanged.",
+  "_bucket": 17
+ },
+ {
+  "id": "D418",
+  "action": "fixed",
+  "note": "Replaced the misleading 'redistribute its weight pro-rata' comment in _weighted_pick with an accurate one explaining random.choices normalizes the present sources' weights. Behavior unchanged (it was already correct).",
+  "_bucket": 17
+ },
+ {
+  "id": "D420",
+  "action": "fixed",
+  "note": "CONCENTRATES branch was an f-string with a literal {symbol} followed by .format(symbol=symbol); converted to a single consistent f-string and dropped .format(), matching the DIVERSIFIES/NEUTRAL branches.",
+  "_bucket": 17
+ },
+ {
+  "id": "D421",
+  "action": "fixed",
+  "note": "Peer-rank pick_pos lookup now matches case-insensitively against an uppercased copy of `order`, mirroring the existing case-insensitive pick_value lookup. Prevents the pick being silently dropped from rank metrics on symbol-case mismatches.",
+  "_bucket": 17
+ },
+ {
+  "id": "D422",
+  "action": "fixed",
+  "note": "_compute_sizing entry guard changed from `not price` to `not price or price <= 0`, so a negative/zero price returns available:False instead of producing negative shares via the price-division cap branch.",
+  "_bucket": 17
+ },
+ {
+  "id": "D423",
+  "action": "deferred",
+  "note": "Low-confidence; default annual_vol of 25.0 when vol is missing is a sensible fallback, not a defect. The suggested fix (ATR fallback or a 'vol-unavailable' flag) would add a new return field that the UI/callers may key on \u2014 return-shape risk outweighs benefit.",
+  "_bucket": 17
+ },
+ {
+  "id": "D390",
+  "action": "fixed",
+  "note": "_c_congress string-date parsing now tries '%m/%d/%Y' (the format congress.py actually emits) first, then falls back to '%Y-%m-%d', and applies the 60d cutoff. Stale string-dated trades are now filtered correctly.",
+  "_bucket": 17
+ },
+ {
+  "id": "D400",
+  "action": "fixed",
+  "note": "Same single edit as D390 fully resolves this duplicate finding: the string-date branch now parses the correct congress format and applies the cutoff (continues only on a successful parse that is older than cutoff).",
+  "_bucket": 17
+ },
+ {
+  "id": "D419",
+  "action": "rejected",
+  "note": "Finder concedes dict item assignment is atomic in CPython and 'unlikely to corrupt'. No observable bug; adding a lock around _dynamic_crypto_id_map writes would add complexity for a non-defect.",
+  "_bucket": 17
+ },
+ {
+  "id": "D437",
+  "action": "deferred",
+  "note": "The time.sleep(1.2) inside _full_crypto_lock is a real serialization cost but not a correctness defect. Moving the fetch outside the lock with double-checked locking is a non-trivial refactor of working cache code that risks double-fetch/cache races; deferred over a risky change.",
+  "_bucket": 17
+ },
+ {
+  "id": "D440",
+  "action": "rejected",
+  "note": "_portfolio_total_value returns a single float and already correctly handles quoted-price-0 (explicit None check + comment). Treating unpriceable positions as $0 is correct for this contract; surfacing unvalued positions would require a return-shape change callers depend on, which is an enhancement not a defect.",
+  "_bucket": 17
+ },
+ {
+  "id": "D439",
+  "action": "fixed",
+  "note": "Root cause is the same congress date-parse bug as D390/D400; with that fixed, only <=60d trades feed `net` before the +/-$100k saturation, so stale trades no longer pollute the normalized congress signal. No separate edit needed at line 434.",
+  "_bucket": 17
+ },
+ {
+  "id": "D108",
+  "action": "fixed",
+  "note": "Now stores the Lease objects (self._kid_lease/_sec_lease) instead of raw plaintext; added _creds() that reads .value per-request and re-leases on TTL expiry, so credentials no longer outlive the 300s lease.",
+  "_bucket": 18
+ },
+ {
+  "id": "D139",
+  "action": "fixed",
+  "note": "Added _read_secret_value(): --set scope=@- reads stdin, @path reads a file, @env:NAME reads an env var, empty value triggers a getpass prompt. Legacy inline scope=value still works. Avoids plaintext on argv.",
+  "_bucket": 18
+ },
+ {
+  "id": "D109",
+  "action": "fixed",
+  "note": "_fills_for now returns [] when the activities response is not a list (isinstance guard before the loop), preventing str.get AttributeError on an error/dict body.",
+  "_bucket": 18
+ },
+ {
+  "id": "D110",
+  "action": "fixed",
+  "note": "submit() sends qty only when present, else notional; TIF now read from order.get('time_in_force') defaulting to 'day'. Stops qty='None' notional rejections and honors limit TIF.",
+  "_bucket": 18
+ },
+ {
+  "id": "D111",
+  "action": "fixed",
+  "note": "positions() coerces the response to a list (data if isinstance(data,list) else []) so a 200 error envelope dict no longer crashes the comprehension.",
+  "_bucket": 18
+ },
+ {
+  "id": "D152",
+  "action": "fixed",
+  "note": "submit() re-reads live_trading_enabled and re-asserts gating each call; if the live flag no longer matches the endpoint this instance was built for it raises BrokerNotEnabled (fail-closed) rather than routing to a stale/live base.",
+  "_bucket": 18
+ },
+ {
+  "id": "D140",
+  "action": "fixed",
+  "note": "main() now logs the full traceback (logging.exception + traceback.print_exc) for diagnosability, and redacts the JSON error message for secret/verify-pass commands so argv-derived values can't leak.",
+  "_bucket": 18
+ },
+ {
+  "id": "D142",
+  "action": "fixed",
+  "note": "cmd_verify_pass restricts to known gates; mcp_read requires contract_ok() to pass; broker gates (alpaca/ccxt/robinhood) require explicit --force-i-ran-the-contract-test ack; the action is now audited. Keeps the VERIFY design fail-closed.",
+  "_bucket": 18
+ },
+ {
+  "id": "D143",
+  "action": "fixed",
+  "note": "cmd_config diffs requested --set keys against aj_config.DEFAULTS, warns on stderr for ignored unknown keys, and includes ignored_keys in the JSON output so a typo'd cap doesn't appear to apply.",
+  "_bucket": 18
+ },
+ {
+  "id": "D112",
+  "action": "fixed",
+  "note": "Fast-fill enrichment now triggers whenever broker_order_id is present and (filled_qty>0 or state in filled/partially_filled), not only filled_qty>0 at submit.",
+  "_bucket": 18
+ },
+ {
+  "id": "D151",
+  "action": "fixed",
+  "note": "cash() documents it returns the USD cash field only and now logs a warning if account currency != USD. Return shape unchanged (float) to avoid breaking callers.",
+  "_bucket": 18
+ },
+ {
+  "id": "D141",
+  "action": "fixed",
+  "note": "cmd_run validates mode in ('paper','live') and errors out with a clear 'unknown mode' message instead of passing a typo'd mode to run_once.",
+  "_bucket": 18
+ },
+ {
+  "id": "D087",
+  "action": "fixed",
+  "note": "trade_stats now uses (t.get('realized') or 0) for win/loss filters and gross sums, matching aj_alpha's defensive access so a malformed trade row can't raise KeyError into status()/maybe_escalate().",
+  "_bucket": 19
+ },
+ {
+  "id": "D127",
+  "action": "fixed",
+  "note": "Added TOOL_PARAMS map and hoisted _make() which now attaches an explicit inspect.Signature (symbol/horizon_days/limit/mode as needed) to each MCP wrapper, so FastMCP advertises a real input schema instead of a bare **kwargs with no params.",
+  "_bucket": 19
+ },
+ {
+  "id": "D088",
+  "action": "fixed",
+  "note": "positions_detail now accumulates raw unrealized (total_unreal) and applies money() once at the end, removing per-line round-then-sum bias. attribution() per-symbol 'total' rounding is intentional per-line display (no grand total summed from rounded legs there), left as-is.",
+  "_bucket": 19
+ },
+ {
+  "id": "D089",
+  "action": "fixed",
+  "note": "journal_csv notional now uses aj_db.money(qty*price) (ROUND_HALF_UP) instead of round() (banker's rounding) for reconciliation consistency with the rest of the system.",
+  "_bucket": 19
+ },
+ {
+  "id": "D090",
+  "action": "deferred",
+  "note": "sharpe_like sqrt(252) annualization is a methodology choice; changing it would alter the returned Sharpe value that UI/CLI/tests may depend on. Finder itself accepts documenting; no safe behavior-preserving fix, so deferred rather than risk a stats change.",
+  "_bucket": 19
+ },
+ {
+  "id": "D091",
+  "action": "fixed",
+  "note": "notify_fill now escapes backslashes and double-quotes in the message before interpolating into the osascript display-notification string, preventing AppleScript injection from a malformed symbol/side.",
+  "_bucket": 19
+ },
+ {
+  "id": "D130",
+  "action": "fixed",
+  "note": "Added _clamp_limit() (clamps to [1,200], coerces non-numeric to default 20) used by _t_proposals and _t_orders, blocking SQLite's negative-LIMIT='all rows' exfiltration and huge-LIMIT OOM on the frozen read surface.",
+  "_bucket": 19
+ },
+ {
+  "id": "D092",
+  "action": "fixed",
+  "note": "position_aging sort key now (age is None, -(age or 0)) so positions with unknown age sort last instead of masquerading as newest.",
+  "_bucket": 19
+ },
+ {
+  "id": "D107",
+  "action": "fixed",
+  "note": "positions_detail now weights by gross market value (sum of |mv|) and sorts by abs(market_value), so short legs / net-short books still show meaningful concentration. Long-only books are unaffected; total_market_value return stays net.",
+  "_bucket": 19
+ },
+ {
+  "id": "D128",
+  "action": "fixed",
+  "note": "_make() hoisted from inside the serve_stdio loop to module level, making per-call name capture explicit and preventing accidental reintroduction of the late-binding bug.",
+  "_bucket": 19
+ },
+ {
+  "id": "D129",
+  "action": "fixed",
+  "note": "_t_forecast now checks for missing symbol before coercing horizon_days, and wraps int() in try/except defaulting to 20, so a bad horizon surfaces the clear 'symbol required' error instead of an opaque parse error.",
+  "_bucket": 19
+ },
+ {
+  "id": "D150",
+  "action": "fixed",
+  "note": "contract_ok now pins each registered fn to an allow-list of the known _t_* read implementations (any non-read callable fails regardless of name), replacing the false-confidence name denylist. Verified existing contract tests still pass (lambda/extra-tool cases still rejected).",
+  "_bucket": 19
+ },
+ {
+  "id": "D072",
+  "action": "fixed",
+  "note": "Real: single negative attribution row made best==worst. Changed guard to `len(attrib)>1 and attrib[-1].get('total',0)<0` so worst is always a distinct row.",
+  "_bucket": 20
+ },
+ {
+  "id": "D093",
+  "action": "fixed",
+  "note": "Real: bad position dict (missing/None avg_cost/qty) aborted the whole unrealized loop. Wrapped the per-symbol body in try/continue and used float(p.get(...) or 0).",
+  "_bucket": 20
+ },
+ {
+  "id": "D073",
+  "action": "fixed",
+  "note": "Real: `cfg.get('session_whitelist') or ['regular']` overrode an intentional empty list (no tradable sessions). Now distinguishes None (default ['regular']) from empty list, preserving the operator's disable.",
+  "_bucket": 20
+ },
+ {
+  "id": "D074",
+  "action": "deferred",
+  "note": "De-escalation/escalation threshold asymmetry is a policy/tuning judgment; changing thresholds alters autonomous risk-escalation behavior. Not a clear defect \u2014 deferred to avoid behavior change.",
+  "_bucket": 20
+ },
+ {
+  "id": "D075",
+  "action": "rejected",
+  "note": "Finder admits low-confidence. trade_stats() contractually returns a 0-1 fraction and wr>=0.55 is correct; no caller passes percent-scaled values. Adding wr/=100 normalization could itself corrupt a legit 0-1 value near edge cases. No real bug.",
+  "_bucket": 20
+ },
+ {
+  "id": "D094",
+  "action": "fixed",
+  "note": "Real: return hard-indexed book['realized_total']/['fees_total'] outside the try; a fallback book ({'positions':{}}) would 500 status(). Now uses .get(...) or 0.0 for both and the total.",
+  "_bucket": 20
+ },
+ {
+  "id": "D095",
+  "action": "fixed",
+  "note": "Real (partial): hardened os_['fill_rate']/os_['total']/os_['by_state'] to .get() so a shape change can't KeyError and silently drop the later critical recon/halt alerts. Kept the single-try structure (minimal change); did not split each check into its own try.",
+  "_bucket": 20
+ },
+ {
+  "id": "D096",
+  "action": "deferred",
+  "note": "fill_rate denominator feeds health_autohalt kill switch. Redefining 'submitted' changes the metric value that can trigger an autonomous halt; the finder's proposed state set is debatable. Deferred to avoid weakening/altering a safety gate's input.",
+  "_bucket": 20
+ },
+ {
+  "id": "D097",
+  "action": "fixed",
+  "note": "Real: status() config projection hard-indexed cfg[k]; an older/partial persisted config would 500 the status endpoint. Changed to cfg.get(k) so a missing key yields None.",
+  "_bucket": 20
+ },
+ {
+  "id": "D076",
+  "action": "fixed",
+  "note": "Real: per-idea `regime = aj_alpha.detect_regime()` was computed and discarded (never stored in the idea dict), causing k redundant SPY fetches. Removed; the briefing-level detect_regime() call at line 294 is retained.",
+  "_bucket": 20
+ },
+ {
+  "id": "D104",
+  "action": "fixed",
+  "note": "Real: int(raw) failed on float-like strings like '1.0', resetting escalation level to 1. Changed to int(float(raw)) inside the existing guard, preserving clamping to [0,2].",
+  "_bucket": 20
+ },
+ {
+  "id": "D105",
+  "action": "fixed",
+  "note": "Real (minor): r.get('text') truthy-guard allowed a non-str truthy value to reach .strip(). Changed to isinstance(r.get('text'), str). Outer except already caught it, but this avoids the silent skip.",
+  "_bucket": 20
+ },
+ {
+  "id": "D025",
+  "action": "rejected",
+  "note": "Not a real defect. The finder itself admits min(lp, quote*(1+adverse)) already caps a buy fill at lp (and max(lp,...) floors a sell at lp), so the limit guarantee is never violated. The proposed change to the marketability test (using slipped price) would alter fill behavior without fixing any correctness bug.",
+  "_bucket": 21
+ },
+ {
+  "id": "D028",
+  "action": "deferred",
+  "note": "Genuine: get_broker() returns a fresh PaperBroker each call so cross-call get_order/cancel see empty _orders. But paper is self-truth and reconcile reconstructs state from aj_fills (finder acknowledges the masking). Making PaperBroker durable/singleton is an architectural change with memory-growth and shared-state risk; deferred to avoid breaking the fail-closed reconcile path.",
+  "_bucket": 21
+ },
+ {
+  "id": "D122",
+  "action": "rejected",
+  "note": "Already addressed. lease() already calls log.exception('aj_secrets.lease decrypt failed for %s') on decrypt failure (ERROR level, distinct marker), vs a silent None for the absent case \u2014 so monitoring can already distinguish corrupt/rekeyed from never-stored. No code change needed.",
+  "_bucket": 21
+ },
+ {
+  "id": "D026",
+  "action": "fixed",
+  "note": "Clamped bps to >=0 with bps = max(0.0, float(bps or 0)) in _fees() before computing the fee, so a misconfigured negative fee_bps can no longer zero out (or refund via negative) fees. Verified: negative bps now yields the min_fee floor (0.0), never negative.",
+  "_bucket": 21
+ },
+ {
+  "id": "D027",
+  "action": "deferred",
+  "note": "cash() returns the static aj_paper_cash seed. Grepped the whole repo: broker.cash() has NO callers \u2014 nothing uses it for buying-power gating, so the claimed wrong-sizing bug has no live consumer. Recomputing it would change the documented contract with no benefit and some risk; deferred (the safer 'document as static seed' alternative needs no edit).",
+  "_bucket": 21
+ },
+ {
+  "id": "D054",
+  "action": "rejected",
+  "note": "Duplicate of D025. The marketability-test vs fill-price asymmetry is cosmetic: fill price is already bounded within the limit by min/max, so paper fills are never optimistic beyond the limit. No correctness defect.",
+  "_bucket": 21
+ },
+ {
+  "id": "D123",
+  "action": "fixed",
+  "note": "Closed the TOCTOU/partial-write window: key is now written fully to a unique temp file (fchmod 0600 + fsync) then published with os.link(), which is atomic AND fails if the destination exists. Readers see either no file or the complete key; exactly one process can publish (no two different keys). Loser re-reads winner's key. Verified idempotent across calls.",
+  "_bucket": 21
+ },
+ {
+  "id": "D124",
+  "action": "fixed",
+  "note": "File-loaded key is now validated via Fernet(kb) before returning (mirroring the env-key path), so a zero-byte/truncated/corrupt key file fails loudly at load instead of later inside encrypt(). Verified: empty key file now raises ValueError at load.",
+  "_bucket": 21
+ },
+ {
+  "id": "D125",
+  "action": "rejected",
+  "note": "Finder's fix requires adding database.delete_setting(), but database.py is outside my editable files. Current delete() is correct under the existing thread-local pooling (finder concedes 'mostly fine'); the concern is speculative future-proofing, not a present defect. No safe in-file change available.",
+  "_bucket": 21
+ },
+ {
+  "id": "D029",
+  "action": "rejected",
+  "note": "Describes intentional behavior: only stock/crypto fee tiers are modeled and unknown asset types fall through to the equity tier by design. Finder labels it minor and its 'fix' is to document the current behavior. No defect.",
+  "_bucket": 21
+ },
+ {
+  "id": "D126",
+  "action": "rejected",
+  "note": "The fix targets aj_alpaca's caller (reads .value at construction), which is outside my editable files. The Lease contract within aj_secrets.py is internally sound (TTL gating + redacted __str__/__repr__). No in-file defect to correct.",
+  "_bucket": 21
+ },
+ {
+  "id": "D147",
+  "action": "fixed",
+  "note": "has() and lease() now capture the cursor from execute() and explicitly close it in a try/finally after fetchone(), instead of leaking the implicit cursor on the long-lived thread-local connection. Behavior/return shapes unchanged.",
+  "_bucket": 21
+ },
+ {
+  "id": "D113",
+  "action": "fixed",
+  "note": "PRIVATE local escalation retry now bumps max_tokens (+256, mirroring public path) so the retry has a genuine chance to cross the quality floor instead of reproducing the same failing output.",
+  "_bucket": 22
+ },
+ {
+  "id": "D430",
+  "action": "fixed",
+  "note": "Both scan_opportunities cache-hit branch and get_cached_scan now shallow-copy the cached dict and its scan_meta before setting cached=True, so the stored object is never mutated/aliased.",
+  "_bucket": 22
+ },
+ {
+  "id": "D114",
+  "action": "fixed",
+  "note": "PUBLIC quality-floor retry no longer sets fallback_used=1 (same chat_any backend is re-called, no distinct fallback); records escalated=1 alone, removing misleading telemetry.",
+  "_bucket": 22
+ },
+ {
+  "id": "D115",
+  "action": "fixed",
+  "note": "Dropped the `text is not None` guard on the PRIVATE retry so a transient None first result also gets one bounded local retry; fail-closed semantics preserved (still-None/short retry leaves ok=False).",
+  "_bucket": 22
+ },
+ {
+  "id": "D149",
+  "action": "deferred",
+  "note": "Real fail-open risk, but the sound fix (callers passing sensitivity=PRIVATE explicitly for holdings paths) lives in operator/holdings modules I cannot edit; broadening the heuristic in-file risks false-positive PRIVATE routing that fail-closes legitimate public prompts. Deferred to avoid breaking callers/tests.",
+  "_bucket": 22
+ },
+ {
+  "id": "D426",
+  "action": "fixed",
+  "note": "When kept_max==0 the de-overlap rescale now falls back to neutral 50 instead of the full composite, preventing reintroduction of the smart_money double-count.",
+  "_bucket": 22
+ },
+ {
+  "id": "D427",
+  "action": "fixed",
+  "note": "Smart-money error-branch detail score now uses sm_score (50 neutral default) instead of 0, so the UI detail matches the value the composite actually scores.",
+  "_bucket": 22
+ },
+ {
+  "id": "D428",
+  "action": "fixed",
+  "note": "_parse_date_loose now returns datetime/date inputs as-is (date promoted to datetime) instead of coercing them to datetime.min; added `date` to the datetime import. Prevents already-parsed recent buys being silently dropped.",
+  "_bucket": 22
+ },
+ {
+  "id": "D429",
+  "action": "fixed",
+  "note": "Primary defect (in-place mutation of the shared cached dict) resolved via the shallow-copy fix (D430). Did not add a threading.Lock: whole-entry dict get/set are atomic under the GIL and wrapping cache access risks holding a lock across _build_universe; the aliasing/corruption concern is gone.",
+  "_bucket": 22
+ },
+ {
+  "id": "D148",
+  "action": "deferred",
+  "note": "cost_usd is genuinely hardcoded 0.0, but recording real cost needs token usage from ai_summarizer.chat_any (another file, contract change). No accurate in-file estimate available without touching that backend. Deferred.",
+  "_bucket": 22
+ },
+ {
+  "id": "D477",
+  "action": "rejected",
+  "note": "Working as intended: reddit posts intentionally treat cached-empty and miss as identical 'no data', and the case needing the distinction (stocktwits) already uses the _NEG sentinel. Description concedes callers are fine; the alternative fix is just documentation. Not a real defect.",
+  "_bucket": 22
+ },
+ {
+  "id": "D431",
+  "action": "fixed",
+  "note": "Guarded `movers = fetcher.get_top_movers() or {}` so a None response degrades to no-gainers instead of an AttributeError that the bare except swallows and silently empties the momentum universe.",
+  "_bucket": 22
+ },
+ {
+  "id": "D266",
+  "action": "rejected",
+  "note": "False premise. database.get_conn() returns a per-thread connection (threading.local), so within a single thread execute() and commit() always hit the SAME connection; DDL is committed normally. No cross-connection bug. Binding once would be cosmetic only.",
+  "_bucket": 23
+ },
+ {
+  "id": "D351",
+  "action": "fixed",
+  "note": "Added threading.Lock guarding all cache dict reads/writes plus a per-symbol single-flight lock, so concurrent callers of the same symbol coalesce onto one in-flight training (kills the 2-5s thundering herd) while different symbols still train in parallel. Refactored compute into _ml_forecast_compute(); return shape unchanged. cache_store.coalesce does not exist, so a lock was the correct route.",
+  "_bucket": 23
+ },
+ {
+  "id": "D389",
+  "action": "fixed",
+  "note": "Real. Now branches on raw P/S code: raw=(txn_type_raw or '').upper().strip(); buy if 'purchase'/'buy' in label or raw.startswith('P'), sell if 'sale'/'sell' in label or raw.startswith('S'). Mirrors synth_sectorflow/_consensus; no longer keys off the combined-label first char which would miscount future 'split'/'pending' labels.",
+  "_bucket": 23
+ },
+ {
+  "id": "D267",
+  "action": "rejected",
+  "note": "False premise. recall() reads its OWN thread's connection; store/forget write THEIR thread's connection (per-thread via threading.local) under _write_lock. No shared sqlite3.Connection/cursor across threads, and WAL mode allows concurrent readers. No race to fix.",
+  "_bucket": 23
+ },
+ {
+  "id": "D268",
+  "action": "fixed",
+  "note": "Real. Moved ai_summarizer._record_ai_call() to immediately after client.embeddings.create() returns, before the len(resp.data)!=len(texts) validation, so a billed-but-malformed response is still counted against the daily AI cap instead of slipping through as free.",
+  "_bucket": 23
+ },
+ {
+  "id": "D269",
+  "action": "fixed",
+  "note": "Real. Guarded query norm: qn=float(norm(q)); if not isfinite(qn) or qn==0 return []. Multiplied row norms by qn and wrapped scores in np.nan_to_num so a NaN/zero query vector or corrupt row can't propagate NaN into argsort/threshold comparisons.",
+  "_bucket": 23
+ },
+ {
+  "id": "D352",
+  "action": "fixed",
+  "note": "Real perf redundancy. Captured df_full from the first _build_features(hist) call before the dropna and reused it for the latest-row features, removing the second _build_features(hist) call that doubled feature-engineering cost on the hot path. Latest row is identical (only dropped for the missing fwd_ret label, unneeded at predict time).",
+  "_bucket": 23
+ },
+ {
+  "id": "D353",
+  "action": "deferred",
+  "note": "The normalization math is correct; this is a calibration opinion (RF-absent blend vs STRONG thresholds). Clamping composite_signal to never-STRONG when RF missing changes the public signal label with no test pinning the intended behavior and could suppress legitimate strong signals. Risky tuning change, deferred.",
+  "_bucket": 23
+ },
+ {
+  "id": "D270",
+  "action": "fixed",
+  "note": "Real. Added 'if not np.isfinite(s): continue' before the below-threshold break in the recall loop so a NaN score can never short-circuit (or be appended). Combined with the D269 np.nan_to_num this is belt-and-suspenders; behavior otherwise unchanged.",
+  "_bucket": 23
+ },
+ {
+  "id": "D378",
+  "action": "deferred",
+  "note": "Calibration opinion about the fp*20/30 rescale plus /20 divisor. The code carries an explicit justifying comment; altering it shifts the composite score for every symbol with no test pinning the new normalization. Subjective tuning, not a clear correctness bug. Deferred to avoid broad model-output drift.",
+  "_bucket": 23
+ },
+ {
+  "id": "D385",
+  "action": "deferred",
+  "note": "Genuine near-degenerate edge case, but the proposed eps-floor changes the feature matrix and StandardScaler scaling for affected instruments, altering RF predictions with no test pinning the intended behavior and a non-trivial eps choice. Exact-zero guard already prevents crashes. Deferred as a risky tuning change on rare near-flat data.",
+  "_bucket": 23
+ },
+ {
+  "id": "D433",
+  "action": "fixed",
+  "note": "Real. When call_vol<=0 now returns None (skip the pair) instead of the pcr=5.0 sentinel that forced a fixed -1.0 max-bearish norm regardless of put volume. PCR computed as put_vol/call_vol only when call_vol>0; existing thinness guard retained.",
+  "_bucket": 23
+ },
+ {
+  "id": "D345",
+  "action": "rejected",
+  "note": "Not a real defect: hypothesis horizon_days is deliberately CALENDAR days (LLM 'verify in N days' wall-clock window), distinct by design from the trading-day signal forecasts. Converting it would mis-resolve. Added a clarifying NOTE comment at the due-date computation to document the intentional divergence; no logic change.",
+  "_bucket": 24
+ },
+ {
+  "id": "D354",
+  "action": "fixed",
+  "note": "_close_price_on_or_before now returns None when target pre-dates every bar instead of fabricating bars[0]['close']. Callers (score_due_forecasts, hypothesis horizon-close) already handle None by skipping/erroring, so no bogus realized return is committed.",
+  "_bucket": 24
+ },
+ {
+  "id": "D135",
+  "action": "fixed",
+  "note": "Memoized a lazy module-level Langfuse singleton (_LF_CLIENT) reused across cycles instead of constructing a fresh client (with its background flush thread + HTTP session) on every emit_cycle_trace call.",
+  "_bucket": 24
+ },
+ {
+  "id": "D364",
+  "action": "fixed",
+  "note": "Added `from contextlib import closing` and wrapped all 10 `with _conn() as c:` sites in `with closing(_conn()) as c:` so each short-lived WAL connection is deterministically closed. All write sites already call c.commit() explicitly, so transaction behavior is preserved.",
+  "_bucket": 24
+ },
+ {
+  "id": "D355",
+  "action": "fixed",
+  "note": "Added a proportional holiday cushion to the trading->calendar conversion: horizon_cal = ceil(h*7/5) + ceil(h/63), so long horizons no longer read the close ~13 days early due to ignored market holidays (~1 per 63 trading days).",
+  "_bucket": 24
+ },
+ {
+  "id": "D356",
+  "action": "fixed",
+  "note": "Captured the UPDATE cursor and only increment `scored` when cur.rowcount > 0; a rowcount of 0 (another thread/process already scored the row via the scored_at IS NULL guard) is now skipped instead of overcounting.",
+  "_bucket": 24
+ },
+ {
+  "id": "D136",
+  "action": "fixed",
+  "note": "Redaction no longer emits the open-ended `result` object (which can carry qty/avg_fill_price/fees/pnl). Now emits only symbol+side plus a coarse status string extracted from result.get('state')/get('status') (or the raw string if result is a str).",
+  "_bucket": 24
+ },
+ {
+  "id": "D365",
+  "action": "fixed",
+  "note": "_call_openai now log.warning()s when ai_summarizer._cap_exceeded is missing instead of silently defaulting to an unenforced cap via the getattr lambda, making a bypassed daily budget visible.",
+  "_bucket": 24
+ },
+ {
+  "id": "D366",
+  "action": "fixed",
+  "note": "Changed the zero-price guard from `float(issued) == 0` to a non-positive check (`float(issued) > 0`, NaN-safe, with TypeError/ValueError fallback to invalid), so negative/corrupt entry prices invalidate instead of producing a sign-inverted realized_pct.",
+  "_bucket": 24
+ },
+ {
+  "id": "D386",
+  "action": "rejected",
+  "note": "Not a real defect: sec_edgar.get_recent_filings signature is (ticker, forms=None, limit=20); the call get_recent_filings(symbol, None, 5) lands None on forms and 5 on limit, which is positionally correct. No silent blanking occurs; no change made.",
+  "_bucket": 24
+ },
+ {
+  "id": "D357",
+  "action": "deferred",
+  "note": "Computing Sharpe over directional-only rows would change the avg_return/sharpe_of_signal_returns values the UI badge consumes \u2014 a risky behavior change. The existing code already documents that avg/Sharpe include all scored (incl. neutral) rows, and the field name is self-describing. Deferred per the prefer-deferred-over-risky rule.",
+  "_bucket": 24
+ },
+ {
+  "id": "D388",
+  "action": "rejected",
+  "note": "The cited line 567 (magnitude/100.0 -> decimal fraction) is correct. The defect is a cross-hook 'standardize units' concern; other hooks pass magnitude=None (absence, not a wrong unit), so there's no concrete bug at this location. Standardizing would touch other modules with no defect to fix here.",
+  "_bucket": 24
+ },
+ {
+  "id": "D404",
+  "action": "fixed",
+  "note": "Real crash: `c <= 0` ran before float() \u2014 a numeric-string close raises TypeError on Py3. Coerced with try/float() first (cf), then guard `cf <= 0`, store cf. synth_macrotranslate.py:322-331.",
+  "_bucket": 25
+ },
+ {
+  "id": "D405",
+  "action": "rejected",
+  "note": "Misread. forward_5d sums 5 daily factor returns (bars i..i+4, needs i+5<=len) while _forward_return uses a price 5 bars ahead (needs index start+5 to exist). The `>` vs `>=` difference correctly reflects different addressing, not an inconsistent boundary for the same quantity; finder itself notes 'that part is fine'.",
+  "_bucket": 25
+ },
+ {
+  "id": "D414",
+  "action": "rejected",
+  "note": "Not real. The optimizer universe `symbols` is built from `current` (=current_clean) \u222a {cand}, which is exactly the proposed book's symbol set; _clean_holdings drops cash/zero-MV. So proposed_size (fraction of proposed_nav) and optimal weight are over the same investable universe \u2014 like-for-like. The 'excluded assets/cash' concern is hypothetical.",
+  "_bucket": 25
+ },
+ {
+  "id": "D415",
+  "action": "fixed",
+  "note": "Real sign inversion. Losses are negative %; for 'positive shift = worse' a more-negative new loss must give positive shift. Changed `n - c` to `c - n`. UI consumes raw scenario_losses, not the shift, so flip is safe. synth_whatif.py:586.",
+  "_bucket": 25
+ },
+ {
+  "id": "D137",
+  "action": "fixed",
+  "note": "Real denylist gap: renamed DB copies (wealth.db.bak, backups/wealth.db.bak) slipped past 'wealth.db'/'wealth.db-*'. Added 'wealth.db*' and '*wealth.db*' to FORBIDDEN_PATHS (strictly more restrictive, fail-closed). Verified .bak variants now BLOCKED; research files still allowed.",
+  "_bucket": 25
+ },
+ {
+  "id": "D406",
+  "action": "rejected",
+  "note": "Not a real defect. lv and pv are set to None together on coercion failure and set together otherwise, so `if pv:` already implies lv is not None. Finder concedes 'behavior currently safe'; the suggested guard is cosmetic.",
+  "_bucket": 25
+ },
+ {
+  "id": "D407",
+  "action": "rejected",
+  "note": "Modeling-convention opinion (confidence low), not a confirmed bug. The output is a factor-attributed (excess-return) projection by design; adding an rf term or relabeling would change the headline expected_5d_pct the UI consumes \u2014 risky behavior change with no clear-cut correct value. No safe surgical fix.",
+  "_bucket": 25
+ },
+ {
+  "id": "D416",
+  "action": "rejected",
+  "note": "Not a defect. horizon_days=365 (confirmed at synth_whatif.py:416), so the ~annual rf subtraction holds. Finder agrees 'No fix required if horizon\u22481y'.",
+  "_bucket": 25
+ },
+ {
+  "id": "D417",
+  "action": "rejected",
+  "note": "Intentional, documented behavior (lines 390-393): missing keys synthesized from market_value via setdefault for ad-hoc holdings; real holdings pass through. avg_cost=market_value is a neutral zero-gain default. Suggested fix adds a network price fetch and risks behavior change. Confidence low.",
+  "_bucket": 25
+ },
+ {
+  "id": "D436",
+  "action": "rejected",
+  "note": "Not real. Finder itself concludes proposed rows always carry symbol/market_value (built from _clean_holdings which guarantees them) \u2014 'safe', 'internal contract only'. Hypothetical bypass of whatif() only.",
+  "_bucket": 25
+ },
+ {
+  "id": "D138",
+  "action": "deferred",
+  "note": "Real but architectural. Proper fix is positive sandbox-containment (allowlist) + path normalization, replacing the name-based denylist contract. That risks breaking this fail-closed stub's documented contract and callers passing relative candidate paths; the real runner isn't even wired yet. D137 widening already closes the most concrete bypass. Deferred to avoid risky rework.",
+  "_bucket": 25
+ },
+ {
+  "id": "D434",
+  "action": "rejected",
+  "note": "Reporting market_beta=None deliberately signals 'beta unavailable' vs an actual beta of 1.0; changing it to 1.0 trades one possible misread for another. Finder confidence low and offers two opposite fixes \u2014 no clear-cut correct change. Current behavior is a reasonable deliberate choice.",
+  "_bucket": 25
+ },
+ {
+  "id": "D098",
+  "action": "rejected",
+  "note": "Not real. aj_routing.ts is written via aj_db.utc_now_iso() = utc_now().replace(microsecond=0).isoformat(); cutoff uses the identical formatting, so the lexicographic compare is exact-match safe.",
+  "_bucket": 26
+ },
+ {
+  "id": "D317",
+  "action": "fixed",
+  "note": "Moved the last_access write-back under _mem_lock with an identity re-check (if _mem.get(k) is hit) so a concurrent cache_set/eviction can't be clobbered or an evicted key resurrected.",
+  "_bucket": 26
+ },
+ {
+  "id": "D318",
+  "action": "fixed",
+  "note": "Size-cap eviction ORDER BY now '(expiry<?) DESC, length(value) DESC, written_at ASC' so hot freshly-written large rows aren't evicted ahead of cold/stale rows; added time.time() param.",
+  "_bucket": 26
+ },
+ {
+  "id": "D319",
+  "action": "deferred",
+  "note": "Real concern, but the proper fix is opting in legitimate empty producers (get_news/get_option_chain) via allow_empty=True in caller files outside my scope; relaxing _looks_like_failure broadly would weaken the fail-closed negative-cache gate many callers depend on.",
+  "_bucket": 26
+ },
+ {
+  "id": "D344",
+  "action": "fixed",
+  "note": "Signal merge now keyed on (issued_at, direction, exit_date) instead of issued_at alone, so distinct same-day signals from the recent+extreme overlap aren't collapsed.",
+  "_bucket": 26
+ },
+ {
+  "id": "D379",
+  "action": "fixed",
+  "note": "Dropped the never-invalidated unlocked module-global _ML_FORECAST_CACHE; adapter now calls ml_forecast.ml_forecast() each time, which has its own thread-safe 1h TTL cache. Removed the dead global definition.",
+  "_bucket": 26
+ },
+ {
+  "id": "D099",
+  "action": "fixed",
+  "note": "Wrapped DELETE/commit in try/except with conn.rollback() on failure (re-raising); rowcount still read only after a successful commit.",
+  "_bucket": 26
+ },
+ {
+  "id": "D100",
+  "action": "fixed",
+  "note": "ok_rate denominator now SUM(CASE WHEN ok IS NOT NULL THEN 1 END) so NULL-ok rows (schema permits NULL) don't deflate the rate feeding recommend_demotions; calls (COUNT(*)) left unchanged so escalation/fallback rates and min_calls gate are unaffected.",
+  "_bucket": 26
+ },
+ {
+  "id": "D316",
+  "action": "rejected",
+  "note": "Not exploitable as described: stats() snapshots hits/misses into locals before dividing, so hit_rate = hits/(hits+misses) is always in [0,1]; it cannot exceed 1.0. Finder rated it acceptable as-is.",
+  "_bucket": 26
+ },
+ {
+  "id": "D320",
+  "action": "deferred",
+  "note": "Low severity and the existing read-time check (.get('error') and len<=3) already mirrors the write-time gate at line 191; the suggested key-subset tightening would make read/write inconsistent and is speculative. Preferred not to risk diverging the two paths.",
+  "_bucket": 26
+ },
+ {
+  "id": "D362",
+  "action": "fixed",
+  "note": "Did not alter the returned sharpe value (UI/test dependency); instead exposed an additive 'sharpe_in_market_bars' (count of non-zero pnl bars) and documented the time-weighted convention so the number is interpretable, per the finder's minimum recommendation.",
+  "_bucket": 26
+ },
+ {
+  "id": "D380",
+  "action": "fixed",
+  "note": "Validate horizon_override up front in run_backtest: non-positive overrides (e.g. -1) normalized to None before the closure/cache key, so a bad negative param no longer silently forces a 1-day horizon for the whole backtest.",
+  "_bucket": 26
+ },
+ {
+  "id": "D343",
+  "action": "rejected",
+  "note": "Not real. fromtimestamp(int(t), tz=utc).strftime maps the epoch to its UTC calendar date, which is identical to what montecarlo's pd.to_datetime(...,utc=True).tz_convert(None) produces. Both modules already yield the same UTC-based date, so the date labels are consistent with the factor frame; the suggested change would only add local-timezone dependence.",
+  "_bucket": 27
+ },
+ {
+  "id": "D369",
+  "action": "fixed",
+  "note": "research_factors.py _merge_frames: replaced strict `(m,) = mom[d]` with `m = mom[d][0]` so an extra momentum column can't raise ValueError and abort the whole factor merge.",
+  "_bucket": 27
+ },
+ {
+  "id": "D348",
+  "action": "fixed",
+  "note": "research_iv_density.py _clean_calls: added a _finite_or_none coercion for bid/ask/last up front (using math.isfinite) so yfinance NaN quotes can never reach the (bid+ask) mid arithmetic; rows drop deterministically.",
+  "_bucket": 27
+ },
+ {
+  "id": "D349",
+  "action": "fixed",
+  "note": "research_iv_density.py _compute: after _density_from_calls, if np.trapz(density,grid) <= 1e-12 (all-zero/degenerate density) return an _error('Degenerate density (no usable curvature)') envelope instead of emitting probabilities from a meaningless flat CDF.",
+  "_bucket": 27
+ },
+ {
+  "id": "D347",
+  "action": "fixed",
+  "note": "research_montecarlo.py prob_of_target: added prob_touch_approximate flag (True in the empty/failed-sim Normal-fallback branch where prob_touch collapses onto prob_term) plus a comment documenting the discrete-daily approximation; existing keys unchanged.",
+  "_bucket": 27
+ },
+ {
+  "id": "D384",
+  "action": "fixed",
+  "note": "research_montecarlo.py _simulate_uncached: build raw_mv per kept column, surface any kept symbol resolving to <=0 weight into dropped_symbols, and renormalize weights over the resolved MV. In the normal case eff_mv == surviving_mv so weights/initial_nav are unchanged; only pathological silent weight loss is now surfaced.",
+  "_bucket": 27
+ },
+ {
+  "id": "D370",
+  "action": "rejected",
+  "note": "Not real. The OLS includes an intercept (ones column), which mathematically guarantees ss_res <= ss_tot, so r2 = 1 - ss_res/ss_tot is in [0,1]; the premise that estimating alpha on excess returns breaks the bound is incorrect. Any sub-epsilon float negative rounds to 0.0 already.",
+  "_bucket": 27
+ },
+ {
+  "id": "D383",
+  "action": "fixed",
+  "note": "research_factors.py: _regress now returns the OLS residual array as a 7th tuple element; factor_exposure reuses it for idiosyncratic vol instead of re-aligning and recomputing, guaranteeing idio_vol is consistent with the reported R\u00b2/coef. _regress is private with a single caller, all updated within the file.",
+  "_bucket": 27
+ },
+ {
+  "id": "D350",
+  "action": "fixed",
+  "note": "research_iv_density.py _density_from_calls: detect uniform vs non-uniform grid via np.diff/allclose. Uniform (smooth-spline) path keeps the exact constant-h second difference and endpoint copy behavior; non-uniform (raw-strike) path now uses np.gradient(np.gradient(C_grid,grid),grid) which respects per-point spacing.",
+  "_bucket": 27
+ },
+ {
+  "id": "D387",
+  "action": "fixed",
+  "note": "research_iv_density.py _compute: moved T and r computation above the time-value filter and changed intrinsic to max(spot - strike*math.exp(-r*T), 0.0), matching the Breeden-Litzenberger discounting used downstream. Removed the now-duplicate later T/r assignment.",
+  "_bucket": 27
+ },
+ {
+  "id": "D346",
+  "action": "fixed",
+  "note": "research_montecarlo.py prob_of_target: clamp horizon and n_paths once (hd, np_clamped), pass them to _simulate_uncached, and return hd/np_clamped in the response so the reported horizon_days matches the simulation that produced the probabilities.",
+  "_bucket": 27
+ },
+ {
+  "id": "D374",
+  "action": "fixed",
+  "note": "research_montecarlo.py _simulate_uncached: clamp n_paths = max(2, min(n_paths, _MAX_PATHS)) (and horizon_days) at the boundary so _summarize's std(ddof=1)/percentile statistics are always well-defined regardless of caller path. No behavioral change for current callers which already floor n_paths at 100.",
+  "_bucket": 27
+ },
+ {
+  "id": "D402",
+  "action": "fixed",
+  "note": "Real high-confidence leak. Wrapped all three `with _conn() as c:` sites in `contextlib.closing(...)` (added `import contextlib`). Explicit c.commit() calls already cover writes, so dropping sqlite's auto-commit-on-with is safe; connections now close.",
+  "_bucket": 28
+ },
+ {
+  "id": "D411",
+  "action": "fixed",
+  "note": "Real. _factor_panel now coerces each factor with try/float and skips NaN/inf (v==v and not math.isinf(v)) instead of round(float(NaN)) producing invalid JSON / NaN composites. math already imported.",
+  "_bucket": 28
+ },
+ {
+  "id": "D412",
+  "action": "fixed",
+  "note": "Real cache-poisoning. _ticker_sector now only caches non-None sector lookups; a transient Finviz failure (sec=None) no longer latches for the full TTL, so the next scan retries.",
+  "_bucket": 28
+ },
+ {
+  "id": "D432",
+  "action": "fixed",
+  "note": "Real. options_skew now treats a zero-call leg as unknown (None) instead of +inf, so a bearish scan no longer fires purely on a zero-call (data-gap) chain. Returns no-data when both legs are unknown; value strings show n/a.",
+  "_bucket": 28
+ },
+ {
+  "id": "D398",
+  "action": "fixed",
+  "note": "Real UI mislead. reflexivity no longer falls back to detected[0] (opposite-direction loop); when the requested direction doesn't fire it returns ('no loop', overall_risk) so the displayed type/strength matches the (non-)firing.",
+  "_bucket": 28
+ },
+ {
+  "id": "D397",
+  "action": "fixed",
+  "note": "Real (minor, low-conf). Added _now_et_naive() (zoneinfo America/New_York, UTC fallback) and used it for the 30d Form-4 and 60d congress cutoffs so the day-window boundary matches the ET filing-date strings instead of drifting on UTC near midnight.",
+  "_bucket": 28
+ },
+ {
+  "id": "D396",
+  "action": "fixed",
+  "note": "Latent fragility. Added an import-time assertion that every COMPONENTS name has a SOURCE_WEIGHTS entry, keeping n_fired (breadth bonus) consistent with the weighted base. All current names already pass; no behavior change.",
+  "_bucket": 28
+ },
+ {
+  "id": "D438",
+  "action": "fixed",
+  "note": "Real thread-local leak (established pattern). Wrapped _build_sector_row in _build_with_cleanup that closes database.close_thread_conn()/cache_store.close_thread_conn() in finally, mirroring idea_pool_warmer._warm_one_with_cleanup. Verified database.py defines close_thread_conn (db is aliased to database).",
+  "_bucket": 28
+ },
+ {
+  "id": "D403",
+  "action": "rejected",
+  "note": "Finder explicitly states 'No logic change required'; the only actionable part (closing the connection) is covered by the D402 fix. Nothing to change.",
+  "_bucket": 28
+ },
+ {
+  "id": "D401",
+  "action": "deferred",
+  "note": "Cross-module unit assumption, low confidence. *100 is correct for the known writer (seed_synthetic_history writes decimals). The proposed abs>1.5 heuristic would misclassify legitimate large decimal returns; no safe normalization without confirming research_tracker's unit. Deferred over risky guess.",
+  "_bucket": 28
+ },
+ {
+  "id": "D413",
+  "action": "deferred",
+  "note": "Cost/rate-limit only, not a crash; finder notes it's 'partly mitigated by congress.py's own cache.' No safe minimal fix in-file without restructuring caching or sharing peerdiv's cache (other modules). Deferred.",
+  "_bucket": 28
+ },
+ {
+  "id": "D435",
+  "action": "deferred",
+  "note": "Finder confirms no secret leakage; only optional OpenAI client caching for latency. Not a correctness defect; client-reuse refactor is out of scope for a surgical fix. Deferred.",
+  "_bucket": 28
+ },
+ {
+  "id": "D245",
+  "action": "fixed",
+  "note": "Added a concurrent daemon stderr-reader thread that drains proc.stderr into _stderr_buf; line 373 now reads from that buffer instead of proc.stderr.read(). Prevents the >64KB-stderr deadlock.",
+  "_bucket": 29
+ },
+ {
+  "id": "D360",
+  "action": "fixed",
+  "note": "_brier_from_rows now skips rows where hit is None (NEUTRAL/HOLD), so Brier scoring covers the same directional population as the hit-rate leaderboard.",
+  "_bucket": 29
+ },
+ {
+  "id": "D358",
+  "action": "fixed",
+  "note": "Changed weights.get(k, 0.1) to weights.get(k, _BASE_WEIGHTS.get(k, 0.1)) at both renorm sites so a dropped adaptive key falls back to its real base weight, not a flat 0.1.",
+  "_bucket": 29
+ },
+ {
+  "id": "D359",
+  "action": "rejected",
+  "note": "Not real: safe_executor.parallel_map's documented and actual contract returns a same-length list with None (never an Exception) for raised jobs and snapshots the result list, so no IndexError or Exception-in-by_name is possible. Existing truthiness/`or {}` guards already handle None.",
+  "_bucket": 29
+ },
+ {
+  "id": "D455",
+  "action": "fixed",
+  "note": "Added module-level threading.Lock guarding all _cache/_cache_ts reads and writes in _get_cached/_set_cached; eviction snapshots items() under the lock. Eliminates the concurrent-mutation RuntimeError/torn-read race.",
+  "_bucket": 29
+ },
+ {
+  "id": "D456",
+  "action": "fixed",
+  "note": "Added 'Snap'/'Snap Inc'/'Snapchat' -> 'SNAP' to KNOWN_COMPANIES so the META peer node SNAP resolves a real name.",
+  "_bucket": 29
+ },
+ {
+  "id": "D457",
+  "action": "deferred",
+  "note": "Real but low-confidence precision issue; any stoplist of word-like tickers (ON, GE, NOW, HD, DE) would silently drop legitimate supply-chain edges for those real companies, weakening a feature. Deferred per prefer-deferred-over-risky guidance.",
+  "_bucket": 29
+ },
+ {
+  "id": "D361",
+  "action": "deferred",
+  "note": "Real edge case, but changing the _rank None-skill fallback alters the leaderboard ordering that drives adaptive weights; the proposed -brier heuristic is fuzzy and behavior-affecting. Deferred to avoid changing weight-driving output.",
+  "_bucket": 29
+ },
+ {
+  "id": "D382",
+  "action": "fixed",
+  "note": "Added _weights_cache_lock and guarded the cache get and the cache set in adaptive_weights so the check-then-set on the shared dict is synchronized under thread-pool concurrency.",
+  "_bucket": 29
+ },
+ {
+  "id": "D377",
+  "action": "fixed",
+  "note": "Return-cone half_width now uses max(0.0, p75-p25)/2 and the shift drops abs(), so a degenerate/inverted IQR produces no spurious tilt.",
+  "_bucket": 29
+ },
+ {
+  "id": "D246",
+  "action": "fixed",
+  "note": "After proc.wait()/_terminate() the stdin/stdout/stderr pipes are now explicitly closed in a best-effort loop (and also on the new stdin-write-failure early-return path), preventing FD leaks on repeated cancelled streams.",
+  "_bucket": 29
+ },
+ {
+  "id": "D247",
+  "action": "fixed",
+  "note": "On stdin write failure the except now SIGTERMs the process group (falling back to terminate()), closes the pipes, and returns None immediately instead of entering the read loop and burning the full _RUN_DEADLINE.",
+  "_bucket": 29
+ },
+ {
+  "id": "D274",
+  "action": "fixed",
+  "note": "STARTTLS failure is now re-raised (aborting the send) when SMTP credentials are configured, so login/sendmail never proceeds over cleartext; missing STARTTLS is still tolerated for unauthenticated relays.",
+  "_bucket": 30
+ },
+ {
+  "id": "D260",
+  "action": "rejected",
+  "note": "Not a real defect: both persist paths (app.py POST route and jarvis_tools set_policy_rule) route parse_rule output through set_rule -> _coerce_value which range-clamps. No direct-save path exists.",
+  "_bucket": 30
+ },
+ {
+  "id": "D261",
+  "action": "fixed",
+  "note": "check_proposal now uses next(...) to take the first max_single_buy_usd rule instead of looping and letting the last duplicate win; behavior-identical under current dedup, more robust if duplicates ever slip in.",
+  "_bucket": 30
+ },
+ {
+  "id": "D262",
+  "action": "fixed",
+  "note": "max_crypto_pct sum now mirrors the max_weight_pct coercion (isinstance int/float and not bool), so a bool weight_pct no longer adds 1 and a string row no longer raises inside sum() and voids the whole crypto check.",
+  "_bucket": 30
+ },
+ {
+  "id": "D263",
+  "action": "fixed",
+  "note": "Wrapped client.responses.create(...) in ai_summarizer.governed_call(lambda: ...) so the web_search call shares the process-wide concurrency cap, RPM pacing, and 429/5xx backoff (governed_call is public, fail-open, zero-arg callable).",
+  "_bucket": 30
+ },
+ {
+  "id": "D264",
+  "action": "fixed",
+  "note": "news_sentiment now sorts the series chronologically by GDELT date (zero-padded YYYYMMDD sorts lexically=chronologically) before extracting vals, and uses a 3-way compare so a flat series reports 'flat' instead of 'deteriorating'.",
+  "_bucket": 30
+ },
+ {
+  "id": "D342",
+  "action": "fixed",
+  "note": "avg_abs_event_move_pct now returns None when window_days < 5 (T+5 not fully observed) instead of silently using a clamped post_idx that shortens the measured horizon; gated on a full_post5 flag.",
+  "_bucket": 30
+ },
+ {
+  "id": "D275",
+  "action": "fixed",
+  "note": "Digest markdown file now opened with encoding='utf-8' so smart punctuation / non-ASCII text writes deterministically across locales instead of raising UnicodeEncodeError on cp1252.",
+  "_bucket": 30
+ },
+ {
+  "id": "D276",
+  "action": "fixed",
+  "note": "sendmail recipients now parsed with email.utils.getaddresses([cfg['to']]) instead of a naive split(','), so display names containing commas don't mis-split into invalid recipients. Done in the same edit as D274.",
+  "_bucket": 30
+ },
+ {
+  "id": "D265",
+  "action": "rejected",
+  "note": "Acceptable as-is per the finder's own analysis: the 'error' key already prevents long-TTL caching of the throttle, and surfacing Retry-After is a cosmetic optional enhancement (EFTS doesn't reliably return it). No genuine bug to correct.",
+  "_bucket": 30
+ },
+ {
+  "id": "D363",
+  "action": "fixed",
+  "note": "Abnormal curve now computes both the symbol average and benchmark average over the SAME event mask (rows with any finite benchmark value), making abnormal a like-for-like difference. The published avg/med/p25/p75 symbol curves over all events are unchanged.",
+  "_bucket": 30
+ },
+ {
+  "id": "D381",
+  "action": "fixed",
+  "note": "avg_post_event_5d_pct now returns None when window_days < 5 (full_post5 flag), since the 5-day post window isn't fully observed; also guarded the round() call against None. Same full_post5 gate as D342.",
+  "_bucket": 30
+ },
+ {
+  "id": "D470",
+  "action": "fixed",
+  "note": "earnings.py:321-326 \u2014 move_pct is None when before is falsy, so `None >= 0` raised TypeError swallowed by except/continue, dropping legit quarters. Added `if move_pct is None: continue` before building the direction.",
+  "_bucket": 31
+ },
+ {
+  "id": "D408",
+  "action": "fixed",
+  "note": "synth_peerdiv.py:482-486 \u2014 replaced broad raw.startswith('S') (which miscounts 'SP' spouse-owner as a sell) with the explicit sell set matching congress.get_congress_summary: S/S (PARTIAL)/SE/S (EXCHANGE)/E (EXCHANGE); buys stay P/PE. raw is .upper()'d so used uppercase forms.",
+  "_bucket": 31
+ },
+ {
+  "id": "D474",
+  "action": "fixed",
+  "note": "congress.py:57-79 \u2014 added time-based half-open reset (_BREAKER_HALFOPEN_S=300, tripped_at timestamp). Breaker still trips fail-closed on busy_streak>=5 but now clears the streak after the cooldown so it self-heals instead of staying open until restart. Added `import time`.",
+  "_bucket": 31
+ },
+ {
+  "id": "D409",
+  "action": "rejected",
+  "note": "_m_insider_form4_net_60d docstring explicitly states it returns 0.0 for zero Form-4s so '0 ranks differently from unknown=None'. Current return matches documented intent; the finder's suggested None contradicts it. The `net != 0.0` term is dead but harmless.",
+  "_bucket": 31
+ },
+ {
+  "id": "D473",
+  "action": "rejected",
+  "note": "congress.py:652-659 inline comment explicitly documents counting exchange variants under sells as a deliberate choice ('we keep them under sells the way the parser tags them'). Intentional, documented behavior the summary depends on; not a defect.",
+  "_bucket": 31
+ },
+ {
+  "id": "D472",
+  "action": "rejected",
+  "note": "earnings.py:407-409 insider signal thresholds are a tuning judgment call, not a defect. Adding a dollar floor changes dossier signal output on a speculative $1-buy edge case; current behavior is defensible. Low confidence.",
+  "_bucket": 31
+ },
+ {
+  "id": "D452",
+  "action": "rejected",
+  "note": "sec_edgar.py:333-337 \u2014 finder admits no behavior change needed for the cap and index access is already bounds-guarded (no crash). Malformed-length parallel arrays don't occur from EDGAR; dropping empty rows would risk changing caller-visible result count. Low confidence, gold-plating.",
+  "_bucket": 31
+ },
+ {
+  "id": "D453",
+  "action": "deferred",
+  "note": "sec_edgar.py:940 \u2014 per-holding thousands-vs-dollars scale heuristic. Fix (majority-vote scale per filing) is a behavior-changing refactor of money math with risk of regressing currently-correct values; total_value==0 already guarded. Low confidence.",
+  "_bucket": 31
+ },
+ {
+  "id": "D476",
+  "action": "deferred",
+  "note": "sec_edgar.py:257 \u2014 defect description is self-contradictory/circular and never states a concrete correct EDGAR FTS endpoint. Changing an external API URL I can't verify could break a working fallback. Prefer deferred over a risky/unverifiable change.",
+  "_bucket": 31
+ },
+ {
+  "id": "D475",
+  "action": "deferred",
+  "note": "congress.py:333-338 \u2014 PTR txn-type fallback already prioritizes after_ticker before the pre_date window. Tightening the fallback anchor risks dropping legitimate trades (code elsewhere stresses not silently losing trades). Low confidence, speculative edge case.",
+  "_bucket": 31
+ },
+ {
+  "id": "D410",
+  "action": "deferred",
+  "note": "synth_peerdiv.py:144-170 \u2014 dropping all dotted tickers also excludes BRK.B/BF.B. Fix requires distinguishing foreign-exchange suffixes from US class suffixes; including dot-form tickers could feed unpriceable forms (yfinance uses BRK-B) downstream. Behavior change in peer selection, low confidence.",
+  "_bucket": 31
+ },
+ {
+  "id": "D471",
+  "action": "deferred",
+  "note": "earnings.py:113/249 \u2014 avg_surprise *100 in calendar path vs no scaling in dossier path. Finder itself is unsure of the actual yfinance units per frame ('confirm units'). Changing either scaling without verifying real units risks corrupting a currently-correct value. Low confidence.",
+  "_bucket": 31
+ },
+ {
+  "id": "D458",
+  "action": "fixed",
+  "note": "Added module _cache_lock (threading.Lock) and guarded _cache_get/_cache_set in alt_data_engine.py to prevent torn dict state under safe_executor fan-out.",
+  "_bucket": 32
+ },
+ {
+  "id": "D462",
+  "action": "fixed",
+  "note": "Added _cache_lock and guarded _cached_get/_cached_set in liquidity_monitor.py for concurrent dashboard+warmer access.",
+  "_bucket": 32
+ },
+ {
+  "id": "D466",
+  "action": "fixed",
+  "note": "Added _cache_lock in narrative_engine.py and wrapped the inline check-then-return read (line ~327) and end-of-function write (line ~446) under the lock.",
+  "_bucket": 32
+ },
+ {
+  "id": "D464",
+  "action": "fixed",
+  "note": "Added _cache_lock in reflexivity_detector.py guarding _get_cached/_set_cached; snapshot _cache_ts.items() via list() before eviction iteration to avoid RuntimeError under concurrent writes.",
+  "_bucket": 32
+ },
+ {
+  "id": "D424",
+  "action": "fixed",
+  "note": "Wrapped get_warmed_dossier and list_warmed_symbols DB reads in try/except (returning None/[] on error with a warning log), matching the existing defensive pattern in _count_fresh/_recently_warmed_keys; protects the /api/ideas path from 'database is locked' during the warmer's TRUNCATE checkpoint.",
+  "_bucket": 32
+ },
+ {
+  "id": "D459",
+  "action": "fixed",
+  "note": "Coerced target to float-or-0 (target = float(target) if isinstance(target,(int,float)) else 0) before the '${:.0f}' format in _score_analyst_velocity, so a non-numeric target left over from a raised float() in the try-block can no longer raise at the format string.",
+  "_bucket": 32
+ },
+ {
+  "id": "D467",
+  "action": "fixed",
+  "note": "Replaced max(buckets, key=buckets.get) with a deterministic tie-break (highest count, then earliest in _BUCKET_ORDER via -index), honoring the module's documented 'favours earlier buckets' ordering instead of arbitrary article-arrival order.",
+  "_bucket": 32
+ },
+ {
+  "id": "D465",
+  "action": "rejected",
+  "note": "Premise false: both fetcher paths return short interest as a FRACTION \u2014 Finviz _num() divides '%'-suffixed strings by 100 (15% -> 0.15) and yfinance shortPercentOfFloat is natively a fraction. The >0.15 test and *100 display are already correct; normalization would be a no-op at best.",
+  "_bucket": 32
+ },
+ {
+  "id": "D425",
+  "action": "rejected",
+  "note": "Code is currently correct: the only warmed_at writer (line 377) uses _now_iso() and all comparisons use _ttl_cutoff_iso(), both datetime.now(timezone.utc).isoformat() (+00:00 suffix), so lexicographic compare is valid. Finder itself flags only a latent 'if any future writer uses Z' risk \u2014 no present defect; parsing both sides would add overhead to a correct hot path.",
+  "_bucket": 32
+ },
+ {
+  "id": "D460",
+  "action": "deferred",
+  "note": "Low confidence; finder concedes the positional strike>=spot labeling is consistent with the app.js coloring and GEX narrative. Factoring net_gex sign into 'type' changes the field's documented semantics and risks breaking frontend/narrative assumptions \u2014 behavior change, not a clear bug.",
+  "_bucket": 32
+ },
+ {
+  "id": "D461",
+  "action": "deferred",
+  "note": "Low confidence data-integrity concern. Both proposed fixes (always recompute BS gamma, or only trust DataFrame gamma when present for all rows) change GEX magnitudes and could discard valid provider gamma; behavior-changing with no confirmed wrong output. Deferred per when-in-doubt rule.",
+  "_bucket": 32
+ },
+ {
+  "id": "D367",
+  "action": "fixed",
+  "note": "research_multihorizon.py:113 \u2014 replaced truthiness fallback `vol5 or 0.01` with `(vol5 if vol5 > 0 else 0.01)` so a genuinely-zero short vol no longer forces 0.01 and skews vol_ratio.",
+  "_bucket": 33
+ },
+ {
+  "id": "D375",
+  "action": "rejected",
+  "note": "Standard moving-block bootstrap stitch-and-chop, already clearly documented in comments; finder calls it 'Acceptable approximation'. A random-offset change would alter the output distribution callers/tests rely on \u2014 not a defect.",
+  "_bucket": 33
+ },
+ {
+  "id": "D391",
+  "action": "fixed",
+  "note": "synth_bayessmart.py:166 \u2014 clamped _raw_value return to [0,1] via max(0.0,min(1.0,...)) so it matches its 0..1 docstring and _normalize_component's clamping when a component reports score>max.",
+  "_bucket": 33
+ },
+ {
+  "id": "D392",
+  "action": "fixed",
+  "note": "synth_bayessmart.py:115 \u2014 added defensive `hit_rate = max(0.0,min(1.0,hit_rate))` clamp inside _posterior_mean before computing hits (the actionable part of the fix). The window-mismatch concern needs tracker changes outside my files; private fn, single caller, no behavior change for valid inputs.",
+  "_bucket": 33
+ },
+ {
+  "id": "D468",
+  "action": "fixed",
+  "note": "synthetic_insider.py \u2014 added module-level threading.Lock and wrapped _cache_get/_cache_set so the two-dict (_cache/_cache_ts) read/write is atomic under safe_executor fan-out.",
+  "_bucket": 33
+ },
+ {
+  "id": "D333",
+  "action": "fixed",
+  "note": "api_keys.py:46 \u2014 scrub `sk-[A-Za-z0-9_-]{6,}` tokens to 'sk-***' in the exception message before it reaches the /api/keys 'detail' response/logs. Kept the generic non-401 path otherwise.",
+  "_bucket": 33
+ },
+ {
+  "id": "D334",
+  "action": "rejected",
+  "note": "mask() revealing last-4 for keys>=12 is an explicit, documented UX tradeoff (finder: 'Defensible UX'); the auth-gating remedy lives in app.py routes outside my assigned files. Not a defect to change unilaterally.",
+  "_bucket": 33
+ },
+ {
+  "id": "D368",
+  "action": "rejected",
+  "note": "h60 prob_up and expected_pct both derive from the same `direction` variable, so signs cannot disagree except via independent rounding at |direction|<~0.002, where expected_pct also rounds to 0.0 (round(,2)). clip only fires at 0.05/0.95 extremes, never near 0.5. Harmless; no real inconsistency.",
+  "_bucket": 33
+ },
+ {
+  "id": "D376",
+  "action": "rejected",
+  "note": "compare_to_point already carries an explicit WHY (Q13) comment documenting the linear \u00d7h/30 scaling as a deliberate first-order approximation \u2014 which is exactly the finder's fallback fix. Switching to compounded space would change spread_vs_median_pct values the UI/tests depend on. Already-addressed.",
+  "_bucket": 33
+ },
+ {
+  "id": "D454",
+  "action": "fixed",
+  "note": "smart_money.py:125-126 \u2014 match only normalized 'BUY'/'SELL' (verified sec_edgar emits only BUY/SELL/OTHER:<code>). Removed dead 'P'/'A'/'S'/'D'/'PURCHASE'/'SALE' branches; counting 'A' awards as buys would have been wrong. Aligns with the cluster-buy logic 15 lines below that already matches 'BUY'.",
+  "_bucket": 33
+ },
+ {
+  "id": "D469",
+  "action": "fixed",
+  "note": "synthetic_insider.py:109 \u2014 changed avg_5 denominator from hard 5.0 to max(len(volumes[-5:]),1), matching avg_20's style so both means use their actual window length. Minimal consistency fix; preserves the always-produce-a-ratio behavior (no new early-return / return-shape change).",
+  "_bucket": 33
+ },
+ {
+  "id": "D516",
+  "action": "fixed",
+  "note": "Added the same hr<=1 guard _forecast_line uses (hr_pct = hr*100 if hr<=1 else hr) so an already-percentage hit_rate no longer prints e.g. 5800%.",
+  "_bucket": 100
+ },
+ {
+  "id": "D517",
+  "action": "fixed",
+  "note": "Changed denominator selection to nd=tr.get('n_directional'); n = nd if nd is not None else tr.get('n') so a real n_directional of 0 no longer silently borrows the larger total n.",
+  "_bucket": 100
+ },
+ {
+  "id": "D518",
+  "action": "fixed",
+  "note": "Filter and format composite_score through _finite() so NaN/string scores are excluded rather than raising in :.0f and dropping the whole ideas section.",
+  "_bucket": 100
+ },
+ {
+  "id": "D519",
+  "action": "fixed",
+  "note": "Added day_value accumulator (mv summed only when change is not None) and based prev_value on it, so partial-coverage day moves divide by a matching base instead of total capital.",
+  "_bucket": 100
+ },
+ {
+  "id": "D520",
+  "action": "fixed",
+  "note": "Append the length-capped chunk before the budget check so at least one evidence chunk always survives on the salvage path.",
+  "_bucket": 100
+ },
+ {
+  "id": "D521",
+  "action": "rejected",
+  "note": "Loop already handles overflow symbols gracefully (quotes.get(...) -> skip on missing price); overflow alerts simply get no near-card, which is the intended cheap truncation. No correctness bug.",
+  "_bucket": 100
+ },
+ {
+  "id": "D522",
+  "action": "fixed",
+  "note": "Regime warn card now falls back to 'Volatility regime is {} \u2014 expect wider swings.' when regime_note is missing, so no blank-body urgent card.",
+  "_bucket": 100
+ },
+ {
+  "id": "D523",
+  "action": "fixed",
+  "note": "day_pnl_pct now guards abs(prev_value)>1e-6 instead of prev_value>0, so an extreme down day with a non-positive base still yields a (large) percentage and the drawdown coach can fire.",
+  "_bucket": 100
+ },
+ {
+  "id": "D524",
+  "action": "fixed",
+  "note": "Warmer-liveness filter now excludes bool (isinstance(v,(int,float)) and not isinstance(v,bool)) so a True/False cycle sentinel can't pollute max().",
+  "_bucket": 100
+ },
+ {
+  "id": "D525",
+  "action": "fixed",
+  "note": "Clamped the 52-week range percentage to [0,100] so an intraday breakout above the cached high no longer prints e.g. 103%/negative.",
+  "_bucket": 100
+ },
+ {
+  "id": "D526",
+  "action": "fixed",
+  "note": "Refactored away_digest to advance the jarvis_last_seen watermark only after deciding the visit counts as an absence (first-visit and genuine-gap paths), so sub-30-min refreshes no longer burn unseen insights.",
+  "_bucket": 100
+ },
+ {
+  "id": "D527",
+  "action": "fixed",
+  "note": "Peek the away-digest count BEFORE db.jarvis_log_insights writes this run's cards, and reuse that count in the headline, so the current briefing's own cards aren't reported as 'logged while you were out'.",
+  "_bucket": 100
+ },
+ {
+  "id": "D528",
+  "action": "fixed",
+  "note": "Earnings card filter now drops days_until<0 and coerces int(days), so a past/float days_until no longer renders 'in -1 days' / 'in 3.0 days'.",
+  "_bucket": 100
+ },
+ {
+  "id": "D529",
+  "action": "fixed",
+  "note": "Deduplicated _GLOSSARY: removed the first rsi and sharpe ratio literals (kept the ones with view), merged overbought/oversold aliases into surviving rsi, and split the drawdown/max-drawdown alias overlap so both canonical entries stay reachable. Verified via _GLOSSARY_INDEX.",
+  "_bucket": 100
+ },
+ {
+  "id": "D530",
+  "action": "fixed",
+  "note": "_answer_earnings symbol path now guards on cal[0].get('earnings_date'), uses e.get('symbol',symbol), and omits the days clause when days_until is None instead of hard-subscripting.",
+  "_bucket": 100
+ },
+ {
+  "id": "D531",
+  "action": "fixed",
+  "note": "'soon' listing now uses e.get('symbol','?') and e.get('earnings_date') or 'TBD' instead of hard keys.",
+  "_bucket": 100
+ },
+ {
+  "id": "D532",
+  "action": "fixed",
+  "note": "health_snapshot insights_14d query now bounds with WHERE created_at >= datetime('now','-14 days') (column confirmed in database.py) so the key matches its name.",
+  "_bucket": 100
+ },
+ {
+  "id": "D533",
+  "action": "fixed",
+  "note": "_answer_alerts now does `db.get_price_alerts(...) or []` before comprehending, preventing a None-iteration TypeError on a DB hiccup.",
+  "_bucket": 100
+ },
+ {
+  "id": "D534",
+  "action": "fixed",
+  "note": "_answer_compare_quotes now computes a winner symbol matching the highlighted name and navigates to it instead of always opening s1.",
+  "_bucket": 100
+ },
+ {
+  "id": "D535",
+  "action": "fixed",
+  "note": "_answer_why share-of-move guard changed to abs(share)>=1 with abs() in the format, suppressing near-zero/negative artifacts while always printing genuine large shares.",
+  "_bucket": 100
+ },
+ {
+  "id": "D536",
+  "action": "fixed",
+  "note": "_symbol_line held tail now uses held.get('shares')/('avg_cost') with safe defaults and only emits the 'You hold' line when shares>0, avoiding KeyError on legacy rows.",
+  "_bucket": 100
+ },
+ {
+  "id": "D537",
+  "action": "rejected",
+  "note": "rows come from _portfolio_pulse which always sets market_value and weight_pct (numeric, never None); the cited KeyError/None-compare cannot occur for this data source.",
+  "_bucket": 100
+ },
+ {
+  "id": "D538",
+  "action": "rejected",
+  "note": "_portfolio_pulse returns None when holdings is empty and always sets market_value, so neither the empty-sequence max() nor the KeyError can trigger here.",
+  "_bucket": 100
+ },
+ {
+  "id": "D539",
+  "action": "rejected",
+  "note": "crypto rows come from _portfolio_pulse which always populates market_value numerically; the hard-key KeyError is not reachable.",
+  "_bucket": 100
+ },
+ {
+  "id": "D540",
+  "action": "rejected",
+  "note": "_portfolio_pulse never returns a truthy pulse with empty holdings (returns None when no rows), so rows[0] cannot raise IndexError.",
+  "_bucket": 100
+ },
+ {
+  "id": "D541",
+  "action": "rejected",
+  "note": "The hr<=1 branch is correct for fractional hit rates; the finder's own 'safer' suggestion is to standardize upstream and is circular/no-op. No concrete defect to fix in this file.",
+  "_bucket": 100
+ },
+ {
+  "id": "D542",
+  "action": "rejected",
+  "note": "db.get_snapshots() returns ORDER BY date ASC, so snaps is guaranteed sorted and older[-1]/snaps[-1] are correct; only a minor double-strptime perf nit remains, not worth a behavior-touching change.",
+  "_bucket": 100
+ },
+ {
+  "id": "D543",
+  "action": "fixed",
+  "note": "Thanks-ack rotation now keyed on len(stripped) (the canonicalized message the matcher saw) instead of the raw original q, making it stable across case/whitespace variants.",
+  "_bucket": 100
+ },
+ {
+  "id": "D544",
+  "action": "fixed",
+  "note": "deep_dossier low-conviction branch now also triggers on net==0, so an all-neutral or perfectly-split set yields 'low' conviction; verified directional cases unchanged.",
+  "_bucket": 100
+ },
+ {
+  "id": "D545",
+  "action": "fixed",
+  "note": "The _clarify_pending presence check now reads _PENDING_CLARIFY under _PENDING_CLARIFY_LOCK, matching the set/pop sites.",
+  "_bucket": 100
+ },
+ {
+  "id": "D546",
+  "action": "fixed",
+  "note": "Clarify-resume now peeks under the lock, validates TTL freshness AND a handled intent first, and pops only when about to dispatch; stale/unhandled entries are not consumed and a failing dispatch leaves the entry in place for retry.",
+  "_bucket": 100
+ },
+ {
+  "id": "D547",
+  "action": "fixed",
+  "note": "Resumed agent clarify now passes the original-cased q to _agent_ask instead of the lowercased ql (folded into the D546 restructure).",
+  "_bucket": 100
+ },
+ {
+  "id": "D548",
+  "action": "fixed",
+  "note": "Recent-order formatting now uses o.get('symbol') or '?' and o.get('state') or 'unknown' so a partial order no longer renders the literal 'None'.",
+  "_bucket": 100
+ },
+ {
+  "id": "D549",
+  "action": "fixed",
+  "note": "profit_factor now gated on _finite(pf) and formatted {:.2f}; non-finite (inf/nan) is omitted. Used _finite() because math is NOT imported in jarvis.py (the finder's claim it was is wrong).",
+  "_bucket": 100
+ },
+ {
+  "id": "D550",
+  "action": "fixed",
+  "note": "Trading-agent status now guards max_trades_per_day: prints 'X/Y trades used today' only when the cap is present, else 'X trades today'.",
+  "_bucket": 100
+ },
+ {
+  "id": "D551",
+  "action": "fixed",
+  "note": "Top-contributor tail now uses c0.get('symbol')/('total_usd') and only renders when both are present, so a malformed entry no longer collapses the whole performance read via the broad except.",
+  "_bucket": 100
+ },
+ {
+  "id": "D552",
+  "action": "fixed",
+  "note": "Non-disagreement dossier headline now reports the aligned count tied to the lean (bulls if net>0, bears if net<0, neutrals if net==0) instead of the largest bloc.",
+  "_bucket": 100
+ },
+ {
+  "id": "D553",
+  "action": "fixed",
+  "note": "Raised the instant 'vs' compare word-count cap from <=6 to <=8 so common 7-8 word compare phrasings still take the keyless side-by-side path (still gated on _VS_RE match and both tokens resolving).",
+  "_bucket": 100
+ },
+ {
+  "id": "D554",
+  "action": "fixed",
+  "note": "_answer_corrections_learned readback (COUNT + SELECT) now runs under db._write_lock (reentrant RLock; read-only) to serialize against concurrent _log_correction writers on the shared connection.",
+  "_bucket": 100
+ },
+ {
+  "id": "D491",
+  "action": "fixed",
+  "note": "Added re.fullmatch allowlist for subreddit ([A-Za-z0-9_]{1,30}) returning 400, and constrained sort to {hot,new,top,rising} (default hot) before the outbound reddit fetch.",
+  "_bucket": 101
+ },
+ {
+  "id": "D480",
+  "action": "fixed",
+  "note": "Guarded symbol type: sym_raw.strip().upper() only when isinstance str, else \"\"; the existing `if not symbol` check then returns a clean 400 instead of AttributeError 500.",
+  "_bucket": 101
+ },
+ {
+  "id": "D481",
+  "action": "fixed",
+  "note": "get_portfolio now falls back to avg_cost when live price is None (real 0.0 stays valid), always accumulating total_value/total_cost and emitting enrichment keys; live-only fields (day_change/pct/pnl) gated on current_price is not None. shares is NOT NULL in schema so unconditional math is safe and matches sibling routes.",
+  "_bucket": 101
+ },
+ {
+  "id": "D482",
+  "action": "fixed",
+  "note": "Added `ap = alert[\"price\"]; if ap is None: continue` after the cur-None guard so a legacy null-priced alert is skipped instead of TypeError-aborting the whole alert phase.",
+  "_bucket": 101
+ },
+ {
+  "id": "D492",
+  "action": "fixed",
+  "note": "Added `if not _valid_ticker(symbol): return 400` at top of ideas_enrich before symbol.upper()/enrich_idea, matching sibling routes.",
+  "_bucket": 101
+ },
+ {
+  "id": "D493",
+  "action": "fixed",
+  "note": "crypto_yields limit now max(1, _safe_int(...,20)).",
+  "_bucket": 101
+ },
+ {
+  "id": "D494",
+  "action": "fixed",
+  "note": "screener_universe limit now min(max(_safe_int(...,200),1),1000).",
+  "_bucket": 101
+ },
+ {
+  "id": "D495",
+  "action": "fixed",
+  "note": "fred_series observations now min(max(_safe_int(...,60),1),5000).",
+  "_bucket": 101
+ },
+ {
+  "id": "D496",
+  "action": "fixed",
+  "note": "congress_all over-fetches senate (limit*2) before merge, and senate_count/house_count are now computed from the returned combined[:limit] slice (senate rows carry chamber='Senate').",
+  "_bucket": 101
+ },
+ {
+  "id": "D497",
+  "action": "fixed",
+  "note": "Coerced spike defensively (try float, None on failure) so a numeric-string cached value can't 500 the buzz blend. Left the 50+spv saturation scale unchanged \u2014 changing the mapping is a behavior change other code/UI may depend on.",
+  "_bucket": 101
+ },
+ {
+  "id": "D500",
+  "action": "fixed",
+  "note": "research_factors_portfolio DB fallback now skips holdings whose asset_type isn't stock/etf, mirroring the scan-route crypto exclusion, so crypto/options don't contaminate the Fama-French regression.",
+  "_bucket": 101
+ },
+ {
+  "id": "D504",
+  "action": "fixed",
+  "note": "_jarvis_act_charge returns the exact appended timestamps (empty list = rate-limited, still falsy); _jarvis_act_refund removes those specific values via deque.remove (int still accepted for back-compat). aj_run_route and aj_approve_route updated to capture and pass back their own stamps, so concurrent refunds no longer pop another request's slot.",
+  "_bucket": 101
+ },
+ {
+  "id": "D505",
+  "action": "fixed",
+  "note": "_mc_holdings_from_portfolio now does `sh = h.get('shares'); if not sh or sh <= 0: continue` before mv = cur*sh, skipping rows with None/missing shares instead of 500-ing the endpoint.",
+  "_bucket": 101
+ },
+ {
+  "id": "D506",
+  "action": "fixed",
+  "note": "Same helper now reads sym0 = h.get('symbol') and `if not sym0: continue`, using sym0 for the price lookup and -USD concat instead of hard h['symbol'] subscripts.",
+  "_bucket": 101
+ },
+ {
+  "id": "D507",
+  "action": "fixed",
+  "note": "research_montecarlo_route now validates/normalizes each holdings entry (must be dict with non-empty str symbol and finite, positive float market_value), returning 400 if none survive, before passing to simulate_portfolio.",
+  "_bucket": 101
+ },
+ {
+  "id": "D508",
+  "action": "fixed",
+  "note": "Broadened the prob_of_target inner guard from (TypeError,ValueError) to `except Exception` with a log.warning, so any failure of the optional add-on leaves the primary sim intact and still returned.",
+  "_bucket": 101
+ },
+ {
+  "id": "D509",
+  "action": "fixed",
+  "note": "aj_approve_route refunds its charged slot on all four non-executing early exits (404 not-found, 400 not-approvable, 409 already-approving, 400 risk-block); happy-path charge preserved. Risk gate unchanged/fail-closed.",
+  "_bucket": 101
+ },
+ {
+  "id": "D510",
+  "action": "fixed",
+  "note": "jarvis_act single-action path now wraps execute_mutating in try/except returning _err(e) and adds `if not isinstance(r, dict): return 500` before r.get('error'), mirroring the batch guard.",
+  "_bucket": 101
+ },
+ {
+  "id": "D511",
+  "action": "fixed",
+  "note": "synth_macrotranslate_portfolio fallback now weights by live market value (_portfolio_live_prices, price*shares) with avg_cost fallback per position, instead of labeling cost basis as market_value; also guards None symbol.",
+  "_bucket": 101
+ },
+ {
+  "id": "D512",
+  "action": "fixed",
+  "note": "synth_whatif_get now rejects non-finite market_value (math.isfinite) with 400 before the `mv < 0` check, blocking NaN/inf that would poison downstream weights. POST path left as-is (it doesn't float()-parse market_value in app.py).",
+  "_bucket": 101
+ },
+ {
+  "id": "D513",
+  "action": "fixed",
+  "note": "aj_run_route wraps run_once so a raise refunds the charged slot before _err(e); existing 409 no-op refund preserved.",
+  "_bucket": 101
+ },
+ {
+  "id": "D514",
+  "action": "fixed",
+  "note": "Activity SSE generate() now tracks a consecutive-error streak (reset on success) and breaks after 5 failures, so a persistently failing snapshot stops re-running for the full 10 min; EventSource auto-reconnects. Normal behavior unchanged.",
+  "_bucket": 101
+ },
+ {
+  "id": "D483",
+  "action": "fixed",
+  "note": "portfolio_ai_analysis day_change_pct now gated on q.get('change') is not None, matching get_portfolio's invariant.",
+  "_bucket": 101
+ },
+ {
+  "id": "D484",
+  "action": "fixed",
+  "note": "update_settings key-format check changed from re.match to re.fullmatch, rejecting keys with trailing junk; the only provider fmt already ends with $ so genuine sk- keys still pass.",
+  "_bucket": 101
+ },
+ {
+  "id": "D486",
+  "action": "fixed",
+  "note": "_portfolio_live_prices now filters both stock and crypto symbol lists to isinstance str, so a None/non-string crypto symbol can't raise TypeError on the -USD concat and 500 every pricing route.",
+  "_bucket": 101
+ },
+ {
+  "id": "D489",
+  "action": "fixed",
+  "note": "get_alerts batch now built from {a['symbol'] ...} filtered to non-empty str symbols, so a NULL/legacy symbol row leaves distance_pct None instead of breaking the quote batch.",
+  "_bucket": 101
+ },
+ {
+  "id": "D490",
+  "action": "fixed",
+  "note": "portfolio_import symbol check now uses _valid_ticker instead of the looser inline `^[A-Z0-9.\\-]{1,10}$`, so imports enforce the same ticker shape (no leading '.'/'-') as the rest of the app.",
+  "_bucket": 101
+ },
+ {
+  "id": "D499",
+  "action": "fixed",
+  "note": "finviz_insiders now allowlists option against the documented set, returning 400 on bad input. (Note: the library call already degraded gracefully, so this is hardening/consistency rather than fixing a 500.)",
+  "_bucket": 101
+ },
+ {
+  "id": "D501",
+  "action": "fixed",
+  "note": "intel_feed result-build switched f['...'] hard subscripts to f.get(...,'') for ticker/form_type/filing_date/description/document_url in all three append blocks (cached, AI, non-AI), so one partial filing dict can't KeyError and drop the entire feed.",
+  "_bucket": 101
+ },
+ {
+  "id": "D502",
+  "action": "fixed",
+  "note": "congress_senate and congress_all now return 400 when a provided symbol fails _valid_ticker, instead of silently yielding empty results.",
+  "_bucket": 101
+ },
+ {
+  "id": "D503",
+  "action": "fixed",
+  "note": "congress_all house merge iterates `member.get('trades',[]) or []` and skips non-dict trade entries, so one malformed trade is skipped rather than aborting all house rows.",
+  "_bucket": 101
+ },
+ {
+  "id": "D485",
+  "action": "rejected",
+  "note": "Not a defect: database.get_portfolio aliases the column as `acct_type` (SELECT a.account_type AS acct_type), so the export's h.get('acct_type','') reads the correct key. The finder's premise that the join is named 'account_type' is wrong.",
+  "_bucket": 101
+ },
+ {
+  "id": "D488",
+  "action": "rejected",
+  "note": "Not a defect: fetcher.get_chart_data is typed/returns a list (not a dict envelope) and compute_indicators already guards len<20. The truthiness gate works correctly for a list; empty list -> 200 with data:[], indicators:{} is a reasonable no-data response. The claimed dict-envelope/non-list failure mode doesn't exist.",
+  "_bucket": 101
+ },
+ {
+  "id": "D515",
+  "action": "rejected",
+  "note": "Not a real defect: the compare_to_current block (k.upper()/result['weights']) is already wrapped in try/except that logs a warning and degrades to a default cmp_out. No 500 occurs; the 'silent swallow' is intentional graceful degradation. Hardening to str(k)/result.get('weights') would only change the degradation contract for no functional gain.",
+  "_bucket": 101
+ },
+ {
+  "id": "D487",
+  "action": "deferred",
+  "note": "monthly_income = total_annual_income/12 is a mathematically-valid annual-average estimate, not wrong math. Relabeling the response or weighting by per-holding pay frequency would change the response semantics/shape (UI depends on it) and frequency data isn't reliably available; deferred to avoid a behavior change for a labeling concern.",
+  "_bucket": 101
+ },
+ {
+  "id": "D555",
+  "action": "fixed",
+  "note": "^IRX (13-week T-bill) was mislabeled as yield_2y, making the 10Y-2Y spread/inversion signal wrong. Changed the symbol to '2YY=F' (CBOT 2-Year Micro Yield futures, a real 2Y yield ~3.85% vs ^IRX 3.68% verified live). Keeps the yield_2y dict key and yield_curve_spread return shape intact so the app.js '2Y TREASURY' card and spread display are now accurate without editing the JS.",
+  "_bucket": 102
+ },
+ {
+  "id": "D556",
+  "action": "fixed",
+  "note": "Added a zero/NaN guard on first_close in the yfinance branch of get_benchmark_history (mirrors the _normalize() helper's guard): if not first_close or pd.isna(first_close), route to the Yahoo-direct fallback. Prevents ZeroDivisionError and NaN-poisoned output being cached for 12h.",
+  "_bucket": 102
+ },
+ {
+  "id": "D557",
+  "action": "fixed",
+  "note": "get_portfolio_stress_test crashed with KeyError on holdings lacking 'symbol'. Now reads sym = (h.get('symbol') or '').strip().upper(), skips empty rows (continue), and writes the normalized symbol into entry. The two later h['symbol'] reads (lines ~2363/2402) iterate over enriched (all of which now carry a symbol), so they're safe.",
+  "_bucket": 102
+ },
+ {
+  "id": "D562",
+  "action": "fixed",
+  "note": "Line 1674 used bare c.upper() on returns.columns, raising AttributeError on tuple/numeric column labels. Changed to str(c).upper(), matching the str(c).upper() form already used at lines 1669/1676/1698.",
+  "_bucket": 102
+ },
+ {
+  "id": "D558",
+  "action": "fixed",
+  "note": "get_macro_indicators raised IndexError when hist non-empty but Close all-NaN (dropna empty). Added 'if closes.empty: recover via _yahoo_chart_history fallback; continue' before the len(closes)<2 / iloc[-1] access.",
+  "_bucket": 102
+ },
+ {
+  "id": "D559",
+  "action": "fixed",
+  "note": "Batch CoinGecko prev/change used 'if (price and _denom)' truthiness, dropping legitimate 0.0/micro-cap prices. Changed to the explicit None check used in _coingecko_quote: prev = price/_denom if (price is not None and _denom not in (None,0)) else None, keeping the pct==-100 divide guard.",
+  "_bucket": 102
+ },
+ {
+  "id": "D560",
+  "action": "fixed",
+  "note": "_yahoo_chart_direct and _yahoo_chart_history interpolated the raw symbol into the URL path (traversal/separator-injection surface). Added 'from urllib.parse import quote as _url_quote' and wrapped sym with _url_quote(sym, safe=''). Verified live that all valid symbols (^GSPC, CL=F, DX-Y.NYB, BTC-USD, BRK-B) still resolve when encoded.",
+  "_bucket": 102
+ },
+ {
+  "id": "D561",
+  "action": "fixed",
+  "note": "get_crypto_quote description: ((...).get('en') or '')[:500] would slice a non-string (e.g. list) returned by CoinGecko. Wrapped in str(...) before slicing to enforce the string contract.",
+  "_bucket": 102
+ },
+ {
+  "id": "D563",
+  "action": "fixed",
+  "note": "Unusual-options current_price was 0 when fast_info.last_price is None, silently zeroing OTM/sentiment classification. Added a fallback: if not current_price, derive it from _yahoo_chart_direct(symbol).get('price') (the module's own fallback chain), inside try/except. No behavior change when last_price is present.",
+  "_bucket": 102
+ },
+ {
+  "id": "D564",
+  "action": "deferred",
+  "note": "Low-confidence threshold preference, not a clear defect. The existing std()>0 guard already prevents divide-by-zero; a noisy-but-mathematically-correct Sharpe over 5 real returns isn't a bug. Raising the floor to 20 would null sharpe/sortino/calmar for samples 5-19, a behavioral change the UI may depend on. Deferred to avoid changing output.",
+  "_bucket": 102
+ },
+ {
+  "id": "D565",
+  "action": "fixed",
+  "note": "_finviz_dividend_fallback mis-parsed a lone-percent 'Dividend TTM' like '0.35%' (parts==['0.35']) into div_rate (dollars) instead of div_yield. Added lone_pct detection (len(parts)==1 and '%' in raw): assign it to div_yield; otherwise keep the original $-first/yield-second parsing.",
+  "_bucket": 102
+ },
+ {
+  "id": "D566",
+  "action": "deferred",
+  "note": "The overwrite is intentional: crypto_to_resolve is built only for known-crypto symbols, and the code comment explicitly states CoinGecko is preferred over Yahoo for these because 'Yahoo has been silently serving wrong prices for some.' Guarding/skipping the overwrite would partially revert that deliberate correctness decision. Low finder confidence; deferred as a risky change to intended behavior.",
+  "_bucket": 102
+ },
+ {
+  "id": "D577",
+  "action": "fixed",
+  "note": "Changed _today_str() to datetime.now(timezone.utc) so the AI daily-cap counter key aligns with prune_ai_call_log's UTC date('now') and the rest of the module's UTC dating.",
+  "_bucket": 103
+ },
+ {
+  "id": "D578",
+  "action": "fixed",
+  "note": "Coerced action defensively: (action or '').upper() in add_transaction's INSERT params, preventing AttributeError on action=None after lock acquisition.",
+  "_bucket": 103
+ },
+ {
+  "id": "D579",
+  "action": "fixed",
+  "note": "Added 'if not symbol: return None' to get_cached_earnings_dossier and 'if not symbol: return' to cache_earnings_dossier, honoring the documented contract and avoiding symbol.upper() crash.",
+  "_bucket": 103
+ },
+ {
+  "id": "D580",
+  "action": "fixed",
+  "note": "Snap total_shares to 0.0 when abs(total_shares) < 1e-9 right after computing it, so float-dust residuals read as flat and the avg-cost divide guard yields 0.0 instead of an astronomical basis.",
+  "_bucket": 103
+ },
+ {
+  "id": "D581",
+  "action": "fixed",
+  "note": "cache_institutional now writes data.get('total_value', data.get('total_value_usd', 0)) so a SEC-native total_value_usd payload isn't coerced to 0. Safe, no signature/shape change.",
+  "_bucket": 103
+ },
+ {
+  "id": "D582",
+  "action": "fixed",
+  "note": "get_snapshots query now filters 'WHERE date IS NOT NULL ORDER BY date ASC' so legacy NULL-dated rows don't anchor the equity curve at index 0.",
+  "_bucket": 103
+ },
+ {
+  "id": "D583",
+  "action": "fixed",
+  "note": "Drop the raw holdings_json blob from the returned dict (d.pop('holdings_json', None)) after parsing into d['holdings']; no caller reads holdings_json (verified app.py:1758,1817 only use 'holdings'/'total_value'). Kept total_value_usd to avoid any frontend shape regression.",
+  "_bucket": 103
+ },
+ {
+  "id": "D584",
+  "action": "fixed",
+  "note": "Wrapped priority coercion in try/except (TypeError, ValueError) -> default 3 before the per-card INSERT, so a non-numeric priority no longer raises out of the whole jarvis_log_insights batch.",
+  "_bucket": 103
+ },
+ {
+  "id": "D585",
+  "action": "fixed",
+  "note": "jarvis_insights_since ORDER BY now '(priority IS NULL), priority ASC, id DESC' so NULL-priority rows sort last instead of outranking priority-1 cards.",
+  "_bucket": 103
+ },
+ {
+  "id": "D586",
+  "action": "fixed",
+  "note": "Added 'if not rows: return' before save_scan_history's executemany/commit, mirroring the top-of-function guard so an all-invalid opportunities list doesn't acquire the lock and commit an empty transaction.",
+  "_bucket": 103
+ },
+ {
+  "id": "D587",
+  "action": "fixed",
+  "note": "Narrowed vacuum_db's OperationalError handling: benign 'cannot vacuum'/'locked' messages skip silently; other failures (malformed/disk I/O/disk-full) are logged at WARNING via augur.db. Preserved the -1 return contract that cache_warmer._vacuum_checked relies on, so control flow is unchanged.",
+  "_bucket": 103
+ },
+ {
+  "id": "D588",
+  "action": "fixed",
+  "note": "Changed t.get('ticker', ticker).upper() to (t.get('ticker') or ticker).upper() so an explicit ticker=None falls back to the function's ticker arg instead of raising and silently dropping the insider row.",
+  "_bucket": 103
+ },
+ {
+  "id": "D589",
+  "action": "fixed",
+  "note": "Added explicit `if iv_vs_hist is None` branch in _rule_based_earnings_brief so the 'in line with historical average' claim is no longer asserted when IV-vs-historical data is missing; numeric near-zero case keeps the in-line message.",
+  "_bucket": 104
+ },
+ {
+  "id": "D591",
+  "action": "fixed",
+  "note": "Added a local `_num()` coercion helper in analyze_insider_pattern and used it for both buy/sell value sums, so a non-numeric string `value` yields 0.0 instead of raising TypeError out of the ungoverned pre-computation.",
+  "_bucket": 104
+ },
+ {
+  "id": "D592",
+  "action": "fixed",
+  "note": "Added `if not isinstance(result, dict): raise ValueError(...)` after json.loads at all three sites (portfolio ~870, earnings ~1095, idea thesis ~1336). Non-object JSON now fails with a clear error_detail and routes to the same fallback rather than an opaque 'list indices' message.",
+  "_bucket": 104
+ },
+ {
+  "id": "D598",
+  "action": "fixed",
+  "note": "In _gov_pace, return early when start_at >= deadline_ts so a late/ungoverned call no longer advances the shared _gov_next_allowed; prevents deadline-clamped bursts from poisoning the clock and over-throttling well-behaved callers. Lock still released via the context manager; previously the call would have slept to the deadline, which served no pacing purpose.",
+  "_bucket": 104
+ },
+ {
+  "id": "D590",
+  "action": "fixed",
+  "note": "Computed `_br = '?' if beat_rate is None else beat_rate` once and used it in both headline and brief, so a legitimate 0% beat rate renders '0%' instead of '?'.",
+  "_bucket": 104
+ },
+ {
+  "id": "D593",
+  "action": "fixed",
+  "note": "Sentiment/composite suffix in the idea-thesis social_line is now only appended when sentiment_label is present and != 'NO DATA', and composite only when social_score is not None; eliminates literal 'Sentiment: None (composite None)'.",
+  "_bucket": 104
+ },
+ {
+  "id": "D594",
+  "action": "fixed",
+  "note": "Pre-formatted EPS range as `_eps_range` ('N/A' when eps_low/high missing) and interpolated it, so the prompt no longer reads 'range: $None - $None'.",
+  "_bucket": 104
+ },
+ {
+  "id": "D595",
+  "action": "fixed",
+  "note": "Coerced numeric days_to_earnings to int via `_days` before interpolation so '(5.0d away)' renders as '(5d away)'; non-numeric values pass through unchanged and the None guard is preserved.",
+  "_bucket": 104
+ },
+ {
+  "id": "D596",
+  "action": "fixed",
+  "note": "Coerced composite to float in _rule_based_idea_thesis with try/except so a string composite no longer crashes the no-key fallback at the various `{composite:.0f}` interpolations.",
+  "_bucket": 104
+ },
+ {
+  "id": "D597",
+  "action": "fixed",
+  "note": "Normalized beat_rate to float-or-None at the top of _rule_based_earnings_brief so a string beat_rate no longer raises TypeError in the `>= 75` / `<= 40` comparisons in the no-key path.",
+  "_bucket": 104
+ },
+ {
+  "id": "D599",
+  "action": "rejected",
+  "note": "Finder itself concludes 'No change needed; eviction is correct LRU' \u2014 reads and writes are both under _tts_lock and the >MAX guard prevents StopIteration. The optional defensive guard adds nothing, so no edit made.",
+  "_bucket": 104
+ },
+ {
+  "id": "D567",
+  "action": "fixed",
+  "note": "Added a third shrink pass in execute_read's dict branch that halves the entries of the longest nested dict/list value until under budget (keeps a subset of per_symbol/factors rows) instead of nuking the whole payload into the tiny truncated envelope.",
+  "_bucket": 105
+ },
+ {
+  "id": "D568",
+  "action": "fixed",
+  "note": "add_price_alert validator now uses _num_arg (strips %,$,,) instead of bare float(), matching the executor so formatted prices like '$200' aren't rejected pre-confirm.",
+  "_bucket": 105
+ },
+ {
+  "id": "D569",
+  "action": "fixed",
+  "note": "_t_crypto_market rnd now coerces once via _num_arg and rounds the coerced float, so a stringified numeric from the crypto API no longer raises TypeError in round().",
+  "_bucket": 105
+ },
+ {
+  "id": "D570",
+  "action": "fixed",
+  "note": "_t_price_history now only falls back to the full fetched period when fewer than 2 recent bars survive the cutoff, and flags that span with a 'window wider than requested' note so N-day stats aren't mislabeled; preserved the days/bars/return_pct shape.",
+  "_bucket": 105
+ },
+ {
+  "id": "D571",
+  "action": "fixed",
+  "note": "_t_benchmark_compare start_epoch now uses replace(tzinfo=timezone.utc).timestamp() (added timezone to the local import) so alignment compares UTC-to-UTC instead of local-midnight vs UTC bar epochs.",
+  "_bucket": 105
+ },
+ {
+  "id": "D572",
+  "action": "fixed",
+  "note": "_t_forecast horizon now parsed via _num_arg before the clamp, so '20.0'/'30 days' coerce instead of raising ValueError.",
+  "_bucket": 105
+ },
+ {
+  "id": "D573",
+  "action": "fixed",
+  "note": "execute_read normalizes a None tool result to {'note':'no data'} before json.dumps so the model gets a structured note, not the literal string 'null'.",
+  "_bucket": 105
+ },
+ {
+  "id": "D574",
+  "action": "fixed",
+  "note": "set_policy_rule kind regex changed from {1,39} to {0,39}, allowing a legitimate single-letter kind (intent was up-to-40, not min-2 chars).",
+  "_bucket": 105
+ },
+ {
+  "id": "D575",
+  "action": "fixed",
+  "note": "_t_recent_transactions now adds limit_capped=True and an explanatory note when the requested limit exceeds the 25 cap; existing transactions shape untouched.",
+  "_bucket": 105
+ },
+ {
+  "id": "D576",
+  "action": "fixed",
+  "note": "_t_what_if remove note now triggers on presence (market_value in args and not in (None,'')) so a supplied '0'/'' value is acknowledged as intentionally dropped.",
+  "_bucket": 105
+ },
+ {
+  "id": "D498",
+  "action": "fixed",
+  "note": "Already guarded: float(spike) wrapped in try/except returning None (app.py:2645-2648). Verified present.",
+  "_bucket": 101
+ },
+ {
+  "id": "D463",
+  "action": "deferred",
+  "note": "Low-priority perf only: adds in-flight coalescing to avoid duplicate stress computation under concurrency; not a correctness defect. Deferred to avoid behavior change.",
+  "_bucket": 32
+ }
+]

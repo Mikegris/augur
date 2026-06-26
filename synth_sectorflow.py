@@ -178,7 +178,11 @@ def _ticker_sector(symbol: str) -> Optional[str]:
         sec = fund.get("Sector") or None
     except Exception:
         sec = None
-    _SECTOR_LOOKUP[sym] = (sec, time.time() + _SECTOR_LOOKUP_TTL)
+    # Only cache successful (non-None) lookups; caching a transient Finviz
+    # failure would de-sector the symbol for the whole TTL and drop its flow
+    # from every sector aggregate. On None, fall through so the next scan retries.
+    if sec is not None:
+        _SECTOR_LOOKUP[sym] = (sec, time.time() + _SECTOR_LOOKUP_TTL)
     return sec
 
 
@@ -515,7 +519,15 @@ def _factor_panel() -> Dict[str, Optional[float]]:
     # Column order in research_factors is ["Mkt-RF","SMB","HML","RMW","CMA","Mom"]
     cols = ["Mkt-RF", "SMB", "HML", "RMW", "CMA", "Mom"]
     last_row = fac[last_idx]
-    out["factors"] = {cols[i]: round(float(last_row[i]), 3) for i in range(min(len(cols), len(last_row)))}
+    factors: Dict[str, float] = {}
+    for i in range(min(len(cols), len(last_row))):
+        try:
+            v = float(last_row[i])
+        except (TypeError, ValueError):
+            continue
+        if v == v and not math.isinf(v):  # skip NaN/inf (invalid JSON, poisons composite)
+            factors[cols[i]] = round(v, 3)
+    out["factors"] = factors
     return out
 
 
@@ -692,13 +704,34 @@ def _compute() -> Dict[str, Any]:
     # roughly the slowest single sector. safe_executor falls back to serial
     # if the process can't spawn threads, and Nones-out any sector that raises.
     import safe_executor
+
+    def _build_with_cleanup(spec: Dict[str, str]) -> Optional[Dict[str, Any]]:
+        # Mirror idea_pool_warmer._warm_one_with_cleanup: each parallel_map
+        # worker thread lazily opens thread-local sqlite/cache handles inside
+        # narrative/finviz/fetcher. The daemon pool is recreated every scan, so
+        # those FDs leak until the thread object is GC'd. Close them on the way
+        # out so a long-lived process doesn't accumulate handles per 10min TTL.
+        try:
+            return _build_sector_row(spec, insiders, congress, factors, spy_bars)
+        finally:
+            try:
+                import database
+                database.close_thread_conn()
+            except Exception:
+                pass
+            try:
+                if cache_store is not None:
+                    cache_store.close_thread_conn()
+            except Exception:
+                pass
+
     # One worker per sector → a single wave (the sectors are independent and
     # I/O-bound). 6 workers left it at ~2 waves (~54s); a full wave roughly
     # halves that. safe_executor degrades to serial if the process can't spawn
     # threads.
     rows: List[Dict[str, Any]] = [
         r for r in safe_executor.parallel_map(
-            lambda spec: _build_sector_row(spec, insiders, congress, factors, spy_bars),
+            _build_with_cleanup,
             SECTORS, max_workers=len(SECTORS), thread_name_prefix="sectorflow",
         ) if r is not None
     ]

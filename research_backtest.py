@@ -271,12 +271,6 @@ def adapter_mean_reversion(
     }
 
 
-# Module-level cache for the per-symbol ml_forecast call so the adapter, which
-# is invoked once per bar in the backtest, doesn't retrain the RF model on
-# every iteration.
-_ML_FORECAST_CACHE: Dict[str, Dict[str, Any]] = {}
-
-
 def adapter_ml_forecast(
     history: pd.DataFrame,
     params: Optional[Dict[str, Any]] = None,
@@ -301,15 +295,15 @@ def adapter_ml_forecast(
     prob_threshold = float(params.get("prob_threshold", 0.55))
     horizon = int(params.get("horizon_days", 20))
 
-    cached = _ML_FORECAST_CACHE.get(symbol)
-    if cached is None:
-        try:
-            import ml_forecast
-            cached = ml_forecast.ml_forecast(symbol) or {}
-        except Exception as e:
-            log.warning("ml_forecast(%s) failed in adapter: %s", symbol, e)
-            cached = {}
-        _ML_FORECAST_CACHE[symbol] = cached
+    # ml_forecast keeps its own thread-safe 1h TTL cache, so call it each time
+    # rather than holding a module-global that never expires and is shared
+    # (unlocked) across backtest runs / date windows for the same symbol.
+    try:
+        import ml_forecast
+        cached = ml_forecast.ml_forecast(symbol) or {}
+    except Exception as e:
+        log.warning("ml_forecast(%s) failed in adapter: %s", symbol, e)
+        cached = {}
 
     rf = (cached or {}).get("rf_classifier") or {}
     prob_up = rf.get("prob_up_20d")
@@ -406,10 +400,15 @@ def _compute_metrics(
     total_return_pct = (nav - 1.0) * 100.0 if nav_series else 0.0
 
     # Sharpe on per-bar pnl (these are daily realised returns when holding;
-    # zeros when flat — that's fine, it just lowers vol).
+    # zeros when flat — that's fine, it just lowers vol). The flat-day zeros
+    # are included by design, so this is a time-weighted (not in-market-only)
+    # Sharpe; expose the in-market bar count below so the number stays
+    # interpretable for a signal that's only occasionally in the market.
+    in_market_bars = 0
     if pnl_by_bar and len(pnl_by_bar) > 2:
         arr = np.asarray(pnl_by_bar, dtype=float)
         arr = arr[np.isfinite(arr)]
+        in_market_bars = int(np.count_nonzero(arr))
         if arr.size > 2 and float(arr.std()) > 1e-12:
             sharpe = float(arr.mean() / arr.std() * math.sqrt(_TRADING_DAYS_PER_YEAR))
         else:
@@ -436,6 +435,7 @@ def _compute_metrics(
         "avg_return_per_signal": round(float(avg_return_per_signal) * 100.0, 4),
         "total_return_pct":     round(float(total_return_pct), 4),
         "sharpe":               round(float(sharpe), 4) if math.isfinite(sharpe) else 0.0,
+        "sharpe_in_market_bars": int(in_market_bars),
         "max_drawdown_pct":     round(float(max_dd), 4),
         "equity_curve":         equity_curve,
         "signals":              signal_log,
@@ -627,9 +627,12 @@ def _run(
             reverse=True,
         )[:100]
         recent = full_signals[-100:]
-        merged: Dict[str, Dict[str, Any]] = {}
+        # Key on a unique tuple, not issued_at alone — two distinct signals can
+        # share an issued_at date, and recent+extreme overlap; keying by date
+        # only would silently collapse distinct same-day entries.
+        merged: Dict[tuple, Dict[str, Any]] = {}
         for s in recent + by_extremity:
-            merged[s["issued_at"]] = s
+            merged[(s["issued_at"], s.get("direction"), s.get("exit_date"))] = s
         metrics["signals"] = sorted(merged.values(), key=lambda s: s["issued_at"])
         metrics["signals_truncated_to"] = 200
 
@@ -672,6 +675,13 @@ def run_backtest(
 
     name = _resolve_signal_name(signal_fn)
     ph = _params_hash(params)
+
+    # Reject non-positive overrides (e.g. a bad -1 API param). Without this a
+    # negative override is truthy, survives into _run, and is clamped to a
+    # 1-day horizon for the whole backtest instead of falling back to the
+    # signal's own horizon_days.
+    if horizon_override is not None and horizon_override <= 0:
+        horizon_override = None
 
     def _do():
         return _run(signal_fn, symbol, start, end, horizon_override, params)

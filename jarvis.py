@@ -29,6 +29,7 @@ import json
 import logging
 import os
 import re
+import threading
 import time
 from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, List, Optional
@@ -273,6 +274,7 @@ def _llm_context_snapshot() -> str:
 # One-shot guard: index_memories() backfill runs once per process, the first
 # time _memory_block does a real recall (so it only fires when a key exists).
 _SEMMEM_BACKFILLED = False
+_SEMMEM_LOCK = threading.Lock()
 
 
 def _memory_block(query: Optional[str] = None) -> str:
@@ -303,16 +305,21 @@ def _memory_block(query: Optional[str] = None) -> str:
             # recallable. Throttled by a module flag — runs at most once per
             # process, and is itself fully guarded / fail-open.
             global _SEMMEM_BACKFILLED
-            if not _SEMMEM_BACKFILLED:
-                _SEMMEM_BACKFILLED = True
+            _do_backfill = False
+            with _SEMMEM_LOCK:
+                if not _SEMMEM_BACKFILLED:
+                    _SEMMEM_BACKFILLED = True
+                    _do_backfill = True
+            if _do_backfill:
                 try:
                     jarvis_semmem.index_memories()
                 except Exception as e:
                     log.debug("semmem backfill skipped: %s", e)
             seen = {l.lower() for l in lines}
             for hit in jarvis_semmem.recall(query, k=3) or []:
-                quoted = '- "{}"'.format(_one_line(hit.get("text") or ""))
-                if quoted.lower() not in seen and len(quoted) > 5:
+                text = _one_line(hit.get("text") or "")
+                quoted = '- "{}"'.format(text)
+                if quoted.lower() not in seen and len(text) > 2:
                     lines.append(quoted)
                     seen.add(quoted.lower())
         except Exception as e:
@@ -558,8 +565,9 @@ def _track_record_line() -> str:
             n = rec.get("n_directional") or 0
             hr = rec.get("hit_rate")
             if isinstance(n, int) and n >= 10 and isinstance(hr, (int, float)):
+                hr_pct = hr * 100 if hr <= 1 else hr
                 return {"line": "My forecast track record: {:.0f}% directional "
-                                "over {} scored calls. ".format(hr * 100, n)}
+                                "over {} scored calls. ".format(hr_pct, n)}
         except Exception as e:
             log.debug("track-record grounding skipped: %s", e)
         return {"line": ""}
@@ -583,10 +591,10 @@ def _salvage_payload(query: str, used: List[str], reasoning: Dict[str, Any],
     for mkey, result in list(tool_cache.items())[:10]:
         name = mkey.split("|", 1)[0]
         chunk = "{}: {}".format(name, (result or "")[:600])
-        if budget - len(chunk) < 0:
-            break
-        budget -= len(chunk)
         digest_parts.append(chunk)
+        budget -= len(chunk)
+        if budget < 0:
+            break
     answer = None
     if digest_parts:
         try:
@@ -820,7 +828,7 @@ def _agent_ask(query: str, history: Optional[List[Dict[str, Any]]] = None,
                 try:
                     cites = (json.loads(result) or {}).get("citations") or []
                     for c in cites:
-                        if c.get("url") and c not in citations:
+                        if isinstance(c, dict) and c.get("url") and c not in citations:
                             citations.append(c)
                 except Exception:
                     pass
@@ -988,6 +996,7 @@ def _portfolio_pulse() -> Optional[Dict[str, Any]]:
     total_value = 0.0
     total_cost = 0.0
     day_pnl = 0.0
+    day_value = 0.0  # value base for only the positions that contributed day_pnl
     day_pnl_known = False
     rows: List[Dict[str, Any]] = []
     for h in holdings:
@@ -1002,13 +1011,14 @@ def _portfolio_pulse() -> Optional[Dict[str, Any]]:
         chg = q.get("change")
         if chg is not None:
             day_pnl += chg * h["shares"]
+            day_value += mv
             day_pnl_known = True
         rows.append({
             "symbol": h["symbol"],
             "asset_type": h.get("asset_type") or "stock",
             "market_value": round(mv, 2),
             "unrealized_pnl": round(mv - cost, 2),
-            "unrealized_pct": round((mv - cost) / cost * 100, 2) if cost > 0 else 0,
+            "unrealized_pct": round((mv - cost) / cost * 100, 2) if cost > 0 else None,
             "day_change_pct": q.get("change_pct"),
             "day_pnl": round(chg * h["shares"], 2) if chg is not None else None,
         })
@@ -1021,13 +1031,17 @@ def _portfolio_pulse() -> Optional[Dict[str, Any]]:
     movers = [r for r in rows if r.get("day_change_pct") is not None]
     movers.sort(key=lambda r: r["day_change_pct"])
     total_pnl = total_value - total_cost
-    prev_value = total_value - day_pnl
+    # Percentage base covers only the positions whose day change was measured,
+    # so partial coverage (some holdings priced but missing 'change') doesn't
+    # dilute the day P&L %. Guard against ~zero base, not sign, so an extreme
+    # down day still yields a (large) percentage.
+    prev_value = day_value - day_pnl
     return {
         "total_value": round(total_value, 2),
         "total_pnl": round(total_pnl, 2),
         "total_pnl_pct": round(total_pnl / total_cost * 100, 2) if total_cost > 0 else 0,
         "day_pnl": round(day_pnl, 2) if day_pnl_known else None,
-        "day_pnl_pct": round(day_pnl / prev_value * 100, 2) if (day_pnl_known and prev_value) else None,
+        "day_pnl_pct": round(day_pnl / prev_value * 100, 2) if (day_pnl_known and abs(prev_value) > 1e-6) else None,
         "num_positions": len(rows),
         "holdings": rows,
         "best": movers[-1] if movers else None,
@@ -1098,8 +1112,8 @@ def _alert_insights(quotes_hint: Optional[Dict[str, Any]] = None) -> List[Dict[s
             if not price or not level:
                 continue
             dist_pct = (level - price) / price * 100
-            near = (a.get("alert_type") == "above" and 0 < dist_pct <= _NEAR_ALERT_PCT) or \
-                   (a.get("alert_type") == "below" and 0 < -dist_pct <= _NEAR_ALERT_PCT)
+            near = (a.get("alert_type") == "above" and 0 <= dist_pct <= _NEAR_ALERT_PCT) or \
+                   (a.get("alert_type") == "below" and 0 <= -dist_pct <= _NEAR_ALERT_PCT)
             if near:
                 cards.append(_card(
                     2, "alert_near", "info",
@@ -1118,8 +1132,9 @@ def _earnings_insights(symbols: List[str]) -> List[Dict[str, Any]]:
     cal = earnings.get_earnings_calendar(symbols[:25])
     for e in cal:
         days = e.get("days_until")
-        if days is None or days > 7:
+        if days is None or days < 0 or days > 7:
             continue
+        days = int(days)
         when = "today" if days == 0 else ("tomorrow" if days == 1 else "in {} days".format(days))
         extra = ""
         if e.get("beat_rate") is not None:
@@ -1171,7 +1186,7 @@ def _streak_card() -> List[Dict[str, Any]]:
     """3+ consecutive up/down sessions from the daily snapshot history."""
     snaps = db.get_snapshots()[-12:]
     vals = [_finite(s.get("total_value")) for s in snaps]
-    vals = [v for v in vals if v]
+    vals = [v for v in vals if v is not None]
     if len(vals) < 4:
         return []
     diffs = [vals[i] - vals[i - 1] for i in range(1, len(vals))]
@@ -1252,10 +1267,10 @@ def _idea_insights() -> List[Dict[str, Any]]:
         pool = idea_pool_warmer.list_warmed_symbols()
     except Exception:
         return cards
-    top = [r for r in pool if r.get("composite_score") is not None][:3]
+    top = [r for r in pool if _finite(r.get("composite_score")) is not None][:3]
     if not top:
         return cards
-    names = ", ".join("{} ({:.0f})".format(r["symbol"], r["composite_score"]) for r in top)
+    names = ", ".join("{} ({:.0f})".format(r["symbol"], _finite(r["composite_score"])) for r in top)
     cards.append(_card(
         3, "ideas", "pos",
         "{} fresh ideas ready in the pool".format(len(pool)),
@@ -1372,12 +1387,17 @@ def _run_briefing_uncached() -> Dict[str, Any]:
             if cp is None or abs(cp) < _BIG_MOVE_PCT:
                 continue
             tone = "pos" if cp > 0 else "neg"
+            _dp = r.get("day_pnl")
+            if _dp is not None:
+                detail = "{} moved {} — {} day P&L on your {} position.".format(
+                    r["symbol"], _fmt_pct(cp), _fmt_usd(_dp), _fmt_usd(r["market_value"]))
+            else:
+                detail = "{} moved {} on your {} position.".format(
+                    r["symbol"], _fmt_pct(cp), _fmt_usd(r["market_value"]))
             cards.append(_card(
                 2, "mover", tone,
                 "{} {} {:.2f}% today".format(r["symbol"], "up" if cp > 0 else "down", abs(cp)),
-                "{} moved {} — {} day P&L on your {} position.".format(
-                    r["symbol"], _fmt_pct(cp), _fmt_usd(r.get("day_pnl")),
-                    _fmt_usd(r["market_value"])),
+                detail,
                 view="research", symbol=r["symbol"]))
         # Concentration risk
         for r in pulse["holdings"]:
@@ -1420,7 +1440,8 @@ def _run_briefing_uncached() -> Dict[str, Any]:
         cards.append(_card(
             1 if regime["regime"] == "STRESSED" else 2, "regime", "warn",
             "Volatility regime: {}".format(regime["regime"]),
-            regime.get("regime_note") or "",
+            regime.get("regime_note") or
+            "Volatility regime is {} — expect wider swings.".format(regime["regime"]),
             view="macro"))
 
     cards.extend(idea_cards or [])
@@ -1435,6 +1456,15 @@ def _run_briefing_uncached() -> Dict[str, Any]:
 
     cards.sort(key=lambda c: c["priority"])
     n_urgent = sum(1 for c in cards if c["priority"] == 1)
+
+    # Peek the away-digest BEFORE logging this run's cards, otherwise the very
+    # cards produced now (created_at > last_seen) get counted as "events logged
+    # while you were out", double-counting what the user is looking at.
+    _away_count = 0
+    try:
+        _away_count = (away_digest(mark_seen=False).get("count") or 0)
+    except Exception as e:
+        log.debug("briefing: away-count peek skipped: %s", e)
 
     # History: persist today's cards so "while you were away" can replay what
     # surfaced between visits. Idempotent per (day, kind, title); cache-miss
@@ -1452,7 +1482,7 @@ def _run_briefing_uncached() -> Dict[str, Any]:
                            "All quiet — book steady, no alerts, calendar clear."))
 
     out = {
-        "greeting": "{}. Markets are {}.".format(_greeting(), _market_phase(now_et)),
+        "greeting": "{}. Markets are {}.".format(_greeting(now_et), _market_phase(now_et)),
         "headline": _build_headline(pulse, regime, n_urgent),
         "insights": cards[:12],
         "portfolio": pulse and {k: v for k, v in pulse.items() if k != "holdings"},
@@ -1461,11 +1491,10 @@ def _run_briefing_uncached() -> Dict[str, Any]:
     }
 
     # Fresh away-digest items earn a mention in the headline itself (additive
-    # string only — peek without moving the watermark, and any failure leaves
-    # the headline exactly as _build_headline made it).
+    # string only — count was peeked above BEFORE this run's cards were logged,
+    # so the current briefing's own cards aren't reported as missed).
     try:
-        dig = away_digest(mark_seen=False)
-        n_away = dig.get("count") or 0
+        n_away = _away_count
         if n_away:
             out["headline"] = out["headline"].rstrip() + \
                 " {} event{} logged while you were out.".format(
@@ -1520,25 +1549,34 @@ def away_digest(mark_seen: bool = True) -> Dict[str, Any]:
         last_seen = (db.get_settings() or {}).get("jarvis_last_seen") or None
     except Exception:
         pass
-    if mark_seen:
-        try:
-            db.set_setting("jarvis_last_seen", now)
-        except Exception as e:
-            log.debug("away_digest: mark seen failed: %s", e)
+
+    def _mark() -> None:
+        if mark_seen:
+            try:
+                db.set_setting("jarvis_last_seen", now)
+            except Exception as e:
+                log.debug("away_digest: mark seen failed: %s", e)
 
     out: Dict[str, Any] = {"since": last_seen, "insights": [], "count": 0,
                            "kind_counts": {}, "away_minutes": None, "line": None}
     if not last_seen:
+        _mark()
         return out  # first visit ever — nothing to recap
     try:
         gap_min = max(0, (datetime.strptime(now, "%Y-%m-%d %H:%M:%S")
-                          - datetime.strptime(str(last_seen)[:19], "%Y-%m-%d %H:%M:%S")
+                          - datetime.strptime(
+                              str(last_seen).replace("T", " ")[:19],
+                              "%Y-%m-%d %H:%M:%S")
                           ).total_seconds() / 60.0)
     except Exception:
         gap_min = None
     out["away_minutes"] = round(gap_min) if gap_min is not None else None
     if gap_min is not None and gap_min < _AWAY_MIN_GAP_MIN:
+        # Too soon to count as an absence — don't burn the watermark, so
+        # insights logged in this window survive to the next genuine digest.
         return out
+    # A genuine absence (or an unparseable gap): now advance the watermark.
+    _mark()
 
     try:
         rows = db.jarvis_insights_since(last_seen, limit=10)
@@ -1708,12 +1746,15 @@ def _forecast_line() -> Dict[str, Any]:
         import forecast_accountability
         rep = forecast_accountability.accountability_report()
         ens = rep.get("ensemble") or {}
-        hr = (ens.get("track_record") or {}).get("hit_rate")
-        n = (ens.get("calibration") or {}).get("n")
+        tr = ens.get("track_record") or {}
+        hr = tr.get("hit_rate")
+        nd = tr.get("n_directional")
+        n = nd if nd is not None else tr.get("n")
         if hr is not None and n:
+            hr_pct = hr * 100 if hr <= 1 else hr
             line = "My directional hit rate stands at {:.0f}% over {} scored calls. {}".format(
-                hr * 100 if hr <= 1 else hr, n,
-                "Holding my edge." if (hr * 100 if hr <= 1 else hr) >= 55 else "Calibrating.")
+                hr_pct, n,
+                "Holding my edge." if hr_pct >= 55 else "Calibrating.")
     except Exception:
         pass
     return {"line": line, "tone": "info", "action": None}
@@ -1729,7 +1770,8 @@ def _symbol_line(symbol: str) -> Dict[str, Any]:
         bits.append("{} today".format(_fmt_pct(q["change_pct"])))
     hi, lo = q.get("fifty_two_week_high"), q.get("fifty_two_week_low")
     if hi and lo and hi > lo:
-        bits.append("{:.0f}% of 52-week range".format((q["price"] - lo) / (hi - lo) * 100))
+        bits.append("{:.0f}% of 52-week range".format(
+            max(0.0, min(100.0, (q["price"] - lo) / (hi - lo) * 100))))
     held = None
     try:
         for h in db.get_portfolio():
@@ -1740,11 +1782,14 @@ def _symbol_line(symbol: str) -> Dict[str, Any]:
         pass
     tail = ""
     if held:
-        mv = (q["price"] or 0) * held["shares"]
-        cost = held["avg_cost"] * held["shares"]
-        pnl = mv - cost
-        tail = " You hold {} — {} {} on the position.".format(
-            _fmt_usd(mv), "up" if pnl >= 0 else "down", _fmt_usd(abs(pnl)))
+        shares = held.get("shares") or 0
+        avg = held.get("avg_cost") or 0
+        if shares:
+            mv = (q["price"] or 0) * shares
+            cost = avg * shares
+            pnl = mv - cost
+            tail = " You hold {} — {} {} on the position.".format(
+                _fmt_usd(mv), "up" if pnl >= 0 else "down", _fmt_usd(abs(pnl)))
     tone = "pos" if (q.get("change_pct") or 0) >= 0 else "neg"
     return {"line": ", ".join(bits) + "." + tail, "tone": tone, "action": None}
 
@@ -1873,8 +1918,10 @@ def health_snapshot() -> Dict[str, Any]:
         import cache_warmer
         import time as _t
         cycles = (cache_warmer.status() or {}).get("last_cycle") or {}
-        if cycles:
-            age = int(_t.time() - max(cycles.values()))
+        vals = [v for v in cycles.values()
+                if isinstance(v, (int, float)) and not isinstance(v, bool)]
+        if vals:
+            age = int(_t.time() - max(vals))
             out["warmer"] = {"alive": age < 900, "last_cycle_age_s": age}
         else:
             out["warmer"] = {"alive": False, "last_cycle_age_s": None}
@@ -1891,7 +1938,8 @@ def health_snapshot() -> Dict[str, Any]:
         out["memory_facts"] = None
     try:
         row = db.get_conn().execute(
-            "SELECT COUNT(*) AS n FROM jarvis_insights").fetchone()
+            "SELECT COUNT(*) AS n FROM jarvis_insights "
+            "WHERE created_at >= datetime('now', '-14 days')").fetchone()
         out["insights_14d"] = row["n"] if row else 0
     except Exception:
         out["insights_14d"] = None
@@ -1918,7 +1966,9 @@ def activity_snapshot() -> Dict[str, Any]:
     try:
         import cache_warmer
         cycles = (cache_warmer.status() or {}).get("last_cycle") or {}
-        rows = sorted(cycles.items(), key=lambda kv: -kv[1])[:8]
+        rows = sorted(
+            ((k, v) for k, v in cycles.items() if isinstance(v, (int, float))),
+            key=lambda kv: -kv[1])[:8]
         for label, ts in rows:
             background.append({
                 "label": _WARMER_LABELS.get(label, label.replace("_", " ").capitalize()),
@@ -2096,6 +2146,8 @@ def _answer_quote(symbol: str) -> Dict[str, Any]:
     vol = _finite(q.get("volume"))
     if vol and vol >= 1e6:
         parts.append("{:.1f}M shares traded".format(vol / 1e6))
+    elif vol and vol >= 1e3:
+        parts.append("{:.0f}K shares traded".format(vol / 1e3))
     return {"answer": ", ".join(parts) + ".",
             "action": {"view": "research", "symbol": symbol}}
 
@@ -2126,10 +2178,15 @@ def _answer_forecast(symbol: str, q_lower: str = "") -> Dict[str, Any]:
     ens = (f or {}).get("ensemble") or {}
     if not ens:
         return {"answer": "The forecast ensemble has no read on {} right now.".format(symbol)}
-    prob = ens.get("prob_up")
-    answer = "{}: ensemble of {} signals puts P(up) at {:.0f}% over {} trading days — {} conviction {}.".format(
-        symbol, f.get("n_signals", 0), (prob or 0.5) * 100, f.get("horizon_days", 20),
-        (ens.get("conviction") or "").lower(), ens.get("direction") or "")
+    prob = _finite(ens.get("prob_up"))
+    if prob is not None:
+        answer = "{}: ensemble of {} signals puts P(up) at {:.0f}% over {} trading days — {} conviction {}.".format(
+            symbol, f.get("n_signals", 0), prob * 100, f.get("horizon_days", 20),
+            (ens.get("conviction") or "").lower(), ens.get("direction") or "")
+    else:
+        answer = "{}: ensemble of {} signals over {} trading days — {} conviction {}.".format(
+            symbol, f.get("n_signals", 0), f.get("horizon_days", 20),
+            (ens.get("conviction") or "").lower(), ens.get("direction") or "")
     cone = ens.get("return_cone") or {}
     p05, p95 = _finite(cone.get("p05")), _finite(cone.get("p95"))
     if p05 is not None and p95 is not None:
@@ -2151,9 +2208,10 @@ def _answer_portfolio(q_lower: str) -> Dict[str, Any]:
                 "action": {"view": "portfolio"}}
     # "All time" / "overall" flips best/worst from today's tape to unrealized
     # P&L — a different question with a different honest answer.
-    alltime = any(p in q_lower for p in ("all time", "all-time", "alltime",
-                                         "overall", "since the beginning",
-                                         "since inception"))
+    alltime = (any(p in q_lower for p in ("all time", "all-time", "alltime",
+                                          "overall", "since the beginning",
+                                          "since inception"))
+               and not any(d in q_lower for d in ("today", "day")))
     ranked = [r for r in pulse["holdings"] if _finite(r.get("unrealized_pct")) is not None]
     if "worst" in q_lower or "loser" in q_lower or "losing" in q_lower:
         if alltime and ranked:
@@ -2236,7 +2294,7 @@ def _answer_holding_period(symbol: str) -> Dict[str, Any]:
     held = ""
     try:
         d0 = datetime.strptime(str(first["date"])[:10], "%Y-%m-%d")
-        days = max(0, (datetime.now() - d0).days)
+        days = max(0, (datetime.now().date() - d0.date()).days)
         if days < 1:
             held = " — bought today"
         elif days < 60:
@@ -2377,8 +2435,8 @@ def _answer_why() -> Dict[str, Any]:
     def _phrase(e: Dict[str, Any]) -> str:
         s = "{} ({}, {})".format(e["symbol"], _fmt_usd(e["day_pnl"]),
                                  _fmt_pct(e.get("day_change_pct")))
-        if e.get("share_of_move_pct") is not None and e["share_of_move_pct"] > 0:
-            s += " — {:.0f}% of the move".format(min(e["share_of_move_pct"], 999))
+        if e.get("share_of_move_pct") is not None and abs(e["share_of_move_pct"]) >= 1:
+            s += " — {:.0f}% of the move".format(min(abs(e["share_of_move_pct"]), 999))
         return s
 
     bits = [head + "."]
@@ -2529,13 +2587,15 @@ def _answer_earnings(symbol: Optional[str]) -> Dict[str, Any]:
     import earnings
     if symbol:
         cal = earnings.get_earnings_calendar([symbol])
-        if cal:
+        if cal and cal[0].get("earnings_date"):
             e = cal[0]
             beat = ""
             if e.get("beat_rate") is not None:
                 beat = " Historical beat rate: {}%.".format(e["beat_rate"])
-            return {"answer": "{} reports earnings on {} ({} days away).{}".format(
-                        e["symbol"], e["earnings_date"], e["days_until"], beat),
+            days = e.get("days_until")
+            days_bit = " ({} days away)".format(days) if days is not None else ""
+            return {"answer": "{} reports earnings on {}{}.{}".format(
+                        e.get("symbol", symbol), e["earnings_date"], days_bit, beat),
                     "action": {"view": "earnings", "symbol": symbol}}
         return {"answer": "No upcoming earnings date found for {}.".format(symbol)}
     held = []
@@ -2549,7 +2609,8 @@ def _answer_earnings(symbol: Optional[str]) -> Dict[str, Any]:
     if not soon:
         return {"answer": "No portfolio earnings in the next two weeks.",
                 "action": {"view": "earnings"}}
-    listing = ", ".join("{} on {}".format(e["symbol"], e["earnings_date"]) for e in soon[:5])
+    listing = ", ".join("{} on {}".format(e.get("symbol", "?"), e.get("earnings_date") or "TBD")
+                        for e in soon[:5])
     return {"answer": "Upcoming portfolio earnings: {}.".format(listing),
             "action": {"view": "earnings"}}
 
@@ -2585,7 +2646,7 @@ def _answer_market() -> Dict[str, Any]:
 
 
 def _answer_alerts() -> Dict[str, Any]:
-    alerts = db.get_price_alerts(include_triggered=True)
+    alerts = db.get_price_alerts(include_triggered=True) or []
     trig = [a for a in alerts if a.get("triggered")]
     active = [a for a in alerts if not a.get("triggered")]
     if not alerts:
@@ -2606,8 +2667,11 @@ def _answer_ideas() -> Dict[str, Any]:
     if not pool:
         return {"answer": "The idea pool is still warming up — check the Ideas view shortly.",
                 "action": {"view": "ideas"}}
-    top = pool[:3]
-    listing = ", ".join("{} (score {:.0f})".format(r["symbol"], r.get("composite_score") or 0) for r in top)
+    top = [r for r in pool if r.get("composite_score") is not None][:3]
+    if not top:
+        return {"answer": "The idea pool is still warming up — check the Ideas view shortly.",
+                "action": {"view": "ideas"}}
+    listing = ", ".join("{} (score {:.0f})".format(r["symbol"], r["composite_score"]) for r in top)
     return {"answer": "Top-scored ideas right now: {}.".format(listing),
             "action": {"view": "ideas"}}
 
@@ -2636,12 +2700,14 @@ def _answer_range(symbol: str) -> Dict[str, Any]:
     q = fetcher.get_quote(symbol)
     if not q or q.get("error") or q.get("price") is None:
         return {"answer": "I couldn't get a quote for {} right now.".format(symbol)}
+    price = _finite(q.get("price"))
+    if price is None:
+        return {"answer": "I couldn't get a quote for {} right now.".format(symbol)}
     hi, lo = _finite(q.get("fifty_two_week_high")), _finite(q.get("fifty_two_week_low"))
     if not hi or not lo or hi <= lo:
         return {"answer": "{} is at ${:,.2f}, but I don't have a clean 52-week range for it.".format(
-                    symbol, q["price"]),
+                    symbol, price),
                 "action": {"view": "research", "symbol": symbol}}
-    price = q["price"]
     pos = (price - lo) / (hi - lo) * 100
     off_hi = (hi - price) / hi * 100
     above_lo = (price - lo) / lo * 100
@@ -2835,11 +2901,13 @@ def _answer_compare_quotes(s1: str, s2: str) -> Dict[str, Any]:
         missing = s1 if not l1 else s2
         return {"answer": "I couldn't price {} right now — try again in a moment.".format(missing)}
     tail = ""
+    winner = s1
     c1, c2 = _finite((q1 or {}).get("change_pct")), _finite((q2 or {}).get("change_pct"))
     if c1 is not None and c2 is not None and abs(c1 - c2) >= 0.05:
-        tail = " {} has the better day.".format(s1 if c1 > c2 else s2)
+        winner = s1 if c1 > c2 else s2
+        tail = " {} has the better day.".format(winner)
     return {"answer": "{} — versus — {}.{}".format(l1, l2, tail),
-            "action": {"view": "research", "symbol": s1}}
+            "action": {"view": "research", "symbol": winner}}
 
 
 # ─── deep knowledge: instant, keyless concept explanations ──────────────────
@@ -2870,22 +2938,14 @@ _GLOSSARY: Dict[str, Dict[str, Any]] = {
                 "literally what hedging costs right now. Under ~15 is complacent, over ~28 is stress. "
                 "It spikes when everyone wants insurance at once.",
         "view": "macro"},
-    "rsi": {"aliases": ["relative strength index", "overbought", "oversold"],
-        "text": "A 0-100 momentum oscillator from the size of recent up-days vs down-days. Above ~70 is "
-                "'overbought' (the move got crowded), below ~30 'oversold'. It's a speed gauge, not a "
-                "direction call — strong trends can sit overbought for weeks. Ask me 'RSI on NVDA'."},
     "momentum score": {"aliases": ["momentum"],
         "text": "My 0-100 blend of three trend reads: price vs its 50-day average, the 50-day vs the "
                 "200-day, and the ~60-day return. High means price, intermediate trend, and recent drift "
                 "all point up. It's how I lean a symbol's technical stance. Ask 'momentum on AAPL'."},
-    "max drawdown": {"aliases": ["drawdown", "max dd"],
+    "max drawdown": {"aliases": ["max dd"],
         "text": "The worst peak-to-trough drop over a window, as a negative %. It answers 'how much pain "
                 "did holding this actually involve' better than volatility does — a -45% drawdown means at "
                 "some point you were down 45% from the high, regardless of where it ended."},
-    "sharpe ratio": {"aliases": ["sharpe"],
-        "text": "Return per unit of volatility — reward for the risk taken. Two names up 20% aren't equal "
-                "if one did it smoothly and the other on a rollercoaster. I show a rough proxy (annualized "
-                "return ÷ annualized vol, no risk-free rate), so read it as relative, not absolute."},
     "breadth": {"aliases": ["market breadth", "participation"],
         "text": "How many names are actually participating, not just the index. A book (or market) up on a "
                 "few megacaps while most names lag is narrow — fragile. I measure your book's breadth as the "
@@ -2903,7 +2963,7 @@ _GLOSSARY: Dict[str, Dict[str, Any]] = {
         "text": "Shares sold short as a fraction of float. High short interest is stored buying pressure: "
                 "every short must eventually buy to close. A squeeze is that buying forced all at once — "
                 "fuel, not a verdict on the business."},
-    "rsi": {"aliases": ["relative strength index"],
+    "rsi": {"aliases": ["relative strength index", "overbought", "oversold"],
         "text": "A 0-100 oscillator of recent gains vs losses. Above ~70 reads overbought, below ~30 oversold — "
                 "but strong trends stay 'overbought' for months. It measures stretch, not direction.",
         "view": "research"},
@@ -2916,7 +2976,7 @@ _GLOSSARY: Dict[str, Dict[str, Any]] = {
         "text": "Excess return per unit of volatility — how much you're paid per unit of sleep lost. "
                 "Two portfolios with equal returns aren't equal if one took twice the swings; Sharpe is the tiebreaker.",
         "view": "analytics"},
-    "drawdown": {"aliases": ["max drawdown"],
+    "drawdown": {"aliases": [],
         "text": "Peak-to-trough decline. The brutal math: a 50% drawdown needs +100% to recover. "
                 "It's the number that tests temperament — returns decide how rich you get, drawdowns decide whether you stay invested.",
         "view": "stress"},
@@ -3120,18 +3180,20 @@ def _answer_social(q: str, ql: str) -> Optional[Dict[str, Any]]:
     stripped = ql.strip()
     if _GREETING_RE.match(stripped):
         try:
-            phase = _market_phase(_et_now())
+            _et = _et_now()
+            phase = _market_phase(_et)
         except Exception:
+            _et = None
             phase = "doing their thing"
         return {"answer": "{}. Markets are {} — what shall we look at?".format(
-            _greeting(), phase)}
+            _greeting(_et), phase)}
     # Only ack when the message is ONLY gratitude. "thanks, now forecast NVDA"
     # carries a real request after the thanks — strip the gratitude phrase and,
     # if anything substantive remains, fall through so it gets answered.
     if _THANKS_RE.search(stripped):
         remainder = _THANKS_RE.sub(" ", stripped).strip(" ,.!?-—")
         if not remainder:
-            return {"answer": _THANKS_ACKS[len(q) % len(_THANKS_ACKS)]}
+            return {"answer": _THANKS_ACKS[len(stripped) % len(_THANKS_ACKS)]}
     return None
 
 
@@ -3801,7 +3863,7 @@ def _answer_trading_agent(ql: str) -> Dict[str, Any]:
                 return {"answer": "The trading agent isn't holding any paper positions "
                                   "right now.", "data": d, "action": action}
             top = d.get("positions") or []
-            names = ", ".join("{} ({})".format(p["symbol"], _fmt_usd(p["market_value_usd"]))
+            names = ", ".join("{} ({})".format(p.get("symbol"), _fmt_usd(p.get("market_value_usd")))
                               for p in top[:5])
             ans = ("The agent holds {} paper position{} worth {} (unrealized {}). "
                    "Top: {}.".format(n, "" if n == 1 else "s",
@@ -3824,14 +3886,17 @@ def _answer_trading_agent(ql: str) -> Dict[str, Any]:
             parts = ["The agent has closed {} paper trade{}".format(n, "" if n == 1 else "s")]
             if wr is not None:
                 parts.append("{:.0f}% win rate".format(wr * 100))
-            if pf is not None:
-                parts.append("profit factor {}".format(pf))
+            if _finite(pf) is not None:
+                parts.append("profit factor {:.2f}".format(pf))
             parts.append("net realized {}".format(_fmt_usd(d.get("net_realized_usd"))))
             tc = d.get("top_contributors") or []
             tail = ""
             if tc:
-                tail = " Top contributor: {} ({}).".format(tc[0]["symbol"],
-                                                           _fmt_usd(tc[0]["total_usd"]))
+                c0 = tc[0]
+                sym = c0.get("symbol")
+                tot = c0.get("total_usd")
+                if sym is not None and tot is not None:
+                    tail = " Top contributor: {} ({}).".format(sym, _fmt_usd(tot))
             return {"answer": ", ".join(parts) + "." + tail, "data": d, "action": action}
         # ── what's it been doing ─────────────────────────────────────────────
         if any(w in ql for w in ("recent", "lately", "been doing", "activity", "latest",
@@ -3842,8 +3907,8 @@ def _answer_trading_agent(ql: str) -> Dict[str, Any]:
                 return {"answer": "The agent hasn't placed any orders yet.",
                         "data": d, "action": action}
             recent = "; ".join("{} {:g} {} ({})".format(
-                o.get("side", "").upper(), float(o.get("qty") or 0), o.get("symbol"),
-                o.get("state")) for o in orders[:4])
+                str(o.get("side") or "").upper(), float(o.get("qty") or 0),
+                o.get("symbol") or "?", o.get("state") or "unknown") for o in orders[:4])
             return {"answer": "Recent agent orders — {}.".format(recent),
                     "data": d, "action": action}
         # ── status (default) ─────────────────────────────────────────────────
@@ -3858,8 +3923,11 @@ def _answer_trading_agent(ql: str) -> Dict[str, Any]:
         if s.get("cumulative_pnl_usd") is not None:
             parts.append("cumulative {}".format(_fmt_usd(s.get("cumulative_pnl_usd"))))
         if s.get("trades_today") is not None:
-            parts.append("{}/{} trades used today".format(
-                s.get("trades_today"), s.get("max_trades_per_day")))
+            cap = s.get("max_trades_per_day")
+            if cap is not None:
+                parts.append("{}/{} trades used today".format(s.get("trades_today"), cap))
+            else:
+                parts.append("{} trades today".format(s.get("trades_today")))
         return {"answer": ", ".join(parts) + ".", "data": s, "action": action}
     except Exception as e:
         log.debug("trading_agent answer failed", exc_info=True)
@@ -4020,7 +4088,9 @@ def deep_dossier(symbol):
     # signals split or there's thin coverage — refuse conviction they don't share.
     consensus = max(len(bulls), len(bears),
                     len([c for c in components if c["stance"] == "neutral"])) / float(n)
-    if disagreement or consensus < 0.6 or n < 2:
+    # net == 0 means no directional majority (all-neutral or a perfect split):
+    # the maximally non-directional case must not earn high/moderate conviction.
+    if disagreement or consensus < 0.6 or n < 2 or net == 0:
         conviction = "low"
     elif consensus >= 0.8 and n >= 3:
         conviction = "high"
@@ -4032,10 +4102,14 @@ def deep_dossier(symbol):
                 "({} bullish vs {} bearish) — so I'm keeping conviction low."
                 ).format(symbol, lean, len(bulls), len(bears))
     else:
+        # Aligned count reflects the bloc that drives the stated lean, not
+        # whichever bloc is largest (neutrals aren't agreement with a lean).
+        aligned = (len(bulls) if net > 0
+                   else (len(bears) if net < 0
+                         else n - len(bulls) - len(bears)))
         head = ("Dossier on {}: a {} read with {} conviction "
                 "({} of {} signals aligned).").format(
-                    symbol, lean, conviction,
-                    max(len(bulls), len(bears), n - len(bulls) - len(bears)), n)
+                    symbol, lean, conviction, aligned, n)
     lines = ["• {} → {}: {}".format(c["name"], c["stance"], c["note"]) for c in components]
     return {
         "answer": head + "\n" + "\n".join(lines),
@@ -4081,12 +4155,15 @@ def _answer_corrections_learned() -> Dict[str, Any]:
     total = 0
     try:
         _corrections_table()
-        conn = db.get_conn()
-        total = conn.execute("SELECT COUNT(*) AS n FROM jarvis_corrections"
-                             ).fetchone()["n"]
-        rows = [dict(r) for r in conn.execute(
-            "SELECT query, prior_intent, created_at FROM jarvis_corrections "
-            "ORDER BY id DESC LIMIT 3").fetchall()]
+        # Serialize the readback against concurrent _log_correction writers on
+        # the shared connection (RLock is reentrant; read-only, so no deadlock).
+        with db._write_lock:
+            conn = db.get_conn()
+            total = conn.execute("SELECT COUNT(*) AS n FROM jarvis_corrections"
+                                 ).fetchone()["n"]
+            rows = [dict(r) for r in conn.execute(
+                "SELECT query, prior_intent, created_at FROM jarvis_corrections "
+                "ORDER BY id DESC LIMIT 3").fetchall()]
     except Exception as e:
         log.debug("corrections readback skipped: %s", e)
     if not total:
@@ -4108,6 +4185,7 @@ def _answer_corrections_learned() -> Dict[str, Any]:
 # In-memory and short-lived by design: a clarify older than the TTL is a
 # conversation that moved on.
 _PENDING_CLARIFY: Dict[int, Dict[str, Any]] = {}
+_PENDING_CLARIFY_LOCK = threading.Lock()
 _CLARIFY_TTL = 300  # seconds
 
 
@@ -4116,13 +4194,14 @@ def _set_pending_clarify(conv_id: Optional[int], intent: str) -> None:
         return
     try:
         import time as _t
-        # Opportunistic GC so the dict can't grow unboundedly.
-        if len(_PENDING_CLARIFY) > 64:
-            cutoff = _t.time() - _CLARIFY_TTL
-            for k in [k for k, v in _PENDING_CLARIFY.items()
-                      if v.get("ts", 0) < cutoff]:
-                _PENDING_CLARIFY.pop(k, None)
-        _PENDING_CLARIFY[conv_id] = {"intent": intent, "ts": _t.time()}
+        with _PENDING_CLARIFY_LOCK:
+            # Opportunistic GC so the dict can't grow unboundedly.
+            if len(_PENDING_CLARIFY) > 64:
+                cutoff = _t.time() - _CLARIFY_TTL
+                for k in [k for k, v in _PENDING_CLARIFY.items()
+                          if v.get("ts", 0) < cutoff]:
+                    _PENDING_CLARIFY.pop(k, None)
+            _PENDING_CLARIFY[conv_id] = {"intent": intent, "ts": _t.time()}
     except Exception:
         pass
 
@@ -4249,6 +4328,11 @@ def ask(query: str, history: Any = None, conversation_id: Any = None,
             inherited = turn["symbol"]
             break
     is_follow_up = bool(_FOLLOW_UP_RE.search(ql)) or ql.startswith(("what about", "how about", "and "))
+    # Broad cues like "again"/"same" can appear in unrelated market/portfolio
+    # questions ("is the market overbought again"); don't hijack those into a
+    # stale single-stock quote.
+    if any(w in ql for w in ("market", "portfolio", "my book", "overall")):
+        is_follow_up = ql.startswith(("what about", "how about", "and "))
     if not symbol and inherited and is_follow_up:
         symbol = inherited
 
@@ -4309,8 +4393,9 @@ def ask(query: str, history: Any = None, conversation_id: Any = None,
     # is an ANSWER to that question, not a routing correction — stripping the
     # negation would mangle it. Skip the correction path entirely when a
     # clarify is pending so the original text passes through unchanged.
-    _clarify_pending = (conv_id is not None
-                        and _PENDING_CLARIFY.get(conv_id) is not None)
+    with _PENDING_CLARIFY_LOCK:
+        _clarify_pending = (conv_id is not None
+                            and _PENDING_CLARIFY.get(conv_id) is not None)
     if _depth < 2 and turns and not _clarify_pending:
         m_corr = _CORRECTION_RE.match(q)
         if m_corr:
@@ -4353,19 +4438,27 @@ def ask(query: str, history: Any = None, conversation_id: Any = None,
         symbol and len(ql.split()) <= 3
         and not re.search(r"\b(price|quote|cost|worth|trading|value)\b", ql))
     if conv_id is not None and _reply_is_bare_symbol:
-        pend = _PENDING_CLARIFY.get(conv_id)
+        with _PENDING_CLARIFY_LOCK:
+            pend = _PENDING_CLARIFY.get(conv_id)
         if pend is not None:
             import time as _t
-            _PENDING_CLARIFY.pop(conv_id, None)
-            if _t.time() - pend.get("ts", 0) < _CLARIFY_TTL:
+            _pend_intent = pend.get("intent")
+            _pend_fresh = (_t.time() - pend.get("ts", 0) < _CLARIFY_TTL)
+            # Only consume the pending clarify once we're certain we can resume
+            # it (fresh AND a handled intent). A stale or unhandled entry is
+            # dropped; a handled-but-failing dispatch leaves it in place so a
+            # retry can still resume within the TTL.
+            if _pend_fresh and _pend_intent in ("forecast", "agent"):
+                with _PENDING_CLARIFY_LOCK:
+                    _PENDING_CLARIFY.pop(conv_id, None)
                 try:
-                    if pend.get("intent") == "forecast":
+                    if _pend_intent == "forecast":
                         return done("forecast", _answer_forecast(symbol, ql))
-                    if pend.get("intent") == "agent":
+                    if _pend_intent == "agent":
                         # Agent/planner asked "which symbol?" — resume the
                         # agent with the bare-symbol reply and full history
                         # rather than dropping to the quote fast-path (J2).
-                        r = _agent_ask(ql, turns, progress=progress)
+                        r = _agent_ask(q, turns, progress=progress)
                         if r and r.get("answer"):
                             payload = {"answer": r["answer"],
                                        "used": r.get("used") or []}
@@ -4471,7 +4564,7 @@ def ask(query: str, history: Any = None, conversation_id: Any = None,
         # queries; longer comparison questions still reach the agent's
         # compare_positions lens.
         m_vs = _VS_RE.search(q)
-        if m_vs and len(ql.split()) <= 4:
+        if m_vs and len(ql.split()) <= 8:
             def _vs_resolve(tok: str) -> Optional[str]:
                 low = tok.lower()
                 if low in _COMPANY_NAMES:

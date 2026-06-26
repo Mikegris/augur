@@ -31,14 +31,20 @@ def cumulative_pnl(mode: str = "paper") -> Dict[str, Any]:
             mark = marks.get(sym)
             if mark is None:
                 continue
-            unreal += (mark - p["avg_cost"]) * p["qty"]
+            try:
+                unreal += (mark - float(p.get("avg_cost") or 0)) * float(p.get("qty") or 0)
+            except Exception:
+                log.debug("cumulative_pnl bad position %s", sym, exc_info=True)
+                continue
     except Exception:
         log.debug("cumulative_pnl unrealized failed", exc_info=True)
     unreal = aj_db.money(unreal)
-    return {"realized_total": book["realized_total"],
+    realized = book.get("realized_total") or 0.0
+    fees = book.get("fees_total") or 0.0
+    return {"realized_total": realized,
             "unrealized_open": unreal,
-            "total": aj_db.money(book["realized_total"] + unreal),
-            "fees_total": book["fees_total"]}
+            "total": aj_db.money(realized + unreal),
+            "fees_total": fees}
 
 
 def order_stats() -> Dict[str, Any]:
@@ -93,7 +99,7 @@ def alerts() -> List[Dict[str, str]]:
         if aj_config.get_config().get("trading_enabled") is False:
             out.append({"level": "info", "message": "trading disabled (halted or never enabled)"})
         os_ = order_stats()
-        if os_.get("fill_rate") is not None and os_["fill_rate"] < 0.5 and os_["total"] >= 4:
+        if os_.get("fill_rate") is not None and os_["fill_rate"] < 0.5 and os_.get("total", 0) >= 4:
             out.append({"level": "warning", "message": "order fill-rate < 50%"})
         rc = recon_stats()
         if rc.get("divergence"):
@@ -101,7 +107,7 @@ def alerts() -> List[Dict[str, str]]:
         gs = gate_stats()
         if gs.get("halt"):
             out.append({"level": "critical", "message": "{} halt event(s) today".format(gs["halt"])})
-        unknown = os_["by_state"].get("unknown", 0)   # reuse os_, no re-query
+        unknown = (os_.get("by_state") or {}).get("unknown", 0)   # reuse os_, no re-query
         if unknown:
             out.append({"level": "critical", "message": "{} order(s) in UNKNOWN state".format(unknown)})
     except Exception:
@@ -114,12 +120,12 @@ def status() -> Dict[str, Any]:
     cfg = aj_config.get_config()
     import aj_risk
     out = {
-        "version": "3.1.0",
+        "version": "3.2.0",
         "trading_enabled": cfg.get("trading_enabled"),
         "live_trading_enabled": cfg.get("live_trading_enabled"),
         "session": aj_db.market_session(),
         "halted": aj_risk.is_halted(),
-        "config": {k: cfg[k] for k in (
+        "config": {k: cfg.get(k) for k in (
             "symbol_allowlist", "max_order_notional_usd", "max_trades_per_day",
             "max_daily_loss_usd", "daily_loss_basis", "session_whitelist",
             "default_broker", "auto_approve_paper")},

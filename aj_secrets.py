@@ -54,27 +54,46 @@ def _load_master_key() -> bytes:
     path = _key_file()
     if os.path.exists(path):
         with open(path, "rb") as f:
-            return f.read().strip()
+            kb = f.read().strip()
+        # Validate the file-loaded key the same way the env key is validated, so
+        # a zero-byte/truncated/corrupted key file fails loudly HERE rather than
+        # surfacing later inside _fernet()/encrypt (and being swallowed by a
+        # broad except in store()).
+        Fernet(kb)
+        return kb
     # Generate + persist atomically with restrictive perms:
     #  * umask 077 so the file is never group/world-readable even briefly;
-    #  * O_EXCL so a concurrent first-use can't have two processes write
-    #    DIFFERENT keys (which would make one's secrets undecryptable) — the
-    #    loser re-reads the winner's key;
-    #  * fchmod 0600 on the fd BEFORE writing the secret bytes.
+    #  * write the FULL key to a unique temp file (fchmod 0600, fsync) and only
+    #    then publish it into place with os.link() — link is atomic AND fails if
+    #    the destination already exists, so (a) any concurrent reader sees either
+    #    NO file or the COMPLETE key, never a half-written (empty/truncated) one,
+    #    and (b) exactly ONE process can publish a key (no two DIFFERENT keys);
+    #  * the loser of the publish race re-reads the winner's key.
+    import uuid as _uuid
     key = Fernet.generate_key()
     old_umask = os.umask(0o077)
+    tmp = "{}.{}.{}.tmp".format(path, os.getpid(), _uuid.uuid4().hex)
     try:
-        try:
-            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-        except FileExistsError:
-            with open(path, "rb") as f:
-                return f.read().strip()
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         try:
             os.fchmod(fd, 0o600)
             os.write(fd, key)
+            os.fsync(fd)
         finally:
             os.close(fd)
+        try:
+            os.link(tmp, path)
+        except FileExistsError:
+            # Another process already published a key — adopt theirs.
+            with open(path, "rb") as f:
+                kb = f.read().strip()
+            Fernet(kb)
+            return kb
     finally:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
         os.umask(old_umask)
     log.info("aj_secrets: generated master key at %s (0600)", path)
     return key
@@ -111,8 +130,12 @@ def store(scope: str, value: str) -> bool:
 
 def has(scope: str) -> bool:
     try:
-        return bool(db.get_conn().execute(
-            "SELECT 1 FROM settings WHERE key=?", (_PREFIX + scope,)).fetchone())
+        cur = db.get_conn().execute(
+            "SELECT 1 FROM settings WHERE key=?", (_PREFIX + scope,))
+        try:
+            return bool(cur.fetchone())
+        finally:
+            cur.close()
     except Exception:
         return False
 
@@ -147,8 +170,12 @@ def lease(scope: str, ttl_s: int = 300, caller: str = "") -> Optional[Lease]:
     error (callers fail closed — no credentialed action proceeds, §20.8)."""
     row = None
     try:
-        row = db.get_conn().execute(
-            "SELECT value FROM settings WHERE key=?", (_PREFIX + scope,)).fetchone()
+        cur = db.get_conn().execute(
+            "SELECT value FROM settings WHERE key=?", (_PREFIX + scope,))
+        try:
+            row = cur.fetchone()
+        finally:
+            cur.close()
     except Exception:
         log.exception("aj_secrets.lease read failed for %s", scope)
     if not row or not row["value"]:

@@ -319,6 +319,8 @@ def get_earnings_dossier(symbol):
                             before = float(price_hist["Close"].iloc[idx])
                             after = float(price_hist["Close"].iloc[idx + 1])
                             move_pct = round((after - before) / before * 100, 2) if before else None
+                            if move_pct is None:
+                                continue
                             post_moves.append({
                                 "date": _date_str(dt),
                                 "move_pct": move_pct,

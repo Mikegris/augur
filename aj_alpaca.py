@@ -58,7 +58,10 @@ class AlpacaBroker(BrokerClient):
         super().__init__(mode="live" if live else "paper")
         self.base = LIVE_BASE if live else PAPER_BASE
         self._assert_enabled(live)
-        self._key, self._secret = self._lease_keys()
+        # Hold the short-lived Lease objects (NOT the raw plaintext) so the
+        # credentials don't outlive the lease TTL on a long-lived instance; the
+        # value is read per-request and re-leased once the lease expires.
+        self._kid_lease, self._sec_lease = self._lease_keys()
 
     # ── gating ────────────────────────────────────────────────────────────────
     def _assert_enabled(self, live: bool) -> None:
@@ -77,12 +80,21 @@ class AlpacaBroker(BrokerClient):
         sec = aj_secrets.lease("alpaca_secret_key", caller="aj_alpaca")
         if not kid or not sec or not kid.value or not sec.value:
             raise BrokerNotEnabled("alpaca: could not lease keys (expired/missing)")
-        return kid.value, sec.value
+        return kid, sec
+
+    def _creds(self):
+        """Read the current key/secret from the held leases, re-leasing if the
+        TTL has expired so plaintext credentials are never cached past the lease
+        window. Fails closed if a fresh lease can't be obtained."""
+        if self._kid_lease.value is None or self._sec_lease.value is None:
+            self._kid_lease, self._sec_lease = self._lease_keys()
+        return self._kid_lease.value, self._sec_lease.value
 
     # ── HTTP ──────────────────────────────────────────────────────────────────
     def _headers(self) -> Dict[str, str]:
-        return {"APCA-API-KEY-ID": self._key,
-                "APCA-API-SECRET-KEY": self._secret,
+        key, secret = self._creds()
+        return {"APCA-API-KEY-ID": key,
+                "APCA-API-SECRET-KEY": secret,
                 "Content-Type": "application/json"}
 
     def _request(self, method: str, path: str,
@@ -98,6 +110,17 @@ class AlpacaBroker(BrokerClient):
 
     # ── BrokerClient ──────────────────────────────────────────────────────────
     def submit(self, order: Dict[str, Any]) -> Dict[str, Any]:
+        # Re-assert gating against CURRENT config every submit: a long-lived
+        # instance must not keep routing to a (possibly LIVE) endpoint after the
+        # operator flipped live_trading_enabled. If the live flag no longer
+        # matches the endpoint this instance was built for, fail closed rather
+        # than send the order to the wrong (live) base.
+        live_now = bool(aj_config.get_config().get("live_trading_enabled"))
+        if live_now != (self.base == LIVE_BASE):
+            raise BrokerNotEnabled(
+                "alpaca: live_trading_enabled changed since this broker was "
+                "constructed; refusing to route to a stale endpoint")
+        self._assert_enabled(live_now)
         # Crypto needs the BTC/USD pair format + gtc/ioc TIF, which this equity
         # path doesn't model — reject rather than mis-route a malformed order.
         if str(order.get("asset_type") or "").lower() == "crypto":
@@ -106,12 +129,17 @@ class AlpacaBroker(BrokerClient):
                     "raw": {"reason": "alpaca adapter does not support crypto yet"}}
         body = {
             "symbol": str(order.get("symbol") or "").upper(),
-            "qty": str(order.get("qty")),
             "side": str(order.get("side") or "").lower(),
             "type": str(order.get("order_type") or "market").lower(),
-            "time_in_force": "day",
+            "time_in_force": str(order.get("time_in_force") or "day").lower(),
             "client_order_id": order.get("client_order_id"),
         }
+        # Send qty for share orders, else notional (fractional dollar) orders —
+        # serializing qty='None' for a notional-only order gets it rejected.
+        if order.get("qty") not in (None, ""):
+            body["qty"] = str(order.get("qty"))
+        elif order.get("notional") not in (None, ""):
+            body["notional"] = str(order.get("notional"))
         if body["type"] == "limit":
             body["limit_price"] = str(order.get("limit_price"))
         data = self._request("POST", "/v2/orders", body)
@@ -119,7 +147,9 @@ class AlpacaBroker(BrokerClient):
         # If Alpaca already reports fills at submit (fast market order), pull
         # them now so the book reflects the trade immediately instead of being
         # marked 'filled' with zero recorded fills until a reconcile poll.
-        if res.get("filled_qty", 0) > 0 and res.get("broker_order_id"):
+        if res.get("broker_order_id") and (
+                res.get("filled_qty", 0) > 0
+                or res.get("state") in ("filled", "partially_filled")):
             res["fills"] = self._fills_for(res["broker_order_id"])
         return res
 
@@ -139,12 +169,20 @@ class AlpacaBroker(BrokerClient):
         return self._to_result(data, with_fills=True)
 
     def positions(self) -> List[Dict[str, Any]]:
-        data = self._request("GET", "/v2/positions") or []
+        data = self._request("GET", "/v2/positions")
+        data = data if isinstance(data, list) else []
         return [{"symbol": p.get("symbol"), "qty": float(p.get("qty") or 0),
                  "avg_cost": float(p.get("avg_entry_price") or 0)} for p in data]
 
     def cash(self) -> float:
+        # Returns the account's USD *cash* field only (not buying_power, which
+        # includes margin). Sizing/recon should treat this as deployable USD
+        # cash. Warn (don't silently trust) if the account isn't USD-denominated.
         data = self._request("GET", "/v2/account") or {}
+        cur = str(data.get("currency") or "USD").upper()
+        if cur != "USD":
+            log.warning("alpaca account currency is %s, not USD; cash() value "
+                        "may not be USD-denominated", cur)
         return aj_db.money(data.get("cash") or 0)
 
     # ── mapping ────────────────────────────────────────────────────────────────
@@ -169,8 +207,10 @@ class AlpacaBroker(BrokerClient):
         except Exception:
             log.debug("alpaca fills fetch failed for %s", broker_order_id, exc_info=True)
             return []
+        if not isinstance(acts, list):
+            return []
         out = []
-        for a in (acts or []):
+        for a in acts:
             out.append({
                 "qty": float(a.get("qty") or 0),
                 "price": float(a.get("price") or 0),

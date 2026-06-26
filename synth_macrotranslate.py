@@ -322,13 +322,19 @@ def _close_series(symbol: str) -> Dict[str, float]:
     for b in bars:
         c = b.get("close")
         t = b.get("time")
-        if c is None or t is None or c <= 0:
+        # Coerce close first — get_chart_data may yield numeric strings, and a
+        # `c <= 0` comparison against a str raises TypeError on Python 3.
+        try:
+            cf = float(c)
+        except (TypeError, ValueError):
+            continue
+        if t is None or cf <= 0:
             continue
         try:
             d = datetime.datetime.utcfromtimestamp(int(t)).strftime("%Y-%m-%d")
         except Exception:
             continue
-        out[d] = float(c)
+        out[d] = cf
     return out
 
 

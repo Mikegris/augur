@@ -328,7 +328,12 @@ def prune_disk(target_bytes: Optional[int] = None) -> dict:
         if total > target:
             rows = c.execute(
                 "SELECT key, length(value) FROM api_cache "
-                "ORDER BY length(value) DESC").fetchall()
+                # Already-expired rows first (any survived the sweep above),
+                # then largest payloads, then oldest-written among equal sizes —
+                # so a hot, freshly-written large entry isn't evicted ahead of
+                # cold/stale rows, avoiding refetch churn for the hot key.
+                "ORDER BY (expiry < ?) DESC, length(value) DESC, written_at ASC",
+                (time.time(),)).fetchall()
             dropped = 0
             freed = 0
             for key, sz in rows:
@@ -522,9 +527,13 @@ def cache_get(key, ttl: Optional[float] = None):
         _misses += 1
         return None
     # Refresh last_access so LRU eviction favors recently-read entries.
-    # Avoid the lock on every read by writing the tuple back directly —
-    # dict item replacement is atomic in CPython.
-    _mem[k] = (value, expiry, now)
+    # Do the write-back under the lock and only if the slot still holds the
+    # SAME tuple we read — otherwise a concurrent cache_set/eviction may have
+    # already popped k or replaced it with a newer value, and an unlocked
+    # write here would resurrect an evicted key or clobber the newer value.
+    with _mem_lock:
+        if _mem.get(k) is hit:
+            _mem[k] = (value, expiry, now)
     _hits += 1
     return value
 

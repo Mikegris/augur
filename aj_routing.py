@@ -107,10 +107,19 @@ def route(messages: List[Dict[str, Any]], role: str = "", complexity: float = 0.
                 chosen = "ollama"
                 text = _ai()._ollama_chat(messages, max_tokens=max_tokens)
                 ok = _meets_floor(text, quality_floor)
-                # bounded escalation: retry once locally on a quality miss
-                if not ok and max_escalations >= 1 and text is not None:
+                # bounded escalation: retry once locally on a quality miss OR
+                # on a None first result (a transient connection blip to a
+                # server that may have just recovered — the cached 60s probe
+                # can lag a brief outage). Fail-closed semantics hold either
+                # way: a still-None/short retry leaves ok=False.
+                # A near-deterministic local model given identical input would
+                # just reproduce the failing output, so bump the token budget
+                # (mirrors the public path) to give the retry a genuine chance
+                # to cross the floor rather than burning latency for nothing.
+                if not ok and max_escalations >= 1:
                     escalated = 1
-                    text = _ai()._ollama_chat(messages, max_tokens=max_tokens)
+                    retry_tokens = (max_tokens + 256) if max_tokens else None
+                    text = _ai()._ollama_chat(messages, max_tokens=retry_tokens)
                     ok = _meets_floor(text, quality_floor)
             else:
                 chosen = "none(local-required)"
@@ -121,7 +130,10 @@ def route(messages: List[Dict[str, Any]], role: str = "", complexity: float = 0.
             ok = _meets_floor(text, quality_floor)
             if not ok and max_escalations >= 1:
                 escalated = 1
-                fallback_used = 1
+                # NOTE: this retry re-calls the same chat_any routing (no
+                # distinct fallback backend is selected), so leave
+                # fallback_used=0 — setting it would feed misleading
+                # "a fallback model was used" telemetry to the eval loop.
                 # Don't turn an intended-unbounded (None) completion into a hard
                 # 256-token cap on the retry — that truncates the very output
                 # that failed the floor for being too short.

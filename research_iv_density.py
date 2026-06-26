@@ -155,6 +155,18 @@ def _clean_calls(calls: list) -> list:
         bid = c.get("bid")
         ask = c.get("ask")
         last = c.get("lastPrice")
+        # yfinance frequently returns float('nan') (not None) for bid/ask/last
+        # on illiquid strikes. Coerce non-finite values to None up front so
+        # NaN can never reach the (bid+ask) arithmetic below and leak into mid.
+        def _finite_or_none(v):
+            try:
+                f = float(v) if v is not None else None
+            except (TypeError, ValueError):
+                return None
+            return f if (f is not None and math.isfinite(f)) else None
+        bid = _finite_or_none(bid)
+        ask = _finite_or_none(ask)
+        last = _finite_or_none(last)
         # yfinance routinely returns NaN for volume/openInterest on illiquid
         # strikes. `x or 0` keeps NaN (NaN is truthy in Python), which later
         # crashes int(NaN) on the cleaned-dict build below. Coerce defensively.
@@ -262,15 +274,23 @@ def _density_from_calls(strikes: list, mids: list, T: float, r: float,
     C_grid = np.where(np.isfinite(C_grid), C_grid, 0.0)
 
     # Centered finite-difference second derivative.
-    # For interior points: d²C/dK² ≈ (C[i+1] - 2C[i] + C[i-1]) / h².
-    h = float(grid[1] - grid[0]) if len(grid) > 1 else 1.0
     n = len(grid)
     d2 = np.zeros(n)
-    if n >= 3 and h > 0:
+    diffs = np.diff(grid) if n > 1 else np.array([])
+    uniform = bool(diffs.size and np.allclose(diffs, diffs[0]))
+    if n >= 3 and uniform and diffs[0] > 0:
+        # Uniform grid (smooth-spline path): exact constant-h second difference.
+        # For interior points: d²C/dK² ≈ (C[i+1] - 2C[i] + C[i-1]) / h².
+        h = float(diffs[0])
         d2[1:-1] = (C_grid[2:] - 2.0 * C_grid[1:-1] + C_grid[:-2]) / (h * h)
         # Endpoints — use one-sided (less accurate but avoids NaN gaps).
         d2[0] = d2[1]
         d2[-1] = d2[-2]
+    elif n >= 3:
+        # Non-uniform grid (raw-strike path: $1 near ATM, $5 in the wings) —
+        # a single constant h gives a wrong d²C/dK². np.gradient applied twice
+        # respects the actual per-point spacing.
+        d2 = np.gradient(np.gradient(C_grid, grid), grid)
 
     # Apply Breeden-Litzenberger discount factor.
     density = np.exp(r * T) * d2
@@ -434,10 +454,16 @@ def _compute(symbol: str, expiry: Optional[str], smooth: bool) -> dict:
     # early tests. Time-value < 0.5% of spot means the call is "fully ITM"
     # and contributes no information to the curvature. Keep OTM strikes
     # always (intrinsic = 0 for K > spot so this filter is a no-op there).
+    T = max(dte, 1) / 365.0  # years; guard against zero-day expiries
+    r = _risk_free_rate()
     tv_floor = max(spot * 0.005, 0.10)
     informative = []
     for c in clean:
-        intrinsic = max(spot - c["strike"], 0.0)
+        # Use DISCOUNTED strike for intrinsic (S − K·e^(-rT)), consistent with
+        # the Breeden-Litzenberger discounting used elsewhere. Undiscounted
+        # intrinsic understates intrinsic for ITM strikes, overstating time
+        # value and letting low-information deep-ITM strikes slip past the filter.
+        intrinsic = max(spot - c["strike"] * math.exp(-r * T), 0.0)
         time_val = c["mid"] - intrinsic
         # OTM: always keep. ITM: require non-trivial time value.
         if c["strike"] >= spot or time_val >= tv_floor:
@@ -476,9 +502,6 @@ def _compute(symbol: str, expiry: Optional[str], smooth: bool) -> dict:
     strikes = [c["strike"] for c in clean]
     mids = [c["mid"] for c in clean]
 
-    T = max(dte, 1) / 365.0  # years; guard against zero-day expiries
-    r = _risk_free_rate()
-
     try:
         grid, density, cdf = _density_from_calls(strikes, mids, T=T, r=r, smooth=smooth)
     except Exception as e:
@@ -489,6 +512,16 @@ def _compute(symbol: str, expiry: Optional[str], smooth: bool) -> dict:
     if grid is None or len(grid) == 0:
         return _error(sym, "Empty density grid", expiry=chosen_expiry,
                       days_to_expiry=dte, spot=spot, n_strikes=len(clean))
+
+    # Degenerate density guard: if the curvature is non-positive everywhere
+    # (heavy no-arb violations flatten C after the monotonic clamp), the
+    # density is all zeros and _density_from_calls leaves it un-normalized.
+    # A flat/zero density yields a flat CDF and meaningless probabilities, so
+    # surface an explicit error rather than emitting misleading numbers.
+    if float(np.trapz(density, grid)) <= 1e-12:
+        return _error(sym, "Degenerate density (no usable curvature)",
+                      expiry=chosen_expiry, days_to_expiry=dte, spot=spot,
+                      n_strikes=len(clean))
 
     # Tail probabilities relative to spot.
     probs = {

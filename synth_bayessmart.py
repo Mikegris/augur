@@ -112,6 +112,7 @@ def _safe_track_record(signal_name: str) -> Dict[str, Any]:
 
 def _posterior_mean(n: int, hit_rate: float) -> Tuple[float, float, float]:
     """Return (alpha_post, beta_post, posterior_mean) for the Beta-binomial."""
+    hit_rate = max(0.0, min(1.0, hit_rate))
     hits = int(round(hit_rate * n))
     misses = max(0, n - hits)
     alpha_post = PRIOR_ALPHA + hits
@@ -163,7 +164,7 @@ def _raw_value(comp: Dict[str, Any]) -> float:
     if score is None or not max_:
         return 0.0
     try:
-        return float(score) / float(max_)
+        return max(0.0, min(1.0, float(score) / float(max_)))
     except (TypeError, ValueError):
         return 0.0
 

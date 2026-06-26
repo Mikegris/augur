@@ -110,7 +110,7 @@ def _h5_short_mom(hist: pd.DataFrame) -> Dict[str, Any]:
     # Recent realized vol (5d std of daily returns)
     rets = close.pct_change()
     vol5 = float(rets.iloc[-5:].std()) if len(rets) >= 5 else 0.0
-    vol60 = float(rets.iloc[-60:].std()) if len(rets) >= 60 else vol5 or 0.01
+    vol60 = float(rets.iloc[-60:].std()) if len(rets) >= 60 else (vol5 if vol5 > 0 else 0.01)
     vol_ratio = (vol5 / vol60) if vol60 > 1e-9 else 1.0
 
     # Stretch score: -1 (deep oversold) … +1 (overbought)

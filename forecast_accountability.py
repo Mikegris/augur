@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import logging
 import math
+import threading
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -146,6 +147,12 @@ def _brier_from_rows(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
     """
     pairs: List[Tuple[float, int, float]] = []  # (prob_up, outcome, realized)
     for r in rows:
+        # Only score directional calls so Brier covers the same population as
+        # the hit-rate leaderboard. NEUTRAL/HOLD rows carry hit=None and are
+        # excluded from hit-rate; including them here would make brier_skill
+        # and hit_rate inconsistent for the same component.
+        if r.get("hit") is None:
+            continue
         md = r.get("metadata") or {}
         p = md.get("prob_up")
         rr = r.get("realized_return")
@@ -262,6 +269,7 @@ _TILT_GAIN = 2.0           # maps (hit_rate - 0.5) into a multiplier
 
 # Tiny TTL cache so we don't re-query the ledger on every uncached forecast.
 _weights_cache: Dict[Any, Tuple[float, Dict[str, float]]] = {}
+_weights_cache_lock = threading.Lock()  # adaptive_weights runs under thread pools
 _WEIGHTS_TTL = 600
 
 
@@ -285,7 +293,8 @@ def adaptive_weights(base_weights: Dict[str, float],
     # WHY (Q9): skill is horizon-specific, so a horizon-5 adaptation must not
     # reuse a cached horizon-60 result — fold horizon_days into the cache key.
     key = ("adaptive", horizon_days, tuple(sorted(base_weights.items())))
-    hit = _weights_cache.get(key)
+    with _weights_cache_lock:
+        hit = _weights_cache.get(key)
     if hit is not None and (time.time() - hit[0]) < _WEIGHTS_TTL:
         return dict(hit[1])
 
@@ -312,7 +321,8 @@ def adaptive_weights(base_weights: Dict[str, float],
         total_adj = sum(adjusted.values()) or 1.0
         scale = total_base / total_adj
         out = {k: v * scale for k, v in adjusted.items()}
-        _weights_cache[key] = (time.time(), out)
+        with _weights_cache_lock:
+            _weights_cache[key] = (time.time(), out)
         return dict(out)
     except Exception as e:
         log.debug("adaptive_weights failed: %s", e)

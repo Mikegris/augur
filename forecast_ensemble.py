@@ -252,8 +252,10 @@ def _build_return_cone(bootstrap: Optional[Dict[str, Any]],
         median = float(d.get("median", 0.0))
         # Shift the whole cone by up to ±1/3 of its own half-width toward the
         # ensemble lean, so a bullish consensus lifts the expected path.
-        half_width = (float(d.get("p75", median)) - float(d.get("p25", median))) / 2.0
-        shift = tilt * 0.66 * abs(half_width)
+        # Guard against a degenerate/inverted IQR (p25 > p75): a non-positive
+        # width is meaningless, so apply no tilt rather than abs()-shifting.
+        half_width = max(0.0, float(d.get("p75", median)) - float(d.get("p25", median))) / 2.0
+        shift = tilt * 0.66 * half_width
         return {
             "source": "bootstrap",
             "expected_return_pct": round(median + shift, 2),
@@ -333,12 +335,13 @@ def _run_uncached(symbol: str, horizon_days: int) -> Dict[str, Any]:
         log.debug("adaptive_weights unavailable: %s", e)
         weights = dict(_BASE_WEIGHTS)
 
-    # Renormalize weights over the available signals.
-    total_w = sum(weights.get(k, 0.1) for k in raw_signals)
+    # Renormalize weights over the available signals. Fall back to a key's
+    # real base weight (not a flat 0.1) if an adaptive run ever drops a key.
+    total_w = sum(weights.get(k, _BASE_WEIGHTS.get(k, 0.1)) for k in raw_signals)
     weighted_sum = 0.0
     signal_rows: List[Dict[str, Any]] = []
     for key, sig in raw_signals.items():
-        w = weights.get(key, 0.1) / total_w
+        w = weights.get(key, _BASE_WEIGHTS.get(key, 0.1)) / total_w
         p = float(sig["prob_up"])
         weighted_sum += p * w
         signal_rows.append({

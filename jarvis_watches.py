@@ -262,7 +262,8 @@ def _crypto_symbols() -> set:
     """Symbols held as crypto in the user's book — quoted as SYM-USD."""
     try:
         return {h["symbol"].upper() for h in db.get_portfolio()
-                if h.get("asset_type") == "crypto" and h.get("symbol")}
+                if isinstance(h, dict) and h.get("asset_type") == "crypto"
+                and h.get("symbol")}
     except Exception:
         return set()
 
@@ -302,7 +303,15 @@ def _fetch_quotes(symbols: List[str], crypto: set) -> Dict[str, Dict[str, Any]]:
             continue
         q = out.get(sym)
         price = (q or {}).get("price") if isinstance(q, dict) else None
-        if not isinstance(price, (int, float)) or isinstance(price, bool) or price <= 0:
+        chg = (q or {}).get("change_pct") if isinstance(q, dict) else None
+        bad_price = (not isinstance(price, (int, float))
+                     or isinstance(price, bool) or price <= 0)
+        # A bare ticker can resolve to an unrelated equity that returns a price
+        # but no/garbled change_pct (e.g. a coin the user doesn't hold). Retry
+        # SYM-USD when EITHER price OR change_pct is missing so change_pct
+        # watches don't silently evaluate against the wrong asset.
+        bad_chg = not isinstance(chg, (int, float)) or isinstance(chg, bool)
+        if bad_price or bad_chg:
             retry[(sym + "-USD").upper()] = sym
     if retry:
         try:
@@ -423,16 +432,21 @@ def evaluate_all() -> List[Dict[str, Any]]:
                     for c in conds)
                 try:
                     if hit:
-                        conn.execute(
+                        # Guard on armed = 1 so a watch deleted/rearmed between
+                        # the unlocked SELECT and here isn't (re-)triggered, and
+                        # two evaluators can't double-fire the same watch.
+                        cur = conn.execute(
                             "UPDATE jarvis_watches SET armed = 0, "
-                            "triggered_at = ?, last_eval = ? WHERE id = ?",
+                            "triggered_at = ?, last_eval = ? "
+                            "WHERE id = ? AND armed = 1",
                             (now, now, w["id"]))
-                        w["armed"] = 0
-                        w["triggered_at"] = now
-                        w["last_eval"] = now
-                        w["conditions"] = conds or []
-                        w["description"] = describe(w)
-                        triggered.append(w)
+                        if cur.rowcount > 0:
+                            w["armed"] = 0
+                            w["triggered_at"] = now
+                            w["last_eval"] = now
+                            w["conditions"] = conds or []
+                            w["description"] = describe(w)
+                            triggered.append(w)
                     else:
                         conn.execute(
                             "UPDATE jarvis_watches SET last_eval = ? "

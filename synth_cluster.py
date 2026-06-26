@@ -41,6 +41,21 @@ import safe_executor
 
 log = logging.getLogger("augur.synth_cluster")
 
+# Form-4 / congress date strings are filing dates expressed in US/Eastern
+# wall-clock. Anchor our day-window cutoffs to the same calendar so a
+# UTC-derived boundary doesn't drift the window by up to a day near midnight.
+try:
+    from zoneinfo import ZoneInfo
+    _ET = ZoneInfo("America/New_York")
+except Exception:  # pragma: no cover - fall back to UTC if tzdata missing
+    _ET = timezone.utc
+
+
+def _now_et_naive() -> datetime:
+    """Current US/Eastern wall-clock as a naive datetime (matches the naive
+    ``strptime`` of the date strings we compare against)."""
+    return datetime.now(_ET).replace(tzinfo=None)
+
 # ---------------------------------------------------------------------------
 # Universe — SP500 top-100 by market cap (snapshot taken May 2026)
 # Refresh this list periodically; we hardcode rather than scrape Wikipedia
@@ -135,7 +150,7 @@ def _component_insider_form4(symbol: str, direction: str) -> Tuple[bool, str, st
     if not txns:
         return (False, "no data", "no Form 4 in 30d")
 
-    cutoff = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=30)
+    cutoff = _now_et_naive() - timedelta(days=30)
     buys = sells = 0
     buy_val = sell_val = 0.0
     for t in txns:
@@ -181,7 +196,7 @@ def _component_congress_60d(symbol: str, direction: str) -> Tuple[bool, str, str
     if not trades:
         return (False, "no data", "no congressional trades")
 
-    cutoff = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=60)
+    cutoff = _now_et_naive() - timedelta(days=60)
     buys = sells = 0
     buy_val = sell_val = 0.0
     for t in trades:
@@ -423,14 +438,21 @@ def _component_options_skew(symbol: str, direction: str) -> Tuple[bool, str, str
     put_vol = _sum_vol(puts)
     if call_oi == 0 and put_oi == 0:
         return (False, "no data", "no OI")
-    pcr_oi = put_oi / call_oi if call_oi else float("inf")
-    pcr_vol = put_vol / call_vol if call_vol else float("inf")
+    # A zero-call chain is almost always a data gap, not genuine put
+    # dominance. Treat that leg's PCR as unknown (None) rather than +inf so a
+    # bearish scan doesn't fire purely on missing call data.
+    pcr_oi = put_oi / call_oi if call_oi else None
+    pcr_vol = put_vol / call_vol if call_vol else None
+    if pcr_oi is None and pcr_vol is None:
+        return (False, "no data", "no call contracts")
 
     if direction == "bullish":
-        fired = pcr_oi < 0.70 or pcr_vol < 0.70
+        fired = (pcr_oi is not None and pcr_oi < 0.70) or (pcr_vol is not None and pcr_vol < 0.70)
     else:
-        fired = pcr_oi > 1.30 or pcr_vol > 1.30
-    return (fired, f"PCR_oi {pcr_oi:.2f}", f"vol PCR {pcr_vol:.2f}")
+        fired = (pcr_oi is not None and pcr_oi > 1.30) or (pcr_vol is not None and pcr_vol > 1.30)
+    oi_str = f"{pcr_oi:.2f}" if pcr_oi is not None else "n/a"
+    vol_str = f"{pcr_vol:.2f}" if pcr_vol is not None else "n/a"
+    return (fired, f"PCR_oi {oi_str}", f"vol PCR {vol_str}")
 
 
 def _component_wiki_attention(symbol: str, direction: str) -> Tuple[bool, str, str]:
@@ -493,10 +515,15 @@ def _component_reflexivity(symbol: str, direction: str) -> Tuple[bool, str, str]
 
     if direction == "bullish":
         fired = bool(bullish_loops)
-        sample = bullish_loops[0] if bullish_loops else (detected[0] if detected else {})
+        sample = bullish_loops[0] if bullish_loops else {}
     else:
         fired = bool(bearish_loops)
-        sample = bearish_loops[0] if bearish_loops else (detected[0] if detected else {})
+        sample = bearish_loops[0] if bearish_loops else {}
+
+    # Only surface the dominant_loop fallback when we actually fired; otherwise
+    # an opposite-direction loop's type would be shown as this scan's "value".
+    if not fired:
+        return (False, "no loop", result.get("overall_risk", "NONE"))
 
     loop_type = sample.get("type") or result.get("dominant_loop") or "?"
     strength = result.get("max_strength", 0)
@@ -515,6 +542,13 @@ COMPONENTS: List[Tuple[str, Callable[[str, str], Tuple[bool, str, str]]]] = [
     ("wiki_attention",    _component_wiki_attention),
     ("reflexivity",       _component_reflexivity),
 ]
+
+# Invariant: every component must carry a weight in SOURCE_WEIGHTS. A fired
+# source with no weight would still increment n_fired (inflating the breadth
+# bonus) while contributing 0 to the weighted base — keep base and bonus
+# consistent by failing fast if a name drifts out of SOURCE_WEIGHTS.
+_missing_weights = [n for n, _ in COMPONENTS if n not in SOURCE_WEIGHTS]
+assert not _missing_weights, f"COMPONENTS missing SOURCE_WEIGHTS: {_missing_weights}"
 
 # Early-exit split. The "cheap" components sit on self-caching upstreams
 # (EDGAR + congress via cache_store, fundamentals 24h, narrative 30min,

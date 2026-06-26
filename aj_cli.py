@@ -28,6 +28,11 @@ def cmd_run(argv):
         i = argv.index("--mode")
         if i + 1 < len(argv):
             mode = argv[i + 1]
+    if mode not in ("paper", "live"):
+        print(json.dumps({"ok": False,
+                          "error": "unknown mode {!r}; expected paper|live".format(mode)}),
+              file=sys.stderr)
+        return
     if mode == "live":
         # live cycles still NEVER auto-execute; the operator only proposes +
         # gates, leaving approval to a human. Make the posture explicit.
@@ -76,39 +81,110 @@ def cmd_config(argv):
         else:
             i += 1
     if updates:
-        _print(aj_config.set_config(updates))
+        # set_config silently ignores unknown keys; surface those so a typo'd
+        # cap (e.g. 'max_order_notinal_usd=...') doesn't look like it applied.
+        ignored = [k for k in updates if k not in aj_config.DEFAULTS]
+        result = aj_config.set_config(updates)
+        if ignored:
+            print("WARNING: ignored unknown config keys (not applied): {}".format(
+                ", ".join(ignored)), file=sys.stderr)
+            _print({"config": result, "ignored_keys": ignored})
+        else:
+            _print(result)
     else:
         _print(aj_config.get_config())
 
 
+def _read_secret_value(scope, raw):
+    """Resolve a secret value WITHOUT leaving plaintext on argv where possible.
+      scope=@-            -> read from stdin (one line, newline stripped)
+      scope=@/path/file  -> read from the named file
+      scope=@env:NAME    -> read from environment variable NAME
+      scope= (empty)     -> getpass prompt (interactive, not echoed)
+      scope=value        -> legacy inline value (discouraged: visible in `ps`)
+    """
+    import os
+    if raw == "@-":
+        return sys.stdin.readline().rstrip("\n")
+    if raw.startswith("@env:"):
+        return os.environ.get(raw[5:], "")
+    if raw.startswith("@"):
+        with open(os.path.expanduser(raw[1:]), "r") as f:
+            return f.read().rstrip("\n")
+    if raw == "":
+        import getpass
+        return getpass.getpass("value for {}: ".format(scope))
+    return raw
+
+
 def cmd_secret(argv):
     """Store a broker credential in the secrets broker (encrypted at rest).
-    Kept off the HTTP path on purpose. Usage: secret --set scope=value [...]"""
+    Kept off the HTTP path on purpose. Prefer a source that doesn't expose the
+    plaintext on argv (visible in shell history / `ps`):
+        secret --set alpaca_key_id=@-           # read value from stdin
+        secret --set alpaca_key_id=@/path/key   # read value from a file
+        secret --set alpaca_key_id=@env:KID      # read value from $KID
+        secret --set alpaca_key_id=             # getpass prompt (no echo)
+    The legacy `--set scope=value` inline form still works but is discouraged."""
     import aj_db, aj_secrets
     aj_db.aj_init()
     i, stored = 0, []
     while i < len(argv):
         if argv[i] == "--set" and i + 1 < len(argv) and "=" in argv[i + 1]:
-            k, v = argv[i + 1].split("=", 1)
-            ok = aj_secrets.store(k.strip(), v.strip())
-            stored.append({k.strip(): "stored" if ok else "failed"})
+            k, raw = argv[i + 1].split("=", 1)
+            scope = k.strip()
+            v = _read_secret_value(scope, raw.strip())
+            ok = aj_secrets.store(scope, v)
+            stored.append({scope: "stored" if ok else "failed"})
             i += 2
         else:
             i += 1
     _print({"secrets": stored} if stored else
-           {"usage": "aj secret --set alpaca_key_id=PK... --set alpaca_secret_key=SK..."})
+           {"usage": "aj secret --set alpaca_key_id=@- --set alpaca_secret_key=@-"})
+
+
+# Gates that flip a LIVE broker on; refusing to set these to 'pass' without an
+# explicit operator acknowledgement that the contract test was actually run.
+_BROKER_GATES = ("alpaca", "ccxt", "robinhood")
+_KNOWN_GATES = _BROKER_GATES + ("opencode", "mcp_read")
+_FORCE_FLAG = "--force-i-ran-the-contract-test"
 
 
 def cmd_verify_pass(argv):
     """Mark a VERIFY gate passed AFTER its contract test succeeds.
-    Usage: verify-pass <gate>   (e.g. alpaca)"""
+    Usage: verify-pass <gate> [--force-i-ran-the-contract-test]
+      <gate> must be one of: alpaca|ccxt|robinhood|opencode|mcp_read
+      * mcp_read is self-verified here (its contract_ok() must pass);
+      * broker gates require the explicit --force acknowledgement because the
+        CLI cannot run the live broker contract test for you — fail-closed."""
     import aj_db, database as dbase
     aj_db.aj_init()
-    gate = argv[0] if argv else ""
+    gate = next((a for a in argv if not a.startswith("-")), "")
+    forced = _FORCE_FLAG in argv
     if not gate:
         _print({"usage": "aj verify-pass <gate>  (alpaca|ccxt|robinhood|opencode|mcp_read)"})
         return
+    if gate not in _KNOWN_GATES:
+        _print({"error": "unknown gate", "gate": gate, "known": list(_KNOWN_GATES)})
+        return
+    if gate == "mcp_read":
+        try:
+            import aj_mcp_read
+            if not aj_mcp_read.contract_ok():
+                _print({"error": "mcp_read contract test did not pass; gate NOT set",
+                        "gate": gate})
+                return
+        except Exception as e:
+            _print({"error": "mcp_read contract test errored; gate NOT set",
+                    "gate": gate, "detail": str(e)})
+            return
+    elif gate in _BROKER_GATES and not forced:
+        _print({"error": "broker gate requires explicit acknowledgement that the "
+                         "contract test was run", "gate": gate,
+                "hint": "re-run with {}".format(_FORCE_FLAG)})
+        return
     dbase.set_setting("aj_verify_" + gate, "pass")
+    aj_db.audit("verify_pass", {"gate": gate, "forced": forced}, actor="cli")
     _print({"gate": gate, "status": "pass"})
 
 
@@ -176,7 +252,17 @@ def main(argv=None):
         fn(argv[1:])
         return 0
     except Exception as e:
-        print(json.dumps({"ok": False, "error": str(e)}), file=sys.stderr)
+        # Emit the full traceback to stderr (an operator debugging a kill/recon
+        # failure needs it), but keep the secret-handling commands from echoing
+        # any argv-derived value into the one-line JSON error.
+        import logging, traceback
+        logging.getLogger("augur.aj_cli").exception("aj_cli command %r failed", cmd)
+        if cmd in ("secret", "verify-pass"):
+            err = "{} command failed (see stderr traceback)".format(cmd)
+        else:
+            err = str(e)
+        traceback.print_exc()
+        print(json.dumps({"ok": False, "error": err}), file=sys.stderr)
         return 1
 
 

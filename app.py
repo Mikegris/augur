@@ -71,7 +71,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(me
 
 # Single source of truth for the app version — surfaced at /api/version and
 # in jarvis.health_snapshot().
-APP_VERSION = "3.1.0"
+APP_VERSION = "3.2.0"
 
 _TICKER_RE = re.compile(r"^[A-Z0-9][A-Z0-9.\-]{0,9}$")
 
@@ -84,6 +84,16 @@ def _safe_int(val, default):
 
 def _valid_ticker(symbol):
     return isinstance(symbol, str) and bool(_TICKER_RE.match(symbol.strip().upper()))
+
+# Crypto pricing keys on `asset_type == "crypto"` throughout the app, so a typo
+# like "Crypto"/"CRYPTO" stored verbatim would make a coin be priced as an
+# equity (no -USD pair) and never get a live quote. Normalize to a known set.
+_KNOWN_ASSET_TYPES = ("stock", "crypto", "etf", "option")
+
+def _normalize_asset_type(value, default="stock"):
+    at = (value or default)
+    at = at.strip().lower() if isinstance(at, str) else default
+    return at if at in _KNOWN_ASSET_TYPES else default
 
 def _err(e, msg="internal error", status=500):
     """Log an engine/DB/upstream exception server-side and return a generic
@@ -108,8 +118,10 @@ def _portfolio_live_prices(holdings):
     symbols from get_quotes_batch, plus each crypto holding's original
     symbol mapped from its -USD Yahoo pair when a quote came back.
     """
-    stock_syms = [h["symbol"] for h in holdings if h.get("asset_type") != "crypto"]
-    crypto_syms = [h["symbol"] for h in holdings if h.get("asset_type") == "crypto"]
+    stock_syms = [h["symbol"] for h in holdings
+                  if h.get("asset_type") != "crypto" and isinstance(h.get("symbol"), str)]
+    crypto_syms = [h["symbol"] for h in holdings
+                   if h.get("asset_type") == "crypto" and isinstance(h.get("symbol"), str)]
     query = stock_syms + [s + "-USD" for s in crypto_syms]
     if not query:
         return {}
@@ -143,6 +155,20 @@ except ImportError:
     pass
 
 db.init_db()
+
+
+# Release this request thread's thread-local SQLite connection when the request
+# context tears down. Flask's threaded server can spawn a fresh thread per
+# request; without this each such thread opened a connection on first DB access
+# and never closed it, leaking file descriptors until GC. close_thread_conn()
+# commits-then-closes and is a no-op when no connection was opened.
+@app.teardown_appcontext
+def _release_db_conn(_exc=None):
+    try:
+        db.close_thread_conn()
+    except Exception:
+        pass
+
 
 # AJTA trading-agent schema (additive aj_* tables + forward-only migration).
 # Safe + idempotent; never alters existing AUGUR tables.
@@ -194,40 +220,55 @@ _JARVIS_WATCH_EVAL_INTERVAL = 300  # seconds
 # worker is the only caller today, but guard it so a second caller (or a future
 # reload) can't both pass the interval check and double-run the evaluation.
 _JARVIS_WATCH_EVAL_LOCK = threading.Lock()
+# In-progress flag so the cadence gate can prevent a concurrent double-run
+# WITHOUT advancing the success timestamp before the work completes.
+_JARVIS_WATCH_EVAL_RUNNING = False
 
 
 def _evaluate_jarvis_watches():
     """Run jarvis_watches.evaluate_all() and log an insight card per newly
     triggered watch so the briefing/digest surface it. Fully guarded — the
     module may not exist yet, and nothing here may kill the worker loop."""
-    global _JARVIS_WATCH_EVAL_LAST
+    global _JARVIS_WATCH_EVAL_LAST, _JARVIS_WATCH_EVAL_RUNNING
     now = time.time()
     with _JARVIS_WATCH_EVAL_LOCK:
+        # Skip if a run is already in flight (double-run guard) or the cadence
+        # interval hasn't elapsed since the last SUCCESSFUL evaluation.
+        if _JARVIS_WATCH_EVAL_RUNNING:
+            return
         if now - _JARVIS_WATCH_EVAL_LAST < _JARVIS_WATCH_EVAL_INTERVAL:
             return
-        _JARVIS_WATCH_EVAL_LAST = now
+        _JARVIS_WATCH_EVAL_RUNNING = True
     try:
-        import jarvis_watches
-    except Exception:
-        return  # module in flight — quietly skip until it lands
-    try:
-        triggered = jarvis_watches.evaluate_all() or []
-        cards = []
-        for w in triggered:
-            if not isinstance(w, dict):
-                continue
-            cards.append({
-                "kind": "watch",
-                "tone": "warn",
-                "priority": 1,
-                "title": "Watch triggered: {}".format(w.get("name") or "unnamed"),
-                "detail": w.get("description") or "",
-                "action": {"view": "alerts"},
-            })
-        if cards:
-            db.jarvis_log_insights(cards)
-    except Exception:
-        log.exception("snapshot worker: jarvis watch evaluation failed")
+        try:
+            import jarvis_watches
+        except Exception:
+            return  # module in flight — quietly skip until it lands
+        try:
+            triggered = jarvis_watches.evaluate_all() or []
+            cards = []
+            for w in triggered:
+                if not isinstance(w, dict):
+                    continue
+                cards.append({
+                    "kind": "watch",
+                    "tone": "warn",
+                    "priority": 1,
+                    "title": "Watch triggered: {}".format(w.get("name") or "unnamed"),
+                    "detail": w.get("description") or "",
+                    "action": {"view": "alerts"},
+                })
+            if cards:
+                db.jarvis_log_insights(cards)
+            # Only advance the cadence timestamp after a successful run, so a
+            # transient failure doesn't silently skip the next tick.
+            with _JARVIS_WATCH_EVAL_LOCK:
+                _JARVIS_WATCH_EVAL_LAST = time.time()
+        except Exception:
+            log.exception("snapshot worker: jarvis watch evaluation failed")
+    finally:
+        with _JARVIS_WATCH_EVAL_LOCK:
+            _JARVIS_WATCH_EVAL_RUNNING = False
 
 
 def _snapshot_worker():
@@ -277,13 +318,50 @@ def _snapshot_worker():
         try:
             active_alerts = db.get_price_alerts(include_triggered=False)
             if active_alerts:
+                # Crypto alert symbols must be fetched as their -USD Yahoo pair
+                # (a bare 'BTC' resolves to an equity and never returns a price),
+                # mirroring _portfolio_live_prices. Infer crypto-ness from the
+                # holdings/watchlist asset_type since price_alerts has none.
+                try:
+                    crypto_set = {
+                        h["symbol"].upper()
+                        for h in locals().get("holdings", []) or []
+                        if h.get("asset_type") == "crypto"
+                    }
+                except Exception:
+                    crypto_set = set()
+                try:
+                    for w in db.get_watchlist():
+                        if w.get("asset_type") == "crypto":
+                            crypto_set.add(str(w["symbol"]).upper())
+                except Exception:
+                    pass
                 alert_syms = list({a["symbol"] for a in active_alerts})
                 missing = [s for s in alert_syms if s not in prices]
                 if missing:
-                    prices.update(fetcher.get_quotes_batch(missing))
+                    # Build the fetch query, mapping crypto symbols to -USD, and
+                    # remember the mapping so we can key the result back to the
+                    # bare alert symbol.
+                    query = []
+                    crypto_query = {}  # bare symbol -> -USD pair (upper)
+                    for s in missing:
+                        if s.upper() in crypto_set:
+                            pair = (s + "-USD").upper()
+                            crypto_query[s] = pair
+                            query.append(pair)
+                        else:
+                            query.append(s)
+                    batch = fetcher.get_quotes_batch(query)
+                    prices.update(batch)
+                    for bare, pair in crypto_query.items():
+                        if pair in batch:
+                            prices[bare] = batch[pair]
                 for alert in active_alerts:
                     cur = (prices.get(alert["symbol"]) or {}).get("price")
                     if cur is None:
+                        continue
+                    ap = alert["price"]
+                    if ap is None:
                         continue
                     hit = (alert["alert_type"] == "above" and cur >= alert["price"]) or \
                           (alert["alert_type"] == "below" and cur <= alert["price"])
@@ -301,10 +379,27 @@ def _snapshot_worker():
 # Guard against Flask reloader double-start — reuse the same reloader-parent
 # detection cache_warmer uses so we start the snapshot worker in exactly one
 # process (app.debug is False at import time, so checking it always started in
-# BOTH the reloader parent and child).
-if not _IS_RELOADER_PARENT:
-    _t = threading.Thread(target=_snapshot_worker, daemon=True)
-    _t.start()
+# BOTH the reloader parent and child). A module-level once-flag (under a lock)
+# additionally makes this block idempotent, so an importlib.reload or repeated
+# execution can't accumulate parallel snapshot threads each re-fetching quotes
+# and racing on the per-day INSERT OR REPLACE.
+_snapshot_started = False
+_snapshot_start_lock = threading.Lock()
+
+
+def _start_snapshot_worker_once():
+    global _snapshot_started
+    if _IS_RELOADER_PARENT:
+        return
+    with _snapshot_start_lock:
+        if _snapshot_started:
+            return
+        _snapshot_started = True
+        _t = threading.Thread(target=_snapshot_worker, daemon=True)
+        _t.start()
+
+
+_start_snapshot_worker_once()
 
 # ─── Serve UI ─────────────────────────────────────────────────────────────────
 
@@ -481,24 +576,30 @@ def get_portfolio():
         sym = h["symbol"]
         q = prices.get(sym, {})
         current_price = q.get("price")
-        if current_price:
-            market_value = current_price * h["shares"]
-            cost_basis = h["avg_cost"] * h["shares"]
-            unrealized_pnl = market_value - cost_basis
-            unrealized_pct = (unrealized_pnl / cost_basis * 100) if cost_basis else 0
-            total_value += market_value
-            total_cost += cost_basis
-            day_chg = q.get("change")
-            h.update({
-                "current_price": round(current_price, 4),
-                "market_value": round(market_value, 2),
-                "cost_basis": round(cost_basis, 2),
-                "unrealized_pnl": round(unrealized_pnl, 2),
-                "unrealized_pct": round(unrealized_pct, 2),
-                "day_change": day_chg,
-                "day_change_pct": q.get("change_pct"),
-                "day_pnl": round(day_chg * h["shares"], 2) if day_chg is not None else None,
-            })
+        # Fall back to avg_cost when the live quote is missing (None) so a
+        # transiently-missing quote can't make the position vanish from the
+        # summary totals — mirrors stress_test / dividends / ai_analysis. A
+        # real 0.0 is a valid price and counted as such.
+        cur = current_price if current_price is not None else h["avg_cost"]
+        market_value = cur * h["shares"]
+        cost_basis = h["avg_cost"] * h["shares"]
+        unrealized_pnl = market_value - cost_basis
+        unrealized_pct = (unrealized_pnl / cost_basis * 100) if cost_basis else 0
+        total_value += market_value
+        total_cost += cost_basis
+        day_chg = q.get("change")
+        h.update({
+            "current_price": round(cur, 4),
+            "market_value": round(market_value, 2),
+            "cost_basis": round(cost_basis, 2),
+            "unrealized_pnl": round(unrealized_pnl, 2),
+            "unrealized_pct": round(unrealized_pct, 2),
+            "day_change": day_chg if current_price is not None else None,
+            # Gate the percent on the same condition as the absolute change
+            # so the UI never shows a percent move beside a None day P&L.
+            "day_change_pct": (q.get("change_pct") if day_chg is not None else None) if current_price is not None else None,
+            "day_pnl": round(day_chg * h["shares"], 2) if (current_price is not None and day_chg is not None) else None,
+        })
         enriched.append(h)
 
     total_pnl = total_value - total_cost
@@ -539,12 +640,13 @@ def add_position():
     if avg_cost < 0 or fees < 0:
         return jsonify({"error": "avg_cost and fees must be >= 0"}), 400
     acct_id = _safe_int(data.get("account_id"), None) if data.get("account_id") else None
+    asset_type = _normalize_asset_type(data.get("asset_type"))
     row_id = db.add_position(
         symbol=data["symbol"],
         name=data.get("name", ""),
         shares=shares,
         avg_cost=avg_cost,
-        asset_type=data.get("asset_type", "stock"),
+        asset_type=asset_type,
         sector=data.get("sector", ""),
         currency=data.get("currency", "USD"),
         notes=data.get("notes", ""),
@@ -592,13 +694,14 @@ def update_position(pos_id):
         return jsonify({"error": "shares must be a finite number > 0"}), 400
     if avg_cost is not None and (not math.isfinite(avg_cost) or avg_cost < 0):
         return jsonify({"error": "avg_cost must be a finite number >= 0"}), 400
-    ok = db.update_position(
-        pos_id,
-        shares=shares,
-        avg_cost=avg_cost,
-        notes=data.get("notes"),
-        account_id=acct_id,
-    )
+    # Only forward account_id when the client actually sent the key, so an
+    # omitted account_id keeps the existing assignment while an explicit null/""
+    # clears it (un-assigns the position from its account). Passing it
+    # unconditionally would wipe the assignment on every PUT that omits it.
+    kwargs = dict(shares=shares, avg_cost=avg_cost, notes=data.get("notes"))
+    if "account_id" in data:
+        kwargs["account_id"] = acct_id
+    ok = db.update_position(pos_id, **kwargs)
     return jsonify({"status": "updated" if ok else "not_found"})
 
 
@@ -648,7 +751,7 @@ def add_watchlist():
     is_new = db.add_to_watchlist(
         symbol=data["symbol"],
         name=data.get("name", ""),
-        asset_type=data.get("asset_type", "stock"),
+        asset_type=_normalize_asset_type(data.get("asset_type")),
         alert_high=alert_high,
         alert_low=alert_low,
         notes=data.get("notes", ""),
@@ -667,7 +770,9 @@ def delete_watchlist(wl_id):
 @app.route("/api/transactions")
 def get_transactions():
     symbol = request.args.get("symbol")
-    limit = _safe_int(request.args.get("limit"), 100)
+    # Clamp to a positive minimum — a negative limit becomes SQL `LIMIT -1`,
+    # which SQLite reads as "no limit" (all rows), the opposite of intent.
+    limit = max(1, _safe_int(request.args.get("limit"), 100))
     return jsonify(db.get_transactions(symbol=symbol, limit=limit))
 
 
@@ -744,9 +849,12 @@ def portfolio_benchmark():
     if not _valid_ticker(symbol):
         return jsonify({"error": "Invalid symbol"}), 400
     period = request.args.get("period", "1y")
-    # Get first snapshot value to normalize benchmark to same starting value
+    # Get first snapshot value to normalize benchmark to same starting value.
+    # Use the earliest snapshot with a POSITIVE total_value — normalizing to a
+    # zero/near-zero base (portfolio was empty when first snapshotted) distorts
+    # the benchmark series wildly.
     snapshots = db.get_snapshots()
-    base_value = snapshots[0]["total_value"] if snapshots else None
+    base_value = next((s["total_value"] for s in snapshots if s.get("total_value")), None)
     data = fetcher.get_benchmark_history(symbol=symbol, period=period, base_value=base_value)
     return jsonify({"symbol": symbol, "data": data})
 
@@ -931,7 +1039,17 @@ def portfolio_import():
             name = norm.get("name") or norm.get("description") or norm.get("\"description\"") or ""
             name = str(name).strip('"').strip() if name else ""
 
-            if not symbol or not re.match(r"^[A-Z0-9.\-]{1,10}$", symbol):
+            if not symbol or not _valid_ticker(symbol):
+                skipped += 1
+                continue
+            # Reject non-finite values — float("inf")/float("nan") parse cleanly
+            # and slip past the <=0 guard (NaN comparisons are always False), so
+            # an "inf"/"nan" cell would otherwise be written to the DB and later
+            # poison avg_cost*shares arithmetic.
+            if shares is not None and not math.isfinite(shares):
+                skipped += 1
+                continue
+            if avg_cost is not None and not math.isfinite(avg_cost):
                 skipped += 1
                 continue
             if shares is None or shares <= 0:
@@ -1010,6 +1128,10 @@ def update_settings():
     data = request.get_json(silent=True) or {}
     if not isinstance(data, dict):
         return jsonify({"error": "expected JSON object"}), 400
+    # Two-phase: validate EVERY key first and only commit once all pass, so a
+    # later validation failure can't leave settings half-applied (the route
+    # would otherwise have already committed earlier db.set_setting writes).
+    plan = []  # list of ("setting", k, v) or ("provider", provider, key)
     for k, v in data.items():
         # The UI echoes masked placeholders back on save — writing one
         # through would clobber the real key with "••••XaQA".
@@ -1021,15 +1143,31 @@ def update_settings():
             provider = next((p for p, s in api_keys.PROVIDERS.items()
                              if s["setting"] == k), None)
             if provider:
-                res = api_keys.save_key(provider, v if isinstance(v, str) else str(v))
-                if res.get("error"):
-                    return jsonify({"error": res["error"]}), 400
+                key = v if isinstance(v, str) else str(v)
+                # Mirror api_keys.save_key's format validation WITHOUT writing,
+                # so we can fail the whole request before committing anything.
+                spec = api_keys.PROVIDERS.get(provider) or {}
+                fmt = spec.get("format")
+                if api_keys.is_masked(key):
+                    return jsonify({"error": "that's the masked placeholder, not a key"}), 400
+                if fmt and not re.fullmatch(fmt, key.strip()):
+                    return jsonify({"error": "key doesn't look like a {} key ({})".format(
+                        spec.get("label", provider), spec.get("hint", ""))}), 400
+                plan.append(("provider", provider, key))
                 continue
         # Non-string values for non-sensitive keys: coerce primitives, reject
         # nested structures (str(dict) used to store "{'x': 1}").
         if v is not None and not isinstance(v, (str, int, float, bool)):
             return jsonify({"error": "invalid value for '{}'".format(k)}), 400
-        db.set_setting(k, v)
+        plan.append(("setting", k, v))
+    # Commit phase — all validations passed.
+    for kind, a, b in plan:
+        if kind == "provider":
+            res = api_keys.save_key(a, b)
+            if res.get("error"):
+                return jsonify({"error": res["error"]}), 400
+        else:
+            db.set_setting(a, b)
     return jsonify({"status": "saved"})
 
 
@@ -1069,7 +1207,8 @@ def get_alerts():
     include_triggered = request.args.get("include_triggered", "false").lower() == "true"
     alerts = db.get_price_alerts(include_triggered=include_triggered)
     # Enrich with current prices
-    symbols = list({a["symbol"] for a in alerts})
+    symbols = list({a["symbol"] for a in alerts
+                    if isinstance(a.get("symbol"), str) and a["symbol"]})
     prices = fetcher.get_quotes_batch(symbols) if symbols else {}
     for a in alerts:
         q = prices.get(a["symbol"], {})
@@ -1087,7 +1226,8 @@ def add_alert():
     data = request.get_json(silent=True) or {}
     if not isinstance(data, dict):
         return jsonify({"error": "expected JSON object"}), 400
-    symbol    = (data.get("symbol", "") or "").upper().strip()
+    sym_raw   = data.get("symbol", "")
+    symbol    = sym_raw.strip().upper() if isinstance(sym_raw, str) else ""
     alert_type = data.get("alert_type", "above")   # "above" or "below"
     try:
         price = float(data.get("price", 0))
@@ -1143,8 +1283,13 @@ def portfolio_dividends():
     prices = {}
     div_map = {}
     if equity_syms:
+        # Unique private sentinel for the quotes-batch slot — using None would
+        # collide with a corrupt holding whose symbol is literally None,
+        # mis-running the batch in that worker and corrupting div_map alignment.
+        _QUOTES = object()
+
         def _div_task(item):
-            if item is None:  # sentinel slot: the live-quotes batch
+            if item is _QUOTES:  # sentinel slot: the live-quotes batch
                 return fetcher.get_quotes_batch(equity_syms)
             return fetcher.get_dividend_data(item)
 
@@ -1152,7 +1297,7 @@ def portfolio_dividends():
         # did) and fills a slot with None if a fetch raises, which the
         # `or {}` below absorbs instead of 500-ing the route.
         wave = safe_executor.parallel_map(
-            _div_task, [None] + equity_syms,
+            _div_task, [_QUOTES] + equity_syms,
             max_workers=9, thread_name_prefix="div-batch")
         prices = wave[0] or {}
         for sym, dd in zip(equity_syms, wave[1:]):
@@ -1303,8 +1448,11 @@ def earnings_dossier(symbol):
     brief = ai_summarizer.generate_earnings_brief(dossier, model=ai_model)
     dossier["brief"] = brief
 
-    # Cache it
-    db.cache_earnings_dossier(symbol, dossier)
+    # Cache only a genuinely successful brief — a failed/error envelope (no key,
+    # rate-limited, daily cap) would otherwise be cached for 6h and keep serving
+    # the bad brief even after the key is fixed.
+    if brief and not (isinstance(brief, dict) and brief.get("error")):
+        db.cache_earnings_dossier(symbol, dossier)
 
     return jsonify(dossier)
 
@@ -1335,7 +1483,10 @@ def portfolio_ai_analysis():
         q = prices.get(sym, {})
         price = q.get("price")
         cost_basis = h["avg_cost"] * h["shares"]
-        market_value = price * h["shares"] if price is not None else cost_basis
+        # Fall back to cost basis only when there is no live price at all;
+        # a real 0.0 quote is a valid price (mirror stress_test/dividends).
+        cur = price if price is not None else h["avg_cost"]
+        market_value = cur * h["shares"]
         unrealized_pnl = market_value - cost_basis
         unrealized_pct = (unrealized_pnl / cost_basis * 100) if cost_basis else 0
         total_value += market_value
@@ -1346,12 +1497,14 @@ def portfolio_ai_analysis():
             "asset_type": h["asset_type"],
             "shares": h["shares"],
             "avg_cost": h["avg_cost"],
-            "current_price": round(price, 4) if price else None,
+            "current_price": round(price, 4) if price is not None else None,
             "market_value": round(market_value, 2),
             "cost_basis": round(cost_basis, 2),
             "unrealized_pnl": round(unrealized_pnl, 2),
             "unrealized_pct": round(unrealized_pct, 2),
-            "day_change_pct": q.get("change_pct"),
+            # Gate the percent on the absolute change being present, matching
+            # get_portfolio, so the model/UI never sees a percent with no move.
+            "day_change_pct": q.get("change_pct") if q.get("change") is not None else None,
             "weight_pct": 0,  # filled below
         })
 
@@ -1428,17 +1581,17 @@ def intel_feed():
             cached = db.get_cached_filing(acc) if not refresh else None
             if cached:
                 result.append({
-                    "ticker": f["ticker"],
-                    "form_type": f["form_type"],
-                    "filing_date": f["filing_date"],
-                    "description": f["description"],
+                    "ticker": f.get("ticker", ""),
+                    "form_type": f.get("form_type", ""),
+                    "filing_date": f.get("filing_date", ""),
+                    "description": f.get("description", ""),
                     "accession": acc,
                     "signal": cached.get("ai_signal", "NEUTRAL"),
                     "summary": cached.get("ai_summary", ""),
                     "key_points": cached.get("ai_key_points", []),
                     "event_type": cached.get("ai_event_type", ""),
                     "ai_powered": bool(cached.get("ai_powered")),
-                    "filing_url": f["document_url"],
+                    "filing_url": f.get("document_url", ""),
                 })
             else:
                 uncached_filings.append(f)
@@ -1472,19 +1625,19 @@ def intel_feed():
                 max_workers=8, thread_name_prefix="intel-ai",
             )
             for f, pair in zip(uncached_filings, summarized):
-                ai_result = pair[1] if pair else {}
+                ai_result = pair[1] if isinstance(pair, (list, tuple)) and len(pair) > 1 else {}
                 result.append({
-                        "ticker": f["ticker"],
-                        "form_type": f["form_type"],
-                        "filing_date": f["filing_date"],
-                        "description": f["description"],
-                        "accession": f["accession"],
+                        "ticker": f.get("ticker", ""),
+                        "form_type": f.get("form_type", ""),
+                        "filing_date": f.get("filing_date", ""),
+                        "description": f.get("description", ""),
+                        "accession": f.get("accession", ""),
                         "signal": ai_result.get("signal", "NEUTRAL"),
                         "summary": ai_result.get("summary", ""),
                         "key_points": ai_result.get("key_points", []),
                         "event_type": ai_result.get("event_type", ""),
                         "ai_powered": bool(ai_result.get("ai_powered")),
-                        "filing_url": f["document_url"],
+                        "filing_url": f.get("document_url", ""),
                     })
         else:
             # No AI requested — return raw filing metadata, empty summary
@@ -1492,17 +1645,17 @@ def intel_feed():
             # the cache later.
             for f in uncached_filings:
                 result.append({
-                    "ticker": f["ticker"],
-                    "form_type": f["form_type"],
-                    "filing_date": f["filing_date"],
-                    "description": f["description"],
-                    "accession": f["accession"],
+                    "ticker": f.get("ticker", ""),
+                    "form_type": f.get("form_type", ""),
+                    "filing_date": f.get("filing_date", ""),
+                    "description": f.get("description", ""),
+                    "accession": f.get("accession", ""),
                     "signal": "NEUTRAL",
                     "summary": "",
                     "key_points": [],
                     "event_type": "",
                     "ai_powered": False,
-                    "filing_url": f["document_url"],
+                    "filing_url": f.get("document_url", ""),
                 })
 
     # Sort by filing_date descending
@@ -1538,19 +1691,13 @@ def intel_filing_detail(accession):
         cik_int = str(int(cik))
         acc_nodash = accession.replace("-", "")
 
-        # Try to find primary document from index
-        index_url = f"https://www.sec.gov/Archives/edgar/data/{cik_int}/{acc_nodash}/{acc_nodash}-index.json"
+        # Try to find primary document from index. EDGAR does not serve a
+        # `-index.json` with a top-level `documents` list; reuse the EDGAR
+        # helper that parses the real filing index page.
         try:
-            import requests as req
-            resp = req.get(index_url, headers=edgar.EDGAR_HEADERS, timeout=15)
-            idx_data = resp.json()
-            primary_doc = None
-            for doc in idx_data.get("documents", []):
-                if doc.get("type") == form_type or str(doc.get("sequence")) == "1":
-                    primary_doc = doc.get("document", "")
-                    break
-            if not primary_doc and idx_data.get("documents"):
-                primary_doc = idx_data["documents"][0].get("document", "")
+            primary_doc, _doc_type = edgar._best_document_from_index(
+                cik_int, acc_nodash, form_type or ""
+            )
         except Exception:
             primary_doc = None
 
@@ -1624,9 +1771,15 @@ def intel_institutional():
                 overlap = []
                 for h in fund_data.get("holdings", []):
                     h_name = h.get("name", "").upper()
-                    # Try to match by checking if any portfolio symbol appears in holding name
+                    h_ticker = (h.get("ticker") or "").upper()
+                    # Try to match by the holding's own ticker when present,
+                    # else a word-boundary match against the holding name.
+                    # A bare substring test produced false positives for short
+                    # tickers (e.g. 'A' matched every name, 'ON' matched 'EXXON').
                     for sym in portfolio_symbols:
-                        if sym in h_name or h_name.startswith(sym):
+                        if (h_ticker and sym == h_ticker) or (
+                            h_name and re.search(r"\b" + re.escape(sym) + r"\b", h_name)
+                        ):
                             overlap.append({**h, "portfolio_symbol": sym})
                             break
 
@@ -2037,6 +2190,11 @@ def scanner_profile_save():
     data = request.get_json(force=True, silent=True)
     if not data:
         return jsonify({"error": "No data provided"}), 400
+    # The profile must be a JSON object — a list/scalar would break
+    # save_scanner_profile's dict.update() and corrupt the saved config that
+    # scan_opportunities reads back.
+    if not isinstance(data, dict):
+        return jsonify({"error": "profile must be a JSON object"}), 400
     scanner.save_scanner_profile(data)
     return jsonify({"status": "ok", "profile": data})
 
@@ -2086,7 +2244,8 @@ def scanner_history(symbol):
     """Score timeline for a symbol across scan runs."""
     if not _valid_ticker(symbol):
         return jsonify({"error": "Invalid symbol"}), 400
-    limit = _safe_int(request.args.get("limit"), 100)
+    # Clamp positive — a negative limit becomes SQL `LIMIT -1` (all rows).
+    limit = max(1, _safe_int(request.args.get("limit"), 100))
     return jsonify({"symbol": symbol.upper(), "history": db.get_scan_history(symbol=symbol, limit=limit)})
 
 
@@ -2099,7 +2258,9 @@ def scanner_history(symbol):
 def congress_senate():
     """Senate STOCK Act trades from senate-stock-watcher-data."""
     symbol = request.args.get("symbol")
-    limit = _safe_int(request.args.get("limit"), 200)
+    if symbol and not _valid_ticker(symbol):
+        return jsonify({"error": "Invalid symbol"}), 400
+    limit = max(1, _safe_int(request.args.get("limit"), 200))  # clamp: negative limit truncates results
     return jsonify({"trades": ds.get_senate_trades(symbol=symbol, limit=limit)})
 
 
@@ -2107,14 +2268,21 @@ def congress_senate():
 def congress_all():
     """Combined House + Senate trades, sorted newest first."""
     symbol = request.args.get("symbol")
+    if symbol and not _valid_ticker(symbol):
+        return jsonify({"error": "Invalid symbol"}), 400
     limit = max(1, _safe_int(request.args.get("limit"), 200))  # clamp: -1 would slice off the last row
-    senate = ds.get_senate_trades(symbol=symbol, limit=limit)
+    # Over-fetch senate so the post-merge slice can surface the true newest
+    # `limit` combined rows even when senate dominates — otherwise senate is
+    # pre-truncated to its own newest `limit` before House rows interleave.
+    senate = ds.get_senate_trades(symbol=symbol, limit=limit * 2)
     try:
         import congress as house_mod
         house_trades = house_mod.get_congress_summary(days=120, max_pdfs=40)
         house_rows = []
         for member in house_trades.get("members", []):
-            for t in member.get("trades", []):
+            for t in member.get("trades", []) or []:
+                if not isinstance(t, dict):
+                    continue
                 tk = (t.get("ticker") or "").upper()
                 if symbol and tk != symbol.upper():
                     continue
@@ -2134,10 +2302,12 @@ def congress_all():
         house_rows = []
     combined = senate + house_rows
     combined.sort(key=lambda r: (r.get("date") or "", r.get("filed") or ""), reverse=True)
+    sliced = combined[:limit]
+    # Report counts actually included in the returned slice, not pre-truncation.
     return jsonify({
-        "trades": combined[:limit],
-        "senate_count": len(senate),
-        "house_count": len(house_rows),
+        "trades": sliced,
+        "senate_count": sum(1 for r in sliced if r.get("chamber") != "House"),
+        "house_count": sum(1 for r in sliced if r.get("chamber") == "House"),
     })
 
 
@@ -2175,7 +2345,7 @@ def crypto_stablecoins():
 
 @app.route("/api/crypto/yields")
 def crypto_yields():
-    limit = _safe_int(request.args.get("limit"), 20)
+    limit = max(1, _safe_int(request.args.get("limit"), 20))
     return jsonify({"pools": ds.defillama_top_yields(limit=limit)})
 
 
@@ -2234,7 +2404,7 @@ def fred_catalog():
 def fred_series(series_id):
     if not fred_data:
         return jsonify({"error": "fred_data module not available"}), 503
-    obs = _safe_int(request.args.get("observations"), 60)
+    obs = min(max(_safe_int(request.args.get("observations"), 60), 1), 5000)
     return jsonify(fred_data.fetch_series(series_id, observations=obs))
 
 
@@ -2296,6 +2466,8 @@ def finviz_insiders():
     if not finviz_data:
         return jsonify({"error": "finviz_data module not available"}), 503
     option = request.args.get("option", "latest")
+    if option not in {"latest", "latest buys", "latest sales", "top week", "top owner trade"}:
+        return jsonify({"error": "invalid option"}), 400
     return jsonify(finviz_data.insider_trades(option=option))
 
 
@@ -2324,7 +2496,7 @@ def screener_universe():
         sector=request.args.get("sector"),
         industry=request.args.get("industry"),
         exchange=request.args.get("exchange"),
-        limit=_safe_int(request.args.get("limit"), 200),
+        limit=min(max(_safe_int(request.args.get("limit"), 200), 1), 1000),
     )
     return jsonify({"asset": asset, "results": out, "count": len(out)})
 
@@ -2357,10 +2529,12 @@ def _sec_v2_unavailable():
 
 @app.route("/api/intel/filings-v2/<symbol>")
 def intel_filings_v2(symbol):
-    if _sec_v2_unavailable():
-        return jsonify(dict(_SEC_V2_DORMANT_ENVELOPE, symbol=symbol.upper())), 503
+    # Validate the symbol before the capability check so an invalid symbol gets
+    # a 400 (consistent error semantics) rather than a 503 'unavailable'.
     if not _valid_ticker(symbol):
         return jsonify({"error": "Invalid symbol"}), 400
+    if _sec_v2_unavailable():
+        return jsonify(dict(_SEC_V2_DORMANT_ENVELOPE, symbol=symbol.upper())), 503
     form = request.args.get("form")
     limit = _safe_int(request.args.get("limit"), 20)
     return jsonify({
@@ -2371,10 +2545,11 @@ def intel_filings_v2(symbol):
 
 @app.route("/api/intel/form4-v2/<symbol>")
 def intel_form4_v2(symbol):
-    if _sec_v2_unavailable():
-        return jsonify(dict(_SEC_V2_DORMANT_ENVELOPE, symbol=symbol.upper())), 503
+    # Validate before the capability check (see intel_filings_v2).
     if not _valid_ticker(symbol):
         return jsonify({"error": "Invalid symbol"}), 400
+    if _sec_v2_unavailable():
+        return jsonify(dict(_SEC_V2_DORMANT_ENVELOPE, symbol=symbol.upper())), 503
     limit = _safe_int(request.args.get("limit"), 30)
     return jsonify({
         "symbol": symbol.upper(),
@@ -2424,7 +2599,11 @@ def alt_reddit_mentions():
 
 @app.route("/api/alt-data/reddit/<subreddit>")
 def alt_reddit_sub(subreddit):
+    if not re.fullmatch(r"[A-Za-z0-9_]{1,30}", subreddit or ""):
+        return jsonify({"error": "invalid subreddit"}), 400
     sort = request.args.get("sort", "hot")
+    if sort not in ("hot", "new", "top", "rising"):
+        sort = "hot"
     limit = _safe_int(request.args.get("limit"), 25)
     return jsonify({
         "subreddit": subreddit,
@@ -2461,9 +2640,15 @@ def _social_composite(sources):
     if _live(hn):
         parts.append(min(100.0, (hn.get("mention_count") or 0) / 50.0 * 100.0))
     spike = ((wk.get("stats") or {}).get("spike_pct_vs_baseline"))
-    if _live(wk) and spike is not None:
+    # spike originates from an external Wikipedia module and may be cached as a
+    # numeric string; coerce defensively so a bad value can't 500 the panel.
+    try:
+        spike_val = float(spike) if spike is not None else None
+    except (TypeError, ValueError):
+        spike_val = None
+    if _live(wk) and spike_val is not None:
         # 0% spike -> 50 (baseline attention), +50% -> 100, -50% -> 0.
-        parts.append(min(100.0, max(0.0, 50.0 + float(spike))))
+        parts.append(min(100.0, max(0.0, 50.0 + spike_val)))
     buzz = round(sum(parts) / len(parts)) if parts else None
 
     # Sentiment direction in -1..1 from StockTwits bull ratio + HN polarity.
@@ -2489,7 +2674,9 @@ def _social_composite(sources):
         "buzz_score": buzz,
         "sentiment": sentiment,
         "sentiment_label": label,
-        "spike_pct": round(float(spike), 1) if spike is not None else None,
+        # Only surface spike_pct when Wikipedia is actually live — a stale/non-live
+        # 'stats' blob would otherwise leak a spike figure that didn't feed buzz.
+        "spike_pct": round(spike_val, 1) if (_live(wk) and spike_val is not None) else None,
         "sources_live": n_live,
     }
 
@@ -2666,6 +2853,8 @@ def ideas_enrich(symbol):
     Two-phase streaming: /api/ideas/random returns fast blocks, then the UI
     fires this endpoint in parallel to fill in the rest.
     """
+    if not _valid_ticker(symbol):
+        return jsonify({"error": "Invalid symbol"}), 400
     asset_class = (request.args.get("asset_class") or "stock").strip().lower()
     strategy = (request.args.get("strategy") or "growth").strip().lower()
     try:
@@ -2898,6 +3087,11 @@ def research_factors_portfolio():
                 # model would return NaN/empty exposures.
                 holdings = []
                 for h in rows:
+                    # The Fama-French model only prices equities/ETFs — exclude
+                    # crypto/options so they don't skew the weights or contaminate
+                    # the exposure estimate (mirrors the scan routes).
+                    if (h.get("asset_type") or "stock") not in ("stock", "etf"):
+                        continue
                     mv = (h.get("shares") or 0) * (h.get("avg_cost") or 0)
                     if mv > 0:
                         holdings.append({
@@ -3037,14 +3231,24 @@ def _mc_holdings_from_portfolio(account_id=None):
         prices = {}
     out = []
     for h in rows:
-        q = prices.get(h["symbol"]) or {}
-        px = q.get("price")
-        if not px:
+        sym0 = h.get("symbol")
+        if not sym0:
             continue
-        mv = px * h["shares"]
+        q = prices.get(sym0) or {}
+        px = q.get("price")
+        # Fall back to cost basis when there's no live quote, mirroring the rest
+        # of the app, instead of silently dropping the position (which understates
+        # exposure). A genuinely non-positive value is still skipped.
+        cur = px if px is not None else h.get("avg_cost")
+        if not cur or cur <= 0:
+            continue
+        sh = h.get("shares")
+        if not sh or sh <= 0:
+            continue
+        mv = cur * sh
         if mv <= 0:
             continue
-        sym = h["symbol"] + "-USD" if h.get("asset_type") == "crypto" else h["symbol"]
+        sym = sym0 + "-USD" if h.get("asset_type") == "crypto" else sym0
         out.append({"symbol": sym, "market_value": round(mv, 2)})
     return out
 
@@ -3058,6 +3262,23 @@ def research_montecarlo_route():
         holdings = data.get("holdings") or []
         if not isinstance(holdings, list) or not holdings:
             return jsonify({"error": "holdings: non-empty list required"}), 400
+        # Validate/normalize each entry before it reaches the simulation engine —
+        # a stray non-dict or a non-numeric/negative market_value would otherwise
+        # surface as an opaque 500 or silently skew the sim.
+        clean = []
+        for h in holdings:
+            if not (isinstance(h, dict) and isinstance(h.get("symbol"), str) and h["symbol"].strip()):
+                continue
+            try:
+                mv = float(h.get("market_value"))
+            except (TypeError, ValueError):
+                continue
+            if not math.isfinite(mv) or mv <= 0:
+                continue
+            clean.append({"symbol": h["symbol"].strip().upper(), "market_value": mv})
+        if not clean:
+            return jsonify({"error": "holdings must be objects with symbol and positive market_value"}), 400
+        holdings = clean
         # Clamp unbounded sim params — an attacker-supplied n_paths=1e9 would
         # peg a worker thread for minutes (DoS).
         horizon = min(max(_safe_int(data.get("horizon_days"), 252), 1), 3650)
@@ -3081,8 +3302,11 @@ def research_montecarlo_route():
                     n_paths=n_paths, method=method, seed=seed,
                 )
                 sim["prob_of_target"] = pt
-            except (TypeError, ValueError):
-                pass
+            except Exception as _pt_err:
+                # The optional target-probability add-on runs a second full
+                # simulation; any failure there must not discard the primary
+                # `sim` the user actually requested.
+                log.warning("prob_of_target failed: %s", _pt_err)
         return jsonify(sim)
     except Exception as e:
         return _err(e)
@@ -3291,12 +3515,17 @@ def jarvis_tts_route():
     try:
         import ai_summarizer
         _OK_VOICES = {"alloy", "echo", "fable", "onyx", "nova", "shimmer"}
-        voice = data.get("voice") or db.get_settings().get("jarvis_tts_voice") or "onyx"
+        client_voice = data.get("voice")
+        voice = client_voice or db.get_settings().get("jarvis_tts_voice") or "onyx"
         voice = str(voice).lower()[:20]
         if voice not in _OK_VOICES:
-            # A bad voice is a 400 (distinct from the keyless 404 the frontend
-            # treats as "no premium voice, fall back to browser").
-            return jsonify({"error": "unknown voice '{}'".format(voice)}), 400
+            if client_voice:
+                # The client explicitly asked for an unknown voice → 400 (distinct
+                # from the keyless 404 the frontend treats as "fall back to browser").
+                return jsonify({"error": "unknown voice '{}'".format(voice)}), 400
+            # The bad voice came from settings (a stale/non-allowlisted DB value):
+            # fall back to the default instead of 400-ing every TTS call.
+            voice = "onyx"
         audio = ai_summarizer.tts_speech(text, voice=voice)
         if not audio:
             return jsonify({"error": "tts unavailable"}), 404
@@ -3402,13 +3631,22 @@ def aj_run_route():
         import aj_operator
         data = request.get_json(silent=True) or {}
         mode = "live" if str(data.get("mode")) == "live" else "paper"
-        if not _jarvis_act_charge(1):
+        _stamps = _jarvis_act_charge(1)
+        if not _stamps:
             return jsonify({"ok": False, "reason": "rate limited"}), 429
-        result = aj_operator.run_once(mode)
+        try:
+            result = aj_operator.run_once(mode)
+        except Exception as e:
+            # No cycle ran — refund the charged slot so transient run_once
+            # failures don't silently drain the shared budget.
+            _jarvis_act_refund(_stamps)
+            return _err(e)
         # A single-instance lock refusal is not success — surface 409 so the UI
-        # doesn't report "cycle complete" when the cycle never ran.
+        # doesn't report "cycle complete" when the cycle never ran. Refund the
+        # rate-limit slot since no cycle actually ran.
         if isinstance(result, dict) and result.get("ok") is False \
                 and "running" in str(result.get("reason", "")):
+            _jarvis_act_refund(_stamps)
             return jsonify(result), 409
         return jsonify(result)
     except Exception as e:
@@ -3433,13 +3671,24 @@ def aj_approve_route(pid):
     through the gated, VERIFY'd broker (which fails closed if not enabled)."""
     try:
         import aj_db, aj_risk, aj_execution
-        if not _jarvis_act_charge(1):
+        _stamps = _jarvis_act_charge(1)
+        if not _stamps:
             return jsonify({"error": "rate limited"}), 429
         row = aj_db.get_row("aj_proposals", pid)
         if not row:
+            _jarvis_act_refund(_stamps)
             return jsonify({"error": "proposal not found"}), 404
-        if row.get("status") not in ("approved", "proposed"):
-            return jsonify({"error": "proposal not approvable (status {})".format(row.get("status"))}), 400
+        prev_status = row.get("status")
+        if prev_status not in ("approved", "proposed"):
+            _jarvis_act_refund(_stamps)
+            return jsonify({"error": "proposal not approvable (status {})".format(prev_status)}), 400
+        # Atomically claim the proposal before executing — two concurrent approval
+        # POSTs for the same pid would otherwise both pass the status check and
+        # both call execute_trade, double-submitting the order. The compare-and-set
+        # on the exact status we just read guarantees exactly one claimer wins.
+        if not aj_db.update_if("aj_proposals", pid, "status", prev_status, status="approving"):
+            _jarvis_act_refund(_stamps)
+            return jsonify({"error": "proposal already being approved"}), 409
         proposal = {"id": pid, "symbol": row["symbol"], "side": row["side"],
                     "qty": row.get("qty"), "notional_usd": row.get("notional_usd"),
                     "order_type": row.get("order_type") or "market",
@@ -3448,11 +3697,17 @@ def aj_approve_route(pid):
         rd = aj_risk.evaluate(proposal)
         if rd.get("decision") != "pass":
             aj_db.update("aj_proposals", pid, status="blocked", risk_reason=rd.get("reason"))
+            _jarvis_act_refund(_stamps)
             return jsonify({"ok": False, "decision": rd.get("decision"), "reason": rd.get("reason")}), 400
         aj_db.audit("approval", {"proposal_id": pid, "mode": rd.get("mode"),
                                  "required": True, "decision": "human-approved"},
                     ref_id=pid, actor="human:web")
         ex = aj_execution.execute_trade(proposal, rd, cycle_id=row.get("cycle_id"))
+        # execute_trade flips status to 'executed' on a fill. If nothing filled,
+        # release the claim back to its prior status so the proposal isn't left
+        # permanently stuck in the intermediate 'approving' state.
+        if not ex.get("ok"):
+            aj_db.update_if("aj_proposals", pid, "status", "approving", status=prev_status)
         return jsonify({"ok": ex.get("ok", False), "exec": ex})
     except Exception as e:
         return _err(e)
@@ -3540,18 +3795,41 @@ _JARVIS_ACT_LOCK = threading.Lock()
 
 def _jarvis_act_charge(n):
     """Atomically prune the rolling window and, if charging n executions keeps
-    the total within _JARVIS_ACT_MAX, append n timestamps and return True.
-    Otherwise return False (rate limited). Both batch and single callers use
-    this so the boundary (reject when total would exceed MAX) is identical."""
+    the total within _JARVIS_ACT_MAX, append n timestamps and return the list of
+    appended timestamps (truthy). Otherwise return an empty list (rate limited,
+    falsy). Both batch and single callers use this so the boundary (reject when
+    total would exceed MAX) is identical. The returned stamps let a caller refund
+    its OWN exact entries instead of popping whichever entry happens to be last."""
     now = time.time()
     with _JARVIS_ACT_LOCK:
         while _JARVIS_ACT_TIMES and now - _JARVIS_ACT_TIMES[0] > _JARVIS_ACT_WINDOW:
             _JARVIS_ACT_TIMES.popleft()
         if len(_JARVIS_ACT_TIMES) + n > _JARVIS_ACT_MAX:
-            return False
-        for _ in range(n):
-            _JARVIS_ACT_TIMES.append(now)
-        return True
+            return []
+        stamps = [now] * n
+        for t in stamps:
+            _JARVIS_ACT_TIMES.append(t)
+        return stamps
+
+
+def _jarvis_act_refund(stamps):
+    """Return previously-charged slots to the rolling window — used when a charged
+    action turns out to be a no-op (e.g. the operator was already running), so
+    polling a busy 'Run' doesn't burn the budget on 409 refusals. Accepts the list
+    of timestamps returned by _jarvis_act_charge and removes those exact entries
+    (so concurrent requests can't refund each other's slots). An int is also
+    accepted for backward compatibility (pops that many most-recent entries)."""
+    with _JARVIS_ACT_LOCK:
+        if isinstance(stamps, int):
+            for _ in range(stamps):
+                if _JARVIS_ACT_TIMES:
+                    _JARVIS_ACT_TIMES.pop()
+            return
+        for t in stamps or []:
+            try:
+                _JARVIS_ACT_TIMES.remove(t)
+            except ValueError:
+                pass
 
 
 @app.route("/api/jarvis/act", methods=["POST"])
@@ -3608,7 +3886,12 @@ def jarvis_act_route():
     # helper as the batch path, so the MAX boundary is identical.
     if not _jarvis_act_charge(1):
         return jsonify({"error": "rate limited"}), 429
-    r = jarvis_tools.execute_mutating(tool, args)
+    try:
+        r = jarvis_tools.execute_mutating(tool, args)
+    except Exception as e:
+        return _err(e)
+    if not isinstance(r, dict):
+        return jsonify({"error": "tool returned invalid result"}), 500
     return (jsonify(r), 400) if r.get("error") else jsonify(r)
 
 
@@ -3735,9 +4018,11 @@ def jarvis_activity_stream_route():
         last_sig = None
         last_yield = _time.time()
         sent_any = False
+        err_streak = 0
         while _time.time() - started < 600:  # hard stop after 10 min
             try:
                 snap = jarvis.activity_snapshot()
+                err_streak = 0
                 sig = _json.dumps(
                     {"background": snap.get("background"),
                      "summary": snap.get("summary")},
@@ -3751,6 +4036,10 @@ def jarvis_activity_stream_route():
                     last_yield = _time.time()
                     yield ": hb\n\n"
             except Exception:
+                # A persistently failing snapshot must not keep re-running (and
+                # pinning a worker) for the full 10 min — stop after a short
+                # streak; the browser's EventSource simply auto-reconnects.
+                err_streak += 1
                 # One bad snapshot must not kill the stream. The documented
                 # contract is "first chunk is a data frame" — so on a FIRST
                 # iteration error, emit an empty-but-valid data frame rather
@@ -3765,6 +4054,8 @@ def jarvis_activity_stream_route():
                 elif _time.time() - last_yield >= 15:
                     last_yield = _time.time()
                     yield ": hb\n\n"
+                if err_streak >= 5:
+                    break
             _time.sleep(2)
 
     resp = Response(generate(), mimetype="text/event-stream")
@@ -4339,14 +4630,27 @@ def synth_macrotranslate_portfolio(release_id):
     holdings = body.get("holdings") or []
     surprise_pct = body.get("surprise_pct")
     if not holdings:
-        # Fall back to the current portfolio so a no-body POST works.
+        # Fall back to the current portfolio so a no-body POST works. Weight by
+        # LIVE market value (price * shares), not cost basis — macro impact
+        # attribution should reflect what positions are worth now, mirroring the
+        # Monte Carlo helper. Fall back to avg_cost only when no live quote.
         try:
             rows = db.get_portfolio() or []
+            try:
+                prices = _portfolio_live_prices(rows)
+            except Exception:
+                prices = {}
             holdings = []
             for h in rows:
-                mv = (h.get("shares") or 0) * (h.get("avg_cost") or 0)
+                sym0 = h.get("symbol")
+                if not sym0:
+                    continue
+                px = (prices.get(sym0) or {}).get("price")
+                px = px if px is not None else h.get("avg_cost")
+                sh = h.get("shares") or 0
+                mv = (px or 0) * sh
                 if mv > 0:
-                    holdings.append({"symbol": h["symbol"], "market_value": float(mv)})
+                    holdings.append({"symbol": sym0, "market_value": float(mv)})
         except Exception:
             holdings = []
     try:
@@ -4415,6 +4719,10 @@ def synth_whatif_get():
         mv = float(request.args.get("market_value") or 0.0)
     except (TypeError, ValueError):
         mv = 0.0
+    # float() parses 'nan'/'inf'; NaN compares False to every relation so it
+    # slips past `mv < 0` and then poisons every downstream weight.
+    if not math.isfinite(mv):
+        return jsonify({"error": "market_value must be a finite number"}), 400
     action = (request.args.get("action") or "add").lower()
     if not sym or mv < 0:
         return jsonify({"error": "need ?symbol=...&market_value=...&action=add|remove|resize_to"}), 400

@@ -43,6 +43,9 @@ def _test_openai(key: str) -> Dict[str, Any]:
         msg = str(e)
         if "401" in msg or "invalid_api_key" in msg.lower():
             return {"ok": False, "detail": "OpenAI rejected the key (401)."}
+        # Scrub anything resembling a secret (e.g. sk-... tokens) before the
+        # message reaches the API response / logs.
+        msg = re.sub(r"sk-[A-Za-z0-9_\-]{6,}", "sk-***", msg)
         return {"ok": False, "detail": "Could not verify: {}".format(msg[:160])}
 
 

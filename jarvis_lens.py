@@ -196,15 +196,22 @@ def _ownership(symbol: str, price: Optional[float], held: Optional[Dict[str, Any
     try:
         h = held if held is not None else _held_record(symbol)
         if h is not None:
+            avg_cost = h.get("avg_cost")
             out.update({
-                "held": True, "shares": h["shares"], "avg_cost": h["avg_cost"],
-                "unrealized_pct": round((price - h["avg_cost"]) / h["avg_cost"] * 100, 1)
-                if (price and h["avg_cost"]) else None,
+                "held": True, "shares": h.get("shares"), "avg_cost": avg_cost,
+                "unrealized_pct": round((price - avg_cost) / avg_cost * 100, 1)
+                if (price and avg_cost) else None,
             })
         txns = db.get_transactions(symbol=symbol, limit=100)
         buys = [t for t in txns if (t.get("action") or "").upper() == "BUY"]
         if buys:
-            first = min(t.get("date") or t.get("created_at", "") for t in buys)
+            # Coerce to string and drop falsy/None so a BUY row with a null
+            # date/created_at can't make min() compare None to str (TypeError),
+            # which would otherwise blank the whole ownership block.
+            dates = [str(t.get("date") or t.get("created_at") or "") for t in buys]
+            dates = [d for d in dates if d]
+            first = min(dates) if dates else None
+        if buys and first:
             out["first_buy"] = first[:10]
             try:
                 days = (datetime.now(timezone.utc)
@@ -448,8 +455,13 @@ def _temperament_uncached() -> Dict[str, Any]:
         cost_total = 0.0
         for t, d in rows:
             act = (t.get("action") or "").upper()
-            price = t.get("price") or 0
-            sh = t.get("shares") or 0
+            # Some import paths store price/shares as text; coerce defensively
+            # so a single string row can't raise TypeError and abort the whole
+            # temperament check (this loop is not wrapped in try/except).
+            price = _num(t.get("price"))
+            sh = _num(t.get("shares"))
+            if price is None or sh is None:
+                continue
             if act == "BUY":
                 if cost_shares > 0 and price > (cost_total / cost_shares) * (1 + _CHASE_PCT / 100):
                     chases.append((sym, price, cost_total / cost_shares))
@@ -532,11 +544,16 @@ def _macro_brief_uncached() -> Dict[str, Any]:
             # Disjoint top/bottom slices — with <6 sectors reporting, ranked[:3]
             # and ranked[-3:] would overlap and produce "X over X".
             half = len(ranked) // 2
-            top_n = min(3, half) if len(ranked) >= 2 else 0
+            # With a single sector reporting, still surface it as leading
+            # (top_n=1) so a one-sector feed isn't dropped entirely. The bottom
+            # slice is only populated when there are ≥2 to keep top/bottom
+            # disjoint.
+            top_n = min(3, max(1, half)) if len(ranked) >= 1 else 0
+            bottom_n = top_n if len(ranked) >= 2 else 0
             top = [{"sector": s.get("sector") or s.get("name"),
                     "change_pct": s["change_pct"]} for s in ranked[:top_n]]
             bottom = [{"sector": s.get("sector") or s.get("name"),
-                       "change_pct": s["change_pct"]} for s in ranked[len(ranked) - top_n:]]
+                       "change_pct": s["change_pct"]} for s in ranked[len(ranked) - bottom_n:]] if bottom_n else []
             return (top, bottom)
         except Exception:
             return None
@@ -593,8 +610,13 @@ def _macro_brief_uncached() -> Dict[str, Any]:
                 str(liquidity["regime"]).lower()))
     if crypto and crypto.get("btc_dominance") is not None:
         chg = crypto.get("mcap_change_24h")
+        # Only assert a direction when we actually have a 24h change; with
+        # dominance present but mcap_change missing, say "mixed" rather than
+        # falsely asserting "contracting" with no evidence.
+        appetite = ("expanding" if chg and chg > 0
+                    else ("contracting" if chg is not None and chg < 0 else "mixed"))
         bits.append("crypto risk appetite is {} (BTC dominance {:.0f}%{})".format(
-            "expanding" if (chg or 0) > 0 else "contracting",
+            appetite,
             crypto["btc_dominance"],
             ", mcap {:+.1f}%/24h".format(chg) if chg is not None else ""))
     narrative = ("; ".join(bits) + "." if bits

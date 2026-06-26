@@ -615,7 +615,9 @@ def _build_note(event_type: str, implied: Optional[float],
     if implied <= 0.01:
         return f"Historical avg {historical:.2f}% vs implied ~0 — implied unreliable."
     ratio = historical / implied
-    if ratio >= 1.25:
+    if ratio <= 0.0:
+        verdict = "historical avg ~0 — no measurable past move vs implied"
+    elif ratio >= 1.25:
         verdict = f"historical {((ratio-1)*100):.0f}% larger than implied — premium cheap"
     elif ratio <= 0.8:
         verdict = f"implied {((1/ratio-1)*100):.0f}% higher than historical avg — premium expensive"

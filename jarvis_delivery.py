@@ -144,7 +144,7 @@ def _channel_file(digest: Dict[str, str]) -> str:
         d = (_setting("digest_dir") or os.path.join(_REPO, "digests")).strip()
         os.makedirs(d, exist_ok=True)
         path = os.path.join(d, "{}.md".format(_dt.date.today().isoformat()))
-        with open(path, "w") as f:
+        with open(path, "w", encoding="utf-8") as f:
             f.write(digest.get("text") or "")
         return "wrote {}".format(path)
     except Exception as e:
@@ -184,15 +184,22 @@ def _channel_email(digest: Dict[str, str]) -> str:
         msg["To"] = cfg["to"]
         msg.attach(MIMEText(digest.get("text") or "", "plain"))
         msg.attach(MIMEText(digest.get("html") or "", "html"))
+        will_authenticate = bool(cfg["user"] and cfg["password"])
         with smtplib.SMTP(cfg["host"], int(cfg["port"]), timeout=20) as s:
             try:
                 s.starttls()
             except Exception:
-                pass  # server may not support STARTTLS
-            if cfg["user"] and cfg["password"]:
+                # Tolerate a missing STARTTLS only for unauthenticated relays.
+                # When credentials are configured, refuse to fall through and
+                # transmit them in cleartext — let the failure abort the send.
+                if will_authenticate:
+                    raise
+                # else: server may not support STARTTLS (no creds to leak)
+            if will_authenticate:
                 s.login(cfg["user"], cfg["password"])
-            s.sendmail(cfg["from"], [t.strip() for t in cfg["to"].split(",")],
-                       msg.as_string())
+            from email.utils import getaddresses
+            rcpts = [addr for _name, addr in getaddresses([cfg["to"]]) if addr]
+            s.sendmail(cfg["from"], rcpts, msg.as_string())
         return "sent to {}".format(cfg["to"])
     except Exception as e:
         log.debug("email failed: %s", e)

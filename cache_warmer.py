@@ -128,6 +128,10 @@ _thread: Optional[threading.Thread] = None
 _started = False
 _started_lock = threading.Lock()
 _last_cycle: dict = {}              # task -> unix ts of last successful run
+# Guards the bookkeeping dicts below. They are written from the warmer loop
+# thread and read concurrently by status() on a request thread; snapshotting a
+# dict mid-__setitem__ can raise "dictionary changed size during iteration".
+_book_lock = threading.Lock()
 
 # Failure backoff. _last_cycle is only stamped on SUCCESS, so before this
 # existed a task that threw (or blew the soft timeout) every time was
@@ -140,6 +144,14 @@ _fail_count: dict = {}              # task -> consecutive failure count
 _next_retry: dict = {}              # task -> unix ts before which we won't retry
 BACKOFF_BASE_SECONDS = 60.0
 BACKOFF_MAX_SECONDS = 3600.0
+
+# Orphaned-thread tracking. When a warm call blows the soft timeout we can't
+# abort its thread, but we CAN refuse to launch another of the same label until
+# the prior one finishes — otherwise a persistently-slow upstream spawns a fresh
+# orphan every cadence, each holding thread-local DB/cache connections, until
+# threads and SQLite WAL readers accumulate without bound.
+_inflight: dict = {}                # label -> still-running orphan Thread
+_inflight_lock = threading.Lock()
 
 
 # Soft watchdog: max wall-clock we'll wait for a single warm call before
@@ -156,6 +168,18 @@ def _safe(label: str, fn, *args, **kwargs):
     Bounded by WARM_CALL_TIMEOUT — if the call doesn't return in time we log
     and move on, otherwise one slow upstream (yfinance 60s timeout, SEC
     EDGAR 90s response) can starve all the other cadences."""
+    # Refuse to spawn a second worker for a label whose prior (timed-out) worker
+    # is still running — caps concurrent orphans at one per label instead of one
+    # per cadence under a persistently-slow upstream.
+    with _inflight_lock:
+        prev = _inflight.get(label)
+        if prev is not None and prev.is_alive():
+            log.warning("warmer %s still running from a prior tick; skipping", label)
+            _record_failure(label)
+            return False
+        if prev is not None:
+            _inflight.pop(label, None)
+
     holder = {"err": None, "done": False}
 
     def _runner():
@@ -165,6 +189,19 @@ def _safe(label: str, fn, *args, **kwargs):
             holder["err"] = e
         finally:
             holder["done"] = True
+            # Release this worker's thread-local DB/cache connections so an
+            # orphaned (timed-out) thread doesn't pin a SQLite WAL reader for
+            # the rest of its life — which would block VACUUM and leak handles.
+            try:
+                import database as _db
+                _db.close_thread_conn()
+            except Exception:
+                pass
+            try:
+                import cache_store as _cs
+                _cs.close_thread_conn()
+            except Exception:
+                pass
 
     t = threading.Thread(target=_runner, name=f"warm-{label}", daemon=True)
     t.start()
@@ -172,24 +209,29 @@ def _safe(label: str, fn, *args, **kwargs):
     if not holder["done"]:
         log.warning("warmer %s exceeded %.0fs soft timeout; moving on",
                     label, WARM_CALL_TIMEOUT)
+        # Remember the still-running orphan so the next tick won't pile on.
+        with _inflight_lock:
+            _inflight[label] = t
         _record_failure(label)
         return False
     if holder["err"] is not None:
         log.debug("warmer %s failed: %s", label, holder["err"])
         _record_failure(label)
         return False
-    _last_cycle[label] = time.time()
-    _fail_count.pop(label, None)
-    _next_retry.pop(label, None)
+    with _book_lock:
+        _last_cycle[label] = time.time()
+        _fail_count.pop(label, None)
+        _next_retry.pop(label, None)
     return True
 
 
 def _record_failure(label: str) -> None:
     """Bump the consecutive-failure count and schedule the next allowed retry."""
-    fails = _fail_count.get(label, 0) + 1
-    _fail_count[label] = fails
-    delay = min(BACKOFF_MAX_SECONDS, BACKOFF_BASE_SECONDS * (2 ** (fails - 1)))
-    _next_retry[label] = time.time() + delay
+    with _book_lock:
+        fails = _fail_count.get(label, 0) + 1
+        _fail_count[label] = fails
+        delay = min(BACKOFF_MAX_SECONDS, BACKOFF_BASE_SECONDS * (2 ** (fails - 1)))
+        _next_retry[label] = time.time() + delay
     if fails >= 3:
         log.warning("warmer %s has failed %d times in a row; next retry in %.0fs",
                     label, fails, delay)
@@ -287,14 +329,23 @@ def _loop():
         # and re-warming the crypto batch ~20× more often than intended (its
         # failures even recorded under "quotes_crypto", a key the gate never
         # checked). Each leg now stamps/backs-off under its own key.
-        eq, crypto = _portfolio_symbols()
-        wl_eq, wl_crypto = _watchlist_symbols()
-        if _due("quotes", QUOTES_INTERVAL, now):
+        # Only hit the DB for portfolio/watchlist symbols when at least one
+        # quote leg is actually due — otherwise this ran 4 SELECTs on every 15s
+        # tick (and a fresh thread-local connection if the loop thread rotated)
+        # to feed gates that were almost always not-due.
+        quotes_due = _due("quotes", QUOTES_INTERVAL, now)
+        quotes_crypto_due = _due("quotes_crypto", QUOTES_INTERVAL, now)
+        if quotes_due or quotes_crypto_due:
+            eq, crypto = _portfolio_symbols()
+            wl_eq, wl_crypto = _watchlist_symbols()
+        else:
+            eq = crypto = wl_eq = wl_crypto = []
+        if quotes_due:
             all_eq = list(dict.fromkeys(eq + wl_eq))  # dedupe, keep order
             if all_eq:
                 _safe("quotes", fetcher.get_quotes_batch, all_eq)
                 time.sleep(INTER_REQUEST_DELAY)
-        if _due("quotes_crypto", QUOTES_INTERVAL, now):
+        if quotes_crypto_due:
             all_crypto = list(dict.fromkeys(crypto + wl_crypto))
             if all_crypto:
                 # Mirror get_portfolio_quotes' guard: holdings already stored
@@ -315,7 +366,8 @@ def _loop():
             # Only advance the cadence if SOMETHING succeeded — an all-failed
             # sweep must stay in backoff, not be stamped done for 12h.
             if any_ok or not eq:
-                _last_cycle["fundamentals"] = time.time()
+                with _book_lock:
+                    _last_cycle["fundamentals"] = time.time()
 
         if _due("news", NEWS_INTERVAL, now):
             eq, _ = _portfolio_symbols()
@@ -324,7 +376,8 @@ def _loop():
                 any_ok = _safe("news", fetcher.get_news, sym) or any_ok
                 time.sleep(INTER_REQUEST_DELAY)
             if any_ok or not eq:
-                _last_cycle["news"] = time.time()
+                with _book_lock:
+                    _last_cycle["news"] = time.time()
 
         # NOTE: benchmark warm task dropped (was wasted budget). It warmed
         # the cache key ("bench","SPY","1y", base_value=None), but the route
@@ -350,7 +403,8 @@ def _loop():
                 any_ok = _safe("chart", fetcher.get_chart_data, sym, "6mo", "1d") or any_ok
                 time.sleep(INTER_REQUEST_DELAY)
             if any_ok or not symbols:
-                _last_cycle["chart"] = time.time()
+                with _book_lock:
+                    _last_cycle["chart"] = time.time()
 
         # ── score-due forecasts cadence: every 6h ────────────────────────
         # research_tracker queues a row each time a tracked signal panel
@@ -527,11 +581,15 @@ def start() -> None:
 
 def status() -> dict:
     """Return last-success timestamps for each task — used by a debug endpoint."""
+    with _book_lock:
+        last_cycle_snap = dict(_last_cycle)
+        fail_snap = dict(_fail_count)
+        retry_snap = dict(_next_retry)
     return {
         "started": _started,
-        "last_cycle": dict(_last_cycle),
-        "failing": dict(_fail_count),          # task -> consecutive failures
-        "next_retry": dict(_next_retry),       # task -> unix ts (backoff gate)
+        "last_cycle": last_cycle_snap,
+        "failing": fail_snap,                  # task -> consecutive failures
+        "next_retry": retry_snap,              # task -> unix ts (backoff gate)
         "config": {
             "boot_delay": BOOT_DELAY_SECONDS,
             "market_interval": MARKET_INTERVAL,

@@ -399,12 +399,17 @@ def _c_congress(symbol: str) -> Optional[Tuple[Any, float]]:
         if isinstance(dt, datetime) and dt < cutoff:
             continue
         if isinstance(dt, str):
-            try:
-                d = datetime.strptime(dt, "%Y-%m-%d")
-                if d < cutoff:
+            # congress.py emits txn_date in "%m/%d/%Y"; try that first, then
+            # fall back to ISO "%Y-%m-%d" for any other source/cache shape.
+            d = None
+            for _fmt in ("%m/%d/%Y", "%Y-%m-%d"):
+                try:
+                    d = datetime.strptime(dt, _fmt)
+                    break
+                except Exception:
                     continue
-            except Exception:
-                pass
+            if d is not None and d < cutoff:
+                continue
         try:
             val = float(t.get("amount_val") or 0.0)
         except Exception:
@@ -553,10 +558,15 @@ def _c_price_momentum(symbol: str) -> Optional[Tuple[Any, float]]:
     if not pieces:
         return None
     n = sum(pieces) / len(pieces)
-    label = "{:+.2f}% / {:.0%} 52w" .format(
-        float(pct) if pct is not None else 0.0,
-        ((float(price) - float(lo)) / (float(hi) - float(lo))) if (price and hi and lo and float(hi) > float(lo)) else 0.5,
-    )
+    try:
+        _pct = float(pct) if pct is not None else 0.0
+        if price is not None and hi is not None and lo is not None and float(hi) > float(lo):
+            _pos = (float(price) - float(lo)) / (float(hi) - float(lo))
+        else:
+            _pos = 0.5
+        label = "{:+.2f}% / {:.0%} 52w".format(_pct, _pos)
+    except Exception:
+        label = "{:+.2f}% / {:.0%} 52w".format(0.0, 0.5)
     return label, _clip(n, -1.0, 1.0)
 
 

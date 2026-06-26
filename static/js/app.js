@@ -4396,6 +4396,55 @@ async function loadTradingView() {
           f('Notify on fills', yn('aj-cfg-notify_fills', cfg.notify_fills), 'Show a macOS notification each time an order fills.')
         )}
 
+        ${group('⚡ 100x — smart sizing', 'Size bigger when the edge is real, smaller when it isn’t', false,
+          f('Kelly sizing', yn('aj-cfg-kelly_sizing', cfg.kelly_sizing), 'Size by the math of optimal growth — your realized win-rate & payoff.') +
+          f('Kelly fraction', num('aj-cfg-kelly_fraction', cfg.kelly_fraction, '0.05'), 'Fraction of full Kelly to bet (0.5 = half-Kelly, safer).') +
+          f('Volatility target', num('aj-cfg-volatility_target_pct', cfg.volatility_target_pct, '0.1', '%/day'), 'Aim each position at this daily-volatility budget; 0=off.') +
+          f('Compound sizing', yn('aj-cfg-compound_sizing', cfg.compound_sizing), 'Grow order size as the agent’s equity grows.') +
+          f('Compounding base', num('aj-cfg-compound_base_equity_usd', cfg.compound_base_equity_usd, null, '$'), 'Equity baseline the compounding ratio is measured against.') +
+          f('Per-symbol weighting', yn('aj-cfg-symbol_performance_weighting', cfg.symbol_performance_weighting), 'Lean into names you’ve won on; fade chronic losers.') +
+          f('Drawdown throttle', num('aj-cfg-drawdown_throttle_pct', cfg.drawdown_throttle_pct, '0.5', '%'), 'Shrink size as drawdown deepens; fully off at this %. 0=off.')
+        )}
+
+        ${group('⚡ 100x — entry alpha', 'Only take the highest-quality setups', false,
+          f('Momentum filter', num('aj-cfg-momentum_filter_days', cfg.momentum_filter_days, null, 'd SMA'), 'Only buy when price is above its N-day average. 0=off.') +
+          f('RSI cap', num('aj-cfg-mean_reversion_rsi_max', cfg.mean_reversion_rsi_max, '0.5'), 'Don’t chase — only buy when RSI(14) is at/below this. 0=off.') +
+          f('Relative strength', yn('aj-cfg-relative_strength_filter', cfg.relative_strength_filter), 'Only buy names outperforming SPY over the lookback.') +
+          f('RS lookback', num('aj-cfg-relative_strength_lookback_days', cfg.relative_strength_lookback_days, null, 'days'), 'Window for the relative-strength comparison.') +
+          f('Max correlation', num('aj-cfg-max_book_correlation', cfg.max_book_correlation, '0.05'), 'Block a buy too correlated with the book (0–1). 0=off.') +
+          f('Earnings blackout', num('aj-cfg-earnings_blackout_days', cfg.earnings_blackout_days, null, 'days'), 'Skip buys within N days of earnings. 0=off.') +
+          f('Max sector weight', num('aj-cfg-max_sector_weight_pct', cfg.max_sector_weight_pct, '0.5', '%'), 'Cap any one GICS sector’s share of the book. 0=off.')
+        )}
+
+        ${group('⚡ 100x — smart exits', 'Lock in winners, cut losers automatically', false,
+          f('Max holding days', num('aj-cfg-max_holding_days', cfg.max_holding_days, null, 'days'), 'Force-exit a position that hasn’t worked after N days. 0=off.') +
+          f('Profit ratchet', num('aj-cfg-profit_ratchet_pct', cfg.profit_ratchet_pct, '0.5', '%'), 'Once up this much, protect a floor of gains. 0=off.') +
+          f('Ratchet lock', num('aj-cfg-profit_ratchet_lock_pct', cfg.profit_ratchet_lock_pct, '0.5', '%'), 'The floor gain the ratchet exits at if price falls back.') +
+          f('TP ladder', yn('aj-cfg-tp_ladder', cfg.tp_ladder), 'Scale out in thirds at take-profit, 1.5×, and 2× instead of all at once.') +
+          f('ATR stop', num('aj-cfg-atr_stop_mult', cfg.atr_stop_mult, '0.1', '×ATR'), 'Volatility-aware stop: exit at mult × ATR below entry. 0=off.') +
+          f('ATR period', num('aj-cfg-atr_period', cfg.atr_period, null, 'bars'), 'Lookback for the Average True Range.')
+        )}
+
+        ${group('⚡ 100x — adaptive brain', 'The agent tunes itself to results & regime', false,
+          f('Adaptive thresholds', yn('aj-cfg-adaptive_thresholds', cfg.adaptive_thresholds), 'Tighten/loosen entry thresholds from the recent realized hit-rate.') +
+          f('Regime adaptive', yn('aj-cfg-regime_adaptive', cfg.regime_adaptive), 'Shift profile on bull / bear / chop (detected from SPY).') +
+          f('Pyramiding', yn('aj-cfg-pyramiding', cfg.pyramiding), 'Allow disciplined adds to a winning position.') +
+          f('Pyramid max adds', num('aj-cfg-pyramid_max_adds', cfg.pyramid_max_adds, null, 'adds'), 'How many times you can add to one position.') +
+          f('Pyramid min gain', num('aj-cfg-pyramid_min_gain_pct', cfg.pyramid_min_gain_pct, '0.5', '%'), 'A position must be up this much before adding.') +
+          f('Signal scorecard', yn('aj-cfg-signal_scorecard', cfg.signal_scorecard), 'Track realized win-rate by entry conviction.') +
+          f('Opportunity radar', yn('aj-cfg-opportunity_radar', cfg.opportunity_radar), 'Rank the universe each cycle and trade only the best setups.') +
+          f('Radar top-K', num('aj-cfg-opportunity_radar_top_k', cfg.opportunity_radar_top_k, null, 'names'), 'How many top-ranked names the radar keeps.')
+        )}
+
+        ${group('⚡ 100x — autonomy', 'Let the agent run itself (paper)', false,
+          f('Auto-run', yn('aj-cfg-auto_run_enabled', cfg.auto_run_enabled), 'Run cycles automatically during market hours.') +
+          f('Auto-run interval', num('aj-cfg-auto_run_interval_min', cfg.auto_run_interval_min, null, 'min'), 'Minutes between automatic cycles.') +
+          f('Health auto-halt', yn('aj-cfg-health_autohalt', cfg.health_autohalt), 'Self-halt on fill-rate collapse, divergence, or a broken audit chain.') +
+          f('Preset escalation', yn('aj-cfg-auto_preset_escalation', cfg.auto_preset_escalation), 'Earn your way up conservative→moderate→aggressive; step down on drawdown.') +
+          f('Daily reflection', yn('aj-cfg-daily_reflection', cfg.daily_reflection), 'Write an end-of-day self-review of what worked.') +
+          f('Pre-market briefing', yn('aj-cfg-premarket_briefing', cfg.premarket_briefing), 'Build a ranked “what to watch” list before the open.')
+        )}
+
         <div class="aj-cfg-savebar">
           <button class="btn" id="aj-save-cfg">Save config</button>
           <span class="muted aj-cfg-savenote">Live trading isn’t editable here — it’s gated behind the CLI + VERIFY checks.</span>
@@ -4492,6 +4541,45 @@ async function loadTradingView() {
       risk_off_vix: vNum('aj-cfg-risk_off_vix'),
       dry_run: vBool('aj-cfg-dry_run'),
       notify_fills: vBool('aj-cfg-notify_fills'),
+      // 100x layer — smart sizing
+      kelly_sizing: vBool('aj-cfg-kelly_sizing'),
+      kelly_fraction: vNum('aj-cfg-kelly_fraction'),
+      volatility_target_pct: vNum('aj-cfg-volatility_target_pct'),
+      compound_sizing: vBool('aj-cfg-compound_sizing'),
+      compound_base_equity_usd: vNum('aj-cfg-compound_base_equity_usd'),
+      symbol_performance_weighting: vBool('aj-cfg-symbol_performance_weighting'),
+      drawdown_throttle_pct: vNum('aj-cfg-drawdown_throttle_pct'),
+      // entry alpha
+      momentum_filter_days: vNum('aj-cfg-momentum_filter_days'),
+      mean_reversion_rsi_max: vNum('aj-cfg-mean_reversion_rsi_max'),
+      relative_strength_filter: vBool('aj-cfg-relative_strength_filter'),
+      relative_strength_lookback_days: vNum('aj-cfg-relative_strength_lookback_days'),
+      max_book_correlation: vNum('aj-cfg-max_book_correlation'),
+      earnings_blackout_days: vNum('aj-cfg-earnings_blackout_days'),
+      max_sector_weight_pct: vNum('aj-cfg-max_sector_weight_pct'),
+      // smart exits
+      max_holding_days: vNum('aj-cfg-max_holding_days'),
+      profit_ratchet_pct: vNum('aj-cfg-profit_ratchet_pct'),
+      profit_ratchet_lock_pct: vNum('aj-cfg-profit_ratchet_lock_pct'),
+      tp_ladder: vBool('aj-cfg-tp_ladder'),
+      atr_stop_mult: vNum('aj-cfg-atr_stop_mult'),
+      atr_period: vNum('aj-cfg-atr_period'),
+      // adaptive brain
+      adaptive_thresholds: vBool('aj-cfg-adaptive_thresholds'),
+      regime_adaptive: vBool('aj-cfg-regime_adaptive'),
+      pyramiding: vBool('aj-cfg-pyramiding'),
+      pyramid_max_adds: vNum('aj-cfg-pyramid_max_adds'),
+      pyramid_min_gain_pct: vNum('aj-cfg-pyramid_min_gain_pct'),
+      signal_scorecard: vBool('aj-cfg-signal_scorecard'),
+      opportunity_radar: vBool('aj-cfg-opportunity_radar'),
+      opportunity_radar_top_k: vNum('aj-cfg-opportunity_radar_top_k'),
+      // autonomy
+      auto_run_enabled: vBool('aj-cfg-auto_run_enabled'),
+      auto_run_interval_min: vNum('aj-cfg-auto_run_interval_min'),
+      health_autohalt: vBool('aj-cfg-health_autohalt'),
+      auto_preset_escalation: vBool('aj-cfg-auto_preset_escalation'),
+      daily_reflection: vBool('aj-cfg-daily_reflection'),
+      premarket_briefing: vBool('aj-cfg-premarket_briefing'),
     };
     const body = {};
     Object.keys(raw).forEach(k => { if (raw[k] !== undefined) body[k] = raw[k]; });
@@ -6888,9 +6976,9 @@ function renderCongressView(data) {
   const topTickers = tickerSummary.slice(0, 20);
   const heatmapHTML = topTickers.map(t => {
     const color = t.sentiment === 'BULLISH' ? 'var(--green)' : t.sentiment === 'BEARISH' ? 'var(--red)' : 'var(--amber)';
-    const opacity = Math.max(0.4, Math.min(1.0, t.total_trades / (topTickers[0]?.total_trades || 1)));
+    const opacity = Math.min(1.0, Math.max(0.4, t.total_trades / (topTickers[0]?.total_trades || 1)) + 0.1);
     return `
-      <div class="congress-heatmap-item" data-congress-ticker="${_esc(t.ticker)}" style="cursor:pointer;border-color:${color};opacity:${opacity + 0.1}">
+      <div class="congress-heatmap-item" data-congress-ticker="${_esc(t.ticker)}" style="cursor:pointer;border-color:${color};opacity:${opacity}">
         <div style="font-size:12px;font-weight:700;color:${color}">${_esc(t.ticker)}</div>
         <div style="font-size:9px;color:var(--text-dim)">${t.total_trades} trades</div>
         <div style="font-size:9px;color:${color}">${t.buy_pct}% BUY</div>
@@ -7446,7 +7534,10 @@ async function analyzeGex(sym) {
     }
 
     // Dealer Hedge Estimates table
-    var hedges = g.dealer_hedges || g.hedge_estimates || [];
+    var hedges = Array.isArray(g.dealer_hedge_estimates) ? g.dealer_hedge_estimates
+      : Object.entries(g.dealer_hedge_estimates || g.dealer_hedges || g.hedge_estimates || {}).map(function (kv) {
+          return Object.assign({move: kv[0]}, kv[1]);
+        });
     if (hedges.length) {
       html += '<div class="panel mb-8"><div class="panel-header"><span class="panel-title">DEALER HEDGE ESTIMATES</span></div>'
         + '<div class="panel-body"><table class="data-table"><thead><tr><th>Move</th><th>Price</th><th>Delta Shares</th></tr></thead><tbody>';
@@ -7515,10 +7606,26 @@ async function mapContagion(sym) {
     if (data.error) throw new Error(data.error);
 
     var connections = data.connections || data.connected_companies || [];
+    if (!connections.length && Array.isArray(data.nodes)) {
+      // Build connection rows from nodes joined with edges (by target ticker)
+      var edgeByTarget = {};
+      (data.edges || []).forEach(function (e) { edgeByTarget[e.target] = e; });
+      connections = data.nodes.map(function (n) {
+        var e = edgeByTarget[n.ticker] || {};
+        return {
+          ticker: n.ticker,
+          name: n.name,
+          relationship: n.relationship || e.type,
+          weight: e.weight,
+          revenue_pct: e.revenue_pct,
+          context: e.context,
+        };
+      });
+    }
     var html = '<div class="kpi-grid" style="display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:16px">'
       + '<div class="kpi-card"><div class="form-label">Total Connections</div><div style="font-size:18px;font-weight:700">' + connections.length + '</div></div>'
       + '<div class="kpi-card"><div class="form-label">Filing Date</div><div style="font-size:14px">' + (data.filing_date || '—') + '</div></div>'
-      + '<div class="kpi-card"><div class="form-label">Company</div><div style="font-size:14px">' + (data.company || symbol) + '</div></div>'
+      + '<div class="kpi-card"><div class="form-label">Company</div><div style="font-size:14px">' + (data.company_name || data.company || symbol) + '</div></div>'
       + '<div class="kpi-card"><div class="form-label">Sector</div><div style="font-size:14px">' + (data.sector || '—') + '</div></div>'
       + '</div>';
 
@@ -7565,13 +7672,13 @@ async function assessContagionImpact() {
   results.innerHTML = existing + '<div id="contagion-impact-loading" class="loading" style="margin-top:12px"><div class="spinner"></div> Assessing impact propagation...</div>';
 
   try {
-    var data = await API.get('/api/contagion/' + symbol + '/impact');
+    var data = await API.get('/api/contagion/impact/' + symbol);
     if (!results.isConnected) return; // navigated away during fetch
     if (data.error) throw new Error(data.error);
     var loadEl = document.getElementById('contagion-impact-loading');
     if (loadEl) loadEl.remove();
 
-    var impacts = data.impacts || data.impact || [];
+    var impacts = data.impacted_companies || data.impacts || data.impact || [];
     if (impacts.length) {
       var impactHtml = '<div class="panel mb-8" style="margin-top:12px"><div class="panel-header"><span class="panel-title">IMPACT ASSESSMENT</span></div>'
         + '<div class="panel-body"><table class="data-table"><thead><tr>'
@@ -7580,16 +7687,18 @@ async function assessContagionImpact() {
       for (var i = 0; i < impacts.length; i++) {
         var imp = impacts[i];
         var riskCls = '';
-        var riskLvl = (imp.risk_level || '').toUpperCase();
+        var riskVal = imp.contagion_risk || imp.risk_level || '';
+        var riskLvl = riskVal.toUpperCase();
         if (riskLvl === 'HIGH' || riskLvl === 'CRITICAL') riskCls = 'col-negative';
         else if (riskLvl === 'MEDIUM' || riskLvl === 'MODERATE') riskCls = 'col-amber';
         else riskCls = 'col-positive';
+        var impScore = (imp.impact_score != null) ? imp.impact_score : imp.score;
         impactHtml += '<tr>'
           + '<td><span class="col-symbol" style="cursor:pointer" onclick="openResearch(\'' + _jesc(imp.ticker || '') + '\')">' + _esc(imp.ticker || '—') + '</span></td>'
-          + '<td style="color:' + _alphaScoreColor(imp.score || 0) + '">' + _alphaFmtNum(imp.score, 1) + '</td>'
+          + '<td style="color:' + _alphaScoreColor(impScore || 0) + '">' + _alphaFmtNum(impScore, 1) + '</td>'
           + '<td>' + _alphaFmtNum(imp.correlation, 2) + '</td>'
           + '<td>' + (imp.lag_days != null ? imp.lag_days : '—') + '</td>'
-          + '<td><span class="signal-badge ' + riskCls + '" style="font-size:9px">' + (imp.risk_level || '—') + '</span></td>'
+          + '<td><span class="signal-badge ' + riskCls + '" style="font-size:9px">' + (riskVal || '—') + '</span></td>'
           + '</tr>';
       }
       impactHtml += '</tbody></table></div></div>';
@@ -7905,7 +8014,7 @@ async function analyzeNarrative(sym) {
     if (data.error) throw new Error(data.error);
 
     var dominant = data.dominant_narrative || '—';
-    var phase = (data.phase || 'UNKNOWN').toUpperCase();
+    var phase = (data.narrative_phase || data.phase || 'UNKNOWN').toUpperCase();
     var phaseCls = '';
     if (phase === 'EMERGENCE' || phase === 'ACCELERATION') phaseCls = 'col-positive';
     else if (phase === 'CONSENSUS') phaseCls = 'col-amber';
@@ -8025,7 +8134,7 @@ async function analyzeSyntheticInsider(sym) {
     else if (alertLevel === 'DORMANT') alertStyle = 'color:var(--text-dim)';
 
     var convergence = data.convergence_count != null ? data.convergence_count : 0;
-    var totalChannels = data.total_channels || 6;
+    var totalChannels = data.total_channels || Object.keys(data.channels || {}).length || 6;
     var signal = data.signal || '—';
 
     // Large composite score display
@@ -8043,7 +8152,10 @@ async function analyzeSyntheticInsider(sym) {
       + '</div>';
 
     // Channel Breakdown
-    var channels = data.channels || data.channel_breakdown || [];
+    var channels = Array.isArray(data.channels) ? data.channels
+      : Object.entries(data.channels || data.channel_breakdown || {}).map(function (kv) {
+          return Object.assign({channel: kv[0]}, kv[1]);
+        });
     if (channels.length) {
       html += '<div class="panel mb-8"><div class="panel-header"><span class="panel-title">CHANNEL BREAKDOWN</span></div>'
         + '<div class="panel-body"><table class="data-table"><thead><tr>'
@@ -8166,10 +8278,10 @@ async function detectReflexivity(sym) {
 
     // Loop type cards
     var loopTypes = [
-      {key: 'equity_feedback', label: 'EQUITY FEEDBACK'},
-      {key: 'dilution_spiral', label: 'DILUTION SPIRAL'},
-      {key: 'index_inclusion', label: 'INDEX INCLUSION'},
-      {key: 'short_squeeze', label: 'SHORT SQUEEZE'}
+      {key: 'EQUITY_FEEDBACK', label: 'EQUITY FEEDBACK'},
+      {key: 'DILUTION_SPIRAL', label: 'DILUTION SPIRAL'},
+      {key: 'INDEX_INCLUSION', label: 'INDEX INCLUSION'},
+      {key: 'SHORT_SQUEEZE', label: 'SHORT SQUEEZE'}
     ];
     // Index the active_loops array by its `type` field so the per-type cards
     // populate (the old code read data.loops[key], but the backend sends an
@@ -8188,8 +8300,9 @@ async function detectReflexivity(sym) {
       var strength = loop.strength != null ? loop.strength : 0;
       var direction = (loop.direction || '').toUpperCase();
       var dirCls = direction === 'VIRTUOUS' ? 'col-positive' : (direction === 'VICIOUS' ? 'col-negative' : '');
-      var proximity = loop.proximity != null ? _alphaFmtNum(loop.proximity, 1) + '%' : '—';
-      var timeline = loop.timeline || '—';
+      var proximityVal = loop.proximity_to_trigger_pct != null ? loop.proximity_to_trigger_pct : loop.proximity;
+      var proximity = proximityVal != null ? _alphaFmtNum(proximityVal, 1) + '%' : '—';
+      var timeline = loop.acceleration_timeline || loop.timeline || '—';
       var detail = loop.detail || loop.description || '—';
 
       html += '<div class="panel" style="margin-bottom:0">'
@@ -8219,7 +8332,7 @@ async function detectReflexivity(sym) {
     html += '</div>';
 
     // Fundamentals snapshot
-    var fundamentals = data.fundamentals || {};
+    var fundamentals = data.fundamentals_snapshot || data.fundamentals || {};
     if (Object.keys(fundamentals).length) {
       html += '<div class="panel mb-8"><div class="panel-header"><span class="panel-title">FUNDAMENTALS SNAPSHOT</span></div>'
         + '<div class="panel-body" style="display:grid;grid-template-columns:repeat(4,1fr);gap:8px;font-size:11px">';
@@ -8274,7 +8387,8 @@ async function loadLiquidityData() {
     else if (regime === 'WARNING') regimeCls = 'col-negative';
     else if (regime === 'CRITICAL') { regimeCls = 'col-negative'; regimeStyle = 'color:var(--magenta, #ff44ff)'; }
 
-    var positionSizing = data.position_sizing != null ? _alphaFmtNum(data.position_sizing, 2) + 'x' : '—';
+    var positionSizingVal = data.position_sizing_multiplier != null ? data.position_sizing_multiplier : data.position_sizing;
+    var positionSizing = positionSizingVal != null ? _alphaFmtNum(positionSizingVal, 2) + 'x' : '—';
     var percentile = data.percentile_rank != null ? _alphaFmtNum(data.percentile_rank, 1) + '%' : '—';
     var recommendation = data.recommendation || '';
 
@@ -8298,7 +8412,10 @@ async function loadLiquidityData() {
     }
 
     // Indicators table
-    var indicators = data.indicators || [];
+    var indicators = Array.isArray(data.indicators) ? data.indicators
+      : Object.entries(data.indicators || {}).map(function (kv) {
+          return Object.assign({indicator: kv[0]}, kv[1]);
+        });
     if (indicators.length) {
       html += '<div class="panel mb-8"><div class="panel-header"><span class="panel-title">STRESS INDICATORS</span></div>'
         + '<div class="panel-body"><table class="data-table"><thead><tr>'
@@ -8377,20 +8494,30 @@ async function nowcastAltData(sym) {
 
     var score = data.nowcast_score != null ? data.nowcast_score : (data.score || 0);
     var beatProb = data.beat_probability != null ? data.beat_probability : null;
-    var surprise = data.estimated_surprise != null ? data.estimated_surprise : null;
-    var confidence = data.confidence || '—';
+    var surprise = data.estimated_surprise_pct != null ? data.estimated_surprise_pct : (data.estimated_surprise != null ? data.estimated_surprise : null);
+    var confidence = data.confidence_level || data.confidence || '—';
 
-    var beatBadgeCls = beatProb != null && beatProb >= 60 ? 'col-positive' : (beatProb != null && beatProb >= 40 ? 'col-amber' : 'col-negative');
+    var beatProbUpper = (typeof beatProb === 'string' ? beatProb : '').toUpperCase();
+    var beatBadgeCls;
+    if (typeof beatProb === 'number') {
+      beatBadgeCls = beatProb >= 60 ? 'col-positive' : (beatProb >= 40 ? 'col-amber' : 'col-negative');
+    } else {
+      beatBadgeCls = beatProbUpper.indexOf('BEAT') >= 0 ? 'col-positive' : (beatProbUpper.indexOf('MISS') >= 0 ? 'col-negative' : 'col-amber');
+    }
+    var beatProbText = beatProb == null ? '—' : (typeof beatProb === 'number' ? _alphaFmtNum(beatProb, 1) + '%' : beatProb);
 
     var html = '<div class="kpi-grid" style="display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:16px">'
       + '<div class="kpi-card"><div class="form-label">Nowcast Score</div><div style="font-size:18px;font-weight:700;color:' + _alphaScoreColor(score) + '">' + _alphaFmtNum(score, 1) + '</div></div>'
-      + '<div class="kpi-card"><div class="form-label">Beat Probability</div><div><span class="signal-badge ' + beatBadgeCls + '" style="font-size:10px">' + (beatProb != null ? _alphaFmtNum(beatProb, 1) + '%' : '—') + '</span></div></div>'
+      + '<div class="kpi-card"><div class="form-label">Beat Probability</div><div><span class="signal-badge ' + beatBadgeCls + '" style="font-size:10px">' + beatProbText + '</span></div></div>'
       + '<div class="kpi-card"><div class="form-label">Est. Surprise %</div><div style="font-size:18px;font-weight:700;color:' + (surprise != null && surprise >= 0 ? 'var(--green)' : 'var(--red, #ff4444)') + '">' + (surprise != null ? (surprise >= 0 ? '+' : '') + _alphaFmtNum(surprise, 2) + '%' : '—') + '</div></div>'
       + '<div class="kpi-card"><div class="form-label">Confidence</div><div style="font-size:14px;font-weight:600">' + confidence + '</div></div>'
       + '</div>';
 
     // Signal Breakdown
-    var signals = data.signals || data.signal_breakdown || [];
+    var signals = Array.isArray(data.signals) ? data.signals
+      : Object.entries(data.signals || data.signal_breakdown || {}).map(function (kv) {
+          return Object.assign({signal: kv[0]}, kv[1]);
+        });
     if (signals.length) {
       html += '<div class="panel mb-8"><div class="panel-header"><span class="panel-title">SIGNAL BREAKDOWN</span></div>'
         + '<div class="panel-body"><table class="data-table"><thead><tr>'

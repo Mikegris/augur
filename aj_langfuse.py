@@ -15,6 +15,12 @@ from typing import Any, Dict
 
 log = logging.getLogger("augur.aj_langfuse")
 
+# Lazy module-level singleton. The Langfuse SDK spins up a background flush
+# thread + HTTP session per client instance, so building a fresh one per cycle
+# (as emit_cycle_trace runs every cycle of a long-running auto_run) would leak
+# threads and sockets. Reuse one client across cycles instead.
+_LF_CLIENT = None
+
 
 def enabled() -> bool:
     return bool(os.environ.get("LANGFUSE_PUBLIC_KEY")
@@ -22,11 +28,14 @@ def enabled() -> bool:
 
 
 def _client():
-    from langfuse import Langfuse
-    return Langfuse(
-        public_key=os.environ.get("LANGFUSE_PUBLIC_KEY"),
-        secret_key=os.environ.get("LANGFUSE_SECRET_KEY"),
-        host=os.environ.get("LANGFUSE_HOST", "http://localhost:3000"))
+    global _LF_CLIENT
+    if _LF_CLIENT is None:
+        from langfuse import Langfuse
+        _LF_CLIENT = Langfuse(
+            public_key=os.environ.get("LANGFUSE_PUBLIC_KEY"),
+            secret_key=os.environ.get("LANGFUSE_SECRET_KEY"),
+            host=os.environ.get("LANGFUSE_HOST", "http://localhost:3000"))
+    return _LF_CLIENT
 
 
 def emit_cycle_trace(summary: Dict[str, Any]) -> Dict[str, Any]:
@@ -43,9 +52,18 @@ def emit_cycle_trace(summary: Dict[str, Any]) -> Dict[str, Any]:
         for p in (summary.get("proposals") or []):
             # Redact: emit only non-sensitive fields. A proposal's thesis/qty
             # and the cycle's P&L are portfolio data and must NOT leave the box
-            # to a (possibly remote) LANGFUSE_HOST.
-            safe = {k: p.get(k) for k in ("symbol", "side", "result")} \
-                if isinstance(p, dict) else {}
+            # to a (possibly remote) LANGFUSE_HOST. 'result' is an open-ended
+            # object that can carry qty/avg_fill_price/fees/pnl, so emit only a
+            # coarse status string from it, never the whole object.
+            if isinstance(p, dict):
+                safe = {"symbol": p.get("symbol"), "side": p.get("side")}
+                res = p.get("result")
+                if isinstance(res, dict):
+                    safe["result"] = res.get("state") or res.get("status")
+                elif isinstance(res, str):
+                    safe["result"] = res
+            else:
+                safe = {}
             trace.span(name="proposal", metadata=safe)
         trace.span(name="reconcile", metadata={"status": summary.get("reconcile")})
         trace.span(name="score", metadata=summary.get("scored") or {})

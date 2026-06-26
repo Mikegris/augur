@@ -289,7 +289,7 @@ def markowitz_optimize(
     ret, vol, sharpe = _portfolio_stats(w_opt, mean, cov, rf)
     frontier = _efficient_frontier(mean, cov, bounds, rf)
 
-    return {
+    out = {
         "symbols": used,
         "weights": {s: float(round(w_opt[i], 6)) for i, s in enumerate(used)},
         "expected_return_pct": round(ret * 100, 4),
@@ -300,6 +300,13 @@ def markowitz_optimize(
         "efficient_frontier": frontier,
         "converged": bool(res.success),
     }
+    # For the equality-constrained objectives a failed solve usually means the
+    # target is infeasible under the box constraints; we returned the feasible
+    # start point. Surface that explicitly so the UI can explain the fallback
+    # rather than presenting the naive start as an "optimal" portfolio.
+    if not res.success and objective in ("target_return", "target_vol"):
+        out["warning"] = "target infeasible under constraints; returning feasible start"
+    return out
 
 
 def _efficient_frontier(
@@ -379,11 +386,17 @@ def risk_parity(symbols: Sequence[str], period: str = "2y") -> Dict:
         constraints=[_sum_to_one_constraint()],
         options={"maxiter": 1000, "ftol": 1e-12},
     )
-    w = np.array(res.x if res.success else w0)
+    w = np.array(res.x if res.success else w0, dtype=float)
+    # A diverged SLSQP can hand back NaN/inf in res.x; NaN survives the
+    # (w < 0) clip below and poisons the whole weight vector. Sanitize first
+    # and fall back to equal weights if nothing finite remains.
+    w = np.where(np.isfinite(w), w, 0.0)
     w = np.where(w < 0, 0.0, w)
     s = w.sum()
     if s > EPS:
         w = w / s
+    else:
+        w = np.full(n, 1.0 / n)
 
     ret, vol, sharpe = _portfolio_stats(w, mean, cov, DEFAULT_RF)
     port_var = float(np.dot(w, cov @ w))
@@ -434,7 +447,11 @@ def black_litterman(
     sym_to_idx = {s: i for i, s in enumerate(used)}
 
     # ── Market weights from supplied caps ──
-    caps = np.array([float(mkt_caps.get(s, 0.0)) for s in used], dtype=float)
+    # `used` symbols are upper-cased by _estimate_cov_and_mean; the caller may
+    # key mkt_caps in original/lower case. Normalize so lookups don't all miss
+    # and silently collapse to equal weights, discarding the supplied caps.
+    caps_norm = {str(k).upper(): v for k, v in (mkt_caps or {}).items()}
+    caps = np.array([float(caps_norm.get(s, 0.0)) for s in used], dtype=float)
     if caps.sum() <= 0:
         # Fallback to equal weights so we still return something useful.
         w_mkt = np.full(n, 1.0 / n)
@@ -546,7 +563,7 @@ def compare_to_current(
     try:
         _, cov, used = _estimate_cov_and_mean(syms, period=period)
         if used:
-            d = np.array([delta.get(s, 0.0) for s in used])
+            d = np.array([delta.get(s, delta.get(s.upper(), 0.0)) for s in used])
             te = math.sqrt(max(float(d @ cov @ d), 0.0))
             te_pct = round(te * 100, 4)
     except Exception as e:

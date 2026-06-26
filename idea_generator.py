@@ -285,7 +285,9 @@ def _weighted_pick(pools, exclude=None):
     if not sources:
         return None
 
-    # If watchlist is empty/excluded, redistribute its weight pro-rata
+    # Only non-empty pools contribute sources/weights above; random.choices
+    # normalizes the remaining weights, so an absent (empty) pool's weight is
+    # effectively redistributed pro-rata across the present sources.
     src = random.choices(sources, weights=weights, k=1)[0]
     candidates = [c for c in pools[src] if c[0] not in exclude]
     if not candidates:
@@ -1076,10 +1078,13 @@ def _compute_peers(symbol: str, sector: Optional[str]):
             continue
         sorted_vals = sorted(vals, key=lambda x: x[1], reverse=higher_better)
         order = [s for s, _ in sorted_vals]
-        try:
-            pick_pos = order.index(symbol.upper()) if symbol.upper() in order else order.index(symbol)
-        except ValueError:
+        # Locate the pick case-insensitively: `order` holds raw (possibly
+        # mixed-case) symbols, which may not match symbol.upper() or symbol.
+        order_upper = [str(s).upper() for s in order]
+        sym_u = symbol.upper()
+        if sym_u not in order_upper:
             continue
+        pick_pos = order_upper.index(sym_u)
         ranks[key] = {
             "label": label,
             "rank": pick_pos + 1,
@@ -1178,7 +1183,7 @@ def _compute_sizing(price, vol_pct, portfolio_value, stop_pct):
 
     Returns a list of tiers, plus a `notes` field explaining the math.
     """
-    if not price or not portfolio_value:
+    if not price or price <= 0 or not portfolio_value:
         return {"available": False, "reason": "Need portfolio value + price to size"}
 
     # Default stop_pct: derived from volatility — 1× annualized vol clamped 5–25%.
@@ -1283,8 +1288,8 @@ def _compute_correlation_to_holdings(symbol, asset_class):
         verdict = "CONCENTRATES"
         verdict_detail = (
             f"Average correlation {avg_corr:.2f} with {high_count} high-corr "
-            "holdings — adding {symbol} would reinforce existing exposure."
-        ).format(symbol=symbol)
+            f"holdings — adding {symbol} would reinforce existing exposure."
+        )
     elif avg_corr <= 0.3:
         verdict = "DIVERSIFIES"
         verdict_detail = (

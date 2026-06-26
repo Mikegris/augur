@@ -292,40 +292,47 @@ def init_db():
     c.execute("CREATE INDEX IF NOT EXISTS idx_institutional_cache_cik ON institutional_cache(fund_cik)")
 
     # ── Migrations: add account_id columns to existing tables ──
-    try:
-        c.execute("ALTER TABLE portfolio ADD COLUMN account_id INTEGER REFERENCES accounts(id) ON DELETE SET NULL")
-    except sqlite3.OperationalError:
-        pass  # column already exists
-    try:
-        c.execute("ALTER TABLE transactions ADD COLUMN account_id INTEGER REFERENCES accounts(id) ON DELETE SET NULL")
-    except sqlite3.OperationalError:
-        pass  # column already exists
+    # Serialize the racy ALTER TABLE migrations and the settings seeding under
+    # the same lock every other writer uses. start() is reachable from several
+    # boot paths, so the cache warmer / a request thread may write concurrently;
+    # without this an ALTER could interleave with another writer and a parallel
+    # get_conn() could observe a half-migrated schema. _write_lock is reentrant,
+    # so _migrate_settings's nested acquisition below is safe.
+    with _write_lock:
+        try:
+            c.execute("ALTER TABLE portfolio ADD COLUMN account_id INTEGER REFERENCES accounts(id) ON DELETE SET NULL")
+        except sqlite3.OperationalError:
+            pass  # column already exists
+        try:
+            c.execute("ALTER TABLE transactions ADD COLUMN account_id INTEGER REFERENCES accounts(id) ON DELETE SET NULL")
+        except sqlite3.OperationalError:
+            pass  # column already exists
 
-    c.execute("CREATE INDEX IF NOT EXISTS idx_portfolio_account ON portfolio(account_id)")
-    c.execute("CREATE INDEX IF NOT EXISTS idx_transactions_account ON transactions(account_id)")
+        c.execute("CREATE INDEX IF NOT EXISTS idx_portfolio_account ON portfolio(account_id)")
+        c.execute("CREATE INDEX IF NOT EXISTS idx_transactions_account ON transactions(account_id)")
 
-    # Default settings
-    defaults = {
-        "refresh_interval": "60",
-        "currency": "USD",
-        "theme": "terminal-green",
-        "show_crypto": "true",
-        "benchmark": "SPY",
-    }
-    for k, v in defaults.items():
-        c.execute("INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)", (k, v))
+        # Default settings
+        defaults = {
+            "refresh_interval": "60",
+            "currency": "USD",
+            "theme": "terminal-green",
+            "show_crypto": "true",
+            "benchmark": "SPY",
+        }
+        for k, v in defaults.items():
+            c.execute("INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)", (k, v))
 
-    # ── Settings schema version ──
-    # Tracks which migration pass has run against the settings table. Old
-    # releases stored typo'd or now-renamed keys (e.g. `show_crypto`
-    # accidentally stored as `showcrypto`); without a version sentinel we
-    # have no way to know whether a given key in the table is a stale
-    # leftover or a legitimate user override. Bump SCHEMA_VERSION below
-    # and add a corresponding case in _migrate_settings() to retire keys.
-    c.execute("INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)",
-              ("__schema_version__", "1"))
+        # ── Settings schema version ──
+        # Tracks which migration pass has run against the settings table. Old
+        # releases stored typo'd or now-renamed keys (e.g. `show_crypto`
+        # accidentally stored as `showcrypto`); without a version sentinel we
+        # have no way to know whether a given key in the table is a stale
+        # leftover or a legitimate user override. Bump SCHEMA_VERSION below
+        # and add a corresponding case in _migrate_settings() to retire keys.
+        c.execute("INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)",
+                  ("__schema_version__", "1"))
 
-    conn.commit()
+        conn.commit()
     # Run settings migrations after defaults so we can prune renamed keys.
     try:
         _migrate_settings(conn)
@@ -351,7 +358,12 @@ def _migrate_settings(conn):
     """Run idempotent settings migrations. Called at the end of init_db()."""
     cur = conn.execute("SELECT value FROM settings WHERE key='__schema_version__'")
     row = cur.fetchone()
-    current = int(row["value"]) if row else 0
+    # A corrupt/non-numeric sentinel from an older build should be treated as
+    # "needs migration" (0) rather than aborting the migration entirely.
+    try:
+        current = int(row["value"]) if row else 0
+    except (TypeError, ValueError):
+        current = 0
     if current >= SCHEMA_VERSION:
         # Even at the latest version, sweep retired keys (cheap + safe).
         if _RETIRED_SETTING_KEYS:
@@ -483,6 +495,12 @@ def add_position(symbol, name, shares, avg_cost, asset_type="stock", sector="", 
             ).fetchone()
         if existing:
             total_shares = existing["shares"] + shares
+            # Snap float-dust residuals (e.g. 1e-13 left by fractional-share
+            # sells) to exactly 0 so the position reads flat instead of
+            # carrying a tiny non-zero count that would yield a garbage
+            # weighted-average cost basis below.
+            if abs(total_shares) < 1e-9:
+                total_shares = 0.0
             if shares < 0:
                 # A partial sell: the cost basis (avg_cost) is unchanged by a
                 # sale — only the share count drops. The old weighted-average
@@ -509,6 +527,14 @@ def add_position(symbol, name, shares, avg_cost, asset_type="stock", sector="", 
             )
             row_id = existing["id"]
         else:
+            # No existing position: a SELL (shares<0) here would insert a
+            # phantom short with the sell price as basis. Reject it — the
+            # over-sell protection above only covers the average-down path.
+            if shares < 0:
+                raise ValueError(
+                    f"Cannot sell {abs(shares)} shares of {symbol.upper()}; "
+                    f"no position held"
+                )
             cur = conn.execute(
                 "INSERT INTO portfolio (symbol, name, shares, avg_cost, asset_type, sector, currency, notes, account_id) VALUES (?,?,?,?,?,?,?,?,?)",
                 (symbol.upper(), name, shares, avg_cost, asset_type, sector, currency, notes, account_id)
@@ -518,7 +544,14 @@ def add_position(symbol, name, shares, avg_cost, asset_type="stock", sector="", 
     return row_id
 
 
-def update_position(pos_id, shares=None, avg_cost=None, notes=None, account_id=None):
+# Sentinel distinguishing "argument omitted → keep existing value" from an
+# explicit None (e.g. account_id=None means "unassign this position from its
+# account"). Using None as the default would make it impossible to clear a
+# field via update_position.
+_UNSET = object()
+
+
+def update_position(pos_id, shares=None, avg_cost=None, notes=None, account_id=_UNSET):
     with _write_lock:
         conn = get_conn()
         pos = conn.execute("SELECT * FROM portfolio WHERE id = ?", (pos_id,)).fetchone()
@@ -527,7 +560,7 @@ def update_position(pos_id, shares=None, avg_cost=None, notes=None, account_id=N
         new_shares = shares if shares is not None else pos["shares"]
         new_cost = avg_cost if avg_cost is not None else pos["avg_cost"]
         new_notes = notes if notes is not None else pos["notes"]
-        new_acct = account_id if account_id is not None else pos["account_id"]
+        new_acct = pos["account_id"] if account_id is _UNSET else account_id
         conn.execute(
             "UPDATE portfolio SET shares = ?, avg_cost = ?, notes = ?, account_id = ? WHERE id = ?",
             (new_shares, new_cost, new_notes, new_acct, pos_id)
@@ -615,7 +648,7 @@ def get_transactions(symbol=None, limit=100, account_id=None):
         params.append(account_id)
     where = (" WHERE " + " AND ".join(conditions)) if conditions else ""
     params.append(limit)
-    rows = conn.execute(base + where + " ORDER BY t.date DESC, t.created_at DESC LIMIT ?", params).fetchall()
+    rows = conn.execute(base + where + " ORDER BY COALESCE(t.date, t.created_at) DESC, t.created_at DESC LIMIT ?", params).fetchall()
     return [dict(r) for r in rows]
 
 
@@ -627,7 +660,7 @@ def add_transaction(symbol, action, shares, price, fees=0, date=None, notes="", 
             date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         conn.execute(
             "INSERT INTO transactions (symbol, action, shares, price, total, fees, date, notes, account_id) VALUES (?,?,?,?,?,?,?,?,?)",
-            (symbol.upper(), action.upper(), shares, price, total, fees, date, notes, account_id)
+            (symbol.upper(), (action or "").upper(), shares, price, total, fees, date, notes, account_id)
         )
         conn.commit()
 
@@ -642,8 +675,8 @@ def get_transaction_stats():
         conn = get_conn()
         row = conn.execute(
             """SELECT COUNT(*) AS total_trades,
-                      COALESCE(SUM(upper(action) = 'BUY'), 0) AS buys,
-                      COALESCE(SUM(upper(action) = 'SELL'), 0) AS sells,
+                      COALESCE(SUM(upper(trim(action)) = 'BUY'), 0) AS buys,
+                      COALESCE(SUM(upper(trim(action)) = 'SELL'), 0) AS sells,
                       MIN(date) AS first_trade_date,
                       MAX(date) AS last_trade_date,
                       (SELECT symbol FROM transactions
@@ -847,13 +880,20 @@ def jarvis_log_insights(cards):
             if not title:
                 continue
             action = card.get("action") or {}
+            # Tolerate a non-numeric priority (e.g. 'high' from an LLM card):
+            # fall back to the default 3 rather than raising out of the whole
+            # batch and losing every insight for this briefing.
+            try:
+                prio = int(card.get("priority") or 3)
+            except (TypeError, ValueError):
+                prio = 3
             cur = conn.execute(
                 "INSERT OR IGNORE INTO jarvis_insights "
                 "(day, kind, tone, priority, title, detail, view, symbol) "
                 "VALUES (?,?,?,?,?,?,?,?)",
                 (day, str(card.get("kind") or "info")[:40],
                  str(card.get("tone") or "info")[:10],
-                 int(card.get("priority") or 3), title,
+                 prio, title,
                  (card.get("detail") or "")[:500],
                  (action.get("view") or None), (action.get("symbol") or None)))
             new += cur.rowcount
@@ -870,7 +910,7 @@ def jarvis_insights_since(since_iso, limit=20):
     conn = get_conn()
     rows = conn.execute(
         "SELECT * FROM jarvis_insights WHERE created_at > ? "
-        "ORDER BY priority ASC, id DESC LIMIT ?",
+        "ORDER BY (priority IS NULL), priority ASC, id DESC LIMIT ?",
         (str(since_iso)[:32], max(1, min(int(limit), 50)))).fetchall()
     return [dict(r) for r in rows]
 
@@ -973,7 +1013,11 @@ def set_setting(key, value):
 # silently reset the budget.
 
 def _today_str():
-    return datetime.now().strftime("%Y-%m-%d")
+    # Keyed in UTC so the cap-counter date aligns with prune_ai_call_log's
+    # date('now', ...) (SQLite evaluates that in UTC) and the rest of the
+    # module's UTC dating; local time would roll/double-bucket at a different
+    # instant for users west of UTC.
+    return datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
 
 def get_ai_call_count(date=None):
@@ -1013,6 +1057,12 @@ def save_snapshot(date, total_value, total_cost, total_pnl, total_pnl_pct, posit
     write of the day; if that first write happened while half the
     upstreams were rate-limited, the saved value undercount persisted
     until midnight."""
+    # A NULL/empty date defeats the UNIQUE-conflict dedupe (SQLite allows
+    # multiple NULLs in a UNIQUE column), so every such snapshot would insert
+    # a new row and the once-per-day contract / prune logic would break.
+    # Fall back to today's UTC date so REPLACE can dedupe.
+    if not date:
+        date = datetime.now(timezone.utc).strftime('%Y-%m-%d')
     with _write_lock:
         conn = get_conn()
         conn.execute(
@@ -1027,7 +1077,7 @@ def save_snapshot(date, total_value, total_cost, total_pnl, total_pnl_pct, posit
 def get_snapshots():
     conn = get_conn()
     rows = conn.execute(
-        "SELECT * FROM portfolio_snapshots ORDER BY date ASC"
+        "SELECT * FROM portfolio_snapshots WHERE date IS NOT NULL ORDER BY date ASC"
     ).fetchall()
     # connection reused (thread-local pool)
     return [dict(r) for r in rows]
@@ -1058,6 +1108,9 @@ def get_cached_filing(accession):
 
 def cache_filing(accession, ticker, form_type, filing_date, description, filing_text, ai_result):
     """Cache a filing with its AI analysis."""
+    # A failed AI step may pass None; coerce so the .get() calls below don't
+    # raise AttributeError mid-write (which would roll back the cache insert).
+    ai_result = ai_result or {}
     with _write_lock:
         conn = get_conn()
         key_points = ai_result.get("key_points", [])
@@ -1108,7 +1161,7 @@ def cache_insider_transactions(ticker, transactions):
                         shares, price, value, shares_after, date, form_url, cached_at)
                        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP)""",
                     (
-                        t.get("ticker", ticker).upper(),
+                        (t.get("ticker") or ticker).upper(),
                         t.get("accession", ""),
                         t.get("insider_name", ""),
                         t.get("title", ""),
@@ -1147,6 +1200,10 @@ def get_cached_institutional(fund_cik):
             except Exception:
                 d["holdings"] = []
         d["total_value"] = d.get("total_value_usd", 0)
+        # Drop the raw JSON blob now that it's parsed into d["holdings"] — it
+        # only doubles the payload size when this dict is jsonified to the
+        # frontend; no caller reads holdings_json.
+        d.pop("holdings_json", None)
         return d
     return None
 
@@ -1165,7 +1222,7 @@ def cache_institutional(fund_name, fund_cik, data):
                 str(fund_cik),
                 data.get("filing_date", ""),
                 data.get("period_of_report", ""),
-                data.get("total_value", 0),
+                data.get("total_value", data.get("total_value_usd", 0)),
                 json.dumps(holdings),
             )
         )
@@ -1177,6 +1234,8 @@ def cache_institutional(fund_name, fund_cik, data):
 
 def get_cached_earnings_dossier(symbol, max_age_hours=6):
     """Return cached earnings dossier or None."""
+    if not symbol:
+        return None
     conn = get_conn()
     row = conn.execute(
         """SELECT dossier_json FROM earnings_cache
@@ -1195,6 +1254,8 @@ def get_cached_earnings_dossier(symbol, max_age_hours=6):
 
 def cache_earnings_dossier(symbol, dossier):
     """Cache an earnings dossier dict."""
+    if not symbol:
+        return
     with _write_lock:
         conn = get_conn()
         conn.execute(
@@ -1213,18 +1274,30 @@ def save_scan_history(opportunities, profile_hash, strategy, scanned_at_iso):
         return
     with _write_lock:
         conn = get_conn()
-        rows = [
-            (
-                scanned_at_iso, profile_hash, strategy,
-                (opp.get("symbol") or "").upper(),
-                opp.get("asset_class"),
-                float(opp.get("composite") or 0),
-                opp.get("badge"),
-                rank,
+        rows = []
+        for rank, opp in enumerate(opportunities, start=1):
+            if not opp.get("symbol"):
+                continue
+            # Store NULL (not 0.0) for a missing/non-numeric composite so a
+            # real zero stays distinct and AVG/MAX stats ignore the gap; also
+            # keeps one bad row from raising and aborting the whole batch.
+            raw = opp.get("composite")
+            try:
+                composite = float(raw) if raw is not None else None
+            except (TypeError, ValueError):
+                composite = None
+            rows.append(
+                (
+                    scanned_at_iso, profile_hash, strategy,
+                    (opp.get("symbol") or "").upper(),
+                    opp.get("asset_class"),
+                    composite,
+                    opp.get("badge"),
+                    rank,
+                )
             )
-            for rank, opp in enumerate(opportunities, start=1)
-            if opp.get("symbol")
-        ]
+        if not rows:
+            return
         conn.executemany(
             """INSERT INTO scanner_history
                (scanned_at, profile_hash, strategy, symbol, asset_class, composite_score, badge, rank_in_scan)
@@ -1482,9 +1555,17 @@ def vacuum_db():
         conn.execute("PRAGMA busy_timeout=30000")  # wait out a transient writer
         conn.isolation_level = None  # autocommit: VACUUM can't run in a txn
         conn.execute("VACUUM")
-    except sqlite3.OperationalError:
+    except sqlite3.OperationalError as e:
         # Some SQLite builds reject VACUUM under WAL mode if a reader/writer is
-        # still active. Best-effort — just skip on failure.
+        # still active — that's a benign skip. But this branch also catches
+        # genuinely serious failures (malformed image, disk I/O error, disk
+        # full); surface those at WARNING so a corrupt/full DB isn't silently
+        # swallowed as a routine skip. Still return -1 to preserve the
+        # skip-by-return-value contract callers rely on.
+        msg = str(e).lower()
+        if not ("cannot vacuum" in msg or "locked" in msg or "database is locked" in msg):
+            import logging as _logging
+            _logging.getLogger("augur.db").warning("VACUUM failed: %s", e)
         return -1
     except Exception:
         return -1

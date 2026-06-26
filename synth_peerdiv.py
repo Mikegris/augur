@@ -480,9 +480,11 @@ def _m_congress_net_60d(sym: str) -> Optional[float]:
         if not isinstance(t, dict):
             continue
         raw = (t.get("txn_type_raw") or "").upper()
+        # Match congress.get_congress_summary's classification: "SP" is the
+        # SPOUSE owner code, not a sell, so don't catch it with startswith("S").
         if raw in ("P", "PE"):
             buys += 1
-        elif raw.startswith("S"):
+        elif raw in ("S", "S (PARTIAL)", "SE", "S (EXCHANGE)", "E (EXCHANGE)"):
             sells += 1
     # If we found no trades, return 0.0 (neutral) rather than None — absence
     # of congressional activity is itself a signal, not "unknown".

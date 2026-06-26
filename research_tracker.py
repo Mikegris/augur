@@ -227,8 +227,12 @@ def _close_price_on_or_before(symbol: str, target: datetime) -> Optional[float]:
             break
     if last_close is not None:
         return last_close
-    # Target may pre-date all bars (rare); fall back to the first bar's close.
-    return _safe_float(bars[0].get("close"))
+    # Target pre-dates every available bar (e.g. a long-dormant backlog finally
+    # scored after the 2y chart window rolled past due_at). Returning the OLDEST
+    # bar's close here would fabricate a meaningless realized return, so return
+    # None instead and let the caller skip the row (errors += 1) rather than
+    # committing a bogus score.
+    return None
 
 
 def _direction_matches(direction: Optional[str], realized_return: Optional[float]) -> Optional[int]:
@@ -286,7 +290,11 @@ def score_due_forecasts(max_rows: int = 200) -> Dict[str, int]:
         # close ~30% short of the intended window and corrupting hit-rate /
         # Brier / adaptive weights. Convert to calendar days: ceil(h*7/5).
         horizon_td = int(row["horizon_days"])
-        horizon_cal = math.ceil(horizon_td * 7 / 5)
+        # ceil(h*7/5) assumes exactly 5 trading days per 7 calendar days, which
+        # ignores market holidays (~9/yr ≈ 1 per 63 trading days). Over long
+        # horizons that under-counts calendar days and reads the close early, so
+        # add a small holiday cushion proportional to the horizon.
+        horizon_cal = math.ceil(horizon_td * 7 / 5) + math.ceil(horizon_td / 63)
         due_at = issued + timedelta(days=horizon_cal)
         if due_at > now:
             # NOTE: rows arrive sorted by issued_at, *not* by due_at, so we
@@ -310,7 +318,7 @@ def score_due_forecasts(max_rows: int = 200) -> Dict[str, int]:
 
         with _write_lock:
             try:
-                _get_conn().execute(
+                cur = _get_conn().execute(
                     """
                     UPDATE signal_forecasts
                        SET scored_at = ?, realized_return = ?, hit = ?,
@@ -328,7 +336,12 @@ def score_due_forecasts(max_rows: int = 200) -> Dict[str, int]:
                     ),
                 )
                 _get_conn().commit()
-                scored += 1
+                # Only count as scored when this UPDATE actually wrote the row.
+                # rowcount == 0 means another thread/process already scored it
+                # (the `scored_at IS NULL` guard matched nothing) — skip it
+                # rather than overcounting 'scored'.
+                if cur.rowcount > 0:
+                    scored += 1
             except Exception as e:
                 log.debug("scoring row %s failed: %s", row["id"], e)
                 errors += 1

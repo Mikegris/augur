@@ -67,8 +67,10 @@ def _summarize(tool: str, data: Any) -> str:
             return "Day P&L is ${:,.2f}.".format(data.get("day_pnl") or 0)
         if tool == "aj_status" and isinstance(data, dict):
             on = data.get("trading_enabled")
+            live = data.get("live_trading_enabled")
+            state = ("on (live)" if live else "on (paper)") if on else "off"
             return "Trading is {}; session {}.".format(
-                "on (paper)" if on else "off", data.get("session"))
+                state, data.get("session"))
         if tool == "aj_positions" and isinstance(data, dict):
             n = len(data.get("positions") or {})
             return "{} open paper position(s).".format(n)

@@ -17,6 +17,7 @@ Python 3.9 compatible (no match/case, no X | Y unions).
 """
 
 import logging
+import threading
 import time
 from datetime import datetime, timezone
 from typing import Dict, List, Optional
@@ -31,26 +32,29 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 _cache = {}       # type: Dict[str, object]
 _cache_ts = {}    # type: Dict[str, float]
+_cache_lock = threading.Lock()
 _CACHE_TTL = 1800  # 30 minutes
 
 
 def _get_cached(key):
     # type: (str) -> object
-    if key in _cache and (time.time() - _cache_ts.get(key, 0)) < _CACHE_TTL:
-        return _cache[key]
-    return None
+    with _cache_lock:
+        if key in _cache and (time.time() - _cache_ts.get(key, 0)) < _CACHE_TTL:
+            return _cache[key]
+        return None
 
 
 def _set_cached(key, value):
     # type: (str, object) -> None
-    _cache[key] = value
-    _cache_ts[key] = time.time()
-    if len(_cache) > 200:
-        cutoff = time.time() - _CACHE_TTL
-        stale = [k for k, t in _cache_ts.items() if t < cutoff]
-        for k in stale:
-            _cache.pop(k, None)
-            _cache_ts.pop(k, None)
+    with _cache_lock:
+        _cache[key] = value
+        _cache_ts[key] = time.time()
+        if len(_cache) > 200:
+            cutoff = time.time() - _CACHE_TTL
+            stale = [k for k, t in list(_cache_ts.items()) if t < cutoff]
+            for k in stale:
+                _cache.pop(k, None)
+                _cache_ts.pop(k, None)
 
 
 # ---------------------------------------------------------------------------

@@ -160,12 +160,16 @@ def _ttl_cutoff_iso() -> str:
 
 def get_warmed_dossier(symbol: str, asset_class: str, strategy: str) -> Optional[Dict[str, Any]]:
     """Return the cached dossier for (symbol, asset_class, strategy) if fresh."""
-    conn = db.get_conn()
-    row = conn.execute(
-        """SELECT dossier_json, warmed_at FROM idea_pool
-            WHERE symbol = ? AND asset_class = ? AND strategy = ?""",
-        (symbol, asset_class, strategy),
-    ).fetchone()
+    try:
+        conn = db.get_conn()
+        row = conn.execute(
+            """SELECT dossier_json, warmed_at FROM idea_pool
+                WHERE symbol = ? AND asset_class = ? AND strategy = ?""",
+            (symbol, asset_class, strategy),
+        ).fetchone()
+    except Exception as exc:  # noqa: BLE001 — DB busy/locked during checkpoint; degrade to miss
+        logger.warning("idea_pool: warmed-dossier lookup failed for %s: %s", symbol, exc)
+        return None
     if not row:
         return None
     if row["warmed_at"] < _ttl_cutoff_iso():
@@ -181,24 +185,28 @@ def get_warmed_dossier(symbol: str, asset_class: str, strategy: str) -> Optional
 
 def list_warmed_symbols(asset_class: Optional[str] = None) -> List[Dict[str, Any]]:
     """List currently fresh warmed rows (used to bias random picks)."""
-    conn = db.get_conn()
-    cutoff = _ttl_cutoff_iso()
-    if asset_class:
-        rows = conn.execute(
-            """SELECT symbol, asset_class, strategy, composite_score, sector, warmed_at
-                FROM idea_pool
-                WHERE warmed_at >= ? AND asset_class = ?
-                ORDER BY composite_score DESC""",
-            (cutoff, asset_class),
-        ).fetchall()
-    else:
-        rows = conn.execute(
-            """SELECT symbol, asset_class, strategy, composite_score, sector, warmed_at
-                FROM idea_pool
-                WHERE warmed_at >= ?
-                ORDER BY composite_score DESC""",
-            (cutoff,),
-        ).fetchall()
+    try:
+        conn = db.get_conn()
+        cutoff = _ttl_cutoff_iso()
+        if asset_class:
+            rows = conn.execute(
+                """SELECT symbol, asset_class, strategy, composite_score, sector, warmed_at
+                    FROM idea_pool
+                    WHERE warmed_at >= ? AND asset_class = ?
+                    ORDER BY composite_score DESC""",
+                (cutoff, asset_class),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                """SELECT symbol, asset_class, strategy, composite_score, sector, warmed_at
+                    FROM idea_pool
+                    WHERE warmed_at >= ?
+                    ORDER BY composite_score DESC""",
+                (cutoff,),
+            ).fetchall()
+    except Exception as exc:  # noqa: BLE001 — DB busy/locked during checkpoint; degrade to empty
+        logger.warning("idea_pool: warmed-symbol listing failed: %s", exc)
+        return []
     return [dict(r) for r in rows]
 
 

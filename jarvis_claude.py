@@ -288,8 +288,25 @@ def ask_claude(query: str,
     try:
         proc.stdin.write(prompt)
         proc.stdin.close()
-    except Exception:
-        pass
+    except Exception as e:
+        # The prompt never reached claude (e.g. it exited immediately). Don't
+        # enter the read loop and burn the full deadline waiting for output
+        # that will never come — terminate and bail now.
+        log.warning("claude stdin write failed: %s", e)
+        try:
+            os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+        except Exception:
+            try:
+                proc.terminate()
+            except Exception:
+                pass
+        for _h in (proc.stdin, proc.stdout, proc.stderr):
+            try:
+                if _h:
+                    _h.close()
+            except Exception:
+                pass
+        return None
 
     import queue as _queue
     lines: "_queue.Queue" = _queue.Queue()
@@ -303,7 +320,22 @@ def ask_claude(query: str,
         finally:
             lines.put(None)  # EOF sentinel
 
+    # Drain stderr concurrently too: claude can write more than the OS pipe
+    # buffer (~64KB) to stderr, which would block its write and stall stdout —
+    # deadlocking the read loop. Capture it into a buffer instead.
+    _stderr_buf: List[str] = []
+
+    def _stderr_reader() -> None:
+        try:
+            if proc.stderr:
+                for chunk in proc.stderr:
+                    _stderr_buf.append(chunk)
+        except Exception:
+            pass
+
     threading.Thread(target=_reader, daemon=True, name="claude-reader").start()
+    threading.Thread(target=_stderr_reader, daemon=True,
+                     name="claude-stderr-reader").start()
 
     events: List[Dict[str, Any]] = []
     used: List[str] = []
@@ -365,12 +397,22 @@ def ask_claude(query: str,
     except Exception:
         _terminate()
 
+    # Close the pipe FDs explicitly so repeated cancelled streams don't leak
+    # file descriptors until GC.
+    for _h in (proc.stdin, proc.stdout, proc.stderr):
+        try:
+            if _h:
+                _h.close()
+        except Exception:
+            pass
+
     if is_cancelled():
         return None
     if not answer.strip():
-        # Surface stderr for diagnostics but degrade to a fallback.
+        # Surface stderr (captured concurrently above) for diagnostics but
+        # degrade to a fallback.
         try:
-            err = (proc.stderr.read() or "").strip()[:300] if proc.stderr else ""
+            err = ("".join(_stderr_buf) or "").strip()[:300]
             if err:
                 log.warning("claude produced no answer; stderr: %s", err)
         except Exception:

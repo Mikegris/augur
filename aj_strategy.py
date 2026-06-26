@@ -11,6 +11,7 @@ Every result still passes the risk gate; this only shapes qty/price/type.
 from __future__ import annotations
 
 import logging
+import math
 from typing import Any, Dict, Optional
 
 import aj_db
@@ -29,7 +30,9 @@ def size_order(symbol: str, side: str, cfg: Dict[str, Any], held_qty: float,
     import aj_risk
     atype = aj_positions.infer_asset_type(symbol)
     price = aj_risk._order_price(symbol, "market", None, atype)
-    if price is None or price <= 0:
+    # NaN/inf must fail closed: `NaN <= 0` is False, so a non-finite price would
+    # slip through and propagate a NaN qty/notional into the order.
+    if price is None or not math.isfinite(price) or price <= 0:
         return None
 
     max_notional = aj_db.money(cfg.get("max_order_notional_usd") or 0)
@@ -43,12 +46,28 @@ def size_order(symbol: str, side: str, cfg: Dict[str, Any], held_qty: float,
         factor = min(1.0, max(_MIN_SIZE_FACTOR, edge / _FULL_SIZE_EDGE_PTS))
         target = aj_db.money(target * factor)
 
+    # 100x sizing intelligence (Kelly · vol-target · compounding · symbol-perf ·
+    # drawdown throttle). A combined multiplier on the target; 0 vetoes the order
+    # (chronic-loser / drawdown halt). No-op (1.0) when every 100x flag is off.
+    try:
+        import aj_alpha
+        mult = aj_alpha.sizing_multiplier(symbol, side, cfg, decision)
+        if mult <= 0:
+            return None
+        target = aj_db.money(target * mult)
+    except Exception:
+        log.debug("alpha sizing multiplier skipped", exc_info=True)
+
     target = min(target, max_notional)
     if target <= 0:
         return None
 
     if side == "sell":
-        qty = min(held_qty, target / price) if held_qty > 0 else 0.0
+        # A sell is an EXIT — close the full held position. The notional target
+        # (half the per-order cap) is a sizing budget for opening exposure, not a
+        # ceiling on how much risk we may unwind; capping here would under-sell an
+        # exit and leave residual risk the sell signal meant to remove.
+        qty = held_qty if held_qty > 0 else 0.0
     else:
         qty = target / price
     if qty <= 0:
@@ -58,7 +77,14 @@ def size_order(symbol: str, side: str, cfg: Dict[str, Any], held_qty: float,
     # ② min-order-notional floor (skip dust)
     min_notional = aj_db.money(cfg.get("min_order_notional_usd") or 0)
     if min_notional > 0 and notional < min_notional:
-        log.debug("skip %s %s: notional %.2f below min %.2f", side, symbol, notional, min_notional)
+        if side != "sell" and max_notional < min_notional:
+            # Contradictory config: the per-order cap is below the dust floor, so
+            # EVERY buy is silently skipped. Surface it to the operator, not debug.
+            log.warning("skip %s %s: max_order_notional %.2f < min_order_notional "
+                        "%.2f — no order can ever pass the floor; check config",
+                        side, symbol, max_notional, min_notional)
+        else:
+            log.debug("skip %s %s: notional %.2f below min %.2f", side, symbol, notional, min_notional)
         return None
 
     # ③ entry order type — passive limit at an offset, or market

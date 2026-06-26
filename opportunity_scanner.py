@@ -14,7 +14,7 @@ import time
 import logging
 import hashlib
 from typing import Optional, Dict, List, Any
-from datetime import datetime, timedelta
+from datetime import datetime, date, timedelta
 import database as db
 import fetcher
 import safe_executor
@@ -213,7 +213,7 @@ def _build_universe(profile):
     # when we're actually running momentum *and* stocks are in scope.)
     if strategy == "momentum" and "stocks" in asset_types:
         try:
-            movers = fetcher.get_top_movers()
+            movers = fetcher.get_top_movers() or {}
             for g in (movers.get("gainers", []) or [])[:15]:
                 if g.get("symbol"):
                     _add(g["symbol"], "stock", "top_gainer")
@@ -321,7 +321,10 @@ def _score_equity(symbol, profile, weights):
                 "price": sm_data.get("price"),
             }
         else:
-            result["details"]["smart_money"] = {"score": 0, "signal": "N/A", "error": sm_data.get("error")}
+            # Detail score mirrors the neutral default the composite uses
+            # (sm_score=50) so the UI detail and the scored value agree — a 0
+            # here would imply max-bearish while the composite treats it neutral.
+            result["details"]["smart_money"] = {"score": sm_score, "signal": "N/A", "error": sm_data.get("error")}
     except Exception as e:
         logger.debug("Smart money error for %s: %s", symbol, e)
 
@@ -341,7 +344,10 @@ def _score_equity(symbol, profile, weights):
         _keep = ("institutional", "options_pricing", "sec_sentiment")
         kept_score = sum(components.get(k, {}).get("score", 0) for k in _keep)
         kept_max = sum(components.get(k, {}).get("max", 0) for k in _keep)
-        sm_score = round(kept_score / kept_max * 100) if kept_max else sm_score
+        # When kept_max is 0 we can't isolate the non-overlapping components, so
+        # falling back to the full composite would REINTRODUCE the double-count
+        # this block exists to remove. Use a neutral 50 instead.
+        sm_score = round(kept_score / kept_max * 100) if kept_max else 50
     result["scores"]["smart_money"] = sm_score
 
     # 2. ML Forecast
@@ -681,6 +687,12 @@ def _composite_to_signal(score):
 def _parse_date_loose(date_str):
     # type: (str) -> datetime
     """Parse date strings in various formats."""
+    # Already a datetime/date? Return as-is (a date is promoted to datetime) so
+    # pre-parsed values aren't coerced to datetime.min and silently dropped.
+    if isinstance(date_str, datetime):
+        return date_str
+    if isinstance(date_str, date):
+        return datetime(date_str.year, date_str.month, date_str.day)
     for fmt in ("%m/%d/%Y", "%Y-%m-%d", "%m/%d/%y"):
         try:
             return datetime.strptime(date_str, fmt)
@@ -710,7 +722,11 @@ def scan_opportunities(profile=None, force_refresh=False):
     if not force_refresh and phash in _scan_cache:
         cached_at = _scan_cache_time.get(phash, 0)
         if (time.time() - cached_at) < _SCAN_CACHE_TTL:
-            result = _scan_cache[phash]
+            # Shallow-copy before annotating so we never mutate the stored
+            # cache object (which would permanently flip its cached flag and
+            # alias the same dict to every caller).
+            result = dict(_scan_cache[phash])
+            result["scan_meta"] = dict(result["scan_meta"])
             result["scan_meta"]["cached"] = True
             return result
 
@@ -817,7 +833,8 @@ def get_cached_scan():
     if phash in _scan_cache:
         cached_at = _scan_cache_time.get(phash, 0)
         if (time.time() - cached_at) < _SCAN_CACHE_TTL:
-            result = _scan_cache[phash]
+            result = dict(_scan_cache[phash])
+            result["scan_meta"] = dict(result["scan_meta"])
             result["scan_meta"]["cached"] = True
             return result
     return None

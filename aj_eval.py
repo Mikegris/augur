@@ -24,6 +24,7 @@ def model_leaderboard(since: Optional[str] = None) -> List[Dict[str, Any]]:
     params = (since,) if since else ()
     rows = aj_db.query(
         "SELECT chosen_model, COUNT(*) AS calls, SUM(ok) AS oks, "
+        "SUM(CASE WHEN ok IS NOT NULL THEN 1 END) AS ok_rows, "
         "SUM(escalated) AS escalations, SUM(fallback_used) AS fallbacks, "
         "AVG(latency_ms) AS avg_latency_ms, SUM(cost_usd) AS cost_usd "
         "FROM aj_routing {} GROUP BY chosen_model ORDER BY calls DESC".format(where),
@@ -31,10 +32,13 @@ def model_leaderboard(since: Optional[str] = None) -> List[Dict[str, Any]]:
     out = []
     for r in rows:
         calls = r["calls"] or 0
+        # ok_rate is over rows that actually recorded ok (0/1); NULL-ok telemetry
+        # is excluded from the denominator so it can't deflate the rate.
+        ok_rows = r["ok_rows"] or 0
         out.append({
             "model": r["chosen_model"],
             "calls": calls,
-            "ok_rate": round((r["oks"] or 0) / calls, 3) if calls else None,
+            "ok_rate": round((r["oks"] or 0) / ok_rows, 3) if ok_rows else None,
             "escalation_rate": round((r["escalations"] or 0) / calls, 3) if calls else None,
             "fallback_rate": round((r["fallbacks"] or 0) / calls, 3) if calls else None,
             "avg_latency_ms": int(r["avg_latency_ms"] or 0),
@@ -97,9 +101,13 @@ def prune_routing(days: int = 30) -> Dict[str, Any]:
     import database as db
     with db._write_lock:
         conn = db.get_conn()
-        cur = conn.execute("DELETE FROM aj_routing WHERE ts < ?", (cutoff,))
-        conn.commit()
-        n = cur.rowcount
+        try:
+            cur = conn.execute("DELETE FROM aj_routing WHERE ts < ?", (cutoff,))
+            conn.commit()
+            n = cur.rowcount
+        except Exception:
+            conn.rollback()
+            raise
     log.info("aj_eval.prune_routing: removed %s rows older than %s", n, cutoff)
     return {"pruned": n, "cutoff": cutoff}
 

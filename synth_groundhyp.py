@@ -34,6 +34,7 @@ Python 3.9 compatible — no PEP 604 unions, no ``dict[…]`` style hints.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import math
@@ -165,7 +166,7 @@ def _ensure_pattern_column() -> None:
     if _pattern_col_checked:
         return
     try:
-        with _conn() as c:
+        with contextlib.closing(_conn()) as c:
             # Confirm the parent table exists; if not, research_tracker
             # hasn't initialised yet — try to coax it.
             row = c.execute(
@@ -535,7 +536,7 @@ def _load_candidate_rows(pool_size: int) -> List[sqlite3.Row]:
     """Pull the most recent ``pool_size`` scored forecast rows."""
     _ensure_pattern_column()
     try:
-        with _conn() as c:
+        with contextlib.closing(_conn()) as c:
             # Defensive: confirm the columns we need exist.  If the parent
             # table is missing (no tracker init), return empty.
             tbl = c.execute(
@@ -941,7 +942,7 @@ def attach_pattern_to_forecast(forecast_id: int, vector: Dict[str, Any]) -> bool
         return False
     _ensure_pattern_column()
     try:
-        with _conn() as c:
+        with contextlib.closing(_conn()) as c:
             cols = {r["name"] for r in c.execute("PRAGMA table_info(signal_forecasts)")}
             if "pattern_vector_json" not in cols:
                 return False

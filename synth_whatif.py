@@ -582,8 +582,9 @@ def _scenario_shifts(
             out[k] = None
         else:
             # Positive shift = the proposed book loses MORE (worse).
-            # Losses are already negative percentages, so subtract for delta.
-            out[k] = round(float(n) - float(c), 4)
+            # Losses are already negative percentages, so a more-negative
+            # `new` loss must yield a positive (worse) shift: cur - new.
+            out[k] = round(float(c) - float(n), 4)
     return out
 
 

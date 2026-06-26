@@ -122,8 +122,12 @@ def _score_insiders(symbol, days=90):
     if not recent:
         return 12, []
 
-    buys = sum(1 for t in recent if t.get("transaction_type", "").upper() in ("P", "A", "BUY", "PURCHASE"))
-    sells = sum(1 for t in recent if t.get("transaction_type", "").upper() in ("S", "D", "SELL", "SALE"))
+    # sec_edgar normalizes open-market actions to "BUY"/"SELL" and tags
+    # everything else "OTHER:<code>", so match only the normalized values
+    # (the old "P"/"A"/"S"/"D"/"PURCHASE"/"SALE" branches were dead, and
+    # counting "A" awards as buys would have been wrong if they ever fired).
+    buys = sum(1 for t in recent if t.get("transaction_type", "").upper() == "BUY")
+    sells = sum(1 for t in recent if t.get("transaction_type", "").upper() == "SELL")
     total = buys + sells
 
     if total == 0:

@@ -53,6 +53,7 @@ LOCAL_MODULES = [
     "aj_cli", "aj_secrets", "aj_alpaca", "aj_eval",
     "aj_opencode", "aj_voice", "aj_langfuse",
     "aj_strategy", "aj_rules", "aj_analytics",
+    "aj_alpha", "aj_autonomy",   # v3.2 100x layer (lazy-imported in the operator)
     "ai_summarizer",
     "alt_data_engine",
     "alt_signals",

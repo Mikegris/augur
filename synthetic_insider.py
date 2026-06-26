@@ -10,6 +10,7 @@ Alert levels:  DORMANT -> AWAKENING -> CONVERGING -> CRITICAL
 """
 
 import logging
+import threading
 import time
 from datetime import datetime, timedelta, timezone
 
@@ -26,6 +27,7 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 _cache = {}
 _cache_ts = {}
+_cache_lock = threading.Lock()
 _CACHE_TTL = 1800  # seconds
 
 # Wall-clock budget for the parallel channel scan. Channels that overrun this
@@ -35,14 +37,16 @@ _CHANNEL_BUDGET_S = 12.0
 
 
 def _cache_get(key):
-    if key in _cache and (time.time() - _cache_ts.get(key, 0)) < _CACHE_TTL:
-        return _cache[key]
+    with _cache_lock:
+        if key in _cache and (time.time() - _cache_ts.get(key, 0)) < _CACHE_TTL:
+            return _cache[key]
     return None
 
 
 def _cache_set(key, value):
-    _cache[key] = value
-    _cache_ts[key] = time.time()
+    with _cache_lock:
+        _cache[key] = value
+        _cache_ts[key] = time.time()
 
 
 def _clamp(value, lo=0, hi=100):
@@ -102,7 +106,7 @@ def _score_volume_anomaly(symbol):
         if len(volumes) < 5:
             return {"score": 50, "detail": "insufficient volume data", "firing": False, "weight": 0.10}
 
-        avg_5 = sum(volumes[-5:]) / 5.0
+        avg_5 = sum(volumes[-5:]) / max(len(volumes[-5:]), 1)
         avg_20 = sum(volumes[-20:]) / max(len(volumes[-20:]), 1)
 
         if avg_20 == 0:

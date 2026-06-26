@@ -78,10 +78,10 @@ def trade_stats() -> Dict[str, Any]:
     import aj_positions
     trades = aj_positions.realized_trades("paper")
     n = len(trades)
-    wins = [t for t in trades if t["realized"] > 0]
-    losses = [t for t in trades if t["realized"] < 0]
-    gross_win = aj_db.money(sum(t["realized"] for t in wins))
-    gross_loss = aj_db.money(-sum(t["realized"] for t in losses))
+    wins = [t for t in trades if (t.get("realized") or 0) > 0]
+    losses = [t for t in trades if (t.get("realized") or 0) < 0]
+    gross_win = aj_db.money(sum(t.get("realized") or 0 for t in wins))
+    gross_loss = aj_db.money(-sum(t.get("realized") or 0 for t in losses))
     return {
         "trades": n,
         "wins": len(wins), "losses": len(losses),
@@ -122,7 +122,7 @@ def position_aging() -> List[Dict[str, Any]]:
     out = []
     for sym in (book.get("positions") or {}):
         out.append({"symbol": sym, "age_days": aj_rules.position_age_days(sym)})
-    return sorted(out, key=lambda x: -(x["age_days"] or 0))
+    return sorted(out, key=lambda x: (x["age_days"] is None, -(x["age_days"] or 0)))
 
 
 # ── ㉑ backtest-lite (forecast replay) ────────────────────────────────────────
@@ -182,7 +182,7 @@ def journal_csv() -> str:
     w.writerow(["filled_at", "symbol", "side", "qty", "price", "fees_usd",
                 "notional", "mode", "broker", "client_order_id"])
     for r in rows:
-        notional = round(float(r.get("qty") or 0) * float(r.get("price") or 0), 2)
+        notional = aj_db.money(float(r.get("qty") or 0) * float(r.get("price") or 0))
         w.writerow([r.get("filled_at"), r.get("symbol"), r.get("side"),
                     r.get("qty"), r.get("price"), r.get("fees_usd"), notional,
                     r.get("mode"), r.get("broker"), r.get("client_order_id")])
@@ -198,6 +198,9 @@ def notify_fill(symbol: str, side: str, qty: float, price: float) -> None:
         if not aj_config.get_config().get("notify_fills"):
             return
         msg = "{} {:g} {} @ ${:,.2f}".format(side.upper(), qty, symbol, price)
+        # Escape AppleScript string metacharacters so a malformed symbol/side
+        # cannot break out of the string literal and inject osascript.
+        msg = msg.replace("\\", "\\\\").replace('"', '\\"')
         subprocess.run(
             ["osascript", "-e",
              'display notification "{}" with title "AUGUR paper fill"'.format(msg)],
@@ -219,6 +222,8 @@ def positions_detail() -> Dict[str, Any]:
     marks = aj_risk._marks(list(positions.keys()))
     rows = []
     total_mv = 0.0
+    gross_mv = 0.0
+    total_unreal = 0.0
     for sym, p in positions.items():
         qty = float(p.get("qty") or 0)
         avg = float(p.get("avg_cost") or 0)
@@ -227,7 +232,9 @@ def positions_detail() -> Dict[str, Any]:
             mark = avg
         mv = qty * mark
         total_mv += mv
+        gross_mv += abs(mv)
         unreal = (mark - avg) * qty
+        total_unreal += unreal
         rows.append({
             "symbol": sym, "qty": round(qty, 4), "avg_cost": round(avg, 2),
             "mark": round(mark, 2), "market_value": aj_db.money(mv),
@@ -236,11 +243,13 @@ def positions_detail() -> Dict[str, Any]:
             "age_days": aj_rules.position_age_days(sym),
             "asset_type": p.get("asset_type") or "stock"})
     for r in rows:
-        r["weight_pct"] = round(r["market_value"] / total_mv * 100, 1) if total_mv > 0 else 0.0
-    rows.sort(key=lambda x: -x["market_value"])
+        # Weight by gross exposure (sum of |market value|) so short legs and
+        # net-short books still produce meaningful, non-zero concentration.
+        r["weight_pct"] = round(abs(r["market_value"]) / gross_mv * 100, 1) if gross_mv > 0 else 0.0
+    rows.sort(key=lambda x: -abs(x["market_value"]))
     return {"positions": rows, "count": len(rows),
             "total_market_value": aj_db.money(total_mv),
-            "total_unrealized": aj_db.money(sum(r["unrealized"] for r in rows))}
+            "total_unrealized": aj_db.money(total_unreal)}
 
 
 def summary() -> Dict[str, Any]:

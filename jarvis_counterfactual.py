@@ -206,7 +206,12 @@ def _coach_summary(rows: List[Dict[str, Any]], net: float) -> str:
                 "price — washes, all of them.")
 
     # The net verdict. Under a dollar either way, don't pretend precision.
-    if net > 1.0:
+    # When every graded sell was a wash, force the wash tail regardless of the
+    # net: summing many sub-band deltas can drift past a dollar in aggregate,
+    # which would otherwise contradict the "washes, all of them" lead.
+    if not regrets and not reliefs:
+        tail = "Net, it comes out a wash — the market hasn't graded these yet."
+    elif net > 1.0:
         tail = ("Net, the urge to sell has cost {} — worth remembering the "
                 "next time the finger hovers.".format(_usd(net)))
     elif net < -1.0:
@@ -262,6 +267,8 @@ def analyze(symbol: Optional[str] = None, limit: int = 10) -> Dict[str, Any]:
 
         delta = (price_now - lot["sell_price"]) * lot["shares"]
         proceeds = lot["sell_price"] * lot["shares"]
+        if proceeds <= 0:
+            continue  # zero/penny proceeds — no band to grade against, skip
         band = _WASH_FRACTION * abs(proceeds)
         if delta == 0 or abs(delta) < band:
             verdict = "wash"
@@ -293,6 +300,10 @@ def analyze(symbol: Optional[str] = None, limit: int = 10) -> Dict[str, Any]:
         "net_usd": net,
         "summary": _coach_summary(sells, net),
         "n_sells": len(sells),
+        # The 200-row read is GLOBAL across all symbols, not per-symbol — for a
+        # very active log, older sells can fall outside the window, so flag when
+        # the cap was hit so callers know the verdict may be partial.
+        "partial": len(txns) >= _TXN_LIMIT,
     }
 
 

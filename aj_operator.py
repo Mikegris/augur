@@ -163,19 +163,26 @@ def _propose_and_execute(cycle_id: str, symbol: str, decision: Dict[str, Any],
                          sizing: Dict[str, Any], cfg: Dict[str, Any]) -> Dict[str, Any]:
     order_type = sizing.get("order_type") or "market"
     limit_price = sizing.get("limit_price")
+    # Normalize the sizing dict defensively: a sizer that omits 'notional'
+    # (returning only 'qty') must not raise KeyError mid-insert and lose the
+    # real cause behind a generic per-symbol failure.
+    qty = sizing.get("qty") or 0.0
+    notional = sizing.get("notional")
+    if notional is None:
+        notional = aj_db.money(qty * float(sizing.get("price") or 0))
     pid = aj_db.insert(
         "aj_proposals", created_at=aj_db.utc_now_iso(), cycle_id=cycle_id,
-        symbol=symbol, side=decision["side"], qty=sizing["qty"],
-        notional_usd=sizing["notional"], order_type=order_type, limit_price=limit_price,
+        symbol=symbol, side=decision["side"], qty=qty,
+        notional_usd=notional, order_type=order_type, limit_price=limit_price,
         thesis=decision.get("thesis"), forecast_id=decision.get("forecast_id"),
         status="proposed")
     aj_db.audit("proposal", {"proposal_id": pid, "symbol": symbol,
-                             "side": decision["side"], "qty": sizing["qty"],
+                             "side": decision["side"], "qty": qty,
                              "thesis": decision.get("thesis")},
                 cycle_id=cycle_id, ref_id=pid)
 
     proposal = {"id": pid, "symbol": symbol, "side": decision["side"],
-                "qty": sizing["qty"], "order_type": order_type, "limit_price": limit_price}
+                "qty": qty, "order_type": order_type, "limit_price": limit_price}
     rd = aj_risk.evaluate(proposal)
     if rd.get("decision") != "pass":
         # The proposal CHECK constraint allows only proposed/blocked/approved/
@@ -213,7 +220,7 @@ def _propose_and_execute(cycle_id: str, symbol: str, decision: Dict[str, Any],
         try:
             import aj_analytics
             aj_analytics.notify_fill(symbol, decision["side"], ex["filled_qty"],
-                                     ex.get("avg_fill_price") or sizing["price"])
+                                     ex.get("avg_fill_price") or sizing.get("price"))
         except Exception:
             pass
     return {"proposal_id": pid, "result": "executed", "exec": ex}
@@ -224,6 +231,8 @@ def _process_exits(cycle_id: str, cfg: Dict[str, Any]) -> List[Dict[str, Any]]:
     scan. Each exit sell still passes the risk gate (held-sells are permitted
     past the allowlist)."""
     import aj_rules
+    # snapshot avg costs before the sells so realized P&L can be scored (19)
+    pre_book = aj_positions.paper_book().get("positions") or {} if cfg.get("signal_scorecard") else {}
     out: List[Dict[str, Any]] = []
     for sig in aj_rules.exit_signals(cfg):
         decision = {"side": "sell", "thesis": "exit: " + sig["reason"], "edge_pts": 0.0}
@@ -236,6 +245,15 @@ def _process_exits(cycle_id: str, cfg: Dict[str, Any]) -> List[Dict[str, Any]]:
         r = _propose_and_execute(cycle_id, sig["symbol"], decision, sizing, cfg)
         r["symbol"] = sig["symbol"]
         r["exit_reason"] = sig["reason"]
+        # 19: score the realized close under its entry conviction
+        if cfg.get("signal_scorecard") and r.get("result") == "executed":
+            try:
+                import aj_alpha
+                avg = float((pre_book.get(sig["symbol"]) or {}).get("avg_cost") or 0)
+                realized = (mark - avg) * qty if avg > 0 else 0.0
+                aj_alpha.scorecard_record(aj_alpha.pop_entry_conviction(sig["symbol"]), realized)
+            except Exception:
+                log.debug("scorecard exit record skipped", exc_info=True)
         out.append(r)
     return out
 
@@ -266,6 +284,13 @@ def run_once(mode: str = "paper") -> Dict[str, Any]:
         summary["recovery"] = rec
 
         cfg = aj_config.get_config()
+        # 100x adaptive brain: tune thresholds to recent hit-rate (16) + the
+        # detected market regime (17). No-op when both flags are off.
+        try:
+            import aj_alpha
+            cfg = aj_alpha.effective_config(cfg)
+        except Exception:
+            log.debug("effective_config skipped", exc_info=True)
         horizon = int(cfg.get("forecast_horizon_days") or 20)
 
         # Enhancement housekeeping BEFORE proposing:
@@ -283,10 +308,18 @@ def run_once(mode: str = "paper") -> Dict[str, Any]:
                    if e.get("result") == "executed"}
 
         book = aj_positions.paper_book()
-        held = {s: p["qty"] for s, p in book["positions"].items()}
+        held = {s: p.get("qty", 0.0) for s, p in (book.get("positions") or {}).items()}
 
-        # scan -> forecast -> judge -> size -> propose -> gate -> execute
-        for symbol in _scan_universe():
+        # scan -> forecast -> judge -> size -> propose -> gate -> execute.
+        # 100x opportunity radar (20): rank the universe and trade only the
+        # top-K best setups. No-op (full universe) when the flag is off.
+        scan = _scan_universe()
+        try:
+            import aj_alpha
+            scan = aj_alpha.rank_universe(scan, cfg)
+        except Exception:
+            log.debug("rank_universe skipped", exc_info=True)
+        for symbol in scan:
             try:
                 if symbol in _exited:
                     summary["proposals"].append({"symbol": symbol, "result": "just_exited"})
@@ -313,6 +346,15 @@ def run_once(mode: str = "paper") -> Dict[str, Any]:
                     continue
                 out = _propose_and_execute(cycle_id, symbol, decision, sizing, cfg)
                 out["symbol"] = symbol
+                # 19: remember the conviction a long was opened on, to score the
+                # eventual close under the right bucket.
+                if cfg.get("signal_scorecard") and out.get("result") == "executed" \
+                        and decision["side"] == "buy":
+                    try:
+                        import aj_alpha
+                        aj_alpha.note_entry_conviction(symbol, decision.get("conviction"))
+                    except Exception:
+                        log.debug("scorecard note skipped", exc_info=True)
                 summary["proposals"].append(out)
             except Exception:
                 log.exception("symbol %s failed in cycle", symbol)
@@ -343,6 +385,19 @@ def run_once(mode: str = "paper") -> Dict[str, Any]:
             aj_analytics.log_cycle(summary)
         except Exception:
             log.debug("cycle analytics failed", exc_info=True)
+
+        # 100x autonomy (opt-in, fail-safe): performance-triggered preset
+        # escalation (23), end-of-day reflection (24), pre-market briefing (25).
+        try:
+            import aj_autonomy
+            if cfg.get("auto_preset_escalation"):
+                summary["escalation"] = aj_autonomy.maybe_escalate(cfg)
+            if cfg.get("daily_reflection"):
+                summary["reflection"] = aj_autonomy.write_reflection()
+            if cfg.get("premarket_briefing") and summary.get("session") == "premarket":
+                summary["briefing"] = aj_autonomy.write_briefing(cfg)
+        except Exception:
+            log.debug("post-cycle autonomy skipped", exc_info=True)
 
         aj_db.close_cycle(cycle_id, "completed")
         aj_db.audit("disconnect", {"cycle_id": cycle_id, "status": "completed"},

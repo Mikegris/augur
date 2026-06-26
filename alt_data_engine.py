@@ -9,6 +9,7 @@ beat probability.
 
 import logging
 import math
+import threading
 import time
 from datetime import datetime
 from typing import Dict, List, Optional
@@ -26,21 +27,24 @@ logger = logging.getLogger(__name__)
 # Module-level cache with TTL
 _cache = {}        # type: Dict[str, object]
 _cache_ts = {}     # type: Dict[str, float]
+_cache_lock = threading.Lock()
 _CACHE_TTL = 3600  # seconds
 
 
 def _cache_get(key):
     # type: (str) -> Optional[object]
-    ts = _cache_ts.get(key)
-    if ts is not None and (time.time() - ts) < _CACHE_TTL:
-        return _cache.get(key)
-    return None
+    with _cache_lock:
+        ts = _cache_ts.get(key)
+        if ts is not None and (time.time() - ts) < _CACHE_TTL:
+            return _cache.get(key)
+        return None
 
 
 def _cache_set(key, value):
     # type: (str, object) -> None
-    _cache[key] = value
-    _cache_ts[key] = time.time()
+    with _cache_lock:
+        _cache[key] = value
+        _cache_ts[key] = time.time()
 
 
 def _clamp(value, lo=0, hi=100):
@@ -312,6 +316,7 @@ def _score_analyst_velocity(fundamentals):
     score = _clamp(score)
 
     rec_display = rec if rec else "N/A"
+    target = float(target) if isinstance(target, (int, float)) else 0
     detail = "Consensus: {}, Target: ${:.0f} ({:+.1f}%)".format(rec_display, target, upside)
     return {"score": score, "detail": detail, "weight": 0.15}
 

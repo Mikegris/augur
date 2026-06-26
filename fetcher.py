@@ -11,6 +11,7 @@ from datetime import datetime, timedelta, timezone
 import time
 import threading
 import re
+from urllib.parse import quote as _url_quote
 
 try:
     from zoneinfo import ZoneInfo
@@ -82,7 +83,9 @@ def _coingecko_quote(coin_id: str, yf_symbol: str) -> dict:
     # prior close is price / (1 + pct/100) — NOT price * pct/100, which would
     # use the current price as the base and overstate the move.
     _denom = (1 + change_pct / 100) if change_pct is not None else None
-    prev = (price / _denom) if (price and _denom) else None
+    # Guard the denominator explicitly (a 0 _denom at pct == -100 is undefined)
+    # and use a None check so a legitimate price of 0.0 isn't dropped.
+    prev = (price / _denom) if (price is not None and _denom not in (None, 0)) else None
     change = (price - prev) if (price is not None and prev is not None) else None
     return {
         "symbol": yf_symbol.upper(),
@@ -170,7 +173,7 @@ def _yahoo_chart_direct(symbol: str) -> dict:
     sym = symbol.upper()
     try:
         r = requests.get(
-            f"{_YAHOO_CHART_BASE}/{sym}",
+            f"{_YAHOO_CHART_BASE}/{_url_quote(sym, safe='')}",  # encode symbol — keep it in the path, no traversal/injection
             params={"interval": "1d", "range": "5d"},
             headers=_YAHOO_DIRECT_HEADERS,
             timeout=8,
@@ -190,7 +193,9 @@ def _yahoo_chart_direct(symbol: str) -> dict:
 
     price = meta.get("regularMarketPrice")
     prev = meta.get("chartPreviousClose") or meta.get("previousClose")
-    chg = round(price - prev, 4) if (price is not None and prev) else None
+    # Guard change on None explicitly (don't drop a valid 0.0 prev via
+    # truthiness); only the division needs a non-zero prev.
+    chg = round(price - prev, 4) if (price is not None and prev is not None) else None
     chg_pct = round((chg / prev) * 100, 4) if (chg is not None and prev) else None
 
     return {
@@ -268,6 +273,13 @@ def _finviz_quote_fallback(symbol: str) -> dict:
         return {"symbol": sym, "error": "finviz: no Price field"}
     prev = _num(fund.get("Prev Close"))
     chg_pct = _num(fund.get("Change"))
+    # Finviz frequently omits 'Prev Close' for ETF proxies/indices while still
+    # reporting a 'Change' percent. Derive prev from price and chg_pct so
+    # change / prev_close / change_pct stay mutually consistent (otherwise the
+    # UI shows a percent move with no absolute change and prev_close=None breaks
+    # downstream P/L math).
+    if prev is None and price is not None and chg_pct is not None and (1 + chg_pct / 100) != 0:
+        prev = price / (1 + chg_pct / 100)
     # `prev` is a non-zero float when present; explicit None check keeps a
     # flat-day quote (price == prev_close) from being silently dropped to None.
     chg = round(price - prev, 4) if (price is not None and prev is not None and prev != 0) else None
@@ -303,7 +315,7 @@ def _yahoo_chart_history(symbol: str, period: str = "6mo", interval: str = "1d")
     yh_range = range_map.get(period, "6mo")
     try:
         r = requests.get(
-            f"{_YAHOO_CHART_BASE}/{sym}",
+            f"{_YAHOO_CHART_BASE}/{_url_quote(sym, safe='')}",  # encode symbol — keep it in the path, no traversal/injection
             params={"interval": interval, "range": yh_range,
                     "includePrePost": "false", "events": "div,split"},
             headers=_YAHOO_DIRECT_HEADERS,
@@ -563,7 +575,10 @@ def get_quote(symbol: str) -> dict:
         # rate-limit budget for nothing).
 
         _lp = _safe(info.last_price)
-        price = _lp if _lp is not None else _safe(info.regular_market_price)
+        # fast_info has no `regular_market_price` attribute (correct name is
+        # last_price); attribute access raises on a missing key. Use getattr
+        # so the degraded last_price-is-None path doesn't blow up the quote.
+        price = _lp if _lp is not None else _safe(getattr(info, "regular_market_price", None))
         prev_close = _safe(info.previous_close)
 
         change = None
@@ -592,7 +607,7 @@ def get_quote(symbol: str) -> dict:
         if result.get("price") is None:
             direct_probe = None
             for fb in (_yahoo_chart_direct, _try_crypto_fallback, _finviz_quote_fallback):
-                fbq = fb(symbol) if fb is not _try_crypto_fallback else fb(symbol)
+                fbq = fb(symbol)
                 if fb is _yahoo_chart_direct:
                     direct_probe = fbq  # keep for the negative-cache verdict
                 if fbq and "error" not in fbq and fbq.get("price") is not None:
@@ -669,7 +684,7 @@ def get_quotes_batch(symbols: list) -> dict:
                 t = tickers.tickers.get(sym.upper()) or yf.Ticker(sym)
                 info = t.fast_info
                 _lp = _safe(info.last_price)
-                price = _lp if _lp is not None else _safe(info.regular_market_price)
+                price = _lp if _lp is not None else _safe(getattr(info, "regular_market_price", None))
                 prev = _safe(info.previous_close)
                 if price is None:
                     raise RuntimeError("no price from yfinance")
@@ -754,7 +769,9 @@ def get_quotes_batch(symbols: list) -> dict:
                 change_pct = d.get("usd_24h_change")
                 # prior close = price / (1 + pct/100); see _coingecko_quote.
                 _denom = (1 + change_pct / 100) if change_pct is not None else None
-                prev = (price / _denom) if (price and _denom) else None
+                # explicit None check (mirrors _coingecko_quote) so a legitimate
+                # 0.0 price isn't dropped; guard pct == -100 (_denom == 0) too.
+                prev = (price / _denom) if (price is not None and _denom not in (None, 0)) else None
                 change = (price - prev) if (price is not None and prev is not None) else None
                 quote = {
                     "symbol": yf_sym,
@@ -976,7 +993,11 @@ def get_news(symbol: str, limit: int = 15) -> list:
     ck = ("news", symbol.upper())
     fetch_n = max(limit, _NEWS_MAX_KEEP)
     hit = _cached(ck, ttl=900)  # 15 min — news doesn't change minute-to-minute
-    if hit is not None:
+    # Only serve the cache when it actually holds enough headlines for this
+    # caller. A prior small-limit caller may have populated fewer items than a
+    # later large-limit (e.g. 50) caller needs; in that case fall through and
+    # refetch the wider window rather than silently truncating.
+    if hit is not None and (len(hit) >= limit or len(hit) >= fetch_n):
         return hit[:limit]
     try:
         t = yf.Ticker(symbol)
@@ -1342,14 +1363,18 @@ def get_crypto_chart(coin_id: str, days: int = 30) -> list:
             "days": days,
         })
         prices = data.get("prices", [])
-        volumes = {int(v[0]): v[1] for v in data.get("total_volumes", [])}
+        total_volumes = data.get("total_volumes", [])
+        # CoinGecko returns prices[] and total_volumes[] sampled in parallel
+        # order/length; their ms timestamps differ slightly, so an exact-key
+        # lookup misses for most points and zeroes out volume. Align by index.
         result = []
-        for ts_ms, price in prices:
+        for idx, (ts_ms, price) in enumerate(prices):
             ts_s = int(ts_ms / 1000)
+            vol = total_volumes[idx][1] if idx < len(total_volumes) else 0
             result.append({
                 "time": ts_s,
                 "value": price,
-                "volume": volumes.get(int(ts_ms), 0),
+                "volume": vol,
             })
         return result
     except Exception:
@@ -1394,7 +1419,7 @@ def get_crypto_quote(coin_id: str) -> dict:
             "id": data.get("id") or coin_id,
             "symbol": str(sym).upper(),
             "name": data.get("name") or coin_id,
-            "description": ((data.get("description") or {}).get("en") or "")[:500],
+            "description": str((data.get("description") or {}).get("en") or "")[:500],
             # CoinGecko returns null (not omitted) sub-objects for delisted
             # / pre-market coins — md.get("current_price", {}) won't supply
             # the default in that case because the key DOES exist with
@@ -1649,7 +1674,7 @@ def get_correlation_matrix(symbols: list, period: str = "3mo") -> dict:
             return {"symbols": symbols, "matrix": {}, "missing_symbols": missing}
 
         # Keep only columns that match our symbols (case-insensitive)
-        available = [c for c in returns.columns if c.upper() in sym_upper]
+        available = [c for c in returns.columns if str(c).upper() in sym_upper]
         if len(available) < 2:
             returned_upper = [str(c).upper() for c in returns.columns]
             missing = [s for s, u in zip(symbols, sym_upper) if u not in returned_upper]
@@ -1715,17 +1740,22 @@ def get_risk_metrics(symbols: list, period: str = "1y") -> dict:
                 result[col_name] = {}
                 continue
 
-            ann_return = float((1 + r.mean()) ** trading_days - 1) * 100
+            # Geometric (CAGR) annualization, consistent with total_return
+            # below. The old `(1 + r.mean()) ** 252` arithmetic-mean form
+            # ignores volatility drag and wildly overstates returns.
+            ann_return = float((1 + r).prod() ** (trading_days / len(r)) - 1) * 100
             ann_vol = float(r.std() * (trading_days ** 0.5)) * 100
 
             # Sharpe
             excess = r - rf_daily
             sharpe = float(excess.mean() / excess.std() * (trading_days ** 0.5)) if excess.std() > 0 else None
 
-            # Sortino
-            downside = r[r < 0]
-            sortino_denom = float(downside.std() * (trading_days ** 0.5)) if len(downside) > 1 else None
-            sortino = float((r.mean() - rf_daily) * (trading_days ** 0.5) / downside.std()) if sortino_denom and sortino_denom > 0 else None
+            # Sortino — downside deviation taken over the FULL sample using
+            # sqrt(mean(min(r - rf, 0)^2)), not std() of the negatives-only
+            # subset (which drops positive days from the deviation base and
+            # understates downside risk, inflating the ratio).
+            dd = float(np.sqrt(np.mean(np.minimum(r - rf_daily, 0.0) ** 2)))
+            sortino = float((r.mean() - rf_daily) / dd * (trading_days ** 0.5)) if dd > 0 else None
 
             # Max drawdown
             cum = (1 + r).cumprod()
@@ -1789,6 +1819,8 @@ def get_benchmark_history(symbol: str = "SPY", period: str = "1y", base_value: f
         closes = hist["Close"]
         result = []
         first_close = float(closes.iloc[0])
+        if not first_close or pd.isna(first_close):  # 0/NaN first bar -> avoid ZeroDivision/NaN output
+            return _normalize(_yahoo_chart_history(symbol, period, "1d"))
         for ts, price in closes.items():
             ts_unix = int(ts.timestamp())
             normalized = (float(price) / first_close) * (base_value if base_value else 1.0)
@@ -1871,7 +1903,9 @@ def compute_indicators(ohlcv: list) -> dict:
         bb_upper = round(mid + 2 * std, 4)
         bb_lower = round(mid - 2 * std, 4)
 
-    # ATR (14)
+    # ATR (14) — simple mean of the last 14 true ranges (NOT Wilder's
+    # EMA-smoothed ATR). Kept as a simple TR average for stability; consumers
+    # should treat this as ATR(simple), which runs slightly jumpier than Wilder.
     atr = None
     if len(closes) >= 15:
         trs = []
@@ -2005,7 +2039,11 @@ def _dividend_data_uncached(symbol: str) -> dict:
             if divs_all is not None and len(divs_all) >= 8:
                 annual = {}
                 for dt, val in divs_all.items():
-                    yr = dt.year if hasattr(dt, 'year') else int(str(dt)[:4])
+                    try:
+                        yr = dt.year if hasattr(dt, 'year') else int(str(dt)[:4])
+                    except (ValueError, TypeError):
+                        # One malformed index entry shouldn't abort the whole CAGR.
+                        continue
                     annual[yr] = annual.get(yr, 0) + float(val)
                 years = sorted(annual.keys())
                 if len(years) >= 6:
@@ -2075,12 +2113,19 @@ def _finviz_dividend_fallback(symbol: str) -> dict:
     parts = div_ttm_raw.replace("(", " ").replace(")", "").replace("%", "").split()
     div_rate = None
     div_yield = None
-    if len(parts) >= 1:
-        try: div_rate = float(parts[0])
+    # A lone percent token (e.g. "0.35%") is a YIELD, not a dollar rate — only a
+    # parenthesized/two-token value like "1.05 (0.35%)" carries a $ rate first.
+    lone_pct = len(parts) == 1 and "%" in div_ttm_raw
+    if lone_pct:
+        try: div_yield = float(parts[0])
         except ValueError: pass
-    if len(parts) >= 2:
-        try: div_yield = float(parts[1])
-        except ValueError: pass
+    else:
+        if len(parts) >= 1:
+            try: div_rate = float(parts[0])
+            except ValueError: pass
+        if len(parts) >= 2:
+            try: div_yield = float(parts[1])
+            except ValueError: pass
     if div_yield is None:
         # Some Finviz pages use "Dividend %" directly. Keep it in PERCENT
         # form to match the "Dividend TTM" branch and the yfinance main path
@@ -2126,7 +2171,7 @@ def get_macro_indicators() -> dict:
         "sp500":      "^GSPC",
         "nasdaq":     "^IXIC",
         "yield_10y":  "^TNX",
-        "yield_2y":   "^IRX",
+        "yield_2y":   "2YY=F",  # CBOT 2-Year Micro Yield futures (real 2Y); ^IRX is the 3-month bill, not the 2Y note
         "yield_30y":  "^TYX",
         "dxy":        "DX-Y.NYB",
         "crude_oil":  "CL=F",
@@ -2155,6 +2200,10 @@ def get_macro_indicators() -> dict:
                 result[key] = _bars_to_value(_yahoo_chart_history(ticker_sym, "5d", "1d"))
                 continue
             closes = hist["Close"].dropna()
+            if closes.empty:
+                # non-empty frame but all-NaN Close (partial response) — recover via Yahoo direct
+                result[key] = _bars_to_value(_yahoo_chart_history(ticker_sym, "5d", "1d"))
+                continue
             if len(closes) < 2:
                 result[key] = {"value": round(float(closes.iloc[-1]), 4), "change_pct": None, "prev": None}
                 continue
@@ -2257,8 +2306,11 @@ def get_portfolio_stress_test(holdings: list, custom_drop_pct: float = None) -> 
     # Fetch beta and sector for each stock holding
     enriched = []
     for h in holdings:
+        sym = (h.get("symbol") or "").strip().upper()
+        if not sym:  # skip malformed/partial rows instead of crashing the whole stress test
+            continue
         entry = dict(h)
-        sym = h["symbol"]
+        entry["symbol"] = sym
         asset_type = h.get("asset_type", "stock")
 
         if asset_type == "crypto":
@@ -2268,7 +2320,11 @@ def get_portfolio_stress_test(holdings: list, custom_drop_pct: float = None) -> 
             try:
                 t = yf.Ticker(sym)
                 info = t.info or {}
-                entry["sector"] = info.get("sector") or info.get("sectorKey") or "Unknown"
+                # Use display-name 'sector' only — 'sectorKey' returns slugs
+                # ('financial-services') that never match the display-name keys
+                # in _SCENARIOS sector_overrides ('Financial Services'), so the
+                # override lookup would silently miss and understate losses.
+                entry["sector"] = info.get("sector") or "Unknown"
                 _bv = _safe(info.get("beta"))
                 entry["beta"] = _bv if _bv is not None else 1.0  # don't coerce a real 0.0 beta to 1.0
                 # Clamp beta to reasonable range
@@ -2290,7 +2346,13 @@ def get_portfolio_stress_test(holdings: list, custom_drop_pct: float = None) -> 
             "total_loss_pct": 0,
             "new_portfolio_value": 0,
         }
-        total_current_value = sum(h.get("market_value", 0) or 0 for h in enriched)
+        # Use the SAME market-value fallback (shares*avg_cost) that each
+        # position uses below, so total_loss_pct's denominator matches the
+        # per-position dollar figures summed into total_new_value.
+        total_current_value = sum(
+            h.get("market_value") or (h.get("shares", 0) * h.get("avg_cost", 0))
+            for h in enriched
+        )
         total_new_value = 0
 
         for h in enriched:
@@ -2338,7 +2400,10 @@ def get_portfolio_stress_test(holdings: list, custom_drop_pct: float = None) -> 
         "total_loss_pct": 0,
         "new_portfolio_value": 0,
     }
-    total_current_value = sum(h.get("market_value", 0) or 0 for h in enriched)
+    total_current_value = sum(
+        h.get("market_value") or (h.get("shares", 0) * h.get("avg_cost", 0))
+        for h in enriched
+    )
     total_new_value = 0
     for h in enriched:
         mv = h.get("market_value") or (h.get("shares", 0) * h.get("avg_cost", 0))
@@ -2397,7 +2462,9 @@ def _unusual_options_flow_uncached(symbol):
     ticker = yf.Ticker(symbol)
 
     try:
-        exps = ticker.options
+        # Coerce defensively: .options is normally a tuple but can be None or a
+        # non-sliceable on partial/rate-limited responses.
+        exps = list(ticker.options or [])
     except Exception as e:
         # Distinguish a transient rate-limit (retryable) from a symbol that
         # genuinely has no chain, so the UI can tell the user which.
@@ -2417,6 +2484,13 @@ def _unusual_options_flow_uncached(symbol):
         current_price = float(getattr(info, "last_price", 0) or 0)
     except Exception:
         current_price = 0
+    if not current_price:
+        # fast_info crumb path can drop last_price; fall back to the module's
+        # own Yahoo-direct quote so OTM/sentiment classification stays accurate.
+        try:
+            current_price = float((_yahoo_chart_direct(symbol) or {}).get("price") or 0)
+        except Exception:
+            current_price = 0
 
     # Only scan nearest 6 expirations to keep it fast
     scan_exps = exps[:6]
@@ -2456,6 +2530,12 @@ def _unusual_options_flow_uncached(symbol):
                 iv = _safe(row.get("impliedVolatility")) or 0
 
                 if vol < 200:
+                    continue
+
+                # Skip $0-notional contracts: an illiquid contract with no last
+                # price produces notional == 0, which shouldn't surface as
+                # "unusual" flow even with high volume.
+                if last_price <= 0:
                     continue
 
                 # Volume/OI ratio — primary unusual signal

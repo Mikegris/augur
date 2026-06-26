@@ -11,6 +11,7 @@ itself is the signal.
 import re
 import time
 import logging
+import threading
 from datetime import datetime, timedelta, timezone
 
 import fetcher
@@ -22,6 +23,7 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 _cache = {}
 _cache_ts = {}
+_cache_lock = threading.Lock()
 _CACHE_TTL = 1800  # seconds
 
 # ---------------------------------------------------------------------------
@@ -166,7 +168,12 @@ def _build_window(articles, now, days):
     for a in window_articles:
         b = a["bucket"]
         buckets[b] = buckets.get(b, 0) + 1
-    dominant = max(buckets, key=buckets.get)
+    # Tie-break deterministically: highest count, then earliest in _BUCKET_ORDER.
+    def _dominant_key(b):
+        idx = _BUCKET_ORDER.index(b) if b in _BUCKET_ORDER else len(_BUCKET_ORDER)
+        return (buckets[b], -idx)
+
+    dominant = max(buckets, key=_dominant_key)
     dominant_pct = round(buckets[dominant] / total * 100, 1)
     return {
         "buckets": buckets,
@@ -324,9 +331,10 @@ def analyze_narrative(symbol):
     # Check cache
     cache_key = "narrative_{}".format(symbol)
     now_ts = time.time()
-    if cache_key in _cache and (now_ts - _cache_ts.get(cache_key, 0)) < _CACHE_TTL:
-        logger.debug("Returning cached narrative for %s", symbol)
-        return _cache[cache_key]
+    with _cache_lock:
+        if cache_key in _cache and (now_ts - _cache_ts.get(cache_key, 0)) < _CACHE_TTL:
+            logger.debug("Returning cached narrative for %s", symbol)
+            return _cache[cache_key]
 
     try:
         raw_articles = fetcher.get_news(symbol, limit=50)
@@ -443,8 +451,9 @@ def analyze_narrative(symbol):
     }
 
     # Cache result
-    _cache[cache_key] = result
-    _cache_ts[cache_key] = time.time()
+    with _cache_lock:
+        _cache[cache_key] = result
+        _cache_ts[cache_key] = time.time()
 
     logger.info(
         "Narrative analysis for %s: phase=%s velocity=%d dominant=%s",

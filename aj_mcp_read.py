@@ -59,9 +59,12 @@ def _t_quote(args: Dict[str, Any]) -> Dict[str, Any]:
 def _t_forecast(args: Dict[str, Any]) -> Dict[str, Any]:
     import forecast_ensemble
     sym = str(args.get("symbol") or "").upper()
-    horizon = int(args.get("horizon_days") or 20)
     if not sym:
         return {"error": "symbol required"}
+    try:
+        horizon = int(args.get("horizon_days") or 20)
+    except (TypeError, ValueError):
+        horizon = 20
     try:
         return forecast_ensemble.ensemble_forecast(sym, horizon)
     except Exception as e:
@@ -76,9 +79,20 @@ def _t_policy_check(args: Dict[str, Any]) -> Dict[str, Any]:
         return {"error": str(e)[:200], "violations": []}
 
 
+def _clamp_limit(raw: Any, default: int = 20, hi: int = 200) -> int:
+    """Bounded LIMIT for the frozen read surface. A negative LIMIT in SQLite
+    means 'no limit' (returns ALL rows) and a huge one can OOM the response, so
+    clamp caller-supplied values to [1, hi]."""
+    try:
+        n = int(raw) if raw is not None else default
+    except (TypeError, ValueError):
+        n = default
+    return max(1, min(n, hi))
+
+
 def _t_proposals(args: Dict[str, Any]) -> Dict[str, Any]:
     import aj_db
-    limit = int(args.get("limit") or 20)
+    limit = _clamp_limit(args.get("limit"))
     rows = aj_db.query(
         "SELECT * FROM aj_proposals ORDER BY id DESC LIMIT ?", (limit,))
     return {"proposals": rows}
@@ -86,7 +100,7 @@ def _t_proposals(args: Dict[str, Any]) -> Dict[str, Any]:
 
 def _t_orders(args: Dict[str, Any]) -> Dict[str, Any]:
     import aj_db
-    limit = int(args.get("limit") or 20)
+    limit = _clamp_limit(args.get("limit"))
     rows = aj_db.query("SELECT * FROM aj_orders ORDER BY id DESC LIMIT ?", (limit,))
     return {"orders": rows}
 
@@ -119,6 +133,40 @@ FROZEN_TOOLS = (
 )
 
 
+# Per-tool input parameters (name -> ordered list of arg names the tool reads).
+# Used to give each MCP-registered tool an explicit signature so FastMCP can
+# derive a proper input schema (a bare **kwargs would advertise NO parameters,
+# making symbol/horizon/limit/mode impossible to pass over the wire).
+TOOL_PARAMS: Dict[str, List[str]] = {
+    "aj_positions":      ["mode"],
+    "aj_proposals":      ["limit"],
+    "aj_orders":         ["limit"],
+    "quote":             ["symbol"],
+    "forecast_ensemble": ["symbol", "horizon_days"],
+}
+
+
+def _make(n: str):
+    """Build an MCP tool wrapper for tool `n` with an explicit parameter
+    signature (so FastMCP advertises the correct input schema) that dispatches
+    through invoke(). Hoisted to module level so `n` is captured per call and
+    the late-binding bug cannot be reintroduced by inlining into a loop."""
+    import inspect
+    params = TOOL_PARAMS.get(n, [])
+
+    def _call(**kwargs):
+        return invoke(n, kwargs)
+
+    if params:
+        # Give _call a real signature with one keyword-or-positional param per
+        # arg (all optional, default None) so FastMCP exposes them in the schema.
+        sig = inspect.Signature(
+            [inspect.Parameter(p, inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                               default=None) for p in params])
+        _call.__signature__ = sig
+    return _call
+
+
 def tool_names() -> List[str]:
     return list(TOOLS.keys())
 
@@ -132,12 +180,17 @@ def contract_ok() -> bool:
     # dead code and would false-positive on read listings like 'aj_orders'.)
     if tuple(TOOLS.keys()) != FROZEN_TOOLS:
         return False
-    # Belt-and-suspenders: refuse known mutating verb names outright.
-    for name in TOOLS:
-        if name.lower() in ("place_order", "submit_order", "set_config",
-                            "kill_switch", "execute_trade", "cancel_order",
-                            "approve", "execute_mutating", "add_holding",
-                            "record_trade"):
+    # Belt-and-suspenders: pin each registered callable to the known set of
+    # READ implementations. A name-based denylist gives false confidence (a
+    # mutating tool added under a novel name like 'liquidate' would slip past
+    # it); binding to an allow-list of read fns means ANY non-read callable —
+    # whatever its name — fails the contract.
+    read_fns = {
+        _t_aj_status, _t_aj_day_pnl, _t_aj_positions, _t_aj_metrics,
+        _t_quote, _t_forecast, _t_policy_check, _t_proposals, _t_orders,
+    }
+    for spec in TOOLS.values():
+        if spec.get("fn") not in read_fns:
             return False
     return True
 
@@ -168,9 +221,5 @@ def serve_stdio():  # pragma: no cover - optional transport
         raise RuntimeError("MCP transport requires the 'mcp' package: {}".format(e))
     server = FastMCP("augur-read")
     for name, spec in TOOLS.items():
-        def _make(n):
-            def _call(**kwargs):
-                return invoke(n, kwargs)
-            return _call
         server.tool(name=name, description=spec["description"])(_make(name))
     server.run()

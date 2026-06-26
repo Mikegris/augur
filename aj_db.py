@@ -207,10 +207,16 @@ def set_setting_raw(key: str, value: str) -> None:
 
 
 def _applied_version() -> int:
+    v = None
     try:
         v = get_setting_raw(_SCHEMA_KEY)
         return int(v) if v is not None else 0
     except Exception:
+        # A corrupt non-int schema version would silently re-run every
+        # migration (IF NOT EXISTS-safe) and overwrite the version, masking the
+        # corruption. Surface it so it's observable rather than swallowed.
+        log.warning("_applied_version: corrupt %s value %r; treating as 0",
+                    _SCHEMA_KEY, v)
         return 0
 
 
@@ -326,7 +332,27 @@ def _us_market_holidays(year: int) -> set:
                 if d.month == month and d.weekday() == weekday]
         return days[-1] if days else None
 
+    def _good_friday():
+        # Western Easter via the anonymous Gregorian computus; Good Friday is
+        # Easter Sunday minus 2 days. Good Friday is a full NYSE close.
+        a = year % 19
+        b = year // 100
+        c = year % 100
+        d = b // 4
+        e = b % 4
+        f = (b + 8) // 25
+        g = (b - f + 1) // 3
+        h = (19 * a + b - d - g + 15) % 30
+        i = c // 4
+        k = c % 4
+        l = (32 + 2 * e + 2 * i - h - k) % 7
+        m = (a + 11 * h + 22 * l) // 451
+        month = (h + l - 7 * m + 114) // 31
+        day = ((h + l - 7 * m + 114) % 31) + 1
+        return (datetime(year, month, day) - timedelta(days=2)).date()
+
     hols = set()
+    hols.add(_good_friday())                        # Good Friday (NYSE closed)
     hols.add(_observed(1, 1))                       # New Year's Day
     hols.add(_nth_weekday(1, 0, 3))                 # MLK (3rd Mon Jan)
     hols.add(_nth_weekday(2, 0, 3))                 # Presidents (3rd Mon Feb)
@@ -419,35 +445,66 @@ class SingleInstanceLock:
     def _acquire_lease(self) -> bool:
         key = "__aj_lease_{}".format(self.name)
         now = time.time()
+        new_val = "{}:{}".format(now, os.getpid())
         with db._write_lock:
             # MUST read the raw row: get_settings() hides `__` keys, so reading
             # the lease through it always returned None and the lock never
             # excluded anything (fail-open). Read directly.
             cur = get_setting_raw(key)
-            if cur:
+            conn = db.get_conn()
+            if not cur:
+                # No lease row at all — claim it with a guarded INSERT. A
+                # concurrent process that inserted first makes this raise on the
+                # PRIMARY KEY (or no-op under OR IGNORE) so only one wins.
                 try:
-                    held_at = float(str(cur).split(":")[0])
-                    if now - held_at < self.ttl_s:
+                    c = conn.execute(
+                        "INSERT OR IGNORE INTO settings (key, value) VALUES (?,?)",
+                        (key, new_val))
+                    conn.commit()
+                    if c.rowcount != 1:
                         return False
                 except Exception:
-                    pass
-            conn = db.get_conn()
-            conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?,?)",
-                         (key, "{}:{}".format(now, os.getpid())))
+                    return False
+                self._have = True
+                return True
+            # A lease row exists. If it is still within TTL, we lost.
+            try:
+                held_at = float(str(cur).split(":")[0])
+                if now - held_at < self.ttl_s:
+                    return False
+            except Exception:
+                # Unparseable lease — treat as stale and try to take it via CAS.
+                pass
+            # Compare-and-set: only steal the lease if the row STILL holds the
+            # exact stale value we just read. A second process that swapped it
+            # between our read and this UPDATE changes the value, so its rowcount
+            # is 1 and ours is 0 — we are told we lost (fixes the cross-process
+            # TOCTOU; the in-process _write_lock alone never excluded siblings).
+            c = conn.execute(
+                "UPDATE settings SET value=? WHERE key=? AND value=?",
+                (new_val, key, cur))
             conn.commit()
+            if c.rowcount != 1:
+                return False
         self._have = True
         return True
 
     def release(self) -> None:
         if not self._have:
             return
-        try:
-            import fcntl
-            if self._fh:
+        if self._fh:
+            try:
+                import fcntl
                 fcntl.flock(self._fh.fileno(), fcntl.LOCK_UN)
+            except Exception:
+                pass
+            # Always close the handle even if the unlock above raised, so the
+            # lock file descriptor never leaks.
+            try:
                 self._fh.close()
-        except Exception:
-            pass
+            except Exception:
+                pass
+            self._fh = None
         try:
             with db._write_lock:
                 conn = db.get_conn()
@@ -532,7 +589,15 @@ def _canonical(payload: Any) -> str:
         return json.dumps(payload, sort_keys=True, separators=(",", ":"),
                           default=str)
     except Exception:
-        return str(payload)
+        # Keep the stored audit body valid, canonical JSON even when the payload
+        # can't be serialized, so it stays parseable/reproducible instead of an
+        # unstable, dict-ordering-dependent str().
+        try:
+            return json.dumps({"_unserializable": str(payload)},
+                              sort_keys=True, separators=(",", ":"))
+        except Exception:
+            return json.dumps({"_unserializable": "<unrepresentable>"},
+                              sort_keys=True, separators=(",", ":"))
 
 
 def audit(kind: str, payload: Any, cycle_id: Optional[str] = None,
@@ -593,7 +658,39 @@ def verify_audit_chain() -> Dict[str, Any]:
 
 # ── generic row helpers for aj_* tables ──────────────────────────────────────
 
+import re as _re
+
+# Tables these generic helpers are allowed to touch. Values are parameterized,
+# but identifiers (table/column names) are interpolated into the SQL text, so we
+# whitelist tables and validate column identifiers to close the injection vector
+# for any path where a name might be derived from config/external input.
+_ALLOWED_TABLES = frozenset({
+    "aj_proposals", "aj_orders", "aj_fills", "aj_risk_events", "aj_routing",
+    "aj_recon", "aj_cycles", "aj_equity", "aj_cycle_log", "aj_position_state",
+})
+_IDENT_RE = _re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def _check_table(table: str) -> str:
+    # aj_audit is append-only and hash-chained: force callers through audit()
+    # so a generic insert can't write a chain-bypassing row (breaks tamper-
+    # evidence). Any non-whitelisted / malformed table name is rejected too.
+    if table == "aj_audit":
+        raise ValueError("aj_audit is append-only; use audit()")
+    if table not in _ALLOWED_TABLES:
+        raise ValueError("disallowed table: {!r}".format(table))
+    return table
+
+
+def _check_cols(*names: str) -> None:
+    for n in names:
+        if not isinstance(n, str) or not _IDENT_RE.match(n):
+            raise ValueError("invalid column identifier: {!r}".format(n))
+
+
 def insert(table: str, **cols) -> int:
+    _check_table(table)
+    _check_cols(*cols.keys())
     keys = list(cols.keys())
     qs = ",".join("?" for _ in keys)
     with db._write_lock:
@@ -608,6 +705,8 @@ def insert(table: str, **cols) -> int:
 def update(table: str, row_id: int, **cols) -> None:
     if not cols:
         return
+    _check_table(table)
+    _check_cols(*cols.keys())
     sets = ",".join("{}=?".format(k) for k in cols)
     with db._write_lock:
         conn = db.get_conn()
@@ -624,6 +723,8 @@ def update_if(table: str, row_id: int, where_col: str, where_val: Any,
     moved the state wins, and this caller is told it lost (rowcount 0)."""
     if not cols:
         return False
+    _check_table(table)
+    _check_cols(where_col, *cols.keys())
     sets = ",".join("{}=?".format(k) for k in cols)
     with db._write_lock:
         conn = db.get_conn()
@@ -635,6 +736,7 @@ def update_if(table: str, row_id: int, where_col: str, where_val: Any,
 
 
 def get_row(table: str, row_id: int) -> Optional[Dict[str, Any]]:
+    _check_table(table)
     conn = db.get_conn()
     r = conn.execute("SELECT * FROM {} WHERE id=?".format(table), (row_id,)).fetchone()
     return dict(r) if r else None
@@ -657,7 +759,12 @@ def backup_db(dest: Optional[str] = None) -> str:
         base = os.path.dirname(src) or "."
         dest = os.path.join(base, "wealth.db.aj-backup-{}".format(stamp))
     s = sqlite3.connect(src)
-    d = sqlite3.connect(dest)
+    try:
+        d = sqlite3.connect(dest)
+    except Exception:
+        # If opening the destination fails, the source FD would otherwise leak.
+        s.close()
+        raise
     try:
         with d:
             s.backup(d)

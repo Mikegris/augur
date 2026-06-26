@@ -53,9 +53,31 @@ def _cache_set(key, value, ttl):
             now = time.time()
             for k in [k for k, v in _cache.items() if v[1] < now][:50]:
                 _cache.pop(k, None)
+            # If everything is still fresh, the expired sweep frees nothing and
+            # the dict grows unbounded. Evict the soonest-to-expire entries to
+            # bring it back under the cap.
+            if len(_cache) > 200:
+                for k, _ in sorted(_cache.items(), key=lambda kv: kv[1][1])[: len(_cache) - 200]:
+                    _cache.pop(k, None)
 
 
 _session = None
+_session_lock = threading.Lock()
+
+
+def _get_session():
+    """Lazily build the shared requests.Session, fully initialized, under a
+    lock. Double-checked so the common (already-built) path stays lock-free,
+    while concurrent first callers can't each build a Session — one of which
+    would be used mid-init (headers not yet applied) and leak its pool."""
+    global _session
+    if _session is None:
+        with _session_lock:
+            if _session is None:
+                s = requests.Session()
+                s.headers.update(HEADERS)
+                _session = s
+    return _session
 
 
 _NEG_SENTINEL = object()  # cached value meaning "upstream failed, don't retry yet"
@@ -75,12 +97,9 @@ def _get(url, *, ttl=900, params=None, timeout=20, json_resp=True, headers=None)
         return None
     if hit is not None:
         return hit
-    global _session
-    if _session is None:
-        _session = requests.Session()
-        _session.headers.update(HEADERS)
+    session = _get_session()
     try:
-        r = _session.get(url, params=params, timeout=timeout, headers=headers)
+        r = session.get(url, params=params, timeout=timeout, headers=headers)
         # Distinguish "transient throttle" from "permanent shape change".
         if r.status_code == 429:
             ra = r.headers.get("Retry-After")
@@ -195,8 +214,15 @@ def gdelt_tone_timeline(query, *, timespan="2w"):
     data = _get(GDELT_DOC, params=params, ttl=1800)
     if not data:
         return []
-    _tl = data.get("timeline") or []
-    series = (_tl[0].get("data") if (_tl and isinstance(_tl[0], dict)) else []) or []
+    _tl = [t for t in (data.get("timeline") or []) if isinstance(t, dict)]
+    # Prefer the series explicitly labeled as tone (GDELT can return — or
+    # reorder — multiple series); fall back to the first if none is labeled,
+    # preserving the previous index-0 behavior.
+    tone_entry = next(
+        (t for t in _tl if "tone" in str(t.get("series", "")).lower()),
+        (_tl[0] if _tl else None),
+    )
+    series = (tone_entry.get("data") if isinstance(tone_entry, dict) else []) or []
     return [{"date": d.get("date"), "value": d.get("value")} for d in series]
 
 
@@ -214,7 +240,7 @@ def defillama_tvl_summary():
     chains_raw = _get(f"{LLAMA}/v2/chains", ttl=900) or []
     if isinstance(protos, list):
         protos = sorted(
-            [p for p in protos if p.get("tvl")],
+            [p for p in protos if isinstance(p.get("tvl"), (int, float))],
             key=lambda p: p["tvl"], reverse=True
         )[:25]
         protos = [{
@@ -301,7 +327,11 @@ def mempool_btc_stats():
     mempool = _get(f"{MEMPOOL}/mempool", ttl=120) or {}
     diff = _get(f"{MEMPOOL}/v1/difficulty-adjustment", ttl=600) or {}
     blocks = _get(f"{MEMPOOL}/blocks", ttl=300) or []
-    tip_height = blocks[0].get("height") if blocks else None
+    tip_height = (
+        blocks[0].get("height")
+        if (isinstance(blocks, list) and blocks and isinstance(blocks[0], dict))
+        else None
+    )
     return {
         "fees": fees,
         "mempool_count": mempool.get("count"),
@@ -334,9 +364,13 @@ def treasury_yield_curve():
     rows = data.get("data") or []
     rates = []
     for r in rows[:20]:
+        try:
+            rate = float(r["avg_interest_rate_amt"]) if r.get("avg_interest_rate_amt") else None
+        except (TypeError, ValueError):
+            rate = None
         rates.append({
             "security": r.get("security_desc"),
-            "rate": float(r["avg_interest_rate_amt"]) if r.get("avg_interest_rate_amt") else None,
+            "rate": rate,
             "date": r.get("record_date"),
         })
     as_of = rates[0]["date"] if rates else None
@@ -366,14 +400,26 @@ def cboe_vix_history():
         return None
     last = None
     for row in csv.DictReader(io.StringIO(txt)):
-        last = row
+        # Skip blank trailing rows (a stray newline yields all-empty values).
+        if any(row.values()):
+            last = row
     if not last:
         return None
+
+    def _num(field):
+        v = last.get(field)
+        if not v:
+            return None
+        try:
+            return float(v)
+        except (TypeError, ValueError):
+            return None
+
     return {
         "vix_date": last.get("DATE"),
-        "vix_close": float(last["CLOSE"]) if last.get("CLOSE") else None,
-        "vix_high": float(last["HIGH"]) if last.get("HIGH") else None,
-        "vix_low": float(last["LOW"]) if last.get("LOW") else None,
+        "vix_close": _num("CLOSE"),
+        "vix_high": _num("HIGH"),
+        "vix_low": _num("LOW"),
     }
 
 
