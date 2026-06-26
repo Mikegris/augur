@@ -21,6 +21,9 @@ import aj_council               # noqa: E402
 from aj_schemas import AnalystReport, CouncilDecision, Rating, Action  # noqa: E402
 
 aj_db.aj_init()
+# Phase 1 tests exercise the analyst-consensus path (no debate). Phase 2's
+# debate has its own suite (test_aj_debate.py).
+aj_config.set_config({"max_research_rounds": 0})
 
 
 def _fake_analyst(score, conf, band="NEUTRAL", analyst="x"):

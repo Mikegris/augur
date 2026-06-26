@@ -25,6 +25,8 @@ import aj_config
 import aj_db
 import aj_routing
 import aj_analysts
+import aj_debate
+import aj_memory
 from aj_schemas import (AnalystReport, CouncilDecision, ResearchPlan, Rating,
                         rating_conviction)
 
@@ -178,7 +180,9 @@ def _consensus(reports: List[AnalystReport]):
 # ── persistence (queryable copy + audit hash chain) ───────────────────────────
 
 def _persist(dec: CouncilDecision, reports: List[AnalystReport],
+             turns: Optional[List[Dict[str, Any]]],
              cycle_id: Optional[str]) -> Optional[int]:
+    turns = turns or []
     run_id = None
     try:
         run_id = aj_db.insert(
@@ -195,13 +199,19 @@ def _persist(dec: CouncilDecision, reports: List[AnalystReport],
                          ts=aj_db.utc_now_iso(), analyst=r.analyst, band=r.band,
                          score=r.score, confidence=r.confidence,
                          narrative=r.narrative[:2000], report_json=_json(r.to_audit()))
+        for t in turns:
+            aj_db.insert("aj_debate_turns", council_run_id=run_id,
+                         ts=aj_db.utc_now_iso(), debate=t.get("debate", "research"),
+                         role=t.get("role", "?"), round=int(t.get("round", 0)),
+                         content=str(t.get("content", ""))[:4000])
     except Exception:
         log.exception("council persist failed (non-fatal)")
     # Audit hash chain — independent of the queryable copy.
     try:
         aj_db.audit("council_run",
                     {"decision": dec.to_audit(),
-                     "reports": [r.to_audit() for r in reports]},
+                     "reports": [r.to_audit() for r in reports],
+                     "debate": turns},
                     cycle_id=cycle_id, ref_id=run_id, actor="council")
     except Exception:
         log.exception("council audit failed (non-fatal)")
@@ -250,21 +260,56 @@ def run(symbol: str, cfg: Optional[Dict[str, Any]] = None,
     the_call = call or _make_call(cfg, budget, cycle_id)
     t0 = time.time()
     reports = _run_analysts(symbol, cfg, the_call)
-    rating, conf, thesis, dissent = _consensus(reports)
+    c_rating, conf, c_thesis, dissent = _consensus(reports)
+
+    # Phase 2: bull/bear debate → research manager refines the consensus. The
+    # consensus plan is the fail-closed fallback if the debate can't run (no
+    # model / budget exhausted) — we never fabricate a debate.
+    rounds = int(cfg.get("max_research_rounds", 1) or 0)
+    plan = ResearchPlan(recommendation=c_rating, rationale=c_thesis)
+    turns: List[Dict[str, Any]] = []
+    debate_ran = False
+    if rounds > 0 and reports and not budget.exhausted():
+        mem_text = _safe_recall(symbol)
+        turns = aj_debate.research_debate(symbol, reports, mem_text, the_call, rounds)
+        dplan = aj_debate.research_manager(symbol, reports, turns, the_call)
+        if dplan is not None:
+            plan = dplan
+            debate_ran = True
 
     backed = [r for r in reports if r.confidence > 0.0]
     if not reports:
         status = "error"
-    elif budget.hit_cap or len(backed) < len(reports):
+    elif budget.hit_cap or len(backed) < len(reports) or (rounds > 0 and not debate_ran):
         status = "degraded"
     else:
         status = "ok"
 
-    plan = ResearchPlan(recommendation=rating, rationale=thesis)
     dec = CouncilDecision.from_plan(
         symbol, plan, confidence=conf,
         dissent=dissent, status=status, cost_usd=budget.cost_usd,
         latency_ms=int((time.time() - t0) * 1000), n_calls=budget.n_calls)
-    _persist(dec, reports, cycle_id)
+    _persist(dec, reports, turns, cycle_id)
+    _remember(dec)
     _cache_put(symbol, cfg, dec)
     return dec
+
+
+def _safe_recall(symbol: str) -> str:
+    try:
+        return aj_memory.recall_text(symbol)
+    except Exception:
+        return ""
+
+
+def _remember(dec: CouncilDecision) -> None:
+    """Append a terse decision summary to the council memory log (fail-open)."""
+    if dec.status not in ("ok", "degraded"):
+        return
+    try:
+        aj_memory.append(dec.symbol, "decision",
+                         "{r}/{a} conviction={c:.0%} — {t}".format(
+                             r=dec.rating.value, a=dec.action.value,
+                             c=dec.conviction, t=dec.thesis[:240]))
+    except Exception:
+        pass
