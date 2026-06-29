@@ -4568,6 +4568,7 @@ async function loadTradingView() {
         ${group('⚡ 100x — autonomy', 'Let the agent run itself (paper)', false,
           f('Auto-run', yn('aj-cfg-auto_run_enabled', cfg.auto_run_enabled), 'Run cycles automatically during market hours.') +
           f('Auto-run interval', num('aj-cfg-auto_run_interval_min', cfg.auto_run_interval_min, null, 'min'), 'Minutes between automatic cycles.') +
+          f('Align to clock', yn('aj-cfg-auto_run_align_to_clock', cfg.auto_run_align_to_clock), 'Fire on wall-clock marks (:00, :10, :20…) so runs land on the expected minute. Off = interval measured from the previous run.') +
           f('Health auto-halt', yn('aj-cfg-health_autohalt', cfg.health_autohalt), 'Self-halt on fill-rate collapse, divergence, or a broken audit chain.') +
           f('Preset escalation', yn('aj-cfg-auto_preset_escalation', cfg.auto_preset_escalation), 'Earn your way up conservative→moderate→aggressive; step down on drawdown.') +
           f('Daily reflection', yn('aj-cfg-daily_reflection', cfg.daily_reflection), 'Write an end-of-day self-review of what worked.') +
@@ -4733,6 +4734,7 @@ async function loadTradingView() {
       // autonomy
       auto_run_enabled: vBool('aj-cfg-auto_run_enabled'),
       auto_run_interval_min: vNum('aj-cfg-auto_run_interval_min'),
+      auto_run_align_to_clock: vBool('aj-cfg-auto_run_align_to_clock'),
       health_autohalt: vBool('aj-cfg-health_autohalt'),
       auto_preset_escalation: vBool('aj-cfg-auto_preset_escalation'),
       daily_reflection: vBool('aj-cfg-daily_reflection'),

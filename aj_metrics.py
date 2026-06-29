@@ -130,7 +130,7 @@ def status() -> Dict[str, Any]:
     import aj_risk
     out = {
         # AJTA agent version. v3.4 adds the Analyst Council advisory layer.
-        "version": "3.8.1",
+        "version": "3.8.2",
         "trading_enabled": cfg.get("trading_enabled"),
         "live_trading_enabled": cfg.get("live_trading_enabled"),
         "session": aj_db.market_session(),

@@ -125,6 +125,45 @@ def test_scheduler_status_shape():
     assert st["auto_run_enabled"] is True and st["interval_min"] == 10
 
 
+def test_clock_aligned_fires_once_per_boundary():
+    # interval 10m, clock-aligned. A run in one slot must NOT re-fire until the
+    # next wall-clock :10 boundary, regardless of how little time elapsed.
+    _reset(); _cfg(auto_run_align_to_clock=True, auto_run_interval_min=10)
+    import datetime
+    base = datetime.datetime(2026, 6, 29, 16, 10, 5, tzinfo=datetime.timezone.utc)  # 12:10:05 ET
+    aj_db.utc_now = lambda: base
+    # no prior run -> due
+    assert A.due_to_run()["due"] is True
+    # a run at 16:10:05 stamps the clock; 90s later (same :10 slot) -> NOT due
+    aj_db.set_setting_raw(A._LAST_RUN_KEY, base.isoformat())
+    aj_db.utc_now = lambda: base + datetime.timedelta(seconds=90)   # 16:11:35, still :10 slot
+    g = A.due_to_run()
+    assert g["due"] is False and "clock mark" in g["reason"], g
+    # cross into the next boundary (16:20) -> due again
+    aj_db.utc_now = lambda: base.replace(minute=20, second=2)        # 16:20:02
+    assert A.due_to_run()["due"] is True
+
+
+def test_clock_aligned_not_drifting_with_cycle_duration():
+    # Even if the prior run COMPLETED 3 min into the slot, the next fire is the
+    # next clock mark, not last_run+interval (which would drift).
+    _reset(); _cfg(auto_run_align_to_clock=True, auto_run_interval_min=10)
+    import datetime
+    # last run completed at 16:13 (3 min into the :10 slot)
+    aj_db.set_setting_raw(A._LAST_RUN_KEY,
+                          datetime.datetime(2026, 6, 29, 16, 13, 0, tzinfo=datetime.timezone.utc).isoformat())
+    # at 16:20:01 -> due (next mark), NOT waiting until 16:23
+    aj_db.utc_now = lambda: datetime.datetime(2026, 6, 29, 16, 20, 1, tzinfo=datetime.timezone.utc)
+    assert A.due_to_run()["due"] is True
+
+
+def test_legacy_interval_mode_still_works():
+    _reset(); _cfg(auto_run_align_to_clock=False, auto_run_interval_min=10)
+    aj_db.set_setting_raw(A._LAST_RUN_KEY, aj_db.utc_now_iso())
+    g = A.due_to_run()
+    assert g["due"] is False and "since last run" in g["reason"] and g["aligned"] is False
+
+
 def test_start_scheduler_idempotent():
     # first start spawns; second is a no-op (returns False). Daemon thread exits
     # with the test process; it self-gates so it won't run real cycles here.

@@ -122,6 +122,7 @@ DEFAULTS: Dict[str, Any] = {
     # autonomous operation (21-25)
     "auto_run_enabled":       False,   # 21: run cycles automatically during market hours
     "auto_run_interval_min":  30,      #     minutes between automatic cycles
+    "auto_run_align_to_clock": True,   #     fire on wall-clock marks (:00,:10,:20…) vs last-run+interval
     "health_autohalt":        False,   # 22: self-halt on fill-rate collapse / divergence / unknown orders
     "auto_preset_escalation": False,   # 23: auto conservative<->moderate<->aggressive on performance
     "daily_reflection":       False,   # 24: write an end-of-day self-review journal entry
@@ -193,7 +194,7 @@ _BOOL_KEYS = {"trading_enabled", "live_trading_enabled", "robinhood_enabled",
               "relative_strength_filter", "tp_ladder", "adaptive_thresholds",
               "regime_adaptive", "pyramiding", "signal_scorecard",
               "opportunity_radar", "risk_based_sizing",
-              "auto_run_enabled", "health_autohalt",
+              "auto_run_enabled", "auto_run_align_to_clock", "health_autohalt",
               "auto_preset_escalation", "daily_reflection", "premarket_briefing",
               # council layer
               "council_enabled", "council_analyst_fundamentals",

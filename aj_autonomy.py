@@ -47,9 +47,23 @@ def minutes_since_last_run() -> Optional[float]:
     return (aj_db.utc_now() - last).total_seconds() / 60.0
 
 
+def _clock_slot(dt, interval: int) -> int:
+    """Which interval bucket a UTC instant falls in on a fixed global grid
+    anchored to the epoch. Two runs in the same slot => same boundary already
+    served. For intervals that divide 60 (5/10/15/30) the UTC grid lines up with
+    ET clock marks because the ET offset is a whole number of hours."""
+    return int(dt.timestamp() // 60) // max(1, interval)
+
+
 def due_to_run(cfg: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """Whether an automatic cycle is due now: auto-run on, a tradable session,
-    and at least `auto_run_interval_min` since the last automatic cycle."""
+    and the interval satisfied.
+
+    Two cadence modes (auto_run_align_to_clock, default True):
+      • clock-aligned — fire once per wall-clock boundary (:00, :10, :20…), so
+        runs land on the minute you expect regardless of cycle duration; no drift.
+      • last-run+interval — fire `interval` minutes after the previous run
+        COMPLETED (legacy behavior; drifts by the cycle's own runtime)."""
     cfg = cfg or aj_config.get_config()
     if not cfg.get("auto_run_enabled"):
         return {"due": False, "reason": "auto_run disabled"}
@@ -61,10 +75,27 @@ def due_to_run(cfg: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         return {"due": False, "reason": "session {} not tradable".format(session)}
     interval = max(1, int(cfg.get("auto_run_interval_min") or 30))
     mins = minutes_since_last_run()
+    aligned = bool(cfg.get("auto_run_align_to_clock", True))
+
+    if aligned:
+        last = _last_auto_run()
+        now = aj_db.utc_now()
+        cur_slot = _clock_slot(now, interval)
+        # Not yet served this boundary? (no prior run, or prior run was an
+        # earlier slot) -> due. Same slot already ran -> wait for the next mark.
+        if last is not None and cur_slot <= _clock_slot(last, interval):
+            return {"due": False,
+                    "reason": "waiting for next :{:02d}m clock mark (interval {}m)".format(
+                        ((cur_slot + 1) * interval) % 60, interval),
+                    "minutes_since": round(mins, 1) if mins is not None else None,
+                    "aligned": True}
+        return {"due": True, "reason": "due (clock-aligned)", "minutes_since": mins,
+                "session": session, "aligned": True}
+
     if mins is not None and mins < interval:
         return {"due": False, "reason": "only {:.0f}m since last run (interval {}m)".format(mins, interval),
-                "minutes_since": round(mins, 1)}
-    return {"due": True, "reason": "due", "minutes_since": mins, "session": session}
+                "minutes_since": round(mins, 1), "aligned": False}
+    return {"due": True, "reason": "due", "minutes_since": mins, "session": session, "aligned": False}
 
 
 def run_scheduled(cfg: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
@@ -186,11 +217,26 @@ def scheduler_status(cfg: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     mins = minutes_since_last_run()
     with _sched_state_lock:
         snap = dict(_sched_state)
+    interval = int(cfg.get("auto_run_interval_min") or 30)
+    aligned = bool(cfg.get("auto_run_align_to_clock", True))
+    # human-readable next expected fire
+    next_eta = None
+    try:
+        now = aj_db.utc_now()
+        if aligned:
+            nxt = (_clock_slot(now, interval) + 1) * interval     # epoch-minutes of next mark
+            next_eta = round(nxt - now.timestamp() / 60.0, 1)     # minutes from now to next mark
+        elif mins is not None:
+            next_eta = round(max(0.0, interval - mins), 1)
+    except Exception:
+        pass
     return {
         "thread_running": alive,
         "started": _sched_started,
         "auto_run_enabled": bool(cfg.get("auto_run_enabled")),
-        "interval_min": int(cfg.get("auto_run_interval_min") or 30),
+        "interval_min": interval,
+        "cadence": "clock-aligned" if aligned else "last-run+interval",
+        "next_fire_in_min": next_eta,
         "tick_seconds": _SCHED_TICK_SECONDS,
         "minutes_since_last_run": (round(mins, 1) if mins is not None else None),
         "due_now": due_to_run(cfg),
