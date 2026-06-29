@@ -16,6 +16,8 @@ from __future__ import annotations
 import json
 import logging
 import math
+import threading
+import time
 from typing import Any, Dict, List, Optional
 
 import aj_db
@@ -81,12 +83,119 @@ def run_scheduled(cfg: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         import aj_operator
         # run_once handles post-cycle autonomy (escalation/reflection/briefing).
         result = aj_operator.run_once("paper")
+        if not result.get("ok"):
+            # e.g. a manual cycle holds the single-instance lock ("another cycle
+            # is running"). Do NOT stamp the interval clock — let the next tick
+            # retry once the lock frees, rather than skipping a whole interval.
+            return {"ran": False, "reason": result.get("reason") or "cycle did not run",
+                    "result": result}
         aj_db.set_setting_raw(_LAST_RUN_KEY, aj_db.utc_now_iso())
         return {"ran": True, "cycle": result.get("cycle_id"),
                 "proposals": len(result.get("proposals") or []), "result": result}
     except Exception as e:
         log.exception("run_scheduled failed")
         return {"ran": False, "reason": "error: {}".format(str(e)[:120])}
+
+
+# ── continuous scheduler thread (the timer that ticks run_scheduled) ──────────
+#
+# aj_autonomy provides the *policy* (due_to_run / run_scheduled); this is the
+# *driver* that was previously missing — a single daemon thread that wakes every
+# _SCHED_TICK_SECONDS and asks run_scheduled() to run a cycle iff due. The thread
+# is intentionally dumb: ALL gating (auto_run_enabled, market session, interval,
+# health auto-halt, kill switch) lives in run_scheduled/run_once and is re-read
+# from config every tick — so toggling auto-run or changing the interval in the
+# UI takes effect within one tick with no restart. Mirrors cache_warmer's
+# idempotent-start + daemon-thread pattern.
+
+_SCHED_TICK_SECONDS = 30      # wake cadence; the real interval gate is in cfg
+_SCHED_BOOT_DELAY = 20        # let the app/cache warm up before the first tick
+
+_sched_thread: Optional[threading.Thread] = None
+_sched_started = False
+_sched_lock = threading.Lock()
+_sched_state: Dict[str, Any] = {
+    "last_tick": None, "last_fire": None, "last_reason": None,
+    "ticks": 0, "fires": 0, "errors": 0,
+}
+_sched_state_lock = threading.Lock()
+
+
+def _scheduler_tick() -> Dict[str, Any]:
+    """One scheduler wake: run a cycle iff due. NEVER raises. Factored out of the
+    loop so it is unit-testable without spawning a thread."""
+    try:
+        res = run_scheduled()
+    except Exception as e:                       # defense in depth — run_scheduled
+        log.exception("scheduler tick failed")   # already swallows, but never die
+        res = {"ran": False, "reason": "tick error: {}".format(str(e)[:120])}
+    now = aj_db.utc_now_iso()
+    reason = str(res.get("reason") or "")
+    with _sched_state_lock:
+        _sched_state["ticks"] += 1
+        _sched_state["last_tick"] = now
+        _sched_state["last_reason"] = res.get("reason") if not res.get("ran") else "ran"
+        if res.get("ran"):
+            _sched_state["fires"] += 1
+            _sched_state["last_fire"] = now
+        elif reason.startswith(("error", "tick error")):
+            _sched_state["errors"] += 1
+    if res.get("ran"):
+        log.info("scheduler fired a cycle: %s (%s proposals)",
+                 res.get("cycle"), res.get("proposals"))
+    else:
+        log.debug("scheduler idle: %s", reason)
+    return res
+
+
+def _scheduler_loop() -> None:
+    # Boot delay so the first tick doesn't race app/cache warm-up.
+    time.sleep(_SCHED_BOOT_DELAY)
+    log.info("aj scheduler loop running (tick=%ss)", _SCHED_TICK_SECONDS)
+    while True:
+        _scheduler_tick()
+        time.sleep(_SCHED_TICK_SECONDS)
+
+
+def start_scheduler() -> bool:
+    """Spawn the auto-run scheduler thread once. Idempotent — safe to call from
+    multiple boot paths (app.py, desktop.py). Returns True if it started the
+    thread on this call, False if one was already running.
+
+    Starting the thread does NOT mean cycles will run: run_scheduled self-gates
+    on auto_run_enabled (default OFF), market session, and interval, so the
+    thread is cheap (one market_session() read per tick) until the operator
+    enables auto-run in the Config tab."""
+    global _sched_thread, _sched_started
+    with _sched_lock:
+        if _sched_started:
+            return False
+        _sched_thread = threading.Thread(
+            target=_scheduler_loop, daemon=True, name="aj-autorun-scheduler")
+        _sched_thread.start()
+        _sched_started = True
+    log.info("aj auto-run scheduler thread launched")
+    return True
+
+
+def scheduler_status(cfg: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """Live scheduler health for /api/aj/status and the Config tab — lets the
+    operator confirm the timer is actually running and see the next-due verdict."""
+    cfg = cfg or aj_config.get_config()
+    alive = bool(_sched_thread and _sched_thread.is_alive())
+    mins = minutes_since_last_run()
+    with _sched_state_lock:
+        snap = dict(_sched_state)
+    return {
+        "thread_running": alive,
+        "started": _sched_started,
+        "auto_run_enabled": bool(cfg.get("auto_run_enabled")),
+        "interval_min": int(cfg.get("auto_run_interval_min") or 30),
+        "tick_seconds": _SCHED_TICK_SECONDS,
+        "minutes_since_last_run": (round(mins, 1) if mins is not None else None),
+        "due_now": due_to_run(cfg),
+        **snap,
+    }
 
 
 # ════════════════════════════════════════════════════════════════════════════

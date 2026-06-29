@@ -130,7 +130,7 @@ def status() -> Dict[str, Any]:
     import aj_risk
     out = {
         # AJTA agent version. v3.4 adds the Analyst Council advisory layer.
-        "version": "3.8.0",
+        "version": "3.8.1",
         "trading_enabled": cfg.get("trading_enabled"),
         "live_trading_enabled": cfg.get("live_trading_enabled"),
         "session": aj_db.market_session(),
@@ -152,4 +152,9 @@ def status() -> Dict[str, Any]:
         out["day_pnl"] = aj_risk.compute_day_pnl()
     except Exception:
         log.debug("status day_pnl failed", exc_info=True)
+    try:
+        import aj_autonomy
+        out["scheduler"] = aj_autonomy.scheduler_status(cfg)
+    except Exception:
+        log.debug("status scheduler failed", exc_info=True)
     return out

@@ -72,7 +72,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(me
 
 # Single source of truth for the app version — surfaced at /api/version and
 # in jarvis.health_snapshot().
-APP_VERSION = "3.8.0"
+APP_VERSION = "3.8.1"
 
 _TICKER_RE = re.compile(r"^[A-Z0-9][A-Z0-9.\-]{0,9}$")
 
@@ -218,6 +218,15 @@ if not _IS_RELOADER_PARENT:
         cache_warmer.start()
     except Exception as _warmer_err:
         log.warning("cache_warmer start failed: %s", _warmer_err)
+    # AJTA auto-run scheduler: the daemon timer that actually ticks the agent's
+    # cycles on auto_run_interval_min. Self-gates on auto_run_enabled (default
+    # OFF) + market session, so it is a cheap no-op until the operator enables
+    # auto-run. Without this, the "Auto-run every N minutes" toggle is inert.
+    try:
+        import aj_autonomy
+        aj_autonomy.start_scheduler()
+    except Exception as _sched_err:
+        log.warning("aj scheduler start failed: %s", _sched_err)
 else:
     log.info("Skipping cache_warmer start in reloader parent process")
 
