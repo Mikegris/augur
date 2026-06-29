@@ -65,6 +65,22 @@ _BASE_WEIGHTS = {
     "narrative":       0.08,
 }
 
+# Orthogonal alpha signals (insider/institutional/political/social) folded in
+# ONLY when multi_factor_signals is on AND the signal has earned weight via the
+# IC gate. Modest base weights — they renormalize over whatever is available.
+_ORTHO_WEIGHTS = {
+    "smart_money":     0.10,
+    "insider":         0.08,
+    "congress":        0.05,
+    "social":          0.03,
+}
+_ORTHO_LABELS = {
+    "smart_money":     "Smart-Money Convergence",
+    "insider":         "Synthetic Insider",
+    "congress":        "Congressional Flow",
+    "social":          "Social Sentiment",
+}
+
 # Disagreement (weighted std of per-signal prob_up) at which we trust ~none
 # of the edge. 0.22 ≈ signals spanning roughly [0.28, 0.72]: a genuine split.
 _MAX_DISAGREEMENT = 0.22
@@ -362,6 +378,36 @@ def _run_uncached(symbol: str, horizon_days: int) -> Dict[str, Any]:
         "narrative": "Narrative Phase",
     }
 
+    # ── Batch 1: multi-factor alpha fusion (opt-in, IC-gated) ────────────────
+    # Fold orthogonal signals (insider/institutional/political/social) into the
+    # candidate set — but ONLY when enabled, and only the ones that have EARNED
+    # it via realized skill (the A4 IC gate), so an unproven signal never moves a
+    # live decision. Fail-open: any error leaves the price ensemble untouched.
+    eff_base = dict(_BASE_WEIGHTS)
+    _cfg: Dict[str, Any] = {}
+    try:
+        import aj_config as _ajc
+        _cfg = _ajc.get_config() or {}
+        if _cfg.get("multi_factor_signals"):
+            import aj_signals
+            ortho = aj_signals.all_signals(symbol) or {}
+            gate_on = bool(_cfg.get("signal_ic_gate", True))
+            for k, sig in ortho.items():
+                if not sig or sig.get("prob_up") is None:
+                    continue
+                if gate_on:
+                    try:
+                        import aj_ic
+                        if not aj_ic.signal_promoted(k, _cfg).get("promoted"):
+                            continue          # unproven -> excluded from the live edge
+                    except Exception:
+                        continue              # unknown/error -> don't trust it
+                raw_signals[k] = sig
+                labels[k] = _ORTHO_LABELS.get(k, k)
+                eff_base[k] = _ORTHO_WEIGHTS.get(k, 0.05)
+    except Exception:
+        log.debug("multi_factor fusion skipped", exc_info=True)
+
     if not raw_signals:
         return {
             "symbol": symbol, "horizon_days": horizon_days,
@@ -373,24 +419,33 @@ def _run_uncached(symbol: str, horizon_days: int) -> Dict[str, Any]:
     # Weights — tilted toward components with a proven realized edge once
     # there's enough scored history (the accountability loop). Falls back to
     # the static base weights on a cold-start install or any failure.
-    weights = dict(_BASE_WEIGHTS)
+    weights = dict(eff_base)
     weights_source = "base"
     try:
         import forecast_accountability
-        weights = forecast_accountability.adaptive_weights(_BASE_WEIGHTS, horizon_days)
+        weights = forecast_accountability.adaptive_weights(eff_base, horizon_days)
         if forecast_accountability.weights_are_adapted(_BASE_WEIGHTS):
             weights_source = "adaptive"
     except Exception as e:
         log.debug("adaptive_weights unavailable: %s", e)
-        weights = dict(_BASE_WEIGHTS)
+        weights = dict(eff_base)
+
+    # Regime-conditional tilt (opt-in): trust momentum in trends, mean-reversion
+    # in chop. No-op unless regime_conditional_weights is on. Fail-open.
+    if _cfg.get("regime_conditional_weights"):
+        try:
+            import aj_select, aj_alpha
+            weights = aj_select.regime_signal_weights(weights, aj_alpha.detect_regime(), _cfg)
+        except Exception:
+            log.debug("regime weights skipped", exc_info=True)
 
     # Renormalize weights over the available signals. Fall back to a key's
     # real base weight (not a flat 0.1) if an adaptive run ever drops a key.
-    total_w = sum(weights.get(k, _BASE_WEIGHTS.get(k, 0.1)) for k in raw_signals)
+    total_w = sum(weights.get(k, eff_base.get(k, 0.1)) for k in raw_signals)
     weighted_sum = 0.0
     signal_rows: List[Dict[str, Any]] = []
     for key, sig in raw_signals.items():
-        w = weights.get(key, _BASE_WEIGHTS.get(key, 0.1)) / total_w
+        w = weights.get(key, eff_base.get(key, 0.1)) / total_w
         p = float(sig["prob_up"])
         weighted_sum += p * w
         row = {

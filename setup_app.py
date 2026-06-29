@@ -59,6 +59,8 @@ LOCAL_MODULES = [
     "aj_personas",
     # v3.6 market screener + options (lazy-imported in the operator/risk/broker)
     "aj_universe", "aj_options", "aj_analyst_util",
+    # v3.9 effectiveness layer (lazy-imported in the ensemble/operator)
+    "aj_signals", "aj_ic", "aj_select", "aj_execution_alpha", "aj_allocate",
     "ai_summarizer",
     "alt_data_engine",
     "alt_signals",

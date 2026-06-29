@@ -4575,6 +4575,21 @@ async function loadTradingView() {
           f('Pre-market briefing', yn('aj-cfg-premarket_briefing', cfg.premarket_briefing), 'Build a ranked “what to watch” list before the open.')
         )}
 
+        ${group('🎯 Effectiveness — better buys & sells', 'Richer signals, pick the best names, trade smarter (all opt-in)', false,
+          f('Multi-factor signals', yn('aj-cfg-multi_factor_signals', cfg.multi_factor_signals), 'Fuse smart-money / insider / congressional / social signals into the forecast — orthogonal to price.') +
+          f('Validate before trusting', yn('aj-cfg-signal_ic_gate', cfg.signal_ic_gate), 'A new signal only earns weight after it proves realized skill (IC/Brier). Strongly recommended ON.') +
+          f('Regime-aware weighting', yn('aj-cfg-regime_conditional_weights', cfg.regime_conditional_weights), 'Trust momentum in trends, mean-reversion in chop.') +
+          f('Cross-sectional selection', yn('aj-cfg-cross_sectional_selection', cfg.cross_sectional_selection), 'Trade the best N relative opportunities, not anything above a bar.') +
+          f('Top-N', num('aj-cfg-cross_sectional_top_n', cfg.cross_sectional_top_n, null, 'names'), 'How many of the best ranked names to trade per cycle.') +
+          f('Cost gate', yn('aj-cfg-cost_gate', cfg.cost_gate), 'Skip trades whose edge won’t survive spread + fees.') +
+          f('Limit entries', yn('aj-cfg-limit_entry', cfg.limit_entry), 'Post a limit through the mid instead of paying the full spread.') +
+          f('Time-stop (days)', num('aj-cfg-time_stop_days', cfg.time_stop_days, null, 'days'), 'Exit a stagnant thesis after N days (0 = off).') +
+          f('Earnings blackout (days)', num('aj-cfg-event_blackout_days', cfg.event_blackout_days, null, 'days'), 'Don’t open new positions within N days of earnings (0 = off).') +
+          f('Profit ladder', yn('aj-cfg-profit_ladder', cfg.profit_ladder), 'Scale out at gain rungs.') +
+          f('Portfolio construction', yn('aj-cfg-portfolio_construction', cfg.portfolio_construction), 'Size by risk-aware allocation across the book (caps only shrink).') +
+          f('Allocation method', `<select id="aj-cfg-alloc_method"><option value="risk_parity"${cfg.alloc_method!=='max_sharpe'&&cfg.alloc_method!=='equal'?' selected':''}>Risk parity</option><option value="max_sharpe"${cfg.alloc_method==='max_sharpe'?' selected':''}>Max Sharpe</option><option value="equal"${cfg.alloc_method==='equal'?' selected':''}>Equal weight</option></select>`, 'How target weights are computed when portfolio construction is on.')
+        )}
+
         <div class="aj-cfg-savebar">
           <button class="btn" id="aj-save-cfg">Save config</button>
           <span class="muted aj-cfg-savenote">Live trading isn’t editable here — it’s gated behind the CLI + VERIFY checks.</span>
@@ -4739,6 +4754,19 @@ async function loadTradingView() {
       auto_preset_escalation: vBool('aj-cfg-auto_preset_escalation'),
       daily_reflection: vBool('aj-cfg-daily_reflection'),
       premarket_briefing: vBool('aj-cfg-premarket_briefing'),
+      // effectiveness layer
+      multi_factor_signals: vBool('aj-cfg-multi_factor_signals'),
+      signal_ic_gate: vBool('aj-cfg-signal_ic_gate'),
+      regime_conditional_weights: vBool('aj-cfg-regime_conditional_weights'),
+      cross_sectional_selection: vBool('aj-cfg-cross_sectional_selection'),
+      cross_sectional_top_n: vNum('aj-cfg-cross_sectional_top_n'),
+      cost_gate: vBool('aj-cfg-cost_gate'),
+      limit_entry: vBool('aj-cfg-limit_entry'),
+      time_stop_days: vNum('aj-cfg-time_stop_days'),
+      event_blackout_days: vNum('aj-cfg-event_blackout_days'),
+      profit_ladder: vBool('aj-cfg-profit_ladder'),
+      portfolio_construction: vBool('aj-cfg-portfolio_construction'),
+      alloc_method: vStr('aj-cfg-alloc_method'),
     };
     const body = {};
     Object.keys(raw).forEach(k => { if (raw[k] !== undefined) body[k] = raw[k]; });

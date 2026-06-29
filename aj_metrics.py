@@ -130,7 +130,7 @@ def status() -> Dict[str, Any]:
     import aj_risk
     out = {
         # AJTA agent version. v3.4 adds the Analyst Council advisory layer.
-        "version": "3.8.2",
+        "version": "3.9.0",
         "trading_enabled": cfg.get("trading_enabled"),
         "live_trading_enabled": cfg.get("live_trading_enabled"),
         "session": aj_db.market_session(),
@@ -157,4 +157,19 @@ def status() -> Dict[str, Any]:
         out["scheduler"] = aj_autonomy.scheduler_status(cfg)
     except Exception:
         log.debug("status scheduler failed", exc_info=True)
+    # effectiveness layer: which alpha/selection/execution/allocation features
+    # are live, plus the IC-promotion verdict for the orthogonal signals.
+    try:
+        eff = {k: cfg.get(k) for k in (
+            "multi_factor_signals", "signal_ic_gate", "regime_conditional_weights",
+            "cross_sectional_selection", "cross_sectional_top_n",
+            "limit_entry", "cost_gate", "time_stop_days", "event_blackout_days",
+            "profit_ladder", "portfolio_construction", "alloc_method")}
+        if cfg.get("multi_factor_signals"):
+            import aj_ic
+            eff["signal_promotion"] = aj_ic.promotion_status(
+                ["smart_money", "insider", "congress", "social"], cfg)
+        out["effectiveness"] = eff
+    except Exception:
+        log.debug("status effectiveness failed", exc_info=True)
     return out

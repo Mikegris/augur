@@ -467,6 +467,73 @@ def _process_exits(cycle_id: str, cfg: Dict[str, Any]) -> List[Dict[str, Any]]:
             except Exception:
                 log.debug("scorecard exit record skipped", exc_info=True)
         out.append(r)
+
+    # ── Batch 3 — supplementary exits: time-stop + profit-ladder (opt-in) ────
+    # time-stop closes a stagnant thesis; the ladder scales out at gain rungs. A
+    # per-symbol high-water mark stops a rung re-trimming every cycle; the mark
+    # is cleared on a full exit so a re-opened position starts fresh. Fail-open.
+    if cfg.get("time_stop_days", 0) or cfg.get("profit_ladder"):
+        try:
+            import aj_execution_alpha as _ea
+            import aj_risk
+            book = aj_positions.paper_book().get("positions") or {}
+            exited = {r.get("symbol") for r in out if r.get("result") == "executed"
+                      and float(r.get("exec", {}).get("qty", 0) or 0) >= 0}
+            done_syms = {r.get("symbol") for r in out}   # any sell processed this cycle
+            marks = aj_risk._marks([s for s in book if s not in done_syms])
+            for sym, pos in list(book.items()):
+                if sym in done_syms:
+                    continue
+                mk = marks.get(sym)
+                qty = float(pos.get("qty") or 0)
+                if mk is None or qty <= 0:
+                    continue
+                position = dict(pos)
+                position["symbol"] = sym
+                lkey = "__aj_ladder_" + sym
+                # time-stop -> full exit
+                ts = _ea.time_stop(position, cfg, mark=mk, opened_at=pos.get("opened_at"))
+                if ts.get("exit"):
+                    dec = {"side": "sell", "thesis": "exit: " + str(ts.get("reason") or "time-stop"),
+                           "edge_pts": 0.0}
+                    sz = {"qty": qty, "price": mk, "notional": aj_db.money(qty * mk),
+                          "order_type": "market", "limit_price": None}
+                    r = _propose_and_execute(cycle_id, sym, dec, sz, cfg)
+                    r["symbol"] = sym
+                    r["exit_reason"] = "time_stop"
+                    out.append(r)
+                    try:
+                        aj_db.set_setting_raw(lkey, "")        # clear ladder on full exit
+                    except Exception:
+                        pass
+                    continue
+                # profit ladder -> trim only rungs ABOVE the high-water mark
+                rungs = [x for x in _ea.profit_ladder(position, cfg, mark=mk) if x.get("triggered")]
+                if rungs:
+                    try:
+                        done = float(aj_db.get_setting_raw(lkey) or 0)
+                    except Exception:
+                        done = 0.0
+                    fresh = [x for x in rungs if float(x.get("gain_pct") or 0) > done]
+                    if fresh:
+                        rung = fresh[-1]
+                        trim = max(0.0, min(1.0, float(rung.get("trim_frac") or 0)))
+                        tqty = qty * trim
+                        if tqty > 0:
+                            dec = {"side": "sell", "edge_pts": 0.0,
+                                   "thesis": "exit: profit-ladder {}%".format(rung.get("gain_pct"))}
+                            sz = {"qty": tqty, "price": mk, "notional": aj_db.money(tqty * mk),
+                                  "order_type": "market", "limit_price": None}
+                            r = _propose_and_execute(cycle_id, sym, dec, sz, cfg)
+                            r["symbol"] = sym
+                            r["exit_reason"] = "profit_ladder"
+                            out.append(r)
+                            try:
+                                aj_db.set_setting_raw(lkey, str(float(rung.get("gain_pct") or 0)))
+                            except Exception:
+                                pass
+        except Exception:
+            log.debug("supplementary exits skipped", exc_info=True)
     return out
 
 
@@ -533,6 +600,36 @@ def run_once(mode: str = "paper") -> Dict[str, Any]:
             scan = aj_alpha.rank_universe(scan, cfg)
         except Exception:
             log.debug("rank_universe skipped", exc_info=True)
+        # Batch 2 — cross-sectional selection: narrow the scan to the top-N best
+        # RELATIVE opportunities by realized forecast edge (not an absolute bar).
+        # Forecasts are cached, so the per-symbol loop below reuses them. Exits
+        # already ran above, so narrowing new-entry candidates is safe.
+        if cfg.get("cross_sectional_selection"):
+            try:
+                import aj_select
+                cands = []
+                for s in scan:
+                    fcx = _forecast(s, horizon)
+                    if fcx and fcx.get("ensemble"):
+                        cands.append((s, fcx))
+                top = aj_select.select_top_n(cands, cfg)
+                scan = [s for s, _ in top]
+                summary["cross_sectional"] = {"considered": len(cands),
+                                              "selected": len(scan)}
+            except Exception:
+                log.debug("cross-sectional selection skipped", exc_info=True)
+        # Batch 5 — portfolio construction: compute risk-aware target weights once
+        # per cycle over the candidate set; used below to CAP each order's notional
+        # (only ever reduces size). Empty map => fall back to per-name sizing.
+        alloc_map = {}
+        if cfg.get("portfolio_construction"):
+            try:
+                import aj_allocate
+                alloc_map = aj_allocate.target_weights(list(scan), cfg) or {}
+                summary["allocation"] = {"names": len(alloc_map),
+                                         "method": cfg.get("alloc_method")}
+            except Exception:
+                log.debug("allocation plan skipped", exc_info=True)
         # Analyst-council advisory budget (Phase 3): consult the council for at
         # most council_topk BUY candidates per cycle (cost bound). No-op unless
         # council_active() (council_enabled + VERIFY-COUNCIL).
@@ -596,6 +693,47 @@ def run_once(mode: str = "paper") -> Dict[str, Any]:
                             new_qty = cap / price          # clip to the cap
                     sizing["qty"] = new_qty
                     sizing["notional"] = aj_db.money(new_qty * price)
+                # ── Batch 3/5 — execution alpha + portfolio cap (BUY entries) ──
+                # All opt-in + fail-open; they only ever BLOCK or SHRINK, never
+                # create/boost, and never touch the fail-closed risk gate.
+                if decision.get("side") == "buy":
+                    try:
+                        import aj_execution_alpha as _ea
+                        # event blackout — don't initiate into earnings
+                        eb = _ea.event_blackout(symbol, cfg)
+                        if eb.get("blocked"):
+                            summary["proposals"].append({"symbol": symbol,
+                                "result": "event_blackout", "reason": eb.get("reason")})
+                            continue
+                        # cost gate — skip trades whose edge won't survive costs
+                        _q = {"price": float(sizing.get("price") or 0)}
+                        cg = _ea.cost_gate(float(decision.get("edge_pts") or 0), symbol, _q, cfg)
+                        if not cg.get("ok"):
+                            summary["proposals"].append({"symbol": symbol,
+                                "result": "cost_blocked", "reason": cg.get("reason")})
+                            continue
+                        # limit/pullback entry — improve the fill vs market-on-cycle
+                        ep = _ea.entry_price(symbol, "buy", _q, cfg)
+                        if ep.get("order_type") == "limit" and ep.get("limit_price"):
+                            sizing = dict(sizing)
+                            sizing["order_type"] = "limit"
+                            sizing["limit_price"] = ep["limit_price"]
+                    except Exception:
+                        log.debug("execution-alpha skipped", exc_info=True)
+                    # portfolio-construction cap: shrink to the risk-aware target
+                    if alloc_map.get(symbol):
+                        try:
+                            import aj_allocate
+                            alloc_notional = aj_allocate.allocation_notional(
+                                symbol, float(alloc_map[symbol]), cfg)
+                            cur = float(sizing.get("notional") or 0)
+                            price = float(sizing.get("price") or 0)
+                            if alloc_notional > 0 and price > 0 and alloc_notional < cur:
+                                sizing = dict(sizing)
+                                sizing["qty"] = alloc_notional / price
+                                sizing["notional"] = aj_db.money(alloc_notional)
+                        except Exception:
+                            log.debug("allocation cap skipped", exc_info=True)
                 # Options sleeve: a BUY signal becomes a long CALL on the
                 # underlying, sized by premium from the (conviction+council-
                 # adjusted) target notional. Falls back to the equity buy when

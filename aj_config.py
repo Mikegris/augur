@@ -184,6 +184,42 @@ DEFAULTS: Dict[str, Any] = {
     # screener global-best cache: rank across recently-seen names, not just the
     # current rotating slice (closes the "rolling sweep only sees 400/cycle" gap).
     "screen_cache_ttl_min":   45,      # how long a screened quote stays rank-eligible
+    # ── effectiveness layer (alpha/selection/execution/allocation) ───────────
+    # ALL opt-in, default OFF, fail-open. Never weakens the fail-closed gate.
+    # Batch 1 — multi-factor alpha fusion (orthogonal signals into the ensemble)
+    "multi_factor_signals":   False,   # fuse smart_money/insider/congress/social into prob_up
+    "regime_conditional_weights": False,  # tilt signal weights by detected regime
+    # Batch 4 — signal validation / IC promotion gate (guards batch 1)
+    "signal_ic_gate":         True,    # require realized-skill promotion before a new signal counts
+    "ic_min_samples":         20,      # min scored history to judge a signal
+    "ic_min_brier_skill":     0.0,     # must beat the base rate
+    "ic_min_ic":              0.0,     # info-coefficient floor (only enforced when available)
+    "wf_min_signals":         20,      # offline walk-forward validation thresholds
+    "wf_min_hit_rate":        0.5,
+    "wf_min_sharpe":          0.0,
+    # Batch 2 — cross-sectional selection (trade the best relative opportunities)
+    "cross_sectional_selection": False,
+    "cross_sectional_top_n":  5,
+    # Batch 3 — execution alpha (better entries/exits + cost discipline)
+    "limit_entry":            False,   # post a limit through the mid vs market-on-cycle
+    "limit_entry_offset_bps": 10.0,    # how far through the mid to improve the fill
+    "cost_gate":              False,   # skip trades whose edge < round-trip cost
+    "assumed_spread_bps":     10.0,    # spread assumption when bid/ask absent
+    "cost_fee_bps":           0.0,     # per-side fee assumption for the cost gate
+    "cost_edge_multiple":     1.5,     # edge must exceed cost by this multiple
+    "time_stop_days":         0,       # exit a stagnant thesis after N days (0 = off)
+    "time_stop_min_gain_pct": 0.0,     # ...unless it's at least this far in the money
+    "profit_ladder":          False,   # scale out at gain rungs
+    "event_blackout_days":    0,       # block NEW entries within N days of earnings (0 = off)
+    "gex_timing":             False,   # nudge entry timing by dealer gamma
+    # Batch 5 — portfolio construction (risk-aware allocation across the book)
+    "portfolio_construction": False,
+    "alloc_method":           "risk_parity",  # risk_parity | max_sharpe | equal
+    "max_position_weight":    0.25,    # per-name cap as a fraction of equity
+    "max_sector_weight":      0.40,    # per-sector cap
+    "correlation_cap":        True,    # down-weight highly-correlated clusters
+    "correlation_cap_threshold": 0.6,
+    "correlation_cap_floor":  0.5,
 }
 
 _BOOL_KEYS = {"trading_enabled", "live_trading_enabled", "robinhood_enabled",
@@ -204,7 +240,12 @@ _BOOL_KEYS = {"trading_enabled", "live_trading_enabled", "robinhood_enabled",
               # universe screener
               "screen_full_equities", "include_crypto",
               # options
-              "trade_options", "option_trade_puts"}
+              "trade_options", "option_trade_puts",
+              # effectiveness layer
+              "multi_factor_signals", "regime_conditional_weights",
+              "signal_ic_gate", "cross_sectional_selection",
+              "limit_entry", "cost_gate", "profit_ladder", "gex_timing",
+              "portfolio_construction", "correlation_cap"}
 _LIST_KEYS = {"symbol_allowlist", "session_whitelist"}
 _FLOAT_KEYS = {"max_order_notional_usd", "max_daily_loss_usd",
                "paper_slippage_bps", "paper_spread_fraction", "fee_bps",
@@ -228,7 +269,13 @@ _FLOAT_KEYS = {"max_order_notional_usd", "max_daily_loss_usd",
                # universe screener
                "screen_min_price", "screen_min_dollar_volume",
                "screen_min_market_cap", "option_moneyness",
-               "option_max_spread_pct", "option_fee_per_contract"}
+               "option_max_spread_pct", "option_fee_per_contract",
+               # effectiveness layer
+               "ic_min_brier_skill", "ic_min_ic", "wf_min_hit_rate",
+               "wf_min_sharpe", "limit_entry_offset_bps", "assumed_spread_bps",
+               "cost_fee_bps", "cost_edge_multiple", "time_stop_min_gain_pct",
+               "max_position_weight", "max_sector_weight",
+               "correlation_cap_threshold", "correlation_cap_floor"}
 _INT_KEYS = {"max_trades_per_day", "forecast_horizon_days", "scan_universe_max",
              "order_ttl_cycles", "exit_cooldown_min", "max_open_positions",
              "max_trades_per_symbol_per_day", "trade_skip_open_min",
@@ -244,14 +291,18 @@ _INT_KEYS = {"max_trades_per_day", "forecast_horizon_days", "scan_universe_max",
              "council_deep_max_tokens", "council_quick_max_tokens",
              "coequal_min_samples",
              # universe screener
-             "crypto_universe_top", "screen_scan_batch", "screen_max"}
+             "crypto_universe_top", "screen_scan_batch", "screen_max",
+             # effectiveness layer
+             "ic_min_samples", "wf_min_signals", "cross_sectional_top_n",
+             "time_stop_days", "event_blackout_days"}
 _STR_KEYS = {"daily_loss_basis", "halt_rearm", "default_broker",
              "entry_order_type", "council_policy",
              "council_deep_model", "council_quick_model",
-             "universe_mode"}
+             "universe_mode", "alloc_method"}
 
 _VALID_COUNCIL_POLICY = ("advisory", "confirm", "coequal")
 _VALID_UNIVERSE_MODE = ("allowlist", "open", "market_screen")
+_VALID_ALLOC_METHOD = ("risk_parity", "max_sharpe", "equal")
 
 _PREFIX = "aj_"
 _VALID_LOSS_BASIS = ("realized_plus_unrealized", "realized")
@@ -374,6 +425,8 @@ def get_config() -> Dict[str, Any]:
         cfg["council_policy"] = str(cfg["council_policy"]).lower()
     um = str(cfg.get("universe_mode") or "").lower()
     cfg["universe_mode"] = um if um in _VALID_UNIVERSE_MODE else "market_screen"
+    am = str(cfg.get("alloc_method") or "").lower()
+    cfg["alloc_method"] = am if am in _VALID_ALLOC_METHOD else "risk_parity"
     cfg["session_whitelist"] = [s.lower() for s in cfg["session_whitelist"]
                                 if s.lower() in _TRADABLE_SESSIONS] or ["regular"]
     # numeric guards: caps/counts can never be negative; probs clamp to [0,1].
