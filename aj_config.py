@@ -154,6 +154,11 @@ DEFAULTS: Dict[str, Any] = {
     "coequal_min_samples":    20,      # min resolved reflections before unlock
     "coequal_min_alpha":      0.0,     # mean alpha (fraction) required to unlock
     "coequal_max_boost":      0.5,     # max extra size fraction (0.5 => up to 1.5x)
+    # How a NEUTRAL council HOLD is treated for a rule-engine BUY (advisory/
+    # coequal). >0 => proceed at this size fraction (trim, not block); 0 => veto
+    # the BUY (legacy strict behavior). An actively-BEARISH council call
+    # (UNDERWEIGHT/SELL) always vetoes regardless.
+    "council_hold_size_factor": 0.5,
     # ── universe / market screener (aj_universe) ─────────────────────────────
     # How the cycle picks its candidate universe:
     #   'allowlist'     — only symbol_allowlist (fail-closed, fully controlled)
@@ -278,7 +283,7 @@ _FLOAT_KEYS = {"max_order_notional_usd", "max_daily_loss_usd",
                "risk_per_trade_pct",
                "pyramid_min_gain_pct",
                # council coequal gate
-               "coequal_min_alpha", "coequal_max_boost",
+               "coequal_min_alpha", "coequal_max_boost", "council_hold_size_factor",
                # universe screener
                "screen_min_price", "screen_min_dollar_volume",
                "screen_min_market_cap", "option_moneyness",

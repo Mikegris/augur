@@ -69,14 +69,21 @@ def test_inactive_proceeds_without_consulting():
     teardown()
 
 
-def test_advisory_veto_on_council_hold_or_sell():
+def test_advisory_vetoes_bearish_trims_neutral():
     _activate(True)
+    # actively bearish (SELL) -> veto
     _patch_run(CouncilDecision(symbol="X", rating=Rating.SELL, action=Action.SELL, conviction=0.9, status="ok"))
     r = aj_operator._council_advise("X", _BUY, _cfg("advisory"), "cyc", {"n": 0, "max": 3})
-    assert r["verdict"] == "veto"
+    assert r["verdict"] == "veto", r
+    # neutral HOLD -> PROCEED at the trim factor (not veto) with the default 0.5
     _patch_run(CouncilDecision(symbol="X", rating=Rating.HOLD, action=Action.HOLD, conviction=0.2, status="ok"))
     r = aj_operator._council_advise("X", _BUY, _cfg("advisory"), "cyc", {"n": 0, "max": 3})
-    assert r["verdict"] == "veto"
+    assert r["verdict"] == "proceed" and abs(r["factor"] - 0.5) < 1e-9, r
+    # legacy strict: council_hold_size_factor=0 restores HOLD == veto
+    cfg0 = _cfg("advisory"); cfg0["council_hold_size_factor"] = 0.0
+    _patch_run(CouncilDecision(symbol="X", rating=Rating.HOLD, action=Action.HOLD, conviction=0.2, status="ok"))
+    r = aj_operator._council_advise("X", _BUY, cfg0, "cyc", {"n": 0, "max": 3})
+    assert r["verdict"] == "veto", r
     teardown()
 
 

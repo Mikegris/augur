@@ -4472,6 +4472,7 @@ async function loadTradingView() {
           f('Council enabled', yn('aj-cfg-council_enabled', cfg.council_enabled), 'Master switch for the council. Off by default; also needs the VERIFY-COUNCIL gate to actually run.') +
           f('Policy', `<select id="aj-cfg-council_policy"><option value="advisory"${cfg.council_policy!=='confirm'&&cfg.council_policy!=='coequal'?' selected':''}>Advisory (read-only)</option><option value="confirm"${cfg.council_policy==='confirm'?' selected':''}>Confirm (must agree)</option><option value="coequal"${cfg.council_policy==='coequal'?' selected':''}>Co-equal</option></select>`, 'How much weight the council carries. The risk gate is always the final authority — the council can never push an order past a cap or unblock a gate.') +
           f('Analysts polled (top-K)', num('aj-cfg-council_topk', cfg.council_topk, null, 'analysts'), 'How many analyst viewpoints to include in the debate.') +
+          f('HOLD size factor', num('aj-cfg-council_hold_size_factor', cfg.council_hold_size_factor, null, '×'), 'When the council is NEUTRAL (HOLD) on a buy: proceed at this fraction of size (0.5 = half). Set 0 to veto every HOLD (strict). A bearish council call always vetoes.') +
           f('Max research rounds', num('aj-cfg-max_research_rounds', cfg.max_research_rounds, null, 'rounds'), 'Debate rounds among the research analysts.') +
           f('Max risk rounds', num('aj-cfg-max_risk_rounds', cfg.max_risk_rounds, null, 'rounds'), 'Debate rounds for the risk review.') +
           f('Fundamental analyst', yn('aj-cfg-council_analyst_fundamental', cfg.council_analyst_fundamental), 'Include the fundamentals viewpoint.') +
@@ -4753,6 +4754,7 @@ async function loadTradingView() {
       council_enabled: vBool('aj-cfg-council_enabled'),
       council_policy: vStr('aj-cfg-council_policy'),
       council_topk: vNum('aj-cfg-council_topk'),
+      council_hold_size_factor: vNum('aj-cfg-council_hold_size_factor'),
       max_research_rounds: vNum('aj-cfg-max_research_rounds'),
       max_risk_rounds: vNum('aj-cfg-max_risk_rounds'),
       council_analyst_fundamental: vBool('aj-cfg-council_analyst_fundamental'),

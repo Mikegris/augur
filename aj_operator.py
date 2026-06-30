@@ -220,11 +220,21 @@ def _council_advise(symbol: str, decision: Dict[str, Any], cfg: Dict[str, Any],
             return {"verdict": "proceed", "factor": 1.0, "council": audit, "brief": brief}
         return {"verdict": "veto", "factor": 0.0, "council": audit, "brief": brief}
 
-    # advisory (default) and locked-coequal: veto a non-BUY council call; on
-    # agreement, SHRINK size on low conviction (never grow). Only equal-or-more
-    # conservative.
-    if dec.action in (Action.SELL, Action.HOLD):
+    # advisory (default) and locked-coequal: the council TRIMS or BLOCKS, never
+    # grows. Veto only an ACTIVELY-BEARISH call (UNDERWEIGHT/SELL both map to
+    # Action.SELL). A neutral HOLD is "no strong view", NOT "don't buy" — proceed
+    # at a reduced size (council_hold_size_factor) so the council sizes-down on
+    # uncertainty instead of silently vetoing the whole strategy. Set the factor
+    # to 0 to restore the legacy strict behavior (HOLD == veto).
+    if dec.action is Action.SELL:
         return {"verdict": "veto", "factor": 0.0, "council": audit, "brief": brief}
+    if dec.action is Action.HOLD:
+        hf = max(0.0, min(1.0, float(cfg.get("council_hold_size_factor", 0.5) or 0.0)))
+        if hf <= 0.0:
+            return {"verdict": "veto", "factor": 0.0, "council": audit, "brief": brief}
+        return {"verdict": "proceed", "factor": hf, "council": audit,
+                "brief": brief + " (hold->trim)"}
+    # bullish (BUY) agreement: shrink on low conviction (never grow here).
     factor = max(0.5, min(1.0, 0.5 + 0.5 * float(dec.conviction or 0.0)))
 
     # coequal (Phase 5): once the realized track record unlocks it, a high-
