@@ -4884,14 +4884,56 @@ async function loadTradingView() {
       if (runBtn) { runBtn.disabled = false; runBtn.textContent = '▶ Run Council'; }
     }
   };
+  const _ajActionColor = (a) => {
+    const s = String(a || '').toLowerCase();
+    if (/buy|accumulate|long|add/.test(s)) return '#2ecc71';
+    if (/sell|reduce|trim|avoid|short|exit/.test(s)) return '#e74c3c';
+    return 'var(--muted, #888)';
+  };
   const councilLoadRecent = async () => {
     const rEl = document.getElementById('aj-council-recent');
     if (!rEl) return;
     try {
       const d = await API.get('/api/aj/council/recent');
       const runs = d.runs || [];
-      rEl.innerHTML = runs.length ? `<table class="data-table" style="width:100%"><thead><tr><th>When</th><th>Symbol</th><th>Action</th><th>Rating</th><th>Conviction</th><th>Status</th><th>Thesis</th><th>Cost</th></tr></thead><tbody>${runs.map(r =>
-        `<tr><td class="muted" style="font-size:11px">${_esc(String(r.ts || '').slice(0, 19))}</td><td><b>${_esc(r.symbol || '')}</b></td><td>${_esc(String(r.action || '—').toUpperCase())}</td><td>${r.rating == null ? '—' : _esc(String(r.rating))}</td><td>${_ajPct(r.conviction)}</td><td>${_esc(String(r.status || '—'))}</td><td class="muted" style="font-size:11px">${_esc((r.thesis || '').slice(0, 70))}</td><td>${r.cost_usd == null ? '—' : _ajMoney(r.cost_usd)}</td></tr>`).join('')}</tbody></table>` : '<div class="muted">No council decisions yet — run one above.</div>';
+      if (!runs.length) { rEl.innerHTML = '<div class="muted">No council decisions yet — run one above.</div>'; return; }
+      rEl.innerHTML = `<table class="data-table" style="width:100%"><thead><tr><th>When</th><th>Symbol</th><th>Final decision</th><th>Conviction</th><th>Status</th><th>Thesis</th><th>Cost</th></tr></thead><tbody>${runs.map((r, i) => {
+        const act = String(r.action || '—').toUpperCase();
+        const rating = (r.rating == null ? '' : ` · rating ${_esc(String(r.rating))}/10`);
+        const decided = String(r.status || '').toLowerCase() === 'ok';
+        // The "final decision" is the action only when the run actually decided;
+        // a degraded/skipped/error run produced no actionable call.
+        const decisionCell = decided
+          ? `<b style="color:${_ajActionColor(r.action)}">${_esc(act)}</b><span class="muted" style="font-size:11px">${rating}</span>`
+          : `<span class="muted">no decision</span>`;
+        const thesis = String(r.thesis || '');
+        const dissent = String(r.dissent || '');
+        const short = thesis.length > 80 ? thesis.slice(0, 80) + '…' : (thesis || '—');
+        const hasMore = thesis.length > 80 || !!dissent;
+        const toggle = hasMore ? ` <span class="aj-cr-toggle" style="color:var(--accent,#4ea1ff);cursor:pointer;white-space:nowrap">details ▸</span>` : '';
+        const detail = `<tr class="aj-cr-detail" id="aj-cr-d-${i}" style="display:none"><td colspan="7" style="background:rgba(255,255,255,0.03)">`
+          + `<div style="white-space:pre-wrap;line-height:1.5"><b>Full thesis</b><br>${_esc(thesis || '—')}</div>`
+          + (dissent ? `<div style="white-space:pre-wrap;line-height:1.5;margin-top:6px"><b>Dissent</b><br>${_esc(dissent)}</div>` : '')
+          + `<div class="muted" style="font-size:11px;margin-top:6px">cycle ${_esc(String(r.cycle_id || '—'))} · ${r.n_calls == null ? '?' : _esc(String(r.n_calls))} LLM call(s)</div>`
+          + `</td></tr>`;
+        return `<tr class="aj-cr-row" data-idx="${i}" style="cursor:${hasMore ? 'pointer' : 'default'}">`
+          + `<td class="muted" style="font-size:11px">${_esc(String(r.ts || '').slice(0, 19))}</td>`
+          + `<td><b>${_esc(r.symbol || '')}</b></td>`
+          + `<td>${decisionCell}</td>`
+          + `<td>${_ajPct(r.conviction)}</td>`
+          + `<td>${_esc(String(r.status || '—'))}</td>`
+          + `<td class="muted" style="font-size:11px">${_esc(short)}${toggle}</td>`
+          + `<td>${r.cost_usd == null ? '—' : _ajMoney(r.cost_usd)}</td></tr>${detail}`;
+      }).join('')}</tbody></table>`;
+      // delegated expand/collapse
+      rEl.querySelectorAll('.aj-cr-row').forEach(row => row.addEventListener('click', () => {
+        const det = document.getElementById('aj-cr-d-' + row.getAttribute('data-idx'));
+        if (!det) return;
+        const open = det.style.display !== 'none';
+        det.style.display = open ? 'none' : 'table-row';
+        const t = row.querySelector('.aj-cr-toggle');
+        if (t) t.textContent = open ? 'details ▸' : 'details ▾';
+      }));
     } catch (e) {
       rEl.innerHTML = '<div class="muted">Recent decisions unavailable.</div>';
     }
