@@ -237,6 +237,22 @@ DEFAULTS: Dict[str, Any] = {
     "metalabel_prob_threshold": 0.5,   # skip a BUY whose P(profit) is below this
     "metalabel_size_by_edge": True,    # scale size by the model's calibrated edge (kelly-lite)
     "metalabel_retrain_min_new": 10,   # retrain after this many new labeled trades
+    # ── portfolio Risk Governor + alpha-decay circuit breaker ─────────────────
+    # ONE global exposure multiplier G on NEW entries, from drawdown / regime /
+    # realized alpha-decay. Opt-in, fail-open to G=1.0. Can only SHRINK exposure
+    # autonomously (or pause via the circuit breaker, G=0); levering up (G>1)
+    # requires risk_governor_max>1 AND proven realized edge. Never touches a sell
+    # (exits always close the full position) nor the fail-closed risk gate.
+    "risk_governor_enabled":  False,
+    "risk_governor_max":      1.0,     # >1 permits levering up ONLY on proven edge
+    "risk_governor_min":      0.0,     # floor on G when not in a breaker
+    "rg_drawdown_derisk_pct": 10.0,    # start shrinking above this portfolio drawdown
+    "rg_drawdown_breaker_pct": 20.0,   # circuit breaker: go flat at/above this drawdown
+    "rg_vix_derisk":          30.0,    # halve exposure when VIX at/above this
+    "rg_alpha_decay_min_trades": 20,   # min realized closed trades before the alpha arm engages
+    "rg_alpha_decay_floor_pct": 0.1,   # weak-but-positive realized expectancy (%) -> halve
+    "rg_lever_unlock_trades": 50,      # realized trades required before G may exceed 1.0
+    "rg_lever_min_expectancy_pct": 0.5,  # realized expectancy (%) required to lever up
 }
 
 _BOOL_KEYS = {"trading_enabled", "live_trading_enabled", "robinhood_enabled",
@@ -263,7 +279,8 @@ _BOOL_KEYS = {"trading_enabled", "live_trading_enabled", "robinhood_enabled",
               "signal_ic_gate", "cross_sectional_selection",
               "limit_entry", "cost_gate", "profit_ladder", "gex_timing",
               "portfolio_construction", "correlation_cap",
-              "metalabel_enabled", "metalabel_size_by_edge"}
+              "metalabel_enabled", "metalabel_size_by_edge",
+              "risk_governor_enabled"}
 _LIST_KEYS = {"symbol_allowlist", "session_whitelist"}
 _FLOAT_KEYS = {"max_order_notional_usd", "max_daily_loss_usd",
                "paper_slippage_bps", "paper_spread_fraction", "fee_bps",
@@ -294,7 +311,10 @@ _FLOAT_KEYS = {"max_order_notional_usd", "max_daily_loss_usd",
                "cost_fee_bps", "cost_edge_multiple", "time_stop_min_gain_pct",
                "max_position_weight", "max_sector_weight",
                "correlation_cap_threshold", "correlation_cap_floor",
-               "metalabel_min_auc", "metalabel_prob_threshold"}
+               "metalabel_min_auc", "metalabel_prob_threshold",
+               "risk_governor_max", "risk_governor_min", "rg_drawdown_derisk_pct",
+               "rg_drawdown_breaker_pct", "rg_vix_derisk", "rg_alpha_decay_floor_pct",
+               "rg_lever_min_expectancy_pct"}
 _INT_KEYS = {"max_trades_per_day", "forecast_horizon_days", "scan_universe_max",
              "order_ttl_cycles", "exit_cooldown_min", "max_open_positions",
              "max_trades_per_symbol_per_day", "trade_skip_open_min",
@@ -314,7 +334,8 @@ _INT_KEYS = {"max_trades_per_day", "forecast_horizon_days", "scan_universe_max",
              # effectiveness layer
              "ic_min_samples", "wf_min_signals", "cross_sectional_top_n",
              "time_stop_days", "event_blackout_days",
-             "metalabel_min_samples", "metalabel_retrain_min_new"}
+             "metalabel_min_samples", "metalabel_retrain_min_new",
+             "rg_alpha_decay_min_trades", "rg_lever_unlock_trades"}
 _STR_KEYS = {"daily_loss_basis", "halt_rearm", "default_broker",
              "entry_order_type", "council_policy",
              "council_deep_model", "council_quick_model",

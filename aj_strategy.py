@@ -86,6 +86,21 @@ def size_order(symbol: str, side: str, cfg: Dict[str, Any], held_qty: float,
     except Exception:
         log.debug("alpha sizing multiplier skipped", exc_info=True)
 
+    # Portfolio Risk Governor (opt-in): one global exposure multiplier G on NEW
+    # entries (drawdown / regime / realized alpha-decay). G=0 is the circuit
+    # breaker — pause new entries. NEVER applied to a sell (an exit must close
+    # the full position); only shrinks unless edge is proven. Fail-open to G=1.
+    if side == "buy":
+        try:
+            import aj_risk_governor
+            _g = float(aj_risk_governor.exposure_multiplier(cfg).get("G", 1.0))
+            if _g <= 0.0:
+                return None                       # circuit breaker: no new entry
+            if _g != 1.0:
+                target = aj_db.money(target * _g)
+        except Exception:
+            log.debug("risk governor skipped", exc_info=True)
+
     target = min(target, max_notional)
     if target <= 0:
         return None

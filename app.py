@@ -72,7 +72,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(me
 
 # Single source of truth for the app version — surfaced at /api/version and
 # in jarvis.health_snapshot().
-APP_VERSION = "3.12.2"
+APP_VERSION = "3.13.0"
 
 _TICKER_RE = re.compile(r"^[A-Z0-9][A-Z0-9.\-]{0,9}$")
 
@@ -3935,6 +3935,18 @@ def aj_metalabel_route():
     try:
         import aj_config, aj_metalabel
         return jsonify(aj_metalabel.status(aj_config.get_config()))
+    except Exception as e:
+        return _err(e)
+
+
+@app.route("/api/aj/risk_governor", methods=["GET"])
+def aj_risk_governor_route():
+    """Portfolio Risk Governor: current global exposure multiplier G, the
+    circuit-breaker flag, the reasons, and the component readings (Insights:
+    risk-governor gauge)."""
+    try:
+        import aj_config, aj_risk_governor
+        return jsonify(aj_risk_governor.status(aj_config.get_config()))
     except Exception as e:
         return _err(e)
 

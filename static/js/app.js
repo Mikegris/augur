@@ -4601,7 +4601,11 @@ async function loadTradingView() {
           f('Allocation method', `<select id="aj-cfg-alloc_method"><option value="risk_parity"${cfg.alloc_method!=='max_sharpe'&&cfg.alloc_method!=='equal'?' selected':''}>Risk parity</option><option value="max_sharpe"${cfg.alloc_method==='max_sharpe'?' selected':''}>Max Sharpe</option><option value="equal"${cfg.alloc_method==='equal'?' selected':''}>Equal weight</option></select>`, 'How target weights are computed when portfolio construction is on.') +
           f('Meta-label gate', yn('aj-cfg-metalabel_enabled', cfg.metalabel_enabled), 'Learn P(profit) from the agent’s own closed trades; skip low-probability setups and size by realized edge. Only acts once the model beats baseline out-of-sample.') +
           f('Meta-label min P(profit)', num('aj-cfg-metalabel_prob_threshold', cfg.metalabel_prob_threshold, null, ''), 'Skip a BUY whose learned P(profit) is below this (0–1).') +
-          f('Meta-label size-by-edge', yn('aj-cfg-metalabel_size_by_edge', cfg.metalabel_size_by_edge), 'Scale position size by the model’s calibrated edge (kelly-lite; only shrinks).')
+          f('Meta-label size-by-edge', yn('aj-cfg-metalabel_size_by_edge', cfg.metalabel_size_by_edge), 'Scale position size by the model’s calibrated edge (kelly-lite; only shrinks).') +
+          f('Risk Governor', yn('aj-cfg-risk_governor_enabled', cfg.risk_governor_enabled), 'Scale TOTAL new-entry exposure by drawdown / regime / realized edge; circuit-breaker pauses entries on a hard drawdown or negative realized expectancy. Only shrinks (or pauses); never bypasses the risk gate.') +
+          f('  ↳ derisk drawdown %', num('aj-cfg-rg_drawdown_derisk_pct', cfg.rg_drawdown_derisk_pct, null, '%'), 'Start shrinking total exposure above this portfolio drawdown.') +
+          f('  ↳ breaker drawdown %', num('aj-cfg-rg_drawdown_breaker_pct', cfg.rg_drawdown_breaker_pct, null, '%'), 'Go flat (pause new entries) at/above this drawdown.') +
+          f('  ↳ derisk VIX', num('aj-cfg-rg_vix_derisk', cfg.rg_vix_derisk, null, ''), 'Halve exposure when VIX is at/above this level.')
         )}
 
         <div class="aj-cfg-savebar">
@@ -4802,6 +4806,10 @@ async function loadTradingView() {
       metalabel_enabled: vBool('aj-cfg-metalabel_enabled'),
       metalabel_prob_threshold: vNum('aj-cfg-metalabel_prob_threshold'),
       metalabel_size_by_edge: vBool('aj-cfg-metalabel_size_by_edge'),
+      risk_governor_enabled: vBool('aj-cfg-risk_governor_enabled'),
+      rg_drawdown_derisk_pct: vNum('aj-cfg-rg_drawdown_derisk_pct'),
+      rg_drawdown_breaker_pct: vNum('aj-cfg-rg_drawdown_breaker_pct'),
+      rg_vix_derisk: vNum('aj-cfg-rg_vix_derisk'),
     };
     const body = {};
     Object.keys(raw).forEach(k => { if (raw[k] !== undefined) body[k] = raw[k]; });

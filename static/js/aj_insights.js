@@ -451,6 +451,40 @@
     } catch (e) { placeholder(body, "meta-label unavailable"); }
   }
 
+  // 13. RISK GOVERNOR (portfolio exposure multiplier + circuit breaker)
+  // /api/aj/risk_governor -> {G, enabled, breaker, reasons:[], components:{...}, max, min}
+  async function loadRiskGovernor(body) {
+    try {
+      var d = await API.get("/api/aj/risk_governor");
+      if (!d || d.error) return placeholder(body, "risk governor unavailable");
+      if (!d.enabled) return placeholder(body, "Risk Governor is off — enable it in Config → Effectiveness.");
+      var g = num(d.G);
+      var breaker = d.breaker === true;
+      var col = breaker ? RED : (g === null ? MUTED : (g >= 0.99 ? GREEN : (g >= 0.5 ? "#f1c40f" : RED)));
+      var label = breaker ? "PAUSED (circuit breaker)" : (g === null ? "—" : "exposure ×" + g.toFixed(2));
+      var h = '<div style="font-size:18px;font-weight:600;color:' + col + ';margin-bottom:2px;">' + esc(label) + '</div>';
+      // a simple 0..max bar for G
+      var mx = num(d.max) || 1.0;
+      var pct = g === null ? 0 : Math.max(0, Math.min(100, (g / (mx || 1)) * 100));
+      h += '<div style="height:8px;background:#1b1b1b;border-radius:4px;overflow:hidden;margin:6px 0 10px;">' +
+        '<div style="height:100%;width:' + pct + '%;background:' + col + ';"></div></div>';
+      var c = d.components || {};
+      function stat(label, val) {
+        return '<div style="display:flex;justify-content:space-between;font-size:11px;padding:2px 0;">' +
+          '<span class="muted">' + label + '</span><span>' + val + '</span></div>';
+      }
+      var ddv = num(c.drawdown_pct), vixv = num(c.vix), rexp = num(c.realized_expectancy_pct);
+      h += stat("drawdown", ddv === null ? "—" : ddv.toFixed(1) + "%") +
+        stat("VIX", vixv === null ? "—" : vixv.toFixed(0)) +
+        stat("regime", esc(c.regime || "—")) +
+        stat("realized expectancy", rexp === null ? "— (need trades)" : rexp.toFixed(2) + "% / " + num(c.realized_n, 0) + " trades");
+      var rs = (d.reasons || []);
+      h += '<div class="muted" style="font-size:10px;margin-top:8px;">' +
+        (rs.length ? esc(rs.join(" · ")) : "full exposure — no derisk triggers active") + '</div>';
+      body.innerHTML = h;
+    } catch (e) { placeholder(body, "risk governor unavailable"); }
+  }
+
   // 6. RISK COCKPIT
   // /api/aj/status -> .day_pnl, .config{max_daily_loss_usd,max_trades_per_day,...},
   //   .halted, .audit_chain.ok, .orders
@@ -777,7 +811,8 @@
     ["9 · Exposure",               "aj-ins-exposure",  "current vs target weight",  loadExposure],
     ["10 · Selectivity Scatter",   "aj-ins-scatter-b", "edge vs conviction",        loadScatter],
     ["11 · Policy Expectancy",     "aj-ins-backtest",  "walk-forward edge of the policy", loadBacktest],
-    ["12 · Learned Edge",          "aj-ins-metalabel", "meta-label P(profit) model", loadMetalabel]
+    ["12 · Learned Edge",          "aj-ins-metalabel", "meta-label P(profit) model", loadMetalabel],
+    ["13 · Risk Governor",         "aj-ins-governor",  "total exposure dial + circuit breaker", loadRiskGovernor]
   ];
 
   function render(rootEl) {

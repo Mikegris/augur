@@ -63,6 +63,8 @@ LOCAL_MODULES = [
     "aj_signals", "aj_ic", "aj_select", "aj_execution_alpha", "aj_allocate",
     # v3.12 meta-labeling + backtest layer (lazy-imported in operator/routes)
     "aj_backtest", "aj_features", "aj_metalabel",
+    # v3.13 portfolio risk governor (lazy-imported in strategy/routes)
+    "aj_risk_governor",
     "ai_summarizer",
     "alt_data_engine",
     "alt_signals",
