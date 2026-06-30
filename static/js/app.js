@@ -4592,7 +4592,10 @@ async function loadTradingView() {
           f('Earnings blackout (days)', num('aj-cfg-event_blackout_days', cfg.event_blackout_days, null, 'days'), 'Don’t open new positions within N days of earnings (0 = off).') +
           f('Profit ladder', yn('aj-cfg-profit_ladder', cfg.profit_ladder), 'Scale out at gain rungs.') +
           f('Portfolio construction', yn('aj-cfg-portfolio_construction', cfg.portfolio_construction), 'Size by risk-aware allocation across the book (caps only shrink).') +
-          f('Allocation method', `<select id="aj-cfg-alloc_method"><option value="risk_parity"${cfg.alloc_method!=='max_sharpe'&&cfg.alloc_method!=='equal'?' selected':''}>Risk parity</option><option value="max_sharpe"${cfg.alloc_method==='max_sharpe'?' selected':''}>Max Sharpe</option><option value="equal"${cfg.alloc_method==='equal'?' selected':''}>Equal weight</option></select>`, 'How target weights are computed when portfolio construction is on.')
+          f('Allocation method', `<select id="aj-cfg-alloc_method"><option value="risk_parity"${cfg.alloc_method!=='max_sharpe'&&cfg.alloc_method!=='equal'?' selected':''}>Risk parity</option><option value="max_sharpe"${cfg.alloc_method==='max_sharpe'?' selected':''}>Max Sharpe</option><option value="equal"${cfg.alloc_method==='equal'?' selected':''}>Equal weight</option></select>`, 'How target weights are computed when portfolio construction is on.') +
+          f('Meta-label gate', yn('aj-cfg-metalabel_enabled', cfg.metalabel_enabled), 'Learn P(profit) from the agent’s own closed trades; skip low-probability setups and size by realized edge. Only acts once the model beats baseline out-of-sample.') +
+          f('Meta-label min P(profit)', num('aj-cfg-metalabel_prob_threshold', cfg.metalabel_prob_threshold, null, ''), 'Skip a BUY whose learned P(profit) is below this (0–1).') +
+          f('Meta-label size-by-edge', yn('aj-cfg-metalabel_size_by_edge', cfg.metalabel_size_by_edge), 'Scale position size by the model’s calibrated edge (kelly-lite; only shrinks).')
         )}
 
         <div class="aj-cfg-savebar">
@@ -4778,6 +4781,9 @@ async function loadTradingView() {
       profit_ladder: vBool('aj-cfg-profit_ladder'),
       portfolio_construction: vBool('aj-cfg-portfolio_construction'),
       alloc_method: vStr('aj-cfg-alloc_method'),
+      metalabel_enabled: vBool('aj-cfg-metalabel_enabled'),
+      metalabel_prob_threshold: vNum('aj-cfg-metalabel_prob_threshold'),
+      metalabel_size_by_edge: vBool('aj-cfg-metalabel_size_by_edge'),
     };
     const body = {};
     Object.keys(raw).forEach(k => { if (raw[k] !== undefined) body[k] = raw[k]; });

@@ -398,6 +398,59 @@
     } catch (e) { placeholder(body, "signal skill unavailable"); }
   }
 
+  // 11. POLICY EXPECTANCY (full-policy walk-forward backtest)
+  // /api/aj/backtest -> {verdict, expectancy_pct, n_trades, summary, aggregate:{...}}
+  async function loadBacktest(body) {
+    try {
+      body.innerHTML = '<div class="muted" style="font-size:11px;">running walk-forward backtest…</div>';
+      var d = await API.get("/api/aj/backtest");
+      if (!d || d.error) return placeholder(body, "backtest unavailable");
+      var agg = d.aggregate || {};
+      var exp = num(d.expectancy_pct);
+      var v = String(d.verdict || "");
+      var col = /positive/.test(v) ? GREEN : (/negative/.test(v) ? RED : MUTED);
+      var h = '<div style="font-size:18px;font-weight:600;color:' + col + ';margin-bottom:2px;">' +
+        (exp === null ? "—" : (exp >= 0 ? "+" : "") + exp.toFixed(2) + "% / trade") + '</div>' +
+        '<div style="color:' + col + ';font-size:12px;margin-bottom:8px;">' + esc(v || "n/a") + '</div>';
+      function stat(label, val) {
+        return '<div style="display:flex;justify-content:space-between;font-size:11px;padding:2px 0;">' +
+          '<span class="muted">' + label + '</span><span>' + val + '</span></div>';
+      }
+      var hit = num(agg.hit_rate);
+      h += stat("trades", num(d.n_trades, 0)) +
+        stat("hit-rate", hit === null ? "—" : (hit * 100).toFixed(0) + "%") +
+        stat("profit factor", (num(agg.profit_factor) === null ? "—" : num(agg.profit_factor).toFixed(2))) +
+        stat("Sharpe (per-trade)", (num(agg.sharpe) === null ? "—" : num(agg.sharpe).toFixed(2))) +
+        stat("max drawdown", (num(agg.max_drawdown) === null ? "—" : (num(agg.max_drawdown) * 100).toFixed(1) + "%"));
+      h += '<div class="muted" style="font-size:10px;margin-top:8px;">' + esc(d.summary || "") +
+        ' · coverage: ' + esc(d.coverage || agg.coverage || "price signals") + '</div>';
+      body.innerHTML = h;
+    } catch (e) { placeholder(body, "backtest unavailable"); }
+  }
+
+  // 12. LEARNED EDGE (meta-label model)
+  // /api/aj/metalabel -> {promoted, oos_auc, n, reason, label_stats:{base_rate,by_regime}}
+  async function loadMetalabel(body) {
+    try {
+      var d = await API.get("/api/aj/metalabel");
+      if (!d || d.error) return placeholder(body, "meta-label unavailable");
+      var promoted = d.promoted === true;
+      var auc = num(d.oos_auc);
+      var ls = d.label_stats || {};
+      var base = num(ls.base_rate);
+      var badge = promoted
+        ? '<span style="color:' + GREEN + ';font-weight:600;">LIVE ✓</span>'
+        : '<span class="muted">learning…</span>';
+      var h = '<div style="font-size:13px;margin-bottom:6px;">model: ' + badge + '</div>';
+      h += '<div style="display:flex;justify-content:space-between;font-size:11px;padding:2px 0;"><span class="muted">out-of-sample AUC</span><span style="color:' +
+        (auc !== null && auc >= 0.55 ? GREEN : MUTED) + ';">' + (auc === null ? "—" : auc.toFixed(3)) + '</span></div>';
+      h += '<div style="display:flex;justify-content:space-between;font-size:11px;padding:2px 0;"><span class="muted">labeled trades</span><span>' + num(d.n, 0) + '</span></div>';
+      h += '<div style="display:flex;justify-content:space-between;font-size:11px;padding:2px 0;"><span class="muted">base win-rate</span><span>' + (base === null ? "—" : (base * 100).toFixed(0) + "%") + '</span></div>';
+      h += '<div class="muted" style="font-size:10px;margin-top:8px;">' + esc(d.reason || "") + '</div>';
+      body.innerHTML = h;
+    } catch (e) { placeholder(body, "meta-label unavailable"); }
+  }
+
   // 6. RISK COCKPIT
   // /api/aj/status -> .day_pnl, .config{max_daily_loss_usd,max_trades_per_day,...},
   //   .halted, .audit_chain.ok, .orders
@@ -722,7 +775,9 @@
     ["7 · Position Drill-Down",    "aj-ins-pos",       "held names",                loadPositions],
     ["8 · Audit Explorer",         "aj-ins-audit",     "tamper-evident log",        loadAudit],
     ["9 · Exposure",               "aj-ins-exposure",  "current vs target weight",  loadExposure],
-    ["10 · Selectivity Scatter",   "aj-ins-scatter-b", "edge vs conviction",        loadScatter]
+    ["10 · Selectivity Scatter",   "aj-ins-scatter-b", "edge vs conviction",        loadScatter],
+    ["11 · Policy Expectancy",     "aj-ins-backtest",  "walk-forward edge of the policy", loadBacktest],
+    ["12 · Learned Edge",          "aj-ins-metalabel", "meta-label P(profit) model", loadMetalabel]
   ];
 
   function render(rootEl) {

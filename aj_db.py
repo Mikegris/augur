@@ -32,7 +32,7 @@ import database as db
 log = logging.getLogger("augur.aj_db")
 
 # ── schema version target (bump when adding a numbered migration step) ────────
-AJ_SCHEMA_TARGET = 7
+AJ_SCHEMA_TARGET = 8
 _SCHEMA_KEY = "aj_schema_version"
 
 # ── DDL (§5). CREATE TABLE IF NOT EXISTS is safe to re-run; column ADDs go
@@ -398,6 +398,29 @@ def aj_migrate() -> int:
                 conn.execute(stmt)
             conn.commit()
             current = 7
+        if current < 8:
+            # Meta-labeling training store: one labeled row per CLOSED trade —
+            # features captured at decision time + whether the trade was net
+            # profitable. Pure ML training data; never read by the live gate.
+            conn.execute("""CREATE TABLE IF NOT EXISTS aj_trade_labels (
+                id                INTEGER PRIMARY KEY,
+                symbol            TEXT NOT NULL,
+                side              TEXT,
+                opened_at         TEXT,
+                closed_at         TEXT,
+                holding_days      REAL,
+                regime            TEXT,
+                features_json     TEXT NOT NULL,
+                realized_return_pct REAL,
+                realized_pnl_usd  REAL,
+                label             INTEGER,
+                created_at        TEXT NOT NULL
+            )""")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_aj_trade_labels_sym ON aj_trade_labels(symbol)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_aj_trade_labels_closed ON aj_trade_labels(closed_at)")
+            conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_aj_trade_labels_uniq ON aj_trade_labels(symbol, opened_at, closed_at)")
+            conn.commit()
+            current = 8
         set_setting_raw(_SCHEMA_KEY, str(current))
         log.info("aj_migrate: schema at version %d", current)
         return current
@@ -892,6 +915,8 @@ _ALLOWED_TABLES = frozenset({
     "aj_screen_cache",
     # per-cycle decision funnel + scan snapshot (step 6, observability)
     "aj_cycle_stats",
+    # meta-labeling training store (step 8, ML training data)
+    "aj_trade_labels",
 })
 _IDENT_RE = _re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 

@@ -72,7 +72,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(me
 
 # Single source of truth for the app version — surfaced at /api/version and
 # in jarvis.health_snapshot().
-APP_VERSION = "3.11.1"
+APP_VERSION = "3.12.0"
 
 _TICKER_RE = re.compile(r"^[A-Z0-9][A-Z0-9.\-]{0,9}$")
 
@@ -3911,6 +3911,30 @@ def aj_position_detail_route(symbol):
             except Exception:
                 pass
         return jsonify(out)
+    except Exception as e:
+        return _err(e)
+
+
+@app.route("/api/aj/backtest", methods=["GET"])
+def aj_backtest_route():
+    """Full-policy walk-forward expectancy report — does the agent's policy have
+    a measured out-of-sample edge? (Insights: policy expectancy.)"""
+    try:
+        import aj_config, aj_backtest
+        syms = request.args.get("symbols")
+        symbols = [s.strip().upper() for s in syms.split(",") if s.strip()] if syms else None
+        return jsonify(aj_backtest.policy_expectancy(aj_config.get_config(), symbols))
+    except Exception as e:
+        return _err(e)
+
+
+@app.route("/api/aj/metalabel", methods=["GET"])
+def aj_metalabel_route():
+    """Meta-label model status: promotion verdict, OOS AUC, label counts/base
+    rate (Insights: learned-edge dashboard)."""
+    try:
+        import aj_config, aj_metalabel
+        return jsonify(aj_metalabel.status(aj_config.get_config()))
     except Exception as e:
         return _err(e)
 

@@ -21,6 +21,7 @@ import aj_operator              # noqa: E402
 import aj_positions             # noqa: E402
 import aj_execution_alpha       # noqa: E402
 import aj_allocate              # noqa: E402
+import aj_metalabel             # noqa: E402
 
 aj_db.aj_init()
 
@@ -35,6 +36,7 @@ _REAL = {
     "tw": aj_allocate.target_weights,
     "an": aj_allocate.allocation_notional,
     "paper_book": aj_positions.paper_book,
+    "predict_proba": aj_metalabel.predict_proba,
 }
 
 
@@ -47,6 +49,7 @@ def _restore():
     aj_allocate.target_weights = _REAL["tw"]
     aj_allocate.allocation_notional = _REAL["an"]
     aj_positions.paper_book = _REAL["paper_book"]
+    aj_metalabel.predict_proba = _REAL["predict_proba"]
 
 _PROPOSED = []   # records (symbol, decision, sizing) reaching _propose_and_execute
 
@@ -231,6 +234,36 @@ def test_profit_ladder_trims_once_per_rung():
     _PROPOSED.clear()
     _run()
     assert not any(p["symbol"] == "WIN" for p in _PROPOSED), ("rung must not re-trim", _PROPOSED)
+
+
+# ── meta-label gate (filter + size) ──────────────────────────────────────────
+
+def test_metalabel_skips_low_probability():
+    _setup({"AAA": (0.90, 30.0)})
+    _cfg(metalabel_enabled=True, metalabel_prob_threshold=0.5)
+    aj_metalabel.predict_proba = lambda feats, cfg=None: 0.20   # below threshold
+    out = _run()
+    assert "AAA" not in _proposed_syms()
+    assert any(p.get("result") == "metalabel_skip" for p in out["proposals"]), out["proposals"]
+
+
+def test_metalabel_allows_and_scales_high_probability():
+    _setup({"AAA": (0.90, 30.0)})
+    _cfg(metalabel_enabled=True, metalabel_prob_threshold=0.5, metalabel_size_by_edge=True)
+    aj_metalabel.predict_proba = lambda feats, cfg=None: 0.52   # passes; mult = .52/.65 < 1 -> shrink
+    _run()
+    assert _PROPOSED, "should have proposed"
+    sz = _PROPOSED[0]["sizing"]
+    # flat sizer = 100 notional; mult = clamp(0.52/0.65)=0.8 -> ~80
+    assert 70 <= sz["notional"] <= 90, sz
+
+
+def test_metalabel_off_no_effect():
+    _setup({"AAA": (0.90, 30.0)})
+    _cfg(metalabel_enabled=False)
+    aj_metalabel.predict_proba = lambda feats, cfg=None: 0.01   # would skip if consulted
+    _run()
+    assert "AAA" in _proposed_syms(), "metalabel off must not filter"
 
 
 if __name__ == "__main__":

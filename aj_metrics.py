@@ -158,7 +158,7 @@ def status() -> Dict[str, Any]:
     import aj_risk
     out = {
         # AJTA agent version. v3.4 adds the Analyst Council advisory layer.
-        "version": "3.11.1",
+        "version": "3.12.0",
         "trading_enabled": cfg.get("trading_enabled"),
         "live_trading_enabled": cfg.get("live_trading_enabled"),
         "session": aj_db.market_session(),
@@ -197,6 +197,12 @@ def status() -> Dict[str, Any]:
             import aj_ic
             eff["signal_promotion"] = aj_ic.promotion_status(
                 ["smart_money", "insider", "congress", "social"], cfg)
+        eff["metalabel_enabled"] = bool(cfg.get("metalabel_enabled"))
+        try:
+            import aj_metalabel
+            eff["metalabel"] = aj_metalabel.is_promoted(cfg)
+        except Exception:
+            log.debug("status metalabel failed", exc_info=True)
         out["effectiveness"] = eff
     except Exception:
         log.debug("status effectiveness failed", exc_info=True)

@@ -815,6 +815,45 @@ def run_once(mode: str = "paper") -> Dict[str, Any]:
                                 sizing["notional"] = aj_db.money(alloc_notional)
                         except Exception:
                             log.debug("allocation cap skipped", exc_info=True)
+                    # ── Meta-label gate (Phase 4): a calibrated P(profit|setup)
+                    # model trained on the agent's OWN realized trades. Opt-in +
+                    # double-gated (only a PROMOTED model that beat baseline OOS
+                    # influences anything). It can only FILTER (skip a low-P trade)
+                    # or SHRINK size (kelly-lite, never increases) — never bypasses
+                    # the fail-closed risk gate. Fail-open.
+                    if cfg.get("metalabel_enabled"):
+                        try:
+                            import aj_metalabel, aj_alpha as _aa
+                            _reg = _aa.detect_regime()
+                            _conv = {"low": 0.0, "medium": 0.5, "high": 1.0}.get(
+                                str(decision.get("conviction") or "").lower(), 0.5)
+                            feats = {"edge": float(decision.get("edge_pts") or 0.0),
+                                     "conviction": _conv,
+                                     "prob_up": float(decision.get("prob_up") or 0.5),
+                                     "side_long": 1.0,
+                                     "regime_bull": 1.0 if _reg == "bull" else 0.0,
+                                     "regime_bear": 1.0 if _reg == "bear" else 0.0,
+                                     "regime_chop": 1.0 if _reg == "chop" else 0.0}
+                            p_profit = aj_metalabel.predict_proba(feats, cfg)
+                            if p_profit is not None:
+                                thr = float(cfg.get("metalabel_prob_threshold", 0.5) or 0.5)
+                                if p_profit < thr:
+                                    summary["proposals"].append(
+                                        {"symbol": symbol, "result": "metalabel_skip",
+                                         "p_profit": round(p_profit, 3)})
+                                    continue
+                                if cfg.get("metalabel_size_by_edge"):
+                                    # bounded shrink only: full size at P>=0.65,
+                                    # tapering to a 0.25 floor as P approaches the
+                                    # threshold. Never increases size.
+                                    mult = max(0.25, min(1.0, p_profit / 0.65))
+                                    price = float(sizing.get("price") or 0)
+                                    q = (sizing.get("qty") or 0.0) * mult
+                                    sizing = dict(sizing)
+                                    sizing["qty"] = q
+                                    sizing["notional"] = aj_db.money(q * price)
+                        except Exception:
+                            log.debug("metalabel gate skipped", exc_info=True)
                 # Options sleeve: a BUY signal becomes a long CALL on the
                 # underlying, sized by premium from the (conviction+council-
                 # adjusted) target notional. Falls back to the equity buy when
@@ -877,6 +916,16 @@ def run_once(mode: str = "paper") -> Dict[str, Any]:
         except Exception:
             log.debug("score_due_forecasts failed", exc_info=True)
             summary["scored"] = None
+
+        # Meta-label learning loop (Phase 4): label any newly-closed trades and
+        # retrain P(profit) when enough new labels accumulate. Cheap no-op unless
+        # metalabel_enabled; maybe_retrain self-gates on metalabel_retrain_min_new.
+        if cfg.get("metalabel_enabled"):
+            try:
+                import aj_metalabel
+                summary["metalabel"] = aj_metalabel.maybe_retrain(cfg)
+            except Exception:
+                log.debug("metalabel retrain skipped", exc_info=True)
 
         # Enhancement analytics: snapshot equity (⑯), refresh position state,
         # and log the cycle (㉒) — all best-effort, never fatal.

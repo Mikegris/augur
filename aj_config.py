@@ -220,6 +220,18 @@ DEFAULTS: Dict[str, Any] = {
     "correlation_cap":        True,    # down-weight highly-correlated clusters
     "correlation_cap_threshold": 0.6,
     "correlation_cap_floor":  0.5,
+    # ── meta-labeling layer (learn the agent's own edge from realized trades) ──
+    # A calibrated P(profitable|setup) model trained on CLOSED trades. ALL opt-in,
+    # default OFF, fail-open, and double-gated: it only goes live after it beats a
+    # baseline out-of-sample (metalabel_min_auc over metalabel_min_samples). When
+    # live it can only FILTER (skip a trade below the prob threshold) or SHRINK/
+    # scale size by realized edge — it can NEVER bypass the fail-closed risk gate.
+    "metalabel_enabled":      False,   # use P(profit) to filter + size entries
+    "metalabel_min_samples":  50,      # min closed-trade labels before a model can promote
+    "metalabel_min_auc":      0.55,    # out-of-sample AUC the model must beat to go live
+    "metalabel_prob_threshold": 0.5,   # skip a BUY whose P(profit) is below this
+    "metalabel_size_by_edge": True,    # scale size by the model's calibrated edge (kelly-lite)
+    "metalabel_retrain_min_new": 10,   # retrain after this many new labeled trades
 }
 
 _BOOL_KEYS = {"trading_enabled", "live_trading_enabled", "robinhood_enabled",
@@ -245,7 +257,8 @@ _BOOL_KEYS = {"trading_enabled", "live_trading_enabled", "robinhood_enabled",
               "multi_factor_signals", "regime_conditional_weights",
               "signal_ic_gate", "cross_sectional_selection",
               "limit_entry", "cost_gate", "profit_ladder", "gex_timing",
-              "portfolio_construction", "correlation_cap"}
+              "portfolio_construction", "correlation_cap",
+              "metalabel_enabled", "metalabel_size_by_edge"}
 _LIST_KEYS = {"symbol_allowlist", "session_whitelist"}
 _FLOAT_KEYS = {"max_order_notional_usd", "max_daily_loss_usd",
                "paper_slippage_bps", "paper_spread_fraction", "fee_bps",
@@ -275,7 +288,8 @@ _FLOAT_KEYS = {"max_order_notional_usd", "max_daily_loss_usd",
                "wf_min_sharpe", "limit_entry_offset_bps", "assumed_spread_bps",
                "cost_fee_bps", "cost_edge_multiple", "time_stop_min_gain_pct",
                "max_position_weight", "max_sector_weight",
-               "correlation_cap_threshold", "correlation_cap_floor"}
+               "correlation_cap_threshold", "correlation_cap_floor",
+               "metalabel_min_auc", "metalabel_prob_threshold"}
 _INT_KEYS = {"max_trades_per_day", "forecast_horizon_days", "scan_universe_max",
              "order_ttl_cycles", "exit_cooldown_min", "max_open_positions",
              "max_trades_per_symbol_per_day", "trade_skip_open_min",
@@ -294,7 +308,8 @@ _INT_KEYS = {"max_trades_per_day", "forecast_horizon_days", "scan_universe_max",
              "crypto_universe_top", "screen_scan_batch", "screen_max",
              # effectiveness layer
              "ic_min_samples", "wf_min_signals", "cross_sectional_top_n",
-             "time_stop_days", "event_blackout_days"}
+             "time_stop_days", "event_blackout_days",
+             "metalabel_min_samples", "metalabel_retrain_min_new"}
 _STR_KEYS = {"daily_loss_basis", "halt_rearm", "default_broker",
              "entry_order_type", "council_policy",
              "council_deep_model", "council_quick_model",
