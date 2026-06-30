@@ -224,7 +224,7 @@
     const lose = (proj.top_losers || []).slice(0, 5);
 
     const contribRows = Object.entries(proj.factor_contributions || {})
-      .sort((a, b) => Math.abs(b[1]) - Math.abs(a[1]))
+      .sort((a, b) => (Math.abs(Number(b[1]) || 0)) - (Math.abs(Number(a[1]) || 0)))
       .map(([k, v]) => `
         <tr>
           <td style="padding:2px 4px;color:var(--text-dim)">${_esc(k)}</td>

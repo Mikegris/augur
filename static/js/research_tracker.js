@@ -80,6 +80,12 @@
     el.innerHTML = '<span style="font-size:9px;color:var(--text-dim, #888)">track…</span>';
     try {
       var data = await fetchJSON('/api/research/track/' + encodeURIComponent(signalName));
+      if (!data || typeof data !== 'object' || Array.isArray(data)) {
+        el.innerHTML = ''
+          + '<span style="font-size:10px;color:var(--text-dim, #888);font-family:monospace">'
+          + 'n/a</span>';
+        return;
+      }
       var n = data.n || 0;
       // Prefer last-100 over all-time so the badge reflects recent skill.
       var rate = data.last_100_hit_rate != null ? data.last_100_hit_rate : data.hit_rate;

@@ -414,9 +414,19 @@ def _congress_index() -> Dict[str, float]:
         amt = _safe_float(t.get("amount_val"))
         if amt is None:
             continue
-        if "purchase" in txn or "buy" in txn or raw.startswith("P"):
+        # Branch on EXACT congress.py transaction codes, not `raw.startswith`.
+        # congress emits: "P" (Buy), "PE" (Purchase/Exercise), "S" (Sell),
+        # "SE" (Sale/Exercise), "S (partial)" (partial sale) and the Exchange
+        # codes "S (Exchange)" / "E (Exchange)". The old `raw.startswith("S")`
+        # bucketed "S (EXCHANGE)" as a sell — exchanges are not directional
+        # open-market flow and must be excluded. Buy codes: P, PE. Sell codes:
+        # S, SE, S (partial). Anything tagged Exchange is dropped.
+        if "EXCHANGE" in raw:
+            continue
+        if raw in ("P", "PE") or "purchase" in txn or "buy" in txn:
             agg[sec] += amt
-        elif "sale" in txn or "sell" in txn or raw.startswith("S"):
+        elif raw in ("S", "SE") or raw.startswith("S (PARTIAL") \
+                or "sale" in txn or "sell" in txn:
             agg[sec] -= amt
     # round to whole dollars
     return {k: round(v, 2) for k, v in agg.items()}

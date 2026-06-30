@@ -781,7 +781,7 @@ async function loadSidebarWatchlist() {
       return;
     }
     el.innerHTML = items.map(i => `
-      <div class="swl-item" onclick="openResearch('${_esc(i.symbol)}')">
+      <div class="swl-item" onclick="openResearch('${_jesc(i.symbol)}')">
         <div>
           <div class="swl-sym">${_esc(i.symbol)}</div>
           <div class="swl-price">${fmt.price(i.price)}</div>
@@ -857,7 +857,7 @@ async function loadOverview() {
     if (el('ov-kpi-gold')) el('ov-kpi-gold').innerHTML = `<div class="kpi-label">GOLD</div>${renderIndexKpi(gold)}`;
     ['ov-kpi-sp', 'ov-kpi-ndx', 'ov-kpi-vix', 'ov-kpi-gold'].forEach(kpiCountUp);
     const tbody = indices.map(idx => `<tr>
-      <td><span class="col-symbol" onclick="openResearch('${_esc(idx.symbol)}')">${_esc(idx.label || idx.symbol)}</span></td>
+      <td><span class="col-symbol" onclick="openResearch('${_jesc(idx.symbol)}')">${_esc(idx.label || idx.symbol)}</span></td>
       <td class="col-price">${fmt.price(idx.price)}</td>
       <td class="${col.pnl(idx.change)}">${fmt.price(idx.change)}</td>
       <td class="${col.pct(idx.change_pct)}">${fmt.pct(idx.change_pct)}</td>
@@ -881,7 +881,7 @@ async function loadOverview() {
   const moversP = API.get('/api/market/movers').then(movers => {
     const el = id => document.getElementById(id);
     const moverRows = (list, cls) => (list || []).map(g => `<tr>
-      <td><span class="col-symbol" onclick="openResearch('${_esc(g.symbol)}')">${_esc(g.symbol)}</span></td>
+      <td><span class="col-symbol" onclick="openResearch('${_jesc(g.symbol)}')">${_esc(g.symbol)}</span></td>
       <td class="col-price">${fmt.price(g.price)}</td>
       <td class="${cls}">${fmt.pct(g.change_pct)}</td>
       <td class="col-number">${fmt.compact(g.market_cap)}</td>
@@ -911,7 +911,7 @@ async function loadOverview() {
           <th style="text-align:right">CUR PRICE</th><th style="text-align:right">MKT VALUE</th>
           <th style="text-align:right">P&L</th><th style="text-align:right">P&L %</th>
         </tr></thead><tbody>${portfolio.holdings.map(h => `<tr>
-          <td><span class="col-symbol" onclick="openResearch('${_esc(h.symbol)}')">${_esc(h.symbol)}</span></td>
+          <td><span class="col-symbol" onclick="openResearch('${_jesc(h.symbol)}')">${_esc(h.symbol)}</span></td>
           <td class="col-name">${_esc(h.name || '—')}</td>
           <td class="col-number">${fmt.num(h.shares, 4)}</td>
           <td class="col-number">$${fmt.price(h.avg_cost)}</td>
@@ -1345,7 +1345,7 @@ function renderPortfolioAnalysis(r) {
   const assessColor = { HOLD: 'var(--text-dim)', ADD: 'var(--green)', TRIM: 'var(--amber)', EXIT: 'var(--red)', REVIEW: 'var(--amber)' };
   const posRows = (r.position_insights || []).map(p =>
     `<tr>
-      <td><span class="col-symbol" onclick="openResearch('${_esc(p.symbol)}')">${_esc(p.symbol)}</span></td>
+      <td><span class="col-symbol" onclick="openResearch('${_jesc(p.symbol)}')">${_esc(p.symbol)}</span></td>
       <td><span style="color:${assessColor[p.assessment] || 'var(--text-dim)'}; font-size:10px;font-weight:bold">${_esc(p.assessment)}</span></td>
       <td style="color:var(--text-secondary);font-size:10px">${_esc(p.note)}</td>
     </tr>`
@@ -2389,7 +2389,7 @@ async function loadWatchlistView() {
                 const alertLow  = i.alert_low  && i.price <= i.alert_low;
                 return `<tr ${alertHigh || alertLow ? 'style="background:rgba(255,170,0,0.05)"' : ''}>
                   <td>
-                    <span class="col-symbol" onclick="openResearch('${_esc(i.symbol)}')">${_esc(i.symbol)}</span>
+                    <span class="col-symbol" onclick="openResearch('${_jesc(i.symbol)}')">${_esc(i.symbol)}</span>
                     ${alertHigh ? '<span class="badge badge-amber" style="margin-left:4px">ALERT ▲</span>' : ''}
                     ${alertLow  ? '<span class="badge badge-red" style="margin-left:4px">ALERT ▼</span>' : ''}
                   </td>
@@ -2403,8 +2403,8 @@ async function loadWatchlistView() {
                   <td class="col-number ${alertHigh ? 'text-amber' : ''}">${i.alert_high ? '$' + fmt.price(i.alert_high) : '—'}</td>
                   <td class="col-number ${alertLow ? 'text-red' : ''}">${i.alert_low ? '$' + fmt.price(i.alert_low) : '—'}</td>
                   <td class="col-actions">
-                    <button class="btn btn-ghost btn-sm" onclick="openResearch('${_esc(i.symbol)}')">CHART</button>
-                    <button class="btn btn-red btn-sm" onclick="removeWatchlist(${i.id}, '${_esc(i.symbol)}')">✕</button>
+                    <button class="btn btn-ghost btn-sm" onclick="openResearch('${_jesc(i.symbol)}')">CHART</button>
+                    <button class="btn btn-red btn-sm" onclick="removeWatchlist(${i.id}, '${_jesc(i.symbol)}')">✕</button>
                   </td>
                 </tr>`;
               }).join('')}
@@ -3159,10 +3159,10 @@ async function loadDividendsView() {
         <div class="panel-header"><span class="panel-title">UPCOMING EX-DIVIDEND DATES</span></div>
         <div class="panel-body">
           ${divPositions.filter(p => p.ex_date).sort((a,b) => a.ex_date > b.ex_date ? 1 : -1).map(p => {
-            const daysUntil = Math.round((new Date(p.ex_date) - new Date()) / 86400000);
+            const daysUntil = Math.round((new Date(p.ex_date + 'T00:00:00') - new Date()) / 86400000);
             const urgColor = daysUntil <= 7 ? 'var(--red)' : daysUntil <= 30 ? 'var(--amber)' : 'var(--text-dim)';
             return `<div style="display:flex;align-items:center;gap:16px;padding:6px 0;border-bottom:1px solid var(--border)">
-              <span class="col-symbol" style="min-width:60px" onclick="openResearch('${_esc(p.symbol)}')">${_esc(p.symbol)}</span>
+              <span class="col-symbol" style="min-width:60px" onclick="openResearch('${_jesc(p.symbol)}')">${_esc(p.symbol)}</span>
               <span style="font-size:11px;color:var(--text-secondary);min-width:100px">${fmt.date(p.ex_date)}</span>
               <span style="font-size:10px;color:${urgColor}">${daysUntil <= 0 ? 'PASSED' : daysUntil + 'd away'}</span>
               ${(() => {
@@ -3925,7 +3925,7 @@ async function loadSettings() {
                 ['DATABASE', 'SQLITE3 (LOCAL)'],
                 ['BACKEND', 'PYTHON / FLASK'],
                 ['LAST REFRESH', State.lastRefresh ? State.lastRefresh.toLocaleTimeString('en-US') : '—'],
-              ].map(([k,v])=>`<div class="fund-item"><span class="fund-key">${k}</span><span class="fund-val">${v}</span></div>`).join('')}
+              ].map(([k,v])=>`<div class="fund-item"><span class="fund-key">${k}</span><span class="fund-val">${_esc(v)}</span></div>`).join('')}
             </div>
             <div style="margin-top:12px">
               <div class="chain-node">AUGUR NODE // CONNECTED</div>
@@ -4958,7 +4958,9 @@ async function loadTradingView() {
 
 const VIEW_LOADERS = {
   overview:     () => loadOverview(),
-  trading:      () => loadTradingView(),
+  // NOTE: 'trading' is intentionally NOT auto-refreshed. The trading view hosts
+  // the AJ Config tab with unsaved edits; rebuilding it on the refresh tick
+  // would reset to Dashboard and clobber in-progress Config changes.
   portfolio:    () => loadPortfolio(),
   crypto:       () => loadCrypto(),
   watchlist:    () => loadWatchlistView(),
@@ -5474,20 +5476,21 @@ async function loadAnalyticsView() {
     ]);
 
     // Build equity curve data
-    const equityData = history.map(s => ({
+    const hist = Array.isArray(history) ? history : [];
+    const equityData = hist.map(s => ({
       time: Math.floor(new Date(s.date + 'T00:00:00Z').getTime() / 1000),
       value: s.total_value,
     }));
 
     // Compute stats
     let totalReturn = null, maxDrawdown = null;
-    if (history.length >= 2) {
-      const first = history[0].total_value;
-      const last  = history[history.length - 1].total_value;
+    if (hist.length >= 2) {
+      const first = hist[0].total_value;
+      const last  = hist[hist.length - 1].total_value;
       totalReturn = ((last - first) / first) * 100;
       let peak = first;
       let dd = 0;
-      history.forEach(s => {
+      hist.forEach(s => {
         if (s.total_value > peak) peak = s.total_value;
         const d = (s.total_value - peak) / peak * 100;
         if (d < dd) dd = d;
@@ -5510,8 +5513,8 @@ async function loadAnalyticsView() {
       '<div class="panel-body" style="border-top:1px solid var(--border);padding:8px 12px;display:flex;gap:24px;font-size:11px">' +
         '<span><span class="text-dim">TOTAL RETURN: </span><span class="' + col.pct(totalReturn) + '">' + fmt.pct(totalReturn) + '</span></span>' +
         '<span><span class="text-dim">MAX DRAWDOWN: </span><span class="col-negative">' + (maxDrawdown != null ? maxDrawdown.toFixed(2) + '%' : '—') + '</span></span>' +
-        '<span><span class="text-dim">SNAPSHOTS: </span><span>' + history.length + '</span></span>' +
-        (history.length === 0 ? '<span class="text-amber">No history yet — snapshots taken every 5 min, once per day</span>' : '') +
+        '<span><span class="text-dim">SNAPSHOTS: </span><span>' + hist.length + '</span></span>' +
+        (hist.length === 0 ? '<span class="text-amber">No history yet — snapshots taken every 5 min, once per day</span>' : '') +
       '</div>' +
     '</div>' +
 
@@ -5540,7 +5543,7 @@ async function loadAnalyticsView() {
 
     // Render equity chart
     if (equityData.length >= 2) {
-      renderEquityChart(equityData, history);
+      renderEquityChart(equityData, hist);
     }
 
     // v0.2.0 — append portfolio Fama-French factor exposure panel.

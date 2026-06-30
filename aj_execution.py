@@ -185,8 +185,15 @@ def _apply_broker_result(order_id: int, res: Dict[str, Any],
             and float(res.get("avg_fill_price") or 0) > 0):
         already = aj_db.query("SELECT id FROM aj_fills WHERE order_id=?", (order_id,))
         if not already:
+            # Idempotency for the SYNTHESIZED aggregate fill keys on the ORDER
+            # (one synthetic fill per order), NOT on filled_at: stamping a fresh
+            # `now` each pass would defeat the natural-key dedup and double-count
+            # an aggregate re-reported by a later reconcile. Use a deterministic
+            # broker_fill_id ('<order>-agg', or the broker's '<boid>-agg') so a
+            # re-report dedups even when the order-level guard is racing.
             _record_fill(order_id, {
-                "broker_fill_id": "{}-agg".format(boid) if boid else None,
+                "broker_fill_id": ("{}-agg".format(boid) if boid
+                                   else "order{}-agg".format(order_id)),
                 "qty": res.get("filled_qty"),
                 "price": res.get("avg_fill_price"),
                 "fees_usd": res.get("fees_usd"),
@@ -246,24 +253,32 @@ def _record_fill(order_id: int, fill: Dict[str, Any], cycle_id: Optional[str]) -
     pv = float(fill.get("price") or 0)
     fv = float(fill.get("fees_usd") or 0)
     at = fill.get("filled_at") or aj_db.utc_now_iso()
-    if bfid:
-        dup = aj_db.query(
-            "SELECT id FROM aj_fills WHERE order_id=? AND broker_fill_id=?",
-            (order_id, bfid))
+    # TOCTOU guard: a concurrent reconcile + submit could both pass a bare
+    # SELECT-then-INSERT and double-insert the SAME fill, double-counting P&L.
+    # Hold the single write lock across the dedup SELECT *and* the INSERT so the
+    # check-then-act is atomic (the natural-key dedup is the second line of
+    # defense for id-less fills re-reported by reconciliation).
+    import database as _db
+    with _db._write_lock:
+        conn = _db.get_conn()
+        if bfid:
+            dup = conn.execute(
+                "SELECT id FROM aj_fills WHERE order_id=? AND broker_fill_id=?",
+                (order_id, bfid)).fetchone()
+        else:
+            # No broker fill id — dedup on the natural key so an id-less fill
+            # re-reported by reconciliation isn't double-counted.
+            dup = conn.execute(
+                "SELECT id FROM aj_fills WHERE order_id=? AND broker_fill_id IS NULL "
+                "AND qty=? AND price=? AND filled_at=?",
+                (order_id, qv, pv, at)).fetchone()
         if dup:
-            return int(dup[0]["id"])
-    else:
-        # No broker fill id — dedup on the natural key so an id-less fill
-        # re-reported by reconciliation isn't double-counted (the exact case the
-        # original guard skipped).
-        dup = aj_db.query(
-            "SELECT id FROM aj_fills WHERE order_id=? AND broker_fill_id IS NULL "
-            "AND qty=? AND price=? AND filled_at=?", (order_id, qv, pv, at))
-        if dup:
-            return int(dup[0]["id"])
-    fid = aj_db.insert(
-        "aj_fills", order_id=order_id, broker_fill_id=bfid,
-        qty=qv, price=pv, fees_usd=fv, filled_at=at)
+            return int(dup["id"])
+        cur = conn.execute(
+            "INSERT INTO aj_fills (order_id, broker_fill_id, qty, price, fees_usd, filled_at) "
+            "VALUES (?,?,?,?,?,?)", (order_id, bfid, qv, pv, fv, at))
+        conn.commit()
+        fid = int(cur.lastrowid)
     # Audit the SAME coerced values that were persisted to aj_fills so the
     # hash-chained record reconciles with the queryable row (raw fill.get(...)
     # values may be None/str when the stored value coerced to 0.0).
@@ -426,30 +441,67 @@ def recover_crashed_cycles(current_cycle: Optional[str] = None) -> Dict[str, Any
     stale = aj_db.find_stale_running_cycles(exclude=current_cycle)
     if not stale:
         return {"crashed": 0, "recon": None}
+    # CLAIM each stale cycle with a compare-and-set (running -> crashed) before
+    # reconciling it. Two recovery passes racing the same crashed cycle would
+    # otherwise both mark+reconcile it; only the pass that actually flips the
+    # state (rowcount 1) owns the recovery — the loser skips it (TOCTOU fix).
+    claimed = []
     for c in stale:
-        aj_db.mark_cycle(c["cycle_id"], "crashed")
-        aj_db.audit("recon", {"cycle_id": c["cycle_id"], "action": "marked crashed"},
-                    cycle_id=current_cycle)
+        if aj_db.claim_stale_cycle(c["cycle_id"]):
+            claimed.append(c)
+            aj_db.audit("recon", {"cycle_id": c["cycle_id"], "action": "marked crashed"},
+                        cycle_id=current_cycle)
+    if not claimed:
+        return {"crashed": 0, "recon": None}
     recon = reconcile(cycle_id=current_cycle)
-    for c in stale:
+    for c in claimed:
         aj_db.mark_cycle(c["cycle_id"], "recovered")
-    return {"crashed": len(stale), "recon": recon}
+    return {"crashed": len(claimed), "recon": recon}
 
 
 # ── kill-switch hooks (§11.4) ─────────────────────────────────────────────────
 
-def cancel_all_open(reason: str = "manual") -> int:
+def cancel_all_open(reason: str = "manual", force_live: bool = False) -> int:
     """Best-effort cancel of every non-terminal order. Paper orders are marked
-    canceled locally; live venues get a broker cancel. Returns count canceled."""
+    canceled locally; live venues get a broker cancel. Returns count canceled.
+
+    `force_live` constructs the LIVE venue adapter directly (bypassing
+    get_broker's "live disabled -> PaperBroker" fallback) so the kill switch can
+    cancel a live order at the venue even while it is disabling live trading in
+    the same operation — otherwise get_broker returns a PaperBroker that knows
+    nothing of the live order and the venue order is never canceled."""
     n = 0
     open_orders = aj_db.query(
         "SELECT * FROM aj_orders WHERE state IN "
         "('new','submitted','accepted','partially_filled','unknown')")
+    # Reuse one broker per (mode, venue) rather than rebuilding it per order —
+    # a fresh live adapter per order would re-auth/re-connect on every loop.
+    _brokers: Dict[str, aj_broker.BrokerClient] = {}
+
+    def _broker_for(mode: str, venue: str) -> aj_broker.BrokerClient:
+        key = "{}|{}".format(mode, venue)
+        b = _brokers.get(key)
+        if b is None:
+            if mode == "live" and force_live:
+                # Build the live adapter directly so a concurrent live-disable
+                # can't downgrade it to PaperBroker mid-cancel.
+                cls = aj_broker._BROKERS.get((venue or "").lower())
+                if venue and venue.lower() == "alpaca":
+                    b = aj_broker._alpaca_cls()()
+                elif cls is not None:
+                    b = cls()
+                else:
+                    b = aj_broker.get_broker(venue)
+            else:
+                b = aj_broker.get_broker(venue)
+            _brokers[key] = b
+        return b
+
     for o in open_orders:
         oid = o["id"]
         try:
             if o.get("mode") == "live" and o.get("broker_order_id"):
-                broker = aj_broker.get_broker(o.get("broker"))
+                broker = _broker_for("live", o.get("broker"))
                 res = broker.cancel(o["broker_order_id"]) or {}
                 rstate = str(res.get("state") or "").strip().lower()
                 # Only flip local state to canceled when the venue actually

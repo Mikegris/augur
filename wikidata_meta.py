@@ -152,6 +152,16 @@ def fetch_facts(symbol: str) -> dict:
         return result
 
     # One query pulls every fact we care about.
+    #
+    # CEO (P169) and headquarters (P159) are frequently MULTI-VALUED — a
+    # company entity lists every former CEO/HQ alongside the current one. The
+    # old `wdt:P169`/`wdt:P159` truthy-statement reads + LIMIT 1 picked an
+    # ARBITRARY value (often a former CEO). Resolve the CURRENT one explicitly:
+    # use the full statement node (p:/ps:), prefer statements WITHOUT an
+    # end-time (P582) — i.e. still in effect — and among those take the one
+    # with the latest start-time (P580). Done in correlated subqueries so the
+    # outer single-row result carries the current CEO/HQ rather than a random
+    # historical one.
     query = f"""
 SELECT ?label
        ?industryLabel ?countryLabel ?headquartersLabel
@@ -161,12 +171,35 @@ WHERE {{
   wd:{qid} rdfs:label ?label . FILTER(LANG(?label) = "en")
   OPTIONAL {{ wd:{qid} wdt:P452  ?industry . }}
   OPTIONAL {{ wd:{qid} wdt:P17   ?country  . }}
-  OPTIONAL {{ wd:{qid} wdt:P159  ?headquarters . }}
   OPTIONAL {{ wd:{qid} wdt:P571  ?inception . }}
   OPTIONAL {{ wd:{qid} wdt:P1128 ?employees . }}
-  OPTIONAL {{ wd:{qid} wdt:P169  ?ceo . }}
   OPTIONAL {{ wd:{qid} wdt:P749  ?parent . }}
   OPTIONAL {{ wd:{qid} wdt:P856  ?website . }}
+
+  OPTIONAL {{
+    SELECT ?ceo WHERE {{
+      wd:{qid} p:P169 ?ceoStmt .
+      ?ceoStmt ps:P169 ?ceo .
+      FILTER NOT EXISTS {{ ?ceoStmt wikibase:rank wikibase:DeprecatedRank . }}
+      FILTER NOT EXISTS {{ ?ceoStmt pq:P582 ?ceoEnd . }}
+      OPTIONAL {{ ?ceoStmt pq:P580 ?ceoStart . }}
+    }}
+    ORDER BY DESC(?ceoStart)
+    LIMIT 1
+  }}
+
+  OPTIONAL {{
+    SELECT ?headquarters WHERE {{
+      wd:{qid} p:P159 ?hqStmt .
+      ?hqStmt ps:P159 ?headquarters .
+      FILTER NOT EXISTS {{ ?hqStmt wikibase:rank wikibase:DeprecatedRank . }}
+      FILTER NOT EXISTS {{ ?hqStmt pq:P582 ?hqEnd . }}
+      OPTIONAL {{ ?hqStmt pq:P580 ?hqStart . }}
+    }}
+    ORDER BY DESC(?hqStart)
+    LIMIT 1
+  }}
+
   SERVICE wikibase:label {{ bd:serviceParam wikibase:language "en". }}
 }}
 LIMIT 1

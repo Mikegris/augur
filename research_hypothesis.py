@@ -246,6 +246,12 @@ def _build_prompt(ctx: Dict[str, Any]) -> str:
     )
 
 
+# Minimum magnitude (percent) a directional call must clear to count as
+# CONFIRMED at scoring time (Q10). A zero/near-zero magnitude would otherwise
+# make any non-adverse move a trivial confirmation.
+_MIN_MAGNITUDE_PCT = 0.5
+
+
 def _validate_hypothesis(h: Any) -> Optional[Dict[str, Any]]:
     """Coerce / sanity-check the LLM payload. Returns None if unusable."""
     if not isinstance(h, dict):
@@ -425,15 +431,33 @@ def save_hypothesis(hypothesis: Dict[str, Any], symbol: str, source: str = "ai")
     except (TypeError, ValueError):
         confidence = 0.0
 
-    # Best-effort issued price
+    # Best-effort issued price.
+    #
+    # WHY (Q4): score_hypothesis measures the realized return as
+    # (horizon_close - issued_price) / issued_price, where horizon_close is the
+    # DAILY CLOSE on/before the due date (via _close_price_on_or_before). If we
+    # capture issued_price from the LIVE intraday quote here, the entry basis is
+    # an intraday tick while the exit basis is a daily close — a mismatch that
+    # leaks the intraday move on creation day into every realized return (a few
+    # tenths of a % of phantom signal, enough to flip small-magnitude UP/DOWN
+    # calls). Capture the entry from the SAME daily-close basis as the exit so
+    # the two endpoints are measured consistently. Fall back to the live quote
+    # only when the historical close is unavailable.
     issued_price: Optional[float] = None
     try:
-        import fetcher
-        q = fetcher.get_quote(symbol) or {}
-        if "error" not in q and q.get("price") is not None:
-            issued_price = float(q["price"])
+        import research_tracker
+        issued_price = research_tracker._close_price_on_or_before(
+            symbol, datetime.now(tz=timezone.utc))
     except Exception:
         issued_price = None
+    if issued_price is None:
+        try:
+            import fetcher
+            q = fetcher.get_quote(symbol) or {}
+            if "error" not in q and q.get("price") is not None:
+                issued_price = float(q["price"])
+        except Exception:
+            issued_price = None
 
     init_hypothesis_db()
     with closing(_conn()) as c:
@@ -652,9 +676,21 @@ def score_hypothesis(hypothesis_id: int) -> Dict[str, Any]:
 
     realized_pct = ((current - float(issued)) / float(issued)) * 100.0
     pred = h.get("prediction") or {}
+    # WHY (Q10): a magnitude_pct of 0 (or a tiny value) makes an UP call
+    # CONFIRMED whenever realized >= 0 — i.e. a coin-flip is graded a win, and
+    # symmetrically a DOWN call is confirmed on any non-positive move. That
+    # inflates the confirmed rate with trivially-true predictions. Floor the
+    # magnitude to a minimum meaningful move (0.5%), matching the non-zero
+    # default _validate_hypothesis already applies at creation time, so a
+    # legacy/zero-magnitude row still has to clear a real threshold.
+    try:
+        magnitude_pct = float(pred.get("magnitude_pct") or 0.0)
+    except (TypeError, ValueError):
+        magnitude_pct = 0.0
+    magnitude_pct = max(abs(magnitude_pct), _MIN_MAGNITUDE_PCT)
     new_status = _resolve(
         pred.get("direction", "UP"),
-        float(pred.get("magnitude_pct") or 0.0),
+        magnitude_pct,
         realized_pct,
     )
 

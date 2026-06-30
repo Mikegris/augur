@@ -7,6 +7,7 @@ Sources:
 """
 
 import logging
+import random
 import re
 import threading
 import time
@@ -15,6 +16,40 @@ from collections import Counter
 import requests
 
 log = logging.getLogger("augur.altsignals")
+
+
+def _retry_after_ttl(resp, base_ttl, lo=30.0, hi=3600.0):
+    """Pick a negative-cache TTL for a rate-limited response.
+
+    Honors the upstream `Retry-After` header (seconds, or an HTTP-date),
+    CLAMPED into [lo, hi] so a hostile/huge value can't pin us out for hours
+    and a tiny one can't cause a retry storm. Adds +/-15% jitter so parallel
+    callers that all 429'd at once don't re-hit upstream in lockstep when the
+    window expires. Falls back to `base_ttl` when no usable header is present.
+    """
+    ttl = base_ttl
+    try:
+        ra = resp.headers.get("Retry-After") if resp is not None else None
+        if ra:
+            ra = ra.strip()
+            if ra.isdigit():
+                ttl = float(ra)
+            else:
+                # HTTP-date form.
+                try:
+                    from email.utils import parsedate_to_datetime
+                    when = parsedate_to_datetime(ra)
+                    if when is not None:
+                        delta = when.timestamp() - time.time()
+                        if delta > 0:
+                            ttl = delta
+                except Exception:
+                    ttl = base_ttl
+    except Exception:
+        ttl = base_ttl
+    ttl = max(lo, min(hi, ttl))
+    ttl *= random.uniform(0.85, 1.15)  # jitter
+    return ttl
 
 UA = "AUGUR/1.0 (+local research)"
 HEADERS_REDDIT   = {"User-Agent": UA}
@@ -30,6 +65,12 @@ _lock = threading.Lock()
 # (rate-limited) upstream regardless — the negative cache was inert. Callers
 # store this sentinel instead and translate it back to None on read.
 _NEG = {"__neg_cache__": True}
+
+# Distinct sentinel for a FETCH FAILURE (rate-limit / network error) as opposed
+# to a genuine empty/no-data result. Keeping these separate lets callers/tests
+# tell "upstream is throttling us" apart from "we asked and there really was
+# nothing", and lets us pick a Retry-After-aware TTL only for the failure case.
+_FAIL = {"__fetch_failed__": True}
 
 
 def _cget(k):
@@ -81,17 +122,24 @@ def reddit_subreddit_posts(subreddit, *, sort="hot", limit=50):
     """Fetch posts from a subreddit. sort: hot|new|top|rising"""
     cache_key = ("reddit", subreddit, sort, limit)
     hit = _cget(cache_key)
+    if hit is _FAIL:
+        return []  # cached fetch-failure — surface no-data without re-hitting
     if hit is not None:
         return hit
     url = f"https://www.reddit.com/r/{subreddit}/{sort}.json"
     try:
         r = requests.get(url, headers=HEADERS_REDDIT, params={"limit": min(limit, 100)}, timeout=15)
         # 403/404 = subreddit went private or was banned; 429 = rate limited.
-        # Cache the empty result so we don't hammer Reddit on every idea
-        # generator / dashboard tick — they all run reddit_ticker_mentions
-        # which sweeps the full default subreddit list in a tight loop.
-        if r.status_code in (403, 404, 429, 451):
-            _cset(cache_key, [], 1800 if r.status_code == 429 else 3600)
+        # Cache the result so we don't hammer Reddit on every idea generator /
+        # dashboard tick — they all run reddit_ticker_mentions which sweeps the
+        # full default subreddit list in a tight loop. A 429 is a FETCH FAILURE
+        # (store _FAIL, honor Retry-After + jitter); 403/404/451 are genuine
+        # "this subreddit has no data for us" results (store []).
+        if r.status_code == 429:
+            _cset(cache_key, _FAIL, _retry_after_ttl(r, 1800))
+            return []
+        if r.status_code in (403, 404, 451):
+            _cset(cache_key, [], 3600)
             return []
         r.raise_for_status()
         children = (r.json().get("data") or {}).get("children") or []
@@ -114,9 +162,10 @@ def reddit_subreddit_posts(subreddit, *, sort="hot", limit=50):
         return posts
     except Exception as e:
         log.warning("reddit fetch %s: %s", subreddit, e)
-        # Cache the failure for a shorter window so transient network blips
-        # don't lock us out, but parallel callers don't all retry at once.
-        _cset(cache_key, [], 120)
+        # Cache the FAILURE (distinct from no-data) for a short, jittered window
+        # so transient network blips don't lock us out and parallel callers
+        # don't all retry in lockstep.
+        _cset(cache_key, _FAIL, _retry_after_ttl(None, 120, lo=30.0, hi=300.0))
         return []
 
 
@@ -172,8 +221,8 @@ def stocktwits_symbol_sentiment(symbol):
     """Pull recent messages for a symbol and compute bull/bear ratio."""
     cache_key = ("stwits", symbol.upper())
     hit = _cget(cache_key)
-    if hit is _NEG:
-        return None  # cached negative — don't re-hit the rate-limited API
+    if hit is _NEG or hit is _FAIL:
+        return None  # cached negative/failure — don't re-hit the rate-limited API
     if hit is not None:
         return hit
     try:
@@ -182,10 +231,12 @@ def stocktwits_symbol_sentiment(symbol):
             # Stocktwits aggressively rate-limits (~200/hr without auth).
             # Cache the failure so idea_generator's parallel pool calls
             # don't retry on every page load — that's how we end up locked
-            # out for hours at a time. Store the _NEG sentinel (not None) so
-            # the cache is actually consultable on the next call.
-            ttl = 1800 if r.status_code == 429 else 600
-            _cset(cache_key, _NEG, ttl)
+            # out for hours at a time. A 429 is a FETCH FAILURE (store _FAIL,
+            # honor Retry-After + jitter); other non-200s store _NEG.
+            if r.status_code == 429:
+                _cset(cache_key, _FAIL, _retry_after_ttl(r, 1800))
+            else:
+                _cset(cache_key, _NEG, 600)
             return None
         data = r.json()
         msgs = data.get("messages") or []
@@ -220,7 +271,7 @@ def stocktwits_symbol_sentiment(symbol):
         return out
     except Exception as e:
         log.warning("stocktwits %s: %s", symbol, e)
-        _cset(cache_key, _NEG, 120)
+        _cset(cache_key, _FAIL, _retry_after_ttl(None, 120, lo=30.0, hi=300.0))
         return None
 
 
@@ -228,13 +279,17 @@ def stocktwits_trending(limit=20):
     """Trending tickers on StockTwits."""
     cache_key = ("stwits_trending", limit)
     hit = _cget(cache_key)
+    if hit is _FAIL:
+        return []
     if hit is not None:
         return hit
     try:
         r = requests.get(STOCKTWITS_TRENDING, headers=HEADERS_STWITS, timeout=15)
         if r.status_code != 200:
-            ttl = 1800 if r.status_code == 429 else 600
-            _cset(cache_key, [], ttl)
+            if r.status_code == 429:
+                _cset(cache_key, _FAIL, _retry_after_ttl(r, 1800))
+            else:
+                _cset(cache_key, [], 600)
             return []
         sym = r.json().get("symbols") or []
         out = [{
@@ -246,5 +301,5 @@ def stocktwits_trending(limit=20):
         return out
     except Exception as e:
         log.warning("stocktwits trending: %s", e)
-        _cset(cache_key, [], 120)
+        _cset(cache_key, _FAIL, _retry_after_ttl(None, 120, lo=30.0, hi=300.0))
         return []

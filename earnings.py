@@ -250,8 +250,11 @@ def get_earnings_dossier(symbol):
                     beat_only = surprises[surprises > 0]
                     avg_beat_magnitude = round(float(beat_only.mean()), 2) if not beat_only.empty else None
 
-                # Last 8 quarters for table
-                for idx, row in past.head(8).iterrows():
+                # Last 8 quarters for table. `head(8)` assumes the frame is
+                # newest-first, but yfinance's earnings_dates index ordering is
+                # not guaranteed — sort by date descending so we genuinely take
+                # the most-recent 8 quarters (not an arbitrary 8).
+                for idx, row in past.sort_index(ascending=False).head(8).iterrows():
                     _actual = _safe_float(row["Reported EPS"])
                     _est = _safe_float(row["EPS Estimate"])
                     history_rows.append({
@@ -311,10 +314,16 @@ def get_earnings_dossier(symbol):
                     try:
                         # Convert to tz-naive for comparison
                         dt_naive = dt.tz_localize(None) if dt.tzinfo else dt
-                        idx = hist_index.searchsorted(dt_naive)
+                        # Anchor `before` to the LAST session on/before the
+                        # announcement. searchsorted(side="left") returns the
+                        # insertion point BEFORE any equal element, so when the
+                        # announcement date is itself a trading session it landed
+                        # AT (or past) that day — shifting the whole reaction
+                        # window forward by one session. side="right"-1 gives the
+                        # index of the last session that is <= the announcement.
+                        idx = hist_index.searchsorted(dt_naive, side="right") - 1
                         # Measure the POST-earnings reaction (announcement day ->
-                        # next session), not the run-up into it. The old idx-1 ->
-                        # idx window ended on the earnings day itself.
+                        # next session), not the run-up into it.
                         if 0 <= idx and idx + 1 < len(price_hist):
                             before = float(price_hist["Close"].iloc[idx])
                             after = float(price_hist["Close"].iloc[idx + 1])

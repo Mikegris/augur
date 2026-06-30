@@ -199,8 +199,11 @@ def _ownership(symbol: str, price: Optional[float], held: Optional[Dict[str, Any
             avg_cost = h.get("avg_cost")
             out.update({
                 "held": True, "shares": h.get("shares"), "avg_cost": avg_cost,
+                # Require avg_cost > 0 — a zero/negative basis (bad import,
+                # gifted shares) would divide-by-zero or invert the sign.
                 "unrealized_pct": round((price - avg_cost) / avg_cost * 100, 1)
-                if (price and avg_cost) else None,
+                if (price and isinstance(avg_cost, (int, float))
+                    and not isinstance(avg_cost, bool) and avg_cost > 0) else None,
             })
         txns = db.get_transactions(symbol=symbol, limit=100)
         buys = [t for t in txns if (t.get("action") or "").upper() == "BUY"]
@@ -472,9 +475,17 @@ def _temperament_uncached() -> Dict[str, Any]:
                 cost_total += price * sh
                 cost_shares += sh
             elif act == "SELL" and cost_shares > 0:
-                avg = cost_total / cost_shares
-                cost_shares = max(0.0, cost_shares - sh)
-                cost_total = avg * cost_shares
+                if sh >= cost_shares:
+                    # Oversell (selling more than the running basis tracks —
+                    # short, pre-history lot, or messy import): reset the lot to
+                    # flat. Clamping to zero shares but keeping a stale avg left
+                    # a phantom basis that false-flagged the NEXT buy as a chase.
+                    cost_shares = 0.0
+                    cost_total = 0.0
+                else:
+                    avg = cost_total / cost_shares
+                    cost_shares -= sh
+                    cost_total = avg * cost_shares
     if chases:
         # Surface the WORST chase (largest premium over basis), not just the
         # most recent — that's the one worth seeing, like quick_flips does.

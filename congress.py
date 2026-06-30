@@ -124,7 +124,12 @@ AMOUNT_MIDPOINTS = {
     "$250,001 - $500,000": 375000,
     "$500,001 - $1,000,000": 750000,
     "$1,000,001 - $5,000,000": 3000000,
-    "Over $5,000,000": 5000000,
+    # "Over $X" is an OPEN-ENDED top band — using the floor ($5,000,000) as the
+    # midpoint systematically understates the biggest trades (a $20M purchase
+    # counts as $5M). There's no upper bound to average against, so use a
+    # sentinel ABOVE the floor (1.5×) as a conservative point estimate that at
+    # least leans the aggregate in the right direction.
+    "Over $5,000,000": 7500000,
 }
 
 OWNER_LABELS = {
@@ -225,7 +230,12 @@ def _parse_amount(amount_str):
             pass
     if nums:
         try:
-            return int(nums[0].replace(",", ""))
+            n = int(nums[0].replace(",", ""))
+            # An "Over $X" / "$X+" open-ended band: the lone number is the
+            # FLOOR, so bump it to a 1.5× sentinel rather than understating it.
+            if "over" in s.lower() or "+" in s:
+                return int(n * 1.5)
+            return n
         except Exception:
             pass
     return 0

@@ -132,7 +132,7 @@
           executed = num(cyc.executed, 0);
       var blocked = 0;
       DROP_CODES.forEach(function (k) {
-        if (k !== "no_signal" && k !== "no_edge") blocked += num(rj[k], 0);
+        if (k !== "no_signal") blocked += num(rj[k], 0);   // no_edge is a real drop, not "cleared"
       });
       var cleared = Math.max(0, withSig - blocked);
       var stages = [
@@ -411,8 +411,8 @@
       html += '<div style="text-align:center;padding:8px;border-radius:4px;margin-bottom:8px;font-weight:700;background:' +
         (halted ? "rgba(231,76,60,.15)" : "rgba(46,204,113,.12)") + ';color:' +
         (halted ? RED : GREEN) + ';">' + (halted ? "HALTED" : "ARMED / LIVE-OK") + '</div>';
-      // day P&L vs max daily loss
-      var pnl = num(st.day_pnl);
+      // day P&L vs max daily loss (status.day_pnl is a dict {day_pnl, ...})
+      var pnl = num((st.day_pnl || {}).day_pnl);
       var maxLoss = num(cfg.max_daily_loss_usd);
       if (maxLoss && maxLoss > 0) {
         var loss = pnl !== null && pnl < 0 ? Math.abs(pnl) : 0;
@@ -437,8 +437,8 @@
       var chainOk = st.audit_chain && st.audit_chain.ok;
       html += '<div style="font-size:12px;margin-top:8px;">audit chain: <span style="color:' +
         (chainOk ? GREEN : RED) + ';font-weight:600;">' + (chainOk ? "VERIFIED ✓" : "BROKEN ✗") + '</span></div>';
-      // cumulative pnl if present
-      var cum = num(st.cumulative_pnl);
+      // cumulative pnl if present (status.cumulative_pnl is a dict {total, ...})
+      var cum = num((st.cumulative_pnl || {}).total);
       if (cum !== null) {
         html += '<div style="font-size:12px;">cumulative P&L: <span style="color:' +
           (cum >= 0 ? GREEN : RED) + ';">' + money(cum) + '</span></div>';
@@ -663,10 +663,26 @@
         { label: "other", data: other, backgroundColor: MUTED, pointRadius: 5 },
         { label: "executed", data: exec, backgroundColor: GREEN, pointRadius: 6 }
       ];
-      var ann = [];
+      // edge-bar vertical guide line — MUST be passed at construction; Chart v4
+      // ignores plugins pushed onto config.plugins after init.
+      var edgePlugin = (minEdge !== null) ? {
+        id: "aj-edgebar",
+        afterDraw: function (ch) {
+          try {
+            var xs = ch.scales.x, area = ch.chartArea, c = ch.ctx;
+            var px = xs.getPixelForValue(minEdge);
+            if (px < area.left || px > area.right) return;
+            c.save();
+            c.strokeStyle = ACCENT; c.lineWidth = 1.5; c.setLineDash([5, 4]);
+            c.beginPath(); c.moveTo(px, area.top); c.lineTo(px, area.bottom); c.stroke();
+            c.restore();
+          } catch (e) {}
+        }
+      } : null;
       var chart = new Chart(ctx, {
         type: "scatter",
         data: { datasets: datasets },
+        plugins: edgePlugin ? [edgePlugin] : [],
         options: {
           responsive: true, maintainAspectRatio: false,
           plugins: {
@@ -689,33 +705,8 @@
           }
         }
       });
-      // draw the edge-bar vertical line via an afterDraw hook (no plugin dep)
-      if (minEdge !== null) {
-        var plugin = {
-          id: "aj-edgebar-" + Math.random().toString(36).slice(2),
-          afterDraw: function (ch) {
-            try {
-              var xs = ch.scales.x, area = ch.chartArea, c = ch.ctx;
-              var px = xs.getPixelForValue(minEdge);
-              if (px < area.left || px > area.right) return;
-              c.save();
-              c.strokeStyle = ACCENT; c.lineWidth = 1.5; c.setLineDash([5, 4]);
-              c.beginPath(); c.moveTo(px, area.top); c.lineTo(px, area.bottom); c.stroke();
-              c.restore();
-            } catch (e) {}
-          }
-        };
-        ch_addPlugin(chart, plugin);
-      }
       keepChart("aj-ins-scatter", chart);
     } catch (e) { placeholder(body, "selectivity scatter unavailable"); }
-  }
-  function ch_addPlugin(chart, plugin) {
-    try {
-      chart.config.plugins = chart.config.plugins || [];
-      chart.config.plugins.push(plugin);
-      chart.update();
-    } catch (e) {}
   }
 
   // ──────────────────────────────────────────────────────────────────────────

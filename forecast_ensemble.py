@@ -442,6 +442,17 @@ def _run_uncached(symbol: str, horizon_days: int) -> Dict[str, Any]:
     # Renormalize weights over the available signals. Fall back to a key's
     # real base weight (not a flat 0.1) if an adaptive run ever drops a key.
     total_w = sum(weights.get(k, eff_base.get(k, 0.1)) for k in raw_signals)
+    # WHY (Q20): `total_w` divides every per-signal weight below. raw_signals is
+    # already guaranteed non-empty (the early return above), but an adaptive /
+    # regime tilt or an all-zero eff_base for an ortho-only candidate set could
+    # in principle drive the sum to ~0, producing inf/NaN weights. Fail open to
+    # an equal-weight blend over the available signals so the ensemble still
+    # returns a sane prob instead of NaN.
+    if not (total_w > 1e-12):
+        n_sig = len(raw_signals)
+        weights = {k: 1.0 for k in raw_signals}
+        eff_base = {k: 1.0 for k in raw_signals}
+        total_w = float(n_sig)
     weighted_sum = 0.0
     signal_rows: List[Dict[str, Any]] = []
     for key, sig in raw_signals.items():

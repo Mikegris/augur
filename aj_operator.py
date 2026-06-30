@@ -462,7 +462,15 @@ def _process_exits(cycle_id: str, cfg: Dict[str, Any]) -> List[Dict[str, Any]]:
             try:
                 import aj_alpha
                 avg = float((pre_book.get(sig["symbol"]) or {}).get("avg_cost") or 0)
-                realized = (mark - avg) * qty if avg > 0 else 0.0
+                # Net of the exit fill's fees (the booked realized P&L), so the
+                # scorecard scores what was actually banked — not a gross
+                # (mark-avg)×qty figure that overstates a marginal/round-trip-
+                # fee-eaten close as a winner.
+                ex = r.get("exec") or {}
+                ex_qty = float(ex.get("filled_qty") or qty)
+                ex_px = float(ex.get("avg_fill_price") or mark)
+                fees = float(ex.get("fees_usd") or 0)
+                realized = ((ex_px - avg) * ex_qty - fees) if avg > 0 else 0.0
                 aj_alpha.scorecard_record(aj_alpha.pop_entry_conviction(sig["symbol"]), realized)
             except Exception:
                 log.debug("scorecard exit record skipped", exc_info=True)
@@ -510,13 +518,49 @@ def _process_exits(cycle_id: str, cfg: Dict[str, Any]) -> List[Dict[str, Any]]:
                 # profit ladder -> trim only rungs ABOVE the high-water mark
                 rungs = [x for x in _ea.profit_ladder(position, cfg, mark=mk) if x.get("triggered")]
                 if rungs:
+                    # Atomically read the high-water mark, pick the next fresh
+                    # rung, and ADVANCE the mark under the single write lock with
+                    # a compare-and-set. Two exit passes (or a re-entrant cycle)
+                    # racing the old read-modify-write would each see the same
+                    # stale mark and double-trim/double-sell the same rung; the
+                    # CAS makes exactly one pass win and advance the mark.
+                    import database as _db
+                    rung = None
+                    new_mark = None
                     try:
-                        done = float(aj_db.get_setting_raw(lkey) or 0)
+                        with _db._write_lock:
+                            conn = _db.get_conn()
+                            row = conn.execute(
+                                "SELECT value FROM settings WHERE key=?", (lkey,)).fetchone()
+                            try:
+                                done = float((row["value"] if row else 0) or 0)
+                            except (TypeError, ValueError):
+                                done = 0.0
+                            fresh = [x for x in rungs if float(x.get("gain_pct") or 0) > done]
+                            if fresh:
+                                rung = fresh[-1]
+                                new_mark = float(rung.get("gain_pct") or 0)
+                                # CAS: only advance if the mark is still `done`.
+                                cur = conn.execute(
+                                    "UPDATE settings SET value=? WHERE key=? AND COALESCE(value,'')=?",
+                                    (str(new_mark), lkey, "" if not row else (row["value"] or ""))
+                                )
+                                if cur.rowcount != 1:
+                                    # No existing row (or it changed under us).
+                                    ins = conn.execute(
+                                        "INSERT OR IGNORE INTO settings (key, value) VALUES (?,?)",
+                                        (lkey, str(new_mark)))
+                                    if ins.rowcount != 1:
+                                        rung = None   # lost the race; another pass took this rung
+                                conn.commit()
+                        try:
+                            _db._invalidate_settings_cache()
+                        except Exception:
+                            pass
                     except Exception:
-                        done = 0.0
-                    fresh = [x for x in rungs if float(x.get("gain_pct") or 0) > done]
-                    if fresh:
-                        rung = fresh[-1]
+                        log.debug("profit-ladder CAS failed", exc_info=True)
+                        rung = None
+                    if rung is not None:
                         trim = max(0.0, min(1.0, float(rung.get("trim_frac") or 0)))
                         tqty = qty * trim
                         if tqty > 0:
@@ -528,10 +572,6 @@ def _process_exits(cycle_id: str, cfg: Dict[str, Any]) -> List[Dict[str, Any]]:
                             r["symbol"] = sym
                             r["exit_reason"] = "profit_ladder"
                             out.append(r)
-                            try:
-                                aj_db.set_setting_raw(lkey, str(float(rung.get("gain_pct") or 0)))
-                            except Exception:
-                                pass
         except Exception:
             log.debug("supplementary exits skipped", exc_info=True)
     return out

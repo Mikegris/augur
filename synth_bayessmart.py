@@ -247,9 +247,14 @@ def seed_synthetic_history(
                 hit = 1 if i < hits else 0
                 direction = "BUY"
                 realized = 0.02 if hit else -0.015
+                # The forecast we *issued* (predicted_magnitude / confidence) is
+                # distinct from what later *realized*. Seed plausible issue-time
+                # values rather than reusing `realized` for those columns.
+                predicted_magnitude = 0.02
+                confidence = 0.6
                 rows.append((
                     sig, "SYNTH", issued_at, horizon_days,
-                    direction, realized, abs(realized),
+                    direction, predicted_magnitude, confidence,
                     '{"synthetic": true}', scored_at, realized, hit,
                     100.0, 100.0 * (1 + realized),
                 ))
@@ -412,20 +417,49 @@ def _compute(symbol: str) -> Dict[str, Any]:
     # bipolar scale). Components with no track record (posterior_mean == prior
     # 0.5) contribute logit(0.5)=0 → they don't move the posterior, which is
     # the correct "no calibrated evidence" behaviour.
+    # CRITICAL: `posterior_mean` is an UNDIRECTED reliability — how often the
+    # component is directionally *right* — not P(up). Treating logit(p) as the
+    # signed up-log-odds is wrong: a reliable-but-bearish component (p high,
+    # normalized<0) would still need its sign from `normalized`, and an
+    # *anti*-reliable component (p<0.5) carries no usable directional evidence
+    # here (we can't tell which way it's wrong without a per-direction
+    # hit-rate). So: magnitude = |normalized|·logit(p) (reliability), SIGN =
+    # sign(normalized) (the component's directional read). Components with
+    # p<=0.5 (no calibrated reliability, or anti-reliable) contribute nothing.
+    # If NO component carries calibrated directional evidence, we cannot emit a
+    # genuine probability → drop posterior_p_up (None) rather than report a
+    # wrong number.
     log_odds = 0.0
+    n_reliable = 0
     for c in components_out:
         p = c["posterior_mean"]
         try:
             p = min(0.999, max(0.001, float(p)))
         except (TypeError, ValueError):
             continue
-        comp_logit = math.log(p / (1.0 - p))      # 0 when p == 0.5
-        log_odds += float(c["normalized"]) * comp_logit
-    try:
-        posterior_p_up = 1.0 / (1.0 + math.exp(-log_odds))
-    except OverflowError:
-        posterior_p_up = 0.0 if log_odds < 0 else 1.0
-    posterior_p_up = max(0.0, min(1.0, posterior_p_up))
+        if p <= 0.5:
+            # No calibrated reliability (prior 0.5) or anti-reliable: undirected
+            # hit-rate gives us no trustworthy directional contribution.
+            continue
+        try:
+            norm = float(c["normalized"])
+        except (TypeError, ValueError):
+            continue
+        if norm == 0.0:
+            continue
+        reliability = math.log(p / (1.0 - p))     # > 0 since p > 0.5
+        sign = 1.0 if norm > 0 else -1.0
+        log_odds += sign * abs(norm) * reliability
+        n_reliable += 1
+
+    if n_reliable == 0:
+        posterior_p_up = None
+    else:
+        try:
+            posterior_p_up = 1.0 / (1.0 + math.exp(-log_odds))
+        except OverflowError:
+            posterior_p_up = 0.0 if log_odds < 0 else 1.0
+        posterior_p_up = max(0.0, min(1.0, posterior_p_up))
 
     # ── Stage 4: top-3 weight shifts ────────────────────────────────────
     shifts = sorted(
@@ -467,7 +501,7 @@ def _compute(symbol: str) -> Dict[str, Any]:
         "bayes_signal": bayes_signal,
         # True log-odds posterior P(up) from naive-Bayes fusion of the
         # calibrated component signals (this one IS a probability).
-        "posterior_p_up": round(posterior_p_up, 4),
+        "posterior_p_up": round(posterior_p_up, 4) if posterior_p_up is not None else None,
         "posterior_log_odds": round(log_odds, 4),
         "score_delta": round(bayes_score - static_score, 2),
         "components": components_out,

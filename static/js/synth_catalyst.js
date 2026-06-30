@@ -187,9 +187,15 @@
     const canvas = document.getElementById('sc-chart');
     if (!canvas) return;
     if (typeof Chart === 'undefined') {
-      canvas.parentElement.innerHTML =
-        '<div style="padding:14px;font-size:11px;color:var(--text-dim)">' +
-        'Chart.js not loaded — timeline chart skipped (table still works).</div>';
+      // Write the notice to the sibling status node rather than overwriting the
+      // canvas's parent — clobbering the parent destroys the canvas and breaks
+      // every subsequent run that expects #sc-chart to still exist.
+      const statusEl = document.getElementById('sc-status');
+      if (statusEl) {
+        statusEl.innerHTML =
+          '<span style="color:var(--text-dim)">' +
+          'Chart.js not loaded — timeline chart skipped (table still works).</span>';
+      }
       return;
     }
     _destroyChart(containerEl);

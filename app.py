@@ -72,7 +72,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(me
 
 # Single source of truth for the app version — surfaced at /api/version and
 # in jarvis.health_snapshot().
-APP_VERSION = "3.10.0"
+APP_VERSION = "3.11.0"
 
 _TICKER_RE = re.compile(r"^[A-Z0-9][A-Z0-9.\-]{0,9}$")
 
@@ -482,7 +482,7 @@ def chart(symbol):
 def news(symbol):
     if not _valid_ticker(symbol):
         return jsonify({"error": "Invalid symbol"}), 400
-    limit = _safe_int(request.args.get("limit"), 15)
+    limit = min(max(_safe_int(request.args.get("limit"), 15), 1), 100)
     return jsonify(fetcher.get_news(symbol.upper(), limit=limit))
 
 
@@ -517,7 +517,7 @@ def market_movers():
 
 @app.route("/api/crypto/market")
 def crypto_market():
-    limit = _safe_int(request.args.get("limit"), 50)
+    limit = min(max(_safe_int(request.args.get("limit"), 50), 1), 100)
     return jsonify(fetcher.get_crypto_market(limit))
 
 
@@ -528,7 +528,7 @@ def crypto_global():
 
 @app.route("/api/crypto/chart/<coin_id>")
 def crypto_chart(coin_id):
-    days = _safe_int(request.args.get("days"), 30)
+    days = min(max(_safe_int(request.args.get("days"), 30), 1), 365)
     return jsonify(fetcher.get_crypto_chart(coin_id, days=days))
 
 
@@ -807,25 +807,14 @@ def transactions_summary():
     """Aggregate KPIs over ALL transactions (no row-limit). Used for the
     Transactions view's headline strip so totals stay accurate when the
     table itself only pages in the latest N rows."""
-    # Pull every transaction. The per-row payload is tiny (8 numeric/string
-    # fields) so this is fine for realistic personal-portfolio sizes.
-    txns = db.get_transactions(limit=10**9)
-    total_buy = 0.0
-    total_sell = 0.0
-    for t in txns:
-        try:
-            total = float(t.get("total") or 0)
-        except (TypeError, ValueError):
-            total = 0.0
-        action = (t.get("action") or "").upper()
-        if action == "BUY":
-            total_buy += total
-        elif action == "SELL":
-            total_sell += total
+    # Aggregate in SQL (SUM/COUNT GROUP BY action) instead of loading every
+    # row into Python just to sum it — keeps the headline strip O(1) on the
+    # DB side regardless of table size.
+    summary = db.get_transaction_summary()
     return jsonify({
-        "total_buy": total_buy,
-        "total_sell": total_sell,
-        "count": len(txns),
+        "total_buy": summary["total_buy"],
+        "total_sell": summary["total_sell"],
+        "count": summary["count"],
     })
 
 
@@ -877,6 +866,14 @@ def portfolio_benchmark():
     if not _valid_ticker(symbol):
         return jsonify({"error": "Invalid symbol"}), 400
     period = request.args.get("period", "1y")
+    # Allowlist the period — an unrecognized value reaches yfinance and comes
+    # back as a silent empty series (looks like "no data" to the UI). Reject
+    # with a 400 so the caller knows the input was bad.
+    _VALID_PERIODS = {"1d", "5d", "1mo", "3mo", "6mo", "1y", "2y", "5y",
+                      "10y", "ytd", "max"}
+    if period not in _VALID_PERIODS:
+        return jsonify({"error": "Invalid period",
+                        "valid_periods": sorted(_VALID_PERIODS)}), 400
     # Get first snapshot value to normalize benchmark to same starting value.
     # Use the earliest snapshot with a POSITIVE total_value — normalizing to a
     # zero/near-zero base (portfolio was empty when first snapshotted) distorts
@@ -976,17 +973,26 @@ def portfolio_export():
 @app.route("/api/transactions/export")
 def transactions_export():
     txns = db.get_transactions(limit=10000)
-    output = io.StringIO()
-    writer = csv.writer(output)
-    writer.writerow(["date", "symbol", "action", "shares", "price", "total", "fees", "notes"])
-    for t in txns:
-        writer.writerow([
-            t.get("date", ""), t.get("symbol", ""), t.get("action", ""), t.get("shares", ""),
-            t.get("price", ""), t.get("total", ""), t.get("fees", 0), t.get("notes", ""),
-        ])
-    output.seek(0)
+
+    # Stream rows out via a generator instead of materializing the whole CSV
+    # in memory before responding — keeps peak memory flat regardless of how
+    # many rows are exported.
+    def _generate():
+        buf = io.StringIO()
+        writer = csv.writer(buf)
+        writer.writerow(["date", "symbol", "action", "shares", "price", "total", "fees", "notes"])
+        yield buf.getvalue()
+        for t in txns:
+            buf.seek(0)
+            buf.truncate(0)
+            writer.writerow([
+                t.get("date", ""), t.get("symbol", ""), t.get("action", ""), t.get("shares", ""),
+                t.get("price", ""), t.get("total", ""), t.get("fees", 0), t.get("notes", ""),
+            ])
+            yield buf.getvalue()
+
     return Response(
-        output.getvalue(),
+        _generate(),
         mimetype="text/csv",
         headers={"Content-Disposition": "attachment; filename=transactions_export.csv"},
     )
@@ -1307,7 +1313,11 @@ def portfolio_dividends():
     # running as its own serial phase before them. Without parallelism,
     # 30 positions = 30 sequential network calls. yfinance 1.2.x is
     # thread-safe with fast_info.
-    equity_syms = [h["symbol"] for h in holdings if h["asset_type"] != "crypto"]
+    # Cap the fan-out: one dividend fetch per holding is unbounded, so a very
+    # large portfolio could spawn hundreds of network calls. 60 covers any
+    # realistic personal portfolio; holdings beyond it just render with their
+    # avg_cost fallback (no dividend roundtrip).
+    equity_syms = [h["symbol"] for h in holdings if h["asset_type"] != "crypto"][:60]
     prices = {}
     div_map = {}
     if equity_syms:
@@ -1603,28 +1613,40 @@ def intel_feed():
         max_workers=8, thread_name_prefix="intel-filings",
     )
 
+    # Flatten all filings, then resolve cache hits in ONE batch query instead
+    # of a per-filing single-row get_cached_filing (N+1). When refreshing we
+    # skip the cache entirely.
+    all_filings = []
     for filings in filing_lists:
         for f in filings or ():
-            acc = f.get("accession")
-            if not acc:
-                continue
-            cached = db.get_cached_filing(acc) if not refresh else None
-            if cached:
-                result.append({
-                    "ticker": f.get("ticker", ""),
-                    "form_type": f.get("form_type", ""),
-                    "filing_date": f.get("filing_date", ""),
-                    "description": f.get("description", ""),
-                    "accession": acc,
-                    "signal": cached.get("ai_signal", "NEUTRAL"),
-                    "summary": cached.get("ai_summary", ""),
-                    "key_points": cached.get("ai_key_points", []),
-                    "event_type": cached.get("ai_event_type", ""),
-                    "ai_powered": bool(cached.get("ai_powered")),
-                    "filing_url": f.get("document_url", ""),
-                })
-            else:
-                uncached_filings.append(f)
+            if f.get("accession"):
+                all_filings.append(f)
+
+    cache_map = {}
+    if not refresh:
+        cache_map = db.get_cached_filings([f["accession"] for f in all_filings])
+
+    for f in all_filings:
+        acc = f.get("accession")
+        if not acc:
+            continue
+        cached = cache_map.get(acc) if not refresh else None
+        if cached:
+            result.append({
+                "ticker": f.get("ticker", ""),
+                "form_type": f.get("form_type", ""),
+                "filing_date": f.get("filing_date", ""),
+                "description": f.get("description", ""),
+                "accession": acc,
+                "signal": cached.get("ai_signal", "NEUTRAL"),
+                "summary": cached.get("ai_summary", ""),
+                "key_points": cached.get("ai_key_points", []),
+                "event_type": cached.get("ai_event_type", ""),
+                "ai_powered": bool(cached.get("ai_powered")),
+                "filing_url": f.get("document_url", ""),
+            })
+        else:
+            uncached_filings.append(f)
 
     # ── Pass 2: handle uncached filings ──
     if uncached_filings:
@@ -1784,8 +1806,15 @@ def intel_institutional():
     holdings = db.get_portfolio()
     portfolio_symbols = set(h["symbol"].upper() for h in holdings)
 
+    # Cold-cache EDGAR fetches for each tracked fund used to run serially on
+    # the request thread (N funds = N back-to-back roundtrips). Parallelize:
+    # each fund's cache-check + maybe-fetch + overlap-compute is independent,
+    # and db.cache_institutional serializes its own write under _write_lock.
+    # sec_edgar bounds its own concurrency, so 6 workers stay within budget.
     result = {}
-    for fund_name, fund_cik in edgar.TRACKED_FUNDS.items():
+
+    def _process_fund(item):
+        fund_name, fund_cik = item
         try:
             # Check cache
             cached = db.get_cached_institutional(fund_cik)
@@ -1813,22 +1842,30 @@ def intel_institutional():
                             overlap.append({**h, "portfolio_symbol": sym})
                             break
 
-                result[fund_name] = {
+                return (fund_name, {
                     "filing_date": fund_data.get("filing_date", ""),
                     "period_of_report": fund_data.get("period_of_report", fund_data.get("period", "")),
                     "total_value": fund_data.get("total_value", 0),
                     "holdings": fund_data.get("holdings", [])[:50],
                     "overlap_with_portfolio": overlap,
                     "num_holdings": len(fund_data.get("holdings", [])),
-                }
-            else:
-                result[fund_name] = {
-                    "error": fund_data.get("error", "Unknown error") if fund_data else "No data",
-                    "holdings": [],
-                    "overlap_with_portfolio": [],
-                }
+                })
+            return (fund_name, {
+                "error": fund_data.get("error", "Unknown error") if fund_data else "No data",
+                "holdings": [],
+                "overlap_with_portfolio": [],
+            })
         except Exception as e:
-            result[fund_name] = {"error": str(e), "holdings": [], "overlap_with_portfolio": []}
+            return (fund_name, {"error": str(e), "holdings": [], "overlap_with_portfolio": []})
+
+    entries = safe_executor.parallel_map(
+        _process_fund, list(edgar.TRACKED_FUNDS.items()),
+        max_workers=6, thread_name_prefix="intel-inst",
+    )
+    for entry in entries:
+        if entry:  # parallel_map fills None for a worker that raised
+            fund_name, fund_entry = entry
+            result[fund_name] = fund_entry
 
     return jsonify(result)
 
@@ -2848,7 +2885,15 @@ def ideas_random():
     asset_class = (request.args.get("asset_class") or "").strip().lower() or None
     sector = (request.args.get("sector") or "").strip() or None
     strategy = (request.args.get("strategy") or "").strip().lower() or None
-    min_score = _safe_int(request.args.get("min_score"), None)
+    # min_score may be fractional (e.g. 7.5); _safe_int would drop it to None
+    # and silently disable the filter. Parse as float and clamp to 0-100.
+    min_score = None
+    _ms_raw = request.args.get("min_score")
+    if _ms_raw is not None and str(_ms_raw).strip() != "":
+        try:
+            min_score = min(max(float(_ms_raw), 0.0), 100.0)
+        except (TypeError, ValueError):
+            min_score = None
     discovery_mode = (request.args.get("discovery_mode") or "curated").strip().lower()
     exclude_raw = (request.args.get("exclude") or "").strip()
     exclude = [s.strip().upper() for s in exclude_raw.split(",") if s.strip()] if exclude_raw else None

@@ -87,40 +87,47 @@ def fetch_series(series_id: str, observations: int = 60) -> dict:
         # Allow arbitrary series IDs but log it — FRED has ~800k of them.
         log.info("fetching uncurated FRED series: %s", series_id)
 
-    cache_key = ("fred", series_id, observations)
-    cached = _cache_get(cache_key)
-    if cached is not None:
-        return cached
-
-    try:
-        resp = requests.get(
-            FRED_CSV_URL, params={"id": series_id}, headers=HEADERS, timeout=15,
-        )
-        resp.raise_for_status()
-    except Exception as e:
-        log.warning("FRED fetch failed for %s: %s", series_id, e)
-        return {"series_id": series_id, "points": [], "error": str(e)}
-
-    points: list[dict] = []
-    reader = csv.reader(io.StringIO(resp.text))
-    header = next(reader, None)
-    if not header or len(header) < 2:
-        return {"series_id": series_id, "points": [], "error": "empty CSV"}
-
-    for row in reader:
-        if len(row) < 2:
-            continue
-        date_str, val_str = row[0], row[1]
-        # FRED uses '.' for missing observations
-        if val_str in (".", "", "NA"):
-            continue
+    # FRED always serves the FULL series CSV regardless of `observations` (the
+    # request ignores it), so key the cache on series_id ONLY and cache the
+    # full parsed series. Each caller then slices [-observations:] off the
+    # cached full series — otherwise every distinct `observations` value was a
+    # cache miss that re-downloaded the same full CSV.
+    cache_key = ("fred", series_id)
+    full = _cache_get(cache_key)
+    if full is None:
         try:
-            points.append({"date": date_str, "value": float(val_str)})
-        except ValueError:
-            continue
+            resp = requests.get(
+                FRED_CSV_URL, params={"id": series_id}, headers=HEADERS, timeout=15,
+            )
+            resp.raise_for_status()
+        except Exception as e:
+            log.warning("FRED fetch failed for %s: %s", series_id, e)
+            return {"series_id": series_id, "points": [], "error": str(e)}
 
-    # Keep the most-recent `observations` points (FRED returns oldest-first)
-    points = points[-observations:]
+        all_points: list[dict] = []
+        reader = csv.reader(io.StringIO(resp.text))
+        header = next(reader, None)
+        if not header or len(header) < 2:
+            return {"series_id": series_id, "points": [], "error": "empty CSV"}
+
+        for row in reader:
+            if len(row) < 2:
+                continue
+            date_str, val_str = row[0], row[1]
+            # FRED uses '.' for missing observations
+            if val_str in (".", "", "NA"):
+                continue
+            try:
+                all_points.append({"date": date_str, "value": float(val_str)})
+            except ValueError:
+                continue
+
+        full = all_points
+        _cache_set(cache_key, full, DEFAULT_TTL)
+
+    # Slice the most-recent `observations` points per caller (FRED returns
+    # oldest-first). Slicing a cached full series — no extra download.
+    points = full[-observations:] if observations and observations > 0 else list(full)
     meta = _series_meta(series_id)
     out = {
         "series_id": series_id,
@@ -132,7 +139,6 @@ def fetch_series(series_id: str, observations: int = 60) -> dict:
         "latest_date": points[-1]["date"] if points else None,
         "latest_value": points[-1]["value"] if points else None,
     }
-    _cache_set(cache_key, out, DEFAULT_TTL)
     return out
 
 

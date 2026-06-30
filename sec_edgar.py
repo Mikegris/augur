@@ -61,7 +61,12 @@ TRACKED_FUNDS = {
 # permanently mark a ticker as un-resolvable, but long enough to absorb
 # repeated lookups during a single page load without re-hammering SEC.
 _CIK_CACHE = {}
-_CIK_NEGATIVE_TTL = 300.0  # 5 minutes
+_CIK_NEGATIVE_TTL = 300.0  # 5 minutes — only for a GENUINE no-match
+# Transient request errors (429/timeout) must NOT poison a valid ticker for
+# the full negative TTL. Cache those for only a few seconds — long enough to
+# absorb a burst of concurrent lookups during one page load, short enough that
+# the ticker resolves as soon as SEC recovers.
+_CIK_ERROR_TTL = 15.0
 _CIK_POSITIVE_TTL = 24 * 3600.0  # CIKs almost never change
 _SESSION = None
 
@@ -236,6 +241,12 @@ def get_cik(ticker):
             return value
         # expired — fall through and refetch
 
+    # Track whether either lookup actually COMPLETED a request (a genuine
+    # "ticker not in SEC's dataset" answer) vs. failed with a request error
+    # (429/timeout/network). Only a genuine no-match earns the long negative
+    # TTL; a transient error gets the short error TTL so the ticker isn't
+    # poisoned for 5 minutes by a momentary SEC blip.
+    request_error = False
     try:
         resp = _edgar_get("https://www.sec.gov/files/company_tickers.json")
         data = resp.json()
@@ -250,6 +261,7 @@ def get_cik(ticker):
                 _CIK_CACHE[ticker_upper] = (cik_padded, now + _CIK_POSITIVE_TTL)
                 return cik_padded
     except Exception as e:
+        request_error = True
         logger.warning("CIK bulk lookup failed for %s: %s", ticker, e)
 
     # Fallback: try submissions search
@@ -265,12 +277,17 @@ def get_cik(ticker):
                 _CIK_CACHE[ticker_upper] = (cik_padded, now + _CIK_POSITIVE_TTL)
                 return cik_padded
     except Exception as e:
+        request_error = True
         logger.warning("CIK fallback search failed for %s: %s", ticker, e)
 
-    # Both lookups failed — negative-cache for 5 minutes so concurrent and
-    # follow-up callers don't immediately re-hammer SEC. After the TTL we
-    # try again in case SEC has recovered.
-    _CIK_CACHE[ticker_upper] = (None, now + _CIK_NEGATIVE_TTL)
+    # No CIK found. Negative-cache, but with a TTL that depends on WHY:
+    #   - request_error  → transient SEC failure; short TTL so a recovered SEC
+    #                      is picked up almost immediately (don't poison a valid
+    #                      ticker on a 429/timeout).
+    #   - genuine no-match (both requests completed cleanly with no hit) →
+    #                      long TTL so multi-symbol scans don't re-hammer SEC.
+    ttl = _CIK_ERROR_TTL if request_error else _CIK_NEGATIVE_TTL
+    _CIK_CACHE[ticker_upper] = (None, now + ttl)
     return None
 
 
@@ -906,33 +923,47 @@ def get_institutional_holdings(fund_cik, fund_name):
                 h_shares = 0.0
 
             try:
-                # SEC 13F spec: value is in thousands of USD.
-                # However some filers (e.g. Berkshire's consolidated 13F) report in actual dollars.
-                # Heuristic: compute implied price per share both ways; the one that gives a
-                # plausible stock price ($0.50 – $100,000) is correct.
+                # SEC 13F spec (post-2023 amendments): the `value` field is in
+                # WHOLE DOLLARS as of the 2023-01-03 form revision; pre-2023
+                # filings reported in THOUSANDS. The old per-row "which scaling
+                # gives a plausible price" heuristic 1000x-misvalued any holding
+                # whose share price sat near a band edge (e.g. a $1.20 penny
+                # stock or a $40k Berkshire-A share), because BOTH scalings can
+                # look "plausible" or NEITHER does.
+                #
+                # Trust the spec: apply the ×1000 (thousands→dollars)
+                # convention, then SANITY-CHECK via the implied price-per-share
+                # using the reported share count. If the implied price is wildly
+                # implausible, LOG the anomaly (don't silently guess) and fall
+                # back to the unscaled value only when that yields a saner price.
                 raw_val = float(str(value_text).replace(",", ""))
+                value_usd = raw_val * 1000  # spec default: thousands → dollars
                 if h_shares > 0 and raw_val > 0:
-                    price_if_dollars = raw_val / h_shares
                     price_if_thousands = (raw_val * 1000) / h_shares
-                    # A plausible stock price is between $0.50 and $100,000
-                    dollars_plausible = 0.50 <= price_if_dollars <= 100000
-                    thousands_plausible = 0.50 <= price_if_thousands <= 100000
-                    if dollars_plausible and not thousands_plausible:
+                    price_if_dollars = raw_val / h_shares
+                    # Plausible US equity price band.
+                    _LO, _HI = 0.50, 100000.0
+                    thousands_ok = _LO <= price_if_thousands <= _HI
+                    dollars_ok = _LO <= price_if_dollars <= _HI
+                    if not thousands_ok and dollars_ok:
+                        # Spec scaling is implausible but the as-filed dollars
+                        # are sane → almost certainly a whole-dollar (post-2023)
+                        # filing. Use it, but record the anomaly.
+                        logger.info(
+                            "13F value-unit anomaly for %s (%s): thousands→$%.2f/sh "
+                            "implausible, using whole-dollar→$%.2f/sh",
+                            fund_name, h_name, price_if_thousands, price_if_dollars,
+                        )
                         value_usd = raw_val
-                    elif thousands_plausible and not dollars_plausible:
-                        value_usd = raw_val * 1000
-                    elif dollars_plausible and thousands_plausible:
-                        # Both plausible — use context: if price_if_dollars < 100K prefer dollars
-                        # (most US stocks trade under $1000, very few over $10K)
-                        # Use thousands only if price_if_dollars is implausibly high (>$10K)
-                        if price_if_dollars > 10000:
-                            value_usd = raw_val * 1000
-                        else:
-                            value_usd = raw_val
-                    else:
-                        value_usd = raw_val * 1000
-                else:
-                    value_usd = raw_val * 1000
+                    elif not thousands_ok and not dollars_ok:
+                        # Neither scaling is plausible — keep the spec default
+                        # but log so the anomaly is visible rather than guessed.
+                        logger.warning(
+                            "13F value-unit anomaly for %s (%s): neither scaling "
+                            "yields a plausible price (shares=%.0f, raw_val=%.0f); "
+                            "keeping spec ×1000",
+                            fund_name, h_name, h_shares, raw_val,
+                        )
             except (ValueError, AttributeError):
                 value_usd = 0.0
 

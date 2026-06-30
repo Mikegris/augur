@@ -83,6 +83,43 @@ def _correlation(a: List[float], b: List[float]) -> Optional[float]:
         return None
 
 
+import time as _time
+import threading as _threading
+
+_CYCLE_TTL_S = 90.0
+_returns_lock = _threading.Lock()
+_returns_memo: Dict[str, Any] = {}   # (symbol|period) -> (expires_at, returns)
+
+
+def reset_cycle_cache() -> None:
+    """Drop the per-cycle returns memo. Optional (the memo self-expires on a
+    short TTL); call at a cycle boundary or in tests that re-patch _closes."""
+    with _returns_lock:
+        _returns_memo.clear()
+
+
+def _cycle_returns(symbol: str, period: str = "6mo") -> List[float]:
+    """Per-symbol daily returns over `period`, memoized per cycle (short TTL) so
+    correlation_capped_weights doesn't refetch the same 6mo series on every call.
+    Uses the LOCAL _closes/_returns wrappers (so module-level monkeypatching is
+    honored) rather than aj_alpha's cached fn, which reads aj_alpha._closes — a
+    DIFFERENT patch point. Fail-open: any error falls through to a fresh compute."""
+    try:
+        key = "{}|{}".format(str(symbol).upper(), period)
+        now = _time.time()
+        with _returns_lock:
+            hit = _returns_memo.get(key)
+            if hit and hit[0] > now:
+                return hit[1]
+        rets = _returns(_closes(symbol, period))
+        if rets:
+            with _returns_lock:
+                _returns_memo[key] = (now + _CYCLE_TTL_S, rets)
+        return rets
+    except Exception:
+        return _returns(_closes(symbol, period))
+
+
 def _account_equity() -> float:
     try:
         import aj_alpha
@@ -340,7 +377,10 @@ def correlation_capped_weights(weights: Dict[str, float],
         floor = _clamp(float(cfg.get("correlation_cap_floor", 0.5) or 0.5), 0.05, 1.0)
 
         syms = list(w.keys())
-        rets = {s: _returns(_closes(s, "6mo")) for s in syms}
+        # Reuse aj_alpha's per-cycle returns memo so each name's 6mo series is
+        # fetched once per cycle and shared with the aj_alpha correlation gates,
+        # rather than refetched on every correlation_capped_weights call.
+        rets = {s: _cycle_returns(s, "6mo") for s in syms}
 
         factors: Dict[str, float] = {}
         for s in syms:

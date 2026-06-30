@@ -61,6 +61,33 @@ def _norm_pdf(x):
     return math.exp(-0.5 * x * x) / math.sqrt(2.0 * math.pi)
 
 
+def _bs_gamma_vec(spot, strikes, tte, ivs, risk_free, div_yield):
+    """Vectorized Black-Scholes(-Merton) gamma for an array of strikes/IVs.
+
+    Returns a numpy array of gammas (0.0 where inputs are invalid). Mirrors the
+    scalar `_black_scholes_greeks` gamma exactly:
+        gamma = e^{-q*T} * φ(d1) / (S * iv * sqrt(T))
+        d1 = (ln(S/K) + (r - q + 0.5*iv^2)*T) / (iv*sqrt(T))
+    """
+    import numpy as np
+    strikes = np.asarray(strikes, dtype=float)
+    ivs = np.asarray(ivs, dtype=float)
+    gamma = np.zeros_like(strikes, dtype=float)
+    if tte <= 0 or spot <= 0:
+        return gamma
+    valid = (strikes > 0) & (ivs > 0)
+    if not valid.any():
+        return gamma
+    k = strikes[valid]
+    iv = ivs[valid]
+    sqrt_t = math.sqrt(tte)
+    d1 = (np.log(spot / k) + (risk_free - div_yield + 0.5 * iv * iv) * tte) / (iv * sqrt_t)
+    disc_q = math.exp(-div_yield * tte)
+    pdf = np.exp(-0.5 * d1 * d1) / math.sqrt(2.0 * math.pi)
+    gamma[valid] = disc_q * pdf / (spot * iv * sqrt_t)
+    return gamma
+
+
 def _black_scholes_greeks(spot, strike, tte, iv, is_call=True, risk_free=0.05, div_yield=0.0):
     # type: (float, float, float, float, bool, float, float) -> dict
     """
@@ -111,16 +138,27 @@ def _black_scholes_greeks(spot, strike, tte, iv, is_call=True, risk_free=0.05, d
 _RISK_FREE_FALLBACK = 0.05
 _risk_free_cache = {"rate": None, "ts": 0.0}
 _RISK_FREE_TTL = 6 * 3600  # 6 hours — the policy rate barely moves intraday
+# When ^IRX can't be fetched (e.g. a Yahoo 429), we serve the 0.05 fallback —
+# but pinning it for the full 6h means a transient blip suppresses the REAL
+# rate for the rest of the window. Cache the fallback for only a few minutes
+# so a recovered ^IRX is picked up promptly.
+_RISK_FREE_FALLBACK_TTL = 300  # 5 minutes
 
 
 def _get_risk_free_rate():
     # type: () -> float
-    """Annualized risk-free rate from ^IRX, cached; falls back to 0.05."""
+    """Annualized risk-free rate from ^IRX, cached; falls back to 0.05.
+
+    A real ^IRX read is cached for 6h; the fallback is cached for only a few
+    minutes so a transient fetch failure doesn't lock in 5% for hours.
+    """
     now = time.time()
     cached = _risk_free_cache.get("rate")
-    if cached is not None and (now - _risk_free_cache.get("ts", 0.0)) < _RISK_FREE_TTL:
+    ttl = _risk_free_cache.get("ttl", _RISK_FREE_TTL)
+    if cached is not None and (now - _risk_free_cache.get("ts", 0.0)) < ttl:
         return cached
     rate = _RISK_FREE_FALLBACK
+    got_real = False
     try:
         irx = yf.Ticker("^IRX")
         last = None
@@ -138,10 +176,13 @@ def _get_risk_free_rate():
             # Sanity-bound to a plausible 0-25% band; ignore garbage.
             if 0.0 <= val <= 0.25:
                 rate = val
+                got_real = True
     except Exception as e:
         logger.debug("gex risk-free: ^IRX fetch failed, using fallback: %s", e)
     _risk_free_cache["rate"] = rate
     _risk_free_cache["ts"] = now
+    # Long TTL only when we got a genuine reading; short TTL for the fallback.
+    _risk_free_cache["ttl"] = _RISK_FREE_TTL if got_real else _RISK_FREE_FALLBACK_TTL
     return rate
 
 
@@ -154,10 +195,49 @@ def _get_dividend_yield(ticker):
         if dy is None:
             return 0.0
         dy = float(dy)
-        # yfinance has historically returned this both as a fraction (0.012) and
-        # as a percent (1.2). Normalize: anything > 1 is treated as a percent.
-        if dy > 1.0:
-            dy = dy / 100.0
+        if dy <= 0:
+            return 0.0
+
+        # yfinance returns `dividendYield` inconsistently — sometimes a fraction
+        # (0.0044 == 0.44%), sometimes a percent (0.44 == 0.44% but indistinct
+        # from a 44% fraction). The old "anything > 1 is a percent" rule
+        # mis-read a legit 0.44 (=0.44% as percent) as a 44% fraction. Instead
+        # of guessing from the magnitude, VALIDATE against an independent yield
+        # estimate: trailingAnnualDividendYield (already a fraction) or
+        # trailingAnnualDividendRate / price. Pick whichever interpretation of
+        # `dy` (as-fraction vs as-percent) is closest to that reference.
+        ref = None
+        tady = info.get("trailingAnnualDividendYield")
+        if tady is not None:
+            try:
+                tady = float(tady)
+                if tady > 0:
+                    ref = tady
+            except (TypeError, ValueError):
+                ref = None
+        if ref is None:
+            rate = info.get("trailingAnnualDividendRate") or info.get("dividendRate")
+            price = (info.get("regularMarketPrice") or info.get("currentPrice")
+                     or info.get("previousClose"))
+            try:
+                if rate and price and float(price) > 0:
+                    ref = float(rate) / float(price)
+            except (TypeError, ValueError):
+                ref = None
+
+        as_fraction = dy            # interpret dy directly as a fraction
+        as_percent = dy / 100.0     # interpret dy as a percent number
+        if ref is not None and ref > 0:
+            # Choose the interpretation closest (in log space) to the reference.
+            cand = min(
+                (as_fraction, as_percent),
+                key=lambda x: abs(math.log((x or 1e-9) / ref)),
+            )
+            dy = cand
+        else:
+            # No reference available — fall back to the magnitude heuristic.
+            dy = as_percent if dy > 1.0 else as_fraction
+
         # Bound to a sane 0-20% band; ignore garbage.
         if 0.0 <= dy <= 0.20:
             return dy
@@ -264,8 +344,12 @@ def _tte_from_expiry(expiry_str):
                 exp_dt = naive_1600.replace(tzinfo=_NY_TZ)
             now = datetime.now(timezone.utc)
         else:
-            # Fallback if no tz library available: treat expiry as 16:00 UTC
-            exp_dt = exp_date.replace(hour=16, minute=0, second=0, tzinfo=timezone.utc)
+            # Fallback if no tz library available: options expire at 16:00
+            # America/New_York, which is ~20:00 UTC (EST) / ~21:00 UTC (EDT) —
+            # NOT 16:00 UTC. Anchoring at 16:00 UTC under-counts ~4h of every
+            # 0/1DTE's remaining time. Use 20:00 UTC as a close approximation of
+            # NY close (within an hour year-round).
+            exp_dt = exp_date.replace(hour=20, minute=0, second=0, tzinfo=timezone.utc)
             now = datetime.now(timezone.utc)
         diff = (exp_dt - now).total_seconds()
         if diff <= 0:
@@ -385,76 +469,95 @@ def compute_gex(symbol):
 
         expirations_scanned += 1
 
+        import numpy as np
+
         for side, df, is_call in [("call", chain.calls, True), ("put", chain.puts, False)]:
             if df is None or df.empty:
                 continue
 
-            for _, row in df.iterrows():
+            # Vectorize the OI / IV / strike extraction + BS gamma. The old
+            # df.iterrows() + per-row _black_scholes_greeks() walked every
+            # contract in Python; coercing the three columns to numpy arrays and
+            # computing gamma in one shot is materially faster on dense chains
+            # (SPX/SPY can have 1000s of strikes across 4 expiries) while
+            # producing identical numbers.
+            try:
+                strikes = np.asarray(df.get("strike"), dtype=float)
+                ois = np.asarray(df.get("openInterest"), dtype=float)
+                ivs = np.asarray(df.get("impliedVolatility"), dtype=float)
+            except (TypeError, ValueError):
+                continue
+
+            # Treat NaNs/missing as 0 (mirrors the `or 0` scalar fallbacks).
+            strikes = np.nan_to_num(strikes, nan=0.0)
+            ois = np.nan_to_num(ois, nan=0.0)
+            ivs = np.nan_to_num(ivs, nan=0.0)
+            ois = ois.astype(np.int64)  # int() truncation, as before
+
+            # Filter: oi >= 10 and strike > 0 (same as the scalar guard).
+            keep = (ois >= 10) & (strikes > 0)
+            if not keep.any():
+                continue
+
+            k_arr = strikes[keep]
+            oi_arr = ois[keep]
+            iv_arr = ivs[keep]
+
+            # BS gamma for the whole side at once.
+            gamma_arr = _bs_gamma_vec(spot, k_arr, tte, iv_arr, risk_free, div_yield)
+
+            # Honor a precomputed `gamma` column when present and > 0 (overrides
+            # the BS value per-row, exactly as the scalar path did).
+            if "gamma" in df.columns:
                 try:
-                    strike = float(row.get("strike", 0))
-                    oi = int(row.get("openInterest", 0) or 0)
-                    iv = float(row.get("impliedVolatility", 0) or 0)
+                    g_col = np.asarray(df["gamma"], dtype=float)
+                    g_col = np.nan_to_num(g_col[keep], nan=0.0)
+                    use_col = g_col > 0
+                    gamma_arr = np.where(use_col, g_col, gamma_arr)
                 except (TypeError, ValueError):
-                    continue
+                    pass
 
-                if oi < 10 or strike <= 0:
-                    continue
+            # Drop non-positive gammas.
+            pos = gamma_arr > 0
+            if not pos.any():
+                continue
+            k_arr = k_arr[pos]
+            oi_arr = oi_arr[pos]
+            gamma_arr = gamma_arr[pos]
 
-                # Try to use gamma from the DataFrame; fall back to BS
-                gamma_val = None
-                if "gamma" in row.index:
-                    try:
-                        g = float(row["gamma"])
-                        if g > 0:
-                            gamma_val = g
-                    except (TypeError, ValueError):
-                        pass
+            # GEX = OI * gamma * 100 * spot^2 * 0.01
+            gex_arr = oi_arr * gamma_arr * 100.0 * spot * spot * 0.01
 
-                if gamma_val is None:
-                    if iv <= 0:
-                        continue
-                    greeks = _black_scholes_greeks(
-                        spot, strike, tte, iv, is_call=is_call,
-                        risk_free=risk_free, div_yield=div_yield,
-                    )
-                    gamma_val = greeks["gamma"]
+            # Calls -> positive gamma (dealer short calls = long gamma)
+            # Puts  -> negative gamma (dealer short puts  = short gamma)
+            #
+            # NOTE: this call-long / put-short dealer sign is the
+            # INDUSTRY-STANDARD NAIVE PROXY — it assumes dealers are net
+            # short every call and net short every put. It is an assumption,
+            # NOT measured order flow (we have no per-trade buy/sell tape),
+            # so the directional sign of the resulting GEX can be wrong for
+            # any name where customer positioning differs from that default.
+            if not is_call:
+                gex_arr = -gex_arr
 
-                if gamma_val <= 0:
-                    continue
-
-                # GEX = OI * gamma * 100 * spot^2 * 0.01
-                gex_value = oi * gamma_val * 100.0 * spot * spot * 0.01
-
-                # Calls -> positive gamma (dealer short calls = long gamma)
-                # Puts  -> negative gamma (dealer short puts  = short gamma)
-                #
-                # NOTE: this call-long / put-short dealer sign is the
-                # INDUSTRY-STANDARD NAIVE PROXY — it assumes dealers are net
-                # short every call and net short every put. It is an assumption,
-                # NOT measured order flow (we have no per-trade buy/sell tape),
-                # so the directional sign of the resulting GEX can be wrong for
-                # any name where customer positioning differs from that default.
-                if is_call:
-                    signed_gex = gex_value
-                else:
-                    signed_gex = -gex_value
-
-                if strike not in strike_map:
-                    strike_map[strike] = {
+            for strike_f, oi_v, signed_gex in zip(
+                k_arr.tolist(), oi_arr.tolist(), gex_arr.tolist()
+            ):
+                if strike_f not in strike_map:
+                    strike_map[strike_f] = {
                         "call_gex": 0.0,
                         "put_gex": 0.0,
                         "call_oi": 0,
                         "put_oi": 0,
                     }
-
                 if is_call:
-                    strike_map[strike]["call_gex"] += signed_gex
-                    strike_map[strike]["call_oi"] += oi
-                    total_call_oi += oi
+                    strike_map[strike_f]["call_gex"] += signed_gex
+                    strike_map[strike_f]["call_oi"] += oi_v
+                    total_call_oi += oi_v
                 else:
-                    strike_map[strike]["put_gex"] += signed_gex
-                    strike_map[strike]["put_oi"] += oi
-                    total_put_oi += oi
+                    strike_map[strike_f]["put_gex"] += signed_gex
+                    strike_map[strike_f]["put_oi"] += oi_v
+                    total_put_oi += oi_v
 
     if not strike_map:
         return {"error": "No valid options data after filtering for {}".format(symbol)}

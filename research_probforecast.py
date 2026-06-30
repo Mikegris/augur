@@ -301,19 +301,23 @@ def _block_bootstrap_paths(returns: np.ndarray, horizon_days: int,
     block_size = int(max(1, min(block_size, T)))
     n_blocks = int(math.ceil(horizon_days / block_size))
 
-    # Highest legal block-start index. Inclusive of the last full block.
-    max_start = T - block_size
-    if max_start < 0:
-        max_start = 0
-
-    # Sample (n_bootstrap, n_blocks) starting indices in one go.
-    starts = rng.integers(0, max_start + 1, size=(n_bootstrap, n_blocks))
+    # WHY (Q2): the prior "never wrap" rule capped block starts at T-block_size
+    # so the freshest `block_size-1` rows (the most recent week of returns)
+    # could only ever appear as a block TAIL, never as a block head — they were
+    # systematically under-sampled, biasing the simulated distribution toward
+    # staler data. A circular (stationary) block bootstrap draws the start
+    # uniformly over the FULL [0, T) range and wraps with modulo-T indexing, so
+    # every row — including the freshest — is equally likely at every block
+    # position. The single artificial Friday→Monday seam this introduces per
+    # wrapped block is negligible versus the recency bias it removes.
+    starts = rng.integers(0, T, size=(n_bootstrap, n_blocks))
 
     # Build a column-offset matrix so we can vectorise the gather:
-    # for each block we want rows [start, start+1, ..., start+block_size-1].
+    # for each block we want rows [start, start+1, ..., start+block_size-1],
+    # wrapped circularly with modulo T.
     offsets = np.arange(block_size, dtype=np.int64)
-    # Shape: (n_bootstrap, n_blocks, block_size). Broadcast-add.
-    idx = starts[:, :, None] + offsets[None, None, :]
+    # Shape: (n_bootstrap, n_blocks, block_size). Broadcast-add, then wrap.
+    idx = (starts[:, :, None] + offsets[None, None, :]) % T
     # Flatten the (n_blocks, block_size) inner dims, then truncate to
     # exactly horizon_days. This is the equivalent of stitching blocks
     # left-to-right and chopping the tail.

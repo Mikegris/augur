@@ -51,17 +51,19 @@ def test_composite_edge():
 # --- cross_sectional_rank ----------------------------------------------------
 def test_rank():
     print("cross_sectional_rank:")
+    # Signed ranking: most BULLISH first. A bearish (negative-edge) name sinks to
+    # the bottom even when its MAGNITUDE is the largest — this feeds a long flow.
     cands = [
         ("LOW", fc(edge=1.0)),
-        ("HIGH", fc(edge=-9.0)),   # strongest by magnitude despite being bearish
+        ("HIGH", fc(edge=-9.0)),   # strongest by magnitude but BEARISH -> last
         ("MID", fc(edge=4.0)),
     ]
     ranked = aj_select.cross_sectional_rank(cands, {})
     syms = [s for s, _ in ranked]
-    check(syms == ["HIGH", "MID", "LOW"], "orders by |edge| desc: " + str(syms))
+    check(syms == ["MID", "LOW", "HIGH"], "orders by SIGNED edge desc (bearish last): " + str(syms))
 
-    # NaN / None edges become 0.0 conviction and sink below real edges; the
-    # sort never crashes on them.
+    # NaN / None edges become 0.0 conviction (neutral) — they sit BELOW positive
+    # edges but ABOVE real negatives; the sort never crashes on them.
     cands2 = [
         ("NAN", fc(edge=float("nan"))),   # -> 0.0 conviction
         ("GOOD", fc(edge=5.0)),
@@ -70,8 +72,8 @@ def test_rank():
     ]
     ranked2 = aj_select.cross_sectional_rank(cands2, {})
     syms2 = [s for s, _ in ranked2]
-    check(syms2[0] == "GOOD" and syms2[1] == "MID", "strong names first: " + str(syms2))
-    check(set(syms2[2:]) == {"NAN", "NONE"}, "zero-conviction (NaN/None) names sink to bottom: " + str(syms2))
+    check(syms2[0] == "GOOD" and syms2[1] == "MID", "strong (bullish) names first: " + str(syms2))
+    check(set(syms2[2:]) == {"NAN", "NONE"}, "zero-conviction (NaN/None) names sink below real edges: " + str(syms2))
 
     # Malformed forecasts (non-dict / missing ensemble) score 0.0 and must sink
     # below real edges without crashing.
@@ -110,10 +112,15 @@ def test_select_top_n():
     top2 = aj_select.select_top_n(cands, {"cross_sectional_top_n": 5, "min_edge_pct_pts": 3.0})
     check([s for s, _ in top2] == ["A", "B", "C"], "floor drops sub-edge names: " + str([s for s, _ in top2]))
 
-    # floor applies to magnitude (bearish counts)
+    # long-only selection: a BEARISH name is never selected, no matter how large
+    # its magnitude. WEAK (bullish but sub-floor) is also dropped -> empty.
     cands3 = [("BEAR", fc(edge=-7.0)), ("WEAK", fc(edge=1.0))]
     top3 = aj_select.select_top_n(cands3, {"cross_sectional_top_n": 5, "min_edge_pct_pts": 4.0})
-    check([s for s, _ in top3] == ["BEAR"], "bearish magnitude clears floor: " + str([s for s, _ in top3]))
+    check([s for s, _ in top3] == [], "bearish name never selected for long flow: " + str([s for s, _ in top3]))
+    # a bullish name clearing the floor IS selected, bearish dropped
+    cands3b = [("BEAR", fc(edge=-7.0)), ("BULL", fc(edge=5.0))]
+    top3b = aj_select.select_top_n(cands3b, {"cross_sectional_top_n": 5, "min_edge_pct_pts": 4.0})
+    check([s for s, _ in top3b] == ["BULL"], "bullish clears floor, bearish dropped: " + str([s for s, _ in top3b]))
 
     # default top_n = 5
     top4 = aj_select.select_top_n(cands, {"min_edge_pct_pts": 0})

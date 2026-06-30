@@ -165,14 +165,15 @@ def cmd_fundamentals(args):
         print(_c("  No data available", RED))
         return
     rows = []
+    # The fetcher emits snake_case keys (not yfinance camelCase), so read those.
     key_metrics = [
-        ("trailingPE", "P/E (TTM)"), ("forwardPE", "P/E (Fwd)"), ("pegRatio", "PEG"),
-        ("priceToSalesTrailing12Months", "P/S"), ("priceToBook", "P/B"),
-        ("profitMargins", "Profit Margin"), ("revenueGrowth", "Revenue Growth"),
-        ("returnOnEquity", "ROE"), ("returnOnAssets", "ROA"),
-        ("debtToEquity", "Debt/Equity"), ("currentRatio", "Current Ratio"),
-        ("dividendYield", "Div Yield"), ("beta", "Beta"),
-        ("targetMeanPrice", "Analyst Target"), ("recommendationKey", "Recommendation"),
+        ("pe_ratio", "P/E (TTM)"), ("forward_pe", "P/E (Fwd)"), ("peg_ratio", "PEG"),
+        ("ps_ratio", "P/S"), ("pb_ratio", "P/B"),
+        ("profit_margin", "Profit Margin"), ("revenue_growth", "Revenue Growth"),
+        ("return_on_equity", "ROE"), ("return_on_assets", "ROA"),
+        ("debt_equity", "Debt/Equity"), ("current_ratio", "Current Ratio"),
+        ("dividend_yield", "Div Yield"), ("beta", "Beta"),
+        ("analyst_target", "Analyst Target"), ("recommendation", "Recommendation"),
     ]
     for key, label in key_metrics:
         val = data.get(key)
@@ -708,10 +709,12 @@ def cmd_dividends(args):
     for h in holdings:
         sym = h["symbol"]
         data = fetcher.get_dividend_data(sym)
-        if not data or not data.get("dividend_rate"):
+        # The fetcher emits div_rate / div_yield / ex_date (not dividend_rate).
+        if not data or not data.get("div_rate"):
             continue
-        rate = data.get("dividend_rate", 0)
-        yld = (data.get("dividend_yield") or 0) * 100
+        rate = data.get("div_rate", 0)
+        # div_yield is already expressed in percent units (e.g. 1.8 == 1.8%).
+        yld = data.get("div_yield") or 0
         annual = rate * h["shares"]
         total_annual += annual
         ex_date = data.get("ex_date", "N/A")
@@ -1367,7 +1370,7 @@ def cmd_scanner(args):
         print(_c("  Scanning universe — this may take 30-60 seconds...", DIM))
         results = scanner.scan_opportunities(profile, force_refresh=args.force)
         opps = results.get("opportunities", [])
-        meta = results.get("meta", {})
+        meta = results.get("scan_meta", {})
         print(f"  Universe: {meta.get('universe_size', '?')} symbols | Strategy: {_c(meta.get('strategy', '?').upper(), GREEN)}")
         print(f"  Found: {_c(str(len(opps)), GREEN)} opportunities\n")
         if not opps:
@@ -1375,7 +1378,9 @@ def cmd_scanner(args):
             return
         rows = []
         for i, o in enumerate(opps):
-            tags = ", ".join(o.get("tags", []))
+            # Scorer emits a single `badge` string ("TOP PICK"/"EARLY SIGNAL"),
+            # not a `tags` list.
+            tags = o.get("badge", "") or ""
             tag_color = GREEN if "TOP PICK" in tags else (YELLOW if "EARLY SIGNAL" in tags else DIM)
             comp = o.get("composite", 0)
             comp_color = GREEN if comp >= 70 else (YELLOW if comp >= 50 else DIM)
@@ -1389,9 +1394,9 @@ def cmd_scanner(args):
             ))
         table(rows, ["#", "Symbol", "Type", "Price", "Score", "Tags"], [4, 10, 8, 12, 8, 24])
 
-        # Show top catalysts
+        # Show top catalysts (scorer emits these as `early_signals`).
         for o in opps[:5]:
-            catalysts = o.get("catalysts", [])
+            catalysts = o.get("early_signals", [])
             if catalysts:
                 print(f"  {_c(o['symbol'], GREEN)}: {'; '.join(catalysts[:3])}")
 
@@ -2160,7 +2165,6 @@ def run_command(command_str):
     import io
     import contextlib
 
-    argv_backup = sys.argv
     buf = io.StringIO()
     try:
         parts = command_str.strip().split()
@@ -2171,7 +2175,11 @@ def run_command(command_str):
                 parser.print_help()
             return buf.getvalue(), 0
 
-        sys.argv = ["augur"] + parts
+        # Parse `parts` directly. Do NOT mutate the process-global sys.argv —
+        # this runs on the multi-threaded web terminal where a concurrent
+        # request would see/clobber a half-written sys.argv (argparse reads
+        # `parts` here, not sys.argv, so the assignment was both unnecessary
+        # and unsafe).
         parser = build_parser()
 
         with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
@@ -2236,8 +2244,6 @@ def run_command(command_str):
         return buf.getvalue(), 1
     except Exception as e:
         return buf.getvalue() + f"\033[31m  Error: {e}\033[0m\n", 1
-    finally:
-        sys.argv = argv_backup
 
 
 if __name__ == "__main__":

@@ -299,15 +299,27 @@ def adapter_ml_forecast(
     prob_threshold = float(params.get("prob_threshold", 0.55))
     horizon = int(params.get("horizon_days", 20))
 
-    # ml_forecast keeps its own thread-safe 1h TTL cache, so call it each time
-    # rather than holding a module-global that never expires and is shared
-    # (unlocked) across backtest runs / date windows for the same symbol.
-    try:
-        import ml_forecast
-        cached = ml_forecast.ml_forecast(symbol) or {}
-    except Exception as e:
-        log.warning("ml_forecast(%s) failed in adapter: %s", symbol, e)
-        cached = {}
+    # WHY (Q19): run_backtest invokes the signal once PER BAR, and the adapter
+    # already (by design — see docstring/leakage flag) reuses a single current
+    # forecast across every bar. Calling ml_forecast.ml_forecast(symbol) on
+    # every bar relied on its 1h TTL cache to dedupe; a cache miss/eviction
+    # mid-run (or a cold cache) would re-train the model dozens of times for one
+    # backtest. Memoize the forecast for the duration of THIS run inside the
+    # per-run sig_params dict (run_backtest builds a fresh params per call), so
+    # the model is computed at most once. This does not change the leakage
+    # status — the result is still a single forward-looking forecast reused
+    # across bars, and `validated` stays False for this adapter.
+    _memo_key = f"_ml_forecast_cache::{symbol}"
+    if _memo_key in params:
+        cached = params[_memo_key] or {}
+    else:
+        try:
+            import ml_forecast
+            cached = ml_forecast.ml_forecast(symbol) or {}
+        except Exception as e:
+            log.warning("ml_forecast(%s) failed in adapter: %s", symbol, e)
+            cached = {}
+        params[_memo_key] = cached
 
     rf = (cached or {}).get("rf_classifier") or {}
     prob_up = rf.get("prob_up_20d")

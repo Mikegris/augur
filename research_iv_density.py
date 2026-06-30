@@ -428,7 +428,8 @@ def _moments(grid: "np.ndarray", density: "np.ndarray") -> dict:
     p_sum = float(p.sum())
     if p_sum <= 1e-12:
         return {
-            "mean_implied": None,
+            "mean_implied_in_support": None,
+            "mean_implied": None,  # alias (Q9): kept for back-compat
             "std_implied": None,
             "skew_implied": None,
             "kurtosis_implied": None,
@@ -443,8 +444,16 @@ def _moments(grid: "np.ndarray", density: "np.ndarray") -> dict:
     else:
         skew = 0.0
         kurt = 0.0
+    # WHY (Q9): `mean` here is the expectation of K_T over the OBSERVED strike
+    # grid only — the RND is truncated at the lowest/highest listed strikes, so
+    # this is a conditional-on-support mean, NOT the true risk-neutral mean
+    # (which would equal the forward if the support were complete). Reporting it
+    # as `mean_implied` invited reading it as the RND mean / implied forward.
+    # Name it `mean_implied_in_support`; keep `mean_implied` as an alias so
+    # existing consumers and tests don't break.
     return {
-        "mean_implied": round(mean, 4),
+        "mean_implied_in_support": round(mean, 4),
+        "mean_implied": round(mean, 4),  # alias (Q9): truncated-support mean
         "std_implied": round(std, 4),
         "skew_implied": round(skew, 4),
         "kurtosis_implied": round(kurt, 4),

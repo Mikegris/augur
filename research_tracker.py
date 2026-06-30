@@ -197,42 +197,63 @@ def _parse_iso(s: str) -> Optional[datetime]:
         return None
 
 
+def _fetch_2y_bars(symbol: str) -> List[dict]:
+    """Fetch ~2y of daily bars for `symbol`. Returns [] on any failure.
+
+    2y covers any horizon we'd realistically score. Centralised so the scorer
+    can fetch each symbol's series exactly once per run (see Q5 in
+    score_due_forecasts) instead of re-pulling it for every price lookup.
+    """
+    try:
+        import fetcher  # type: ignore
+    except Exception:
+        return []
+    try:
+        return fetcher.get_chart_data(symbol, "2y", "1d") or []
+    except Exception:
+        return []
+
+
+def _close_on_or_before_from_bars(bars: List[dict],
+                                   target: datetime) -> Optional[float]:
+    """Latest daily close at-or-before `target` from a pre-fetched bar list.
+
+    WHY (Q18): the prior implementation relied on the bars already being in
+    ascending time order and `break`-ing on the first future bar. If the feed
+    ever returned bars out of order (or with a stray early future bar) the
+    early break would stop at the wrong row and return a too-old / wrong close.
+    Take the max-time bar with ts <= target without any order assumption.
+    """
+    if not bars:
+        return None
+    target_ts = int(target.timestamp())
+    best_ts: Optional[int] = None
+    best_close: Optional[float] = None
+    for bar in bars:
+        ts = bar.get("time")
+        if ts is None:
+            continue
+        ts = int(ts)
+        if ts > target_ts:
+            continue
+        if best_ts is None or ts > best_ts:
+            c = _safe_float(bar.get("close"))
+            if c is not None:
+                best_ts = ts
+                best_close = c
+    # best_close stays None when target pre-dates every available bar (e.g. a
+    # long-dormant backlog finally scored after the 2y window rolled past
+    # due_at). Returning the OLDEST close would fabricate a meaningless realized
+    # return, so return None and let the caller skip the row.
+    return best_close
+
+
 def _close_price_on_or_before(symbol: str, target: datetime) -> Optional[float]:
     """Fetch the latest daily close at-or-before `target` via fetcher.get_chart_data.
 
     Returns None if fetcher isn't importable or no data is available.
     """
-    try:
-        import fetcher  # type: ignore
-    except Exception:
-        return None
-    try:
-        # 2y covers any horizon we'd realistically score. Daily bars.
-        bars = fetcher.get_chart_data(symbol, "2y", "1d") or []
-    except Exception:
-        return None
-    if not bars:
-        return None
-    target_ts = int(target.timestamp())
-    last_close: Optional[float] = None
-    for bar in bars:
-        ts = bar.get("time")
-        if ts is None:
-            continue
-        if int(ts) <= target_ts:
-            c = _safe_float(bar.get("close"))
-            if c is not None:
-                last_close = c
-        else:
-            break
-    if last_close is not None:
-        return last_close
-    # Target pre-dates every available bar (e.g. a long-dormant backlog finally
-    # scored after the 2y chart window rolled past due_at). Returning the OLDEST
-    # bar's close here would fabricate a meaningless realized return, so return
-    # None instead and let the caller skip the row (errors += 1) rather than
-    # committing a bogus score.
-    return None
+    return _close_on_or_before_from_bars(_fetch_2y_bars(symbol), target)
 
 
 def _direction_matches(direction: Optional[str], realized_return: Optional[float]) -> Optional[int]:
@@ -264,6 +285,19 @@ def score_due_forecasts(max_rows: int = 200) -> Dict[str, int]:
     scored = 0
     errors = 0
     now = datetime.now(timezone.utc)
+
+    # WHY (Q5): each due row needs the close at issue time AND the close at the
+    # horizon end. The old code called _close_price_on_or_before twice per row,
+    # and each call re-fetched the SAME symbol's full 2y daily bars — so a
+    # backlog of N rows for one symbol pulled its 2y history 2N times. Fetch
+    # each symbol's series exactly once per run and index both prices from it.
+    _bars_cache: Dict[str, List[dict]] = {}
+
+    def _bars_for(symbol: str) -> List[dict]:
+        sym = (symbol or "").upper()
+        if sym not in _bars_cache:
+            _bars_cache[sym] = _fetch_2y_bars(sym)
+        return _bars_cache[sym]
 
     # Read candidates outside the write lock — readers don't block writers.
     conn = _get_conn()
@@ -302,11 +336,12 @@ def score_due_forecasts(max_rows: int = 200) -> Dict[str, int]:
             # horizon could still be due. Skip just this row and keep going.
             continue
 
+        bars = _bars_for(row["symbol"])
         issue_price = _safe_float(row["issue_price"])
         if issue_price is None:
             # Try to backfill from the chart at issue time.
-            issue_price = _close_price_on_or_before(row["symbol"], issued)
-        score_price = _close_price_on_or_before(row["symbol"], due_at)
+            issue_price = _close_on_or_before_from_bars(bars, issued)
+        score_price = _close_on_or_before_from_bars(bars, due_at)
 
         if not issue_price or not score_price:
             # Don't mark scored — try again next cycle.

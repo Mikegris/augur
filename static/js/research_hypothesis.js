@@ -17,9 +17,9 @@
 
   // ── Local fallbacks for the formatters (in case app.js isn't loaded yet)
   const _fmt = (typeof fmt !== 'undefined') ? fmt : {
-    pct: (v) => v == null ? '—' : (parseFloat(v).toFixed(2) + '%'),
+    pct: (v) => (v == null || isNaN(parseFloat(v))) ? '—' : (parseFloat(v).toFixed(2) + '%'),
     date: (s) => s ? new Date(s).toLocaleDateString() : '—',
-    num: (v, d) => v == null ? '—' : parseFloat(v).toFixed(d || 2),
+    num: (v, d) => (v == null || isNaN(parseFloat(v))) ? '—' : parseFloat(v).toFixed(d || 2),
   };
 
   const STATUS_COLORS = {
@@ -104,7 +104,7 @@
     const dir = pred.direction || '—';
     const mag = (pred.magnitude_pct != null) ? (pred.magnitude_pct + '%') : '—';
     const horizon = (pred.horizon_days != null) ? (pred.horizon_days + 'd') : '—';
-    const conf = (pred.confidence != null)
+    const conf = (pred.confidence != null && !isNaN(parseFloat(pred.confidence)))
       ? Math.round(parseFloat(pred.confidence) * 100) + '%'
       : '—';
     return (

@@ -121,8 +121,8 @@ STRATEGY_WEIGHTS = {
 
 # ── Scan Cache ───────────────────────────────────────────────────────────────
 
-_scan_cache = {}        # profile_hash -> results dict
-_scan_cache_time = {}   # profile_hash -> timestamp
+_scan_cache = {}        # profile_hash -> (results dict, timestamp) tuple
+_scan_cache_time = {}   # deprecated: timestamp now lives in the _scan_cache tuple
 _SCAN_CACHE_TTL = 1800  # 30 minutes
 
 
@@ -288,9 +288,16 @@ def _build_universe(profile):
 # SIGNAL SCORING
 # ══════════════════════════════════════════════════════════════════════════════
 
-def _score_equity(symbol, profile, weights):
-    # type: (str, dict, dict) -> Dict[str, Any]
-    """Score a stock/ETF opportunity using multiple signals."""
+def _score_equity(symbol, profile, weights, prefetch=None):
+    # type: (str, dict, dict, Optional[dict]) -> Dict[str, Any]
+    """Score a stock/ETF opportunity using multiple signals.
+
+    `prefetch` (optional, ADDED): a {"quotes": {symbol: quote_dict}} bundle
+    pre-fetched ONCE for the whole universe via get_quotes_batch, so the
+    per-symbol price/name don't require an extra round trip when smart_money
+    couldn't supply them. Passing None preserves the original behavior.
+    """
+    prefetch = prefetch or {}
     result = {
         "symbol": symbol,
         "scores": {},
@@ -530,9 +537,13 @@ def _score_equity(symbol, profile, weights):
     result["scores"]["dividend"] = div_score
 
     # ── Compute weighted composite ──────────────────────────────────────────
+    # A dimension never written to scores is "no information" → neutral 50,
+    # NOT 0 (max-bearish), which would systematically penalize symbols whose
+    # signal set was partial. Dividend keeps an explicit 0 default (0% yield
+    # is real data, set above), so it's already present in scores.
     composite = 0.0
     for dim, weight in weights.items():
-        raw = result["scores"].get(dim, 0)
+        raw = result["scores"].get(dim, 50)
         composite += (raw / 100.0) * weight
     result["composite"] = round(composite, 1)
 
@@ -563,9 +574,15 @@ def _score_equity(symbol, profile, weights):
         if fund_score > 60:
             result["composite"] = min(100, result["composite"] + 3)
 
-    # Pull name/price from smart money data
-    result["name"] = sm_data.get("name", symbol)
-    result["price"] = sm_data.get("price")
+    # Pull name/price from smart money data, falling back to the pre-fetched
+    # universe quote batch when smart_money didn't carry them (avoids a
+    # redundant per-symbol quote round trip).
+    _pf_quote = (prefetch.get("quotes") or {}).get(symbol) or {}
+    result["name"] = sm_data.get("name") or _pf_quote.get("name") or symbol
+    _price = sm_data.get("price")
+    if _price is None:
+        _price = _pf_quote.get("price")
+    result["price"] = _price
     result["signal"] = _composite_to_signal(result["composite"])
 
     return result
@@ -726,12 +743,12 @@ def scan_opportunities(profile=None, force_refresh=False):
     # Check cache
     phash = _profile_hash(profile)
     if not force_refresh and phash in _scan_cache:
-        cached_at = _scan_cache_time.get(phash, 0)
+        cached_result, cached_at = _scan_cache[phash]
         if (time.time() - cached_at) < _SCAN_CACHE_TTL:
             # Shallow-copy before annotating so we never mutate the stored
             # cache object (which would permanently flip its cached flag and
             # alias the same dict to every caller).
-            result = dict(_scan_cache[phash])
+            result = dict(cached_result)
             result["scan_meta"] = dict(result["scan_meta"])
             result["scan_meta"]["cached"] = True
             return result
@@ -750,10 +767,22 @@ def scan_opportunities(profile=None, force_refresh=False):
 
     opportunities = []
 
+    # Pre-fetch live quotes for the whole equity universe in ONE batch call,
+    # so each scorer can read price/name from this map instead of issuing its
+    # own per-symbol quote round trip. Best-effort: an empty/failed batch just
+    # falls back to the scorer's existing smart_money-derived price.
+    prefetch = {"quotes": {}}
+    _eq_syms = [c["symbol"] for c in equity_candidates]
+    if _eq_syms:
+        try:
+            prefetch["quotes"] = fetcher.get_quotes_batch(_eq_syms) or {}
+        except Exception as e:
+            logger.debug("scan prefetch quotes failed: %s", e)
+
     # Score equities in parallel
     def _score_eq(candidate):
         try:
-            result = _score_equity(candidate["symbol"], profile, weights)
+            result = _score_equity(candidate["symbol"], profile, weights, prefetch=prefetch)
             result["asset_class"] = candidate["asset_class"]
             result["source"] = candidate["source"]
             return result
@@ -816,9 +845,10 @@ def scan_opportunities(profile=None, force_refresh=False):
         },
     }
 
-    # Cache
-    _scan_cache[phash] = result
-    _scan_cache_time[phash] = time.time()
+    # Cache — store (result, timestamp) as a SINGLE tuple assignment so a
+    # concurrent reader never sees a fresh result paired with a stale/missing
+    # timestamp (the previous two-dict write was non-atomic).
+    _scan_cache[phash] = (result, time.time())
 
     # Persist top results to scanner_history so we can chart scores over time.
     try:
@@ -837,9 +867,9 @@ def get_cached_scan():
     profile = get_scanner_profile()
     phash = _profile_hash(profile)
     if phash in _scan_cache:
-        cached_at = _scan_cache_time.get(phash, 0)
+        cached_result, cached_at = _scan_cache[phash]
         if (time.time() - cached_at) < _SCAN_CACHE_TTL:
-            result = dict(_scan_cache[phash])
+            result = dict(cached_result)
             result["scan_meta"] = dict(result["scan_meta"])
             result["scan_meta"]["cached"] = True
             return result

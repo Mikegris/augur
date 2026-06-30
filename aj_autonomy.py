@@ -30,6 +30,11 @@ _REFLECTION_KEY = "__aj_reflection"        # + _YYYY-MM-DD
 _BRIEFING_KEY = "__aj_briefing"
 _ESCALATION_KEY = "__aj_preset_level"
 
+# health_check audit-chain cadence: full re-scan every Nth check (catches a
+# tampered prefix the quick tail-verify would miss), quick in between.
+_FULL_CHAIN_EVERY = 20
+_health_chain_counter = 0
+
 
 # ════════════════════════════════════════════════════════════════════════════
 #  21 — CONTINUOUS AUTO-RUN SCHEDULER
@@ -98,6 +103,38 @@ def due_to_run(cfg: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     return {"due": True, "reason": "due", "minutes_since": mins, "session": session, "aligned": False}
 
 
+def _claim_run_slot(prev_raw: Optional[str], stamp: str) -> bool:
+    """Atomically claim the auto-run slot by CAS-advancing _LAST_RUN_KEY from the
+    exact value `due_to_run` observed (`prev_raw`) to `stamp`. Returns True iff
+    THIS caller won the claim. Closes the due-check->stamp race: two ticks that
+    both saw 'due' off the same prev value can't both run — only the one that
+    flips the stamp proceeds; the loser is told it's no longer due."""
+    import database as _db
+    try:
+        with _db._write_lock:
+            conn = _db.get_conn()
+            if prev_raw is None:
+                cur = conn.execute(
+                    "INSERT OR IGNORE INTO settings (key, value) VALUES (?,?)",
+                    (_LAST_RUN_KEY, stamp))
+                won = cur.rowcount == 1
+            else:
+                cur = conn.execute(
+                    "UPDATE settings SET value=? WHERE key=? AND value=?",
+                    (stamp, _LAST_RUN_KEY, prev_raw))
+                won = cur.rowcount == 1
+            conn.commit()
+        if won:
+            try:
+                _db._invalidate_settings_cache()
+            except Exception:
+                pass
+        return won
+    except Exception:
+        log.debug("_claim_run_slot failed", exc_info=True)
+        return False
+
+
 def run_scheduled(cfg: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """Run one cycle iff due. Stamps the last-run time on success. This is the
     function an external timer/cron ticks; it never raises."""
@@ -105,22 +142,42 @@ def run_scheduled(cfg: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     gate = due_to_run(cfg)
     if not gate.get("due"):
         return {"ran": False, "reason": gate.get("reason")}
+    # health gate FIRST — never auto-run into a known-bad state (22), and never
+    # consume/stamp the interval slot when we're not going to run anyway.
+    if cfg.get("health_autohalt"):
+        hc = health_check(cfg)
+        if hc.get("halted"):
+            return {"ran": False, "reason": "health auto-halt: " + hc.get("summary", "")}
+    # CLAIM the slot before running: CAS-advance the last-run stamp from the
+    # value due_to_run just observed. The winner runs; a racing tick that saw the
+    # same prior value loses the CAS and bows out. This both serializes ticks and
+    # stamps the interval clock atomically with the due decision (no due->stamp
+    # gap during which a second tick could re-fire the same interval).
+    prev_raw = aj_db.get_setting_raw(_LAST_RUN_KEY)
+    stamp = aj_db.utc_now_iso()
+    if not _claim_run_slot(prev_raw, stamp):
+        return {"ran": False, "reason": "another tick claimed this interval"}
     try:
-        # health gate first — never auto-run into a known-bad state (22)
-        if cfg.get("health_autohalt"):
-            hc = health_check(cfg)
-            if hc.get("halted"):
-                return {"ran": False, "reason": "health auto-halt: " + hc.get("summary", "")}
         import aj_operator
         # run_once handles post-cycle autonomy (escalation/reflection/briefing).
         result = aj_operator.run_once("paper")
         if not result.get("ok"):
             # e.g. a manual cycle holds the single-instance lock ("another cycle
-            # is running"). Do NOT stamp the interval clock — let the next tick
-            # retry once the lock frees, rather than skipping a whole interval.
+            # is running"). RESTORE the prior stamp so the next tick retries this
+            # interval rather than skipping it (we claimed it but didn't run).
+            try:
+                if prev_raw is not None:
+                    aj_db.set_setting_raw(_LAST_RUN_KEY, prev_raw)
+                else:
+                    # First-ever run: there was no prior stamp, so we INSERTed it.
+                    # Remove it (don't leave the slot marked done) so the next tick
+                    # retries instead of waiting a full interval.
+                    aj_db.set_setting_raw(_LAST_RUN_KEY, "")
+            except Exception:
+                log.debug("run_scheduled: stamp restore failed", exc_info=True)
             return {"ran": False, "reason": result.get("reason") or "cycle did not run",
                     "result": result}
-        aj_db.set_setting_raw(_LAST_RUN_KEY, aj_db.utc_now_iso())
+        # success — the claimed stamp already marks this interval done.
         return {"ran": True, "cycle": result.get("cycle_id"),
                 "proposals": len(result.get("proposals") or []), "result": result}
     except Exception as e:
@@ -199,7 +256,11 @@ def start_scheduler() -> bool:
     enables auto-run in the Config tab."""
     global _sched_thread, _sched_started
     with _sched_lock:
-        if _sched_started:
+        # Respawn if the thread was started before but has since DIED (an
+        # unexpected crash of _scheduler_loop): treating `started` as permanent
+        # would leave auto-run silently dead forever. Only refuse when a live
+        # thread is actually running.
+        if _sched_started and _sched_thread is not None and _sched_thread.is_alive():
             return False
         _sched_thread = threading.Thread(
             target=_scheduler_loop, daemon=True, name="aj-autorun-scheduler")
@@ -268,8 +329,15 @@ def health_check(cfg: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         # reconciliation divergence — paper book vs broker disagree
         if int(recon.get("divergence", 0)) > 0:
             issues.append({"level": "critical", "msg": "{} unresolved reconciliation divergences".format(recon["divergence"])})
-        # audit chain broken — tamper / corruption
-        chain = aj_db.verify_audit_chain()
+        # audit chain broken — tamper / corruption. The hot path uses quick=True
+        # (verify only the tail), but that can't catch an edit INSIDE the already-
+        # verified prefix. So the autonomous monitor does a FULL re-scan every
+        # _FULL_CHAIN_EVERY checks (and on the first check), quick in between —
+        # bounding how long out-of-band tampering can go undetected.
+        global _health_chain_counter
+        _health_chain_counter += 1
+        full = (_health_chain_counter % _FULL_CHAIN_EVERY) == 1
+        chain = aj_db.verify_audit_chain(quick=not full)
         if not chain.get("ok"):
             issues.append({"level": "critical", "msg": "audit chain broken at {}".format(chain.get("broken_at"))})
     except Exception:
@@ -305,6 +373,47 @@ def _current_level() -> int:
         return 1
 
 
+def _cas_escalation_level(from_level: int, to_level: int) -> bool:
+    """Compare-and-set the preset-level key from `from_level` to `to_level`.
+    Returns True iff this caller won. Handles the absent-key case (the level
+    defaults to 1 in _current_level, so an absent key is treated as level 1 and
+    claimed via INSERT)."""
+    import database as _db
+    try:
+        with _db._write_lock:
+            conn = _db.get_conn()
+            row = conn.execute(
+                "SELECT value FROM settings WHERE key=?", (_ESCALATION_KEY,)).fetchone()
+            if row is None:
+                # absent => effective level 1; only valid to move off 1.
+                if from_level != 1:
+                    return False
+                cur = conn.execute(
+                    "INSERT OR IGNORE INTO settings (key, value) VALUES (?,?)",
+                    (_ESCALATION_KEY, str(to_level)))
+                won = cur.rowcount == 1
+            else:
+                cur = conn.execute(
+                    "UPDATE settings SET value=? WHERE key=? AND value=?",
+                    (str(to_level), _ESCALATION_KEY, row["value"]))
+                # only count it ours if the stored value really was from_level
+                try:
+                    stored = max(0, min(2, int(float(row["value"]))))
+                except (TypeError, ValueError):
+                    stored = 1
+                won = cur.rowcount == 1 and stored == from_level
+            conn.commit()
+        if won:
+            try:
+                _db._invalidate_settings_cache()
+            except Exception:
+                pass
+        return won
+    except Exception:
+        log.debug("_cas_escalation_level failed", exc_info=True)
+        return False
+
+
 def maybe_escalate(cfg: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """Move the risk preset up the ladder on proven performance, down on a
     drawdown. Earns its way up: positive Sharpe-like + win-rate ≥ 55% over
@@ -337,8 +446,13 @@ def maybe_escalate(cfg: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         if new_level == level:
             return {"changed": False, "level": _PRESET_LADDER[level], "reason": reason,
                     "metrics": {"trades": n, "win_rate": wr, "sharpe": sharpe, "drawdown_pct": round(dd, 1)}}
+        # CAS the level key from the value we read to the new value: two cycles
+        # racing (e.g. manual + scheduled) must not both apply a preset jump off
+        # the same `level` — the loser sees a changed key and bows out, so the
+        # ladder advances exactly one step. Apply the preset only after we own it.
+        if not _cas_escalation_level(level, new_level):
+            return {"changed": False, "reason": "escalation level changed concurrently"}
         aj_config.apply_preset(_PRESET_LADDER[new_level])
-        aj_db.set_setting_raw(_ESCALATION_KEY, str(new_level))
         aj_db.audit("preset_escalation",
                     {"from": _PRESET_LADDER[level], "to": _PRESET_LADDER[new_level], "reason": reason})
         return {"changed": True, "from": _PRESET_LADDER[level], "to": _PRESET_LADDER[new_level], "reason": reason}
@@ -402,12 +516,39 @@ def build_reflection() -> Dict[str, Any]:
 
 
 def write_reflection() -> Dict[str, Any]:
-    """Build today's reflection and persist it (one per day, overwrites)."""
+    """Build today's reflection and persist it — FIRST write of the day wins.
+
+    Keyed by date with INSERT OR IGNORE so a manual + scheduled run on the same
+    day don't double-write (and double-audit) the journal entry. If today's entry
+    already exists, return it unchanged rather than rebuilding/overwriting it."""
+    import database as _db
+    date = aj_db.utc_now().strftime("%Y-%m-%d")
+    key = "{}_{}".format(_REFLECTION_KEY, date)
+    existing = get_reflection(date)
+    if existing is not None:
+        return existing
     refl = build_reflection()
     try:
-        key = "{}_{}".format(_REFLECTION_KEY, refl["date"])
-        aj_db.set_setting_raw(key, json.dumps(refl))
-        aj_db.audit("reflection", {"date": refl["date"], "takeaway": refl["takeaway"]})
+        won = False
+        with _db._write_lock:
+            conn = _db.get_conn()
+            cur = conn.execute(
+                "INSERT OR IGNORE INTO settings (key, value) VALUES (?,?)",
+                (key, json.dumps(refl)))
+            conn.commit()
+            won = cur.rowcount == 1
+        try:
+            _db._invalidate_settings_cache()
+        except Exception:
+            pass
+        # Only audit when WE created today's entry (a racing writer that won the
+        # INSERT already audited it).
+        if won:
+            aj_db.audit("reflection", {"date": refl["date"], "takeaway": refl["takeaway"]})
+        else:
+            prior = get_reflection(date)
+            if prior is not None:
+                return prior
     except Exception:
         log.exception("write_reflection persist failed")
     return refl
@@ -471,6 +612,14 @@ def build_briefing(cfg: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
 
 
 def write_briefing(cfg: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    # First briefing of the day wins: if today's briefing is already stored,
+    # return it rather than rebuilding (a manual + scheduled premarket run on the
+    # same day must not double-build/overwrite). Keyed on the stored payload's
+    # date so get_briefing()'s single-key contract is preserved.
+    today = aj_db.utc_now().strftime("%Y-%m-%d")
+    existing = get_briefing()
+    if existing is not None and existing.get("date") == today:
+        return existing
     b = build_briefing(cfg)
     try:
         aj_db.set_setting_raw(_BRIEFING_KEY, json.dumps(b))

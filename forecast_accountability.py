@@ -374,21 +374,22 @@ def adaptive_weights(base_weights: Dict[str, float],
         for k, w in base_weights.items():
             mult = 1.0
             try:
-                # WHY (Q9): filter the track record to this horizon so we tilt
-                # on the component's skill AT this horizon, not a pooled average
-                # across all horizons.
-                rec = research_tracker.get_track_record(
-                    _component_signal(k), horizon_days=horizon_days)
-                n = rec.get("n_directional") or 0
+                # WHY (Q9): filter to this horizon so we tilt on the component's
+                # skill AT this horizon, not a pooled average across horizons.
+                # WHY (Q11): the old code called get_track_record AND
+                # get_scored_rows for the SAME component+horizon — two DB
+                # scans returning overlapping data. Pull the scored rows once
+                # and derive BOTH the directional sample size (n_directional =
+                # rows with a non-null hit) and the Brier calibration from them.
+                rows = research_tracker.get_scored_rows(_component_signal(k))
+                if horizon_days is not None:
+                    rows = [r for r in rows
+                            if r.get("horizon_days") == horizon_days]
+                n = sum(1 for r in rows if r.get("hit") is not None)
                 if n >= _MIN_N_FOR_ADAPT:
                     # C: tilt on BRIER SKILL (consistency with the leaderboard
                     # ranking) rather than raw hit-rate. Brier skill rewards
                     # well-calibrated probabilities, not just directional luck.
-                    rows = research_tracker.get_scored_rows(
-                        _component_signal(k))
-                    if horizon_days is not None:
-                        rows = [r for r in rows
-                                if r.get("horizon_days") == horizon_days]
                     cal = _brier_from_rows(rows)
                     skill = cal.get("brier_skill")
                     if skill is not None and (cal.get("n") or 0) >= _MIN_N_FOR_ADAPT:

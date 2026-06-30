@@ -19,6 +19,13 @@
 
   const POST_PATH = '/api/research/optimize';
 
+  // ── frontier chart lifecycle (module-level so it survives canvas recreation)
+  // Each render builds a fresh <canvas>, so the prior chart can't be found via
+  // the new node. Track the live Chart instance and the deferred-build timer
+  // here so we can destroy/cancel them before the next render.
+  let _frontierChart = null;
+  let _frontierTimer = null;
+
   // ── small DOM helpers ───────────────────────────────────────────────────
   function el(tag, attrs, children) {
     const node = document.createElement(tag);
@@ -325,6 +332,16 @@
   }
 
   function renderFrontier(result) {
+    // Cancel any deferred build still pending from a previous render and
+    // destroy the live chart up front. Both are tracked at module level
+    // because each render creates a brand-new <canvas>, so the prior chart
+    // can't be located through the new node's _chart property.
+    if (_frontierTimer != null) { clearTimeout(_frontierTimer); _frontierTimer = null; }
+    if (_frontierChart && typeof _frontierChart.destroy === 'function') {
+      try { _frontierChart.destroy(); } catch (e) { /* ignore */ }
+      _frontierChart = null;
+    }
+
     const frontier = result.efficient_frontier || [];
     const cur = { x: result.expected_vol_pct, y: result.expected_return_pct };
     if (!frontier.length || typeof window.Chart !== 'function') {
@@ -335,16 +352,21 @@
     const canvas = el('canvas');
     wrap.appendChild(canvas);
     // Defer chart creation until after the canvas is inserted into the DOM.
-    setTimeout(() => {
+    _frontierTimer = setTimeout(() => {
+      _frontierTimer = null;
+      // If the view was torn down (or re-rendered) the canvas may now be
+      // detached; binding Chart.js to a detached canvas throws and leaks.
+      if (!canvas.isConnected) return;
       try {
-        // Destroy any prior chart bound to this canvas before creating a new
-        // one. Without this, every re-render (each OPTIMIZE click) leaks a
-        // Chart.js instance and the canvas accumulates listeners until the
-        // tab is closed.
-        if (canvas._chart && typeof canvas._chart.destroy === 'function') {
-          try { canvas._chart.destroy(); } catch (e) { /* ignore */ }
+        // Destroy any chart bound to this canvas before creating a new one.
+        if (_frontierChart && typeof _frontierChart.destroy === 'function') {
+          try { _frontierChart.destroy(); } catch (e) { /* ignore */ }
         }
-        canvas._chart = new window.Chart(canvas.getContext('2d'), {
+        if (window.Chart.getChart) {
+          const prior = window.Chart.getChart(canvas);
+          if (prior && typeof prior.destroy === 'function') { try { prior.destroy(); } catch (e) { /* ignore */ } }
+        }
+        _frontierChart = new window.Chart(canvas.getContext('2d'), {
           type: 'scatter',
           data: {
             datasets: [

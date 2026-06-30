@@ -170,7 +170,7 @@ def _build_features(hist):
 
 # ── Model 1: Random Forest Return Classifier ─────────────────────────────────
 
-def _rf_predict(hist):
+def _rf_predict(hist, features=None):
     """
     Train a Random Forest on the stock's own history to predict
     P(positive 20-day forward return). The reported `accuracy_recent`
@@ -178,6 +178,11 @@ def _rf_predict(hist):
     (re-fit on everything before that holdout).
 
     Returns dict with probability, confidence, feature importances.
+
+    WHY (Q14): `features` may be a pre-built ``(df_full, feature_cols)`` tuple
+    from ``_build_features(hist)``; when supplied we reuse it instead of
+    rebuilding the 2y feature frame (this and ``_detect_regime`` both need it).
+    Defaults to None so existing direct callers/tests keep working.
     """
     from sklearn.ensemble import RandomForestClassifier
     from sklearn.preprocessing import StandardScaler
@@ -187,7 +192,7 @@ def _rf_predict(hist):
     except Exception:  # pragma: no cover - sklearn always present in venv
         CalibratedClassifierCV = None
 
-    df_full, feature_cols = _build_features(hist)
+    df_full, feature_cols = features if features is not None else _build_features(hist)
     df = df_full.dropna(subset=feature_cols + ["fwd_ret_20d"])
 
     if len(df) < 120:
@@ -480,18 +485,22 @@ def _trend_forecast(hist, days_ahead=30):
 
 # ── Model 3: Regime Detection (K-Means) ──────────────────────────────────────
 
-def _detect_regime(hist):
+def _detect_regime(hist, features=None):
     """
     Cluster recent market states into regimes:
       - LOW VOL TREND   = steady up/down
       - HIGH VOL CHOP   = mean-reverting, volatile
       - BREAKOUT         = vol expanding, directional
       - COMPRESSION      = vol contracting, coiling
+
+    WHY (Q14): accepts the same pre-built ``(df_full, feature_cols)`` tuple as
+    ``_rf_predict`` so the 2y feature frame is built once per forecast, not
+    twice. ``features=None`` keeps the standalone behaviour.
     """
     from sklearn.cluster import KMeans
     from sklearn.preprocessing import StandardScaler
 
-    df, feature_cols = _build_features(hist)
+    df, feature_cols = features if features is not None else _build_features(hist)
 
     regime_features = ["vol_20d", "bb_width", "rsi_14", "roc_20", "atr_14", "vol_ratio"]
     subset = df[regime_features].dropna()
@@ -823,9 +832,20 @@ def _ml_forecast_compute(symbol):
 
     results = {"symbol": symbol}
 
+    # WHY (Q14): _rf_predict and _detect_regime each used to call
+    # _build_features(hist) independently, engineering the full 2y feature
+    # matrix TWICE per forecast. Build it once here and pass it into both.
+    # Fail-open: if feature engineering throws, fall back to None so each
+    # model rebuilds on its own (prior behaviour) rather than crashing.
+    try:
+        _features = _build_features(hist)
+    except Exception as e:
+        log.warning("feature build failed for %s: %s", symbol, e)
+        _features = None
+
     # 1. Random Forest
     try:
-        rf_result = _rf_predict(hist)
+        rf_result = _rf_predict(hist, features=_features)
         results["rf_classifier"] = rf_result
     except Exception as e:
         log.warning("RF error for %s: %s", symbol, e)
@@ -841,7 +861,7 @@ def _ml_forecast_compute(symbol):
 
     # 3. Regime Detection
     try:
-        regime = _detect_regime(hist)
+        regime = _detect_regime(hist, features=_features)
         results["regime"] = regime
     except Exception as e:
         log.warning("Regime error for %s: %s", symbol, e)
@@ -855,13 +875,40 @@ def _ml_forecast_compute(symbol):
         log.warning("MR error for %s: %s", symbol, e)
         results["mean_reversion"] = None
 
-    # Realized daily vol (close-to-close) for the principled trend→prob map.
-    try:
-        _daily_vol = float(hist["Close"].pct_change().dropna().iloc[-60:].std())
-        if not np.isfinite(_daily_vol) or _daily_vol <= 0:
+    # Dispersion for the principled trend→prob map.
+    #
+    # WHY (Q13): the trend vote's expected move (forecast_pct) comes from a
+    # BLEND of slope fits over 60/120/250-day windows, but the old map divided
+    # it by a 60-day realized vol. A drift estimated partly from 250 days of
+    # data paired with a 60-day dispersion is a units mismatch: it understates
+    # the uncertainty around a slow long-window drift and inflates |prob-0.5|.
+    # Use the trend regression's OWN residual scatter, blended with the SAME
+    # 0.5/0.3/0.2 weights the price forecast uses, so the dispersion is fit-
+    # consistent. `residual_std` is the daily log-space std around each slope
+    # fit. Fall back to the 60d realized vol, then to None.
+    _daily_vol = None
+    _tf = results.get("trend_forecast")
+    if _tf and isinstance(_tf.get("regimes"), dict):
+        try:
+            reg = _tf["regimes"]
+            blend = 0.0
+            wsum = 0.0
+            for label, w in (("short", 0.5), ("mid", 0.3), ("long", 0.2)):
+                rs = reg.get(label, {}).get("residual_std")
+                if rs is not None and np.isfinite(rs) and rs > 0:
+                    blend += w * float(rs)
+                    wsum += w
+            if wsum > 0:
+                _daily_vol = blend / wsum
+        except Exception:
             _daily_vol = None
-    except Exception:
-        _daily_vol = None
+    if _daily_vol is None:
+        try:
+            _v = float(hist["Close"].pct_change().dropna().iloc[-60:].std())
+            if np.isfinite(_v) and _v > 0:
+                _daily_vol = _v
+        except Exception:
+            _daily_vol = None
 
     # Composite ML signal
     signals = []

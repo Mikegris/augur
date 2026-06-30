@@ -154,7 +154,10 @@ class Lease(object):
 
     @property
     def value(self) -> Optional[str]:
-        if time.time() > self.expires_at:
+        # >= so a zero/negative TTL is deterministically expired (the two
+        # time.time() reads can be equal under clock granularity; `>` made a
+        # ttl_s=0 lease intermittently read as still-valid).
+        if time.time() >= self.expires_at:
             return None
         return self._value
 

@@ -183,26 +183,39 @@ def get_warmed_dossier(symbol: str, asset_class: str, strategy: str) -> Optional
     return dossier
 
 
-def list_warmed_symbols(asset_class: Optional[str] = None) -> List[Dict[str, Any]]:
-    """List currently fresh warmed rows (used to bias random picks)."""
+def list_warmed_symbols(asset_class: Optional[str] = None,
+                        limit: Optional[int] = None) -> List[Dict[str, Any]]:
+    """List currently fresh warmed rows (used to bias random picks).
+
+    `limit` (optional, ADDED): push the row cap into SQL via LIMIT so callers
+    that only want the top-N don't pull ~180 rows just to slice [:N] in
+    Python. None preserves the old "return everything fresh" behavior.
+    """
     try:
         conn = db.get_conn()
         cutoff = _ttl_cutoff_iso()
+        # Top scores first; an optional LIMIT ? keeps the result set to the
+        # rows the caller will actually use.
+        limit_sql = ""
+        extra_params: tuple = ()
+        if limit is not None and limit > 0:
+            limit_sql = " LIMIT ?"
+            extra_params = (int(limit),)
         if asset_class:
             rows = conn.execute(
                 """SELECT symbol, asset_class, strategy, composite_score, sector, warmed_at
                     FROM idea_pool
                     WHERE warmed_at >= ? AND asset_class = ?
-                    ORDER BY composite_score DESC""",
-                (cutoff, asset_class),
+                    ORDER BY composite_score DESC""" + limit_sql,
+                (cutoff, asset_class) + extra_params,
             ).fetchall()
         else:
             rows = conn.execute(
                 """SELECT symbol, asset_class, strategy, composite_score, sector, warmed_at
                     FROM idea_pool
                     WHERE warmed_at >= ?
-                    ORDER BY composite_score DESC""",
-                (cutoff,),
+                    ORDER BY composite_score DESC""" + limit_sql,
+                (cutoff,) + extra_params,
             ).fetchall()
     except Exception as exc:  # noqa: BLE001 — DB busy/locked during checkpoint; degrade to empty
         logger.warning("idea_pool: warmed-symbol listing failed: %s", exc)

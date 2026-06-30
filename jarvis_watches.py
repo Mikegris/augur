@@ -268,6 +268,45 @@ def _crypto_symbols() -> set:
         return set()
 
 
+# Common crypto tickers — the plausibility gate for the -USD substitution. A
+# bare equity feed can briefly return 0 for a real stock; without this gate the
+# fallback would replace that equity's quote with an unrelated -USD coin. Only
+# symbols that are plausibly crypto are eligible for the substitute. Kept as a
+# small static set (mirrors aj_positions._CRYPTO_HINTS) and augmented fail-open
+# from the app's crypto universe when those light modules are importable.
+_KNOWN_CRYPTO = {
+    "BTC", "ETH", "SOL", "XRP", "DOGE", "ADA", "HBAR", "LTC", "BCH", "AVAX",
+    "DOT", "MATIC", "LINK", "UNI", "ATOM", "BNB", "TRX", "SHIB", "NEAR", "APT",
+    "ARB", "OP", "FIL", "ICP", "ETC", "XLM", "ALGO", "VET", "AAVE", "MKR",
+    "INJ", "SUI", "SEI", "TIA", "RNDR", "IMX", "GRT", "SAND", "MANA", "AXS",
+    "PEPE", "WIF", "BONK", "USDT", "USDC", "DAI",
+}
+
+
+def _crypto_universe() -> set:
+    """A best-effort superset of known crypto tickers for the -USD plausibility
+    gate. Starts from the static set and augments from the app's crypto universe
+    if those modules import cheaply; fully fail-open (returns the static set on
+    any error). Cached on the module so repeated watch evals don't re-import."""
+    global _CRYPTO_UNIVERSE_CACHE
+    if _CRYPTO_UNIVERSE_CACHE is not None:
+        return _CRYPTO_UNIVERSE_CACHE
+    uni = set(_KNOWN_CRYPTO)
+    try:
+        import idea_generator
+        for s in (getattr(idea_generator, "CRYPTO_UNIVERSE", None) or []):
+            t = str(s).upper().replace("-USD", "")
+            if t:
+                uni.add(t)
+    except Exception:
+        pass
+    _CRYPTO_UNIVERSE_CACHE = uni
+    return uni
+
+
+_CRYPTO_UNIVERSE_CACHE = None
+
+
 def _fetch_quotes(symbols: List[str], crypto: set) -> Dict[str, Dict[str, Any]]:
     """One batched quote fetch, keyed back to the user-facing symbol.
 
@@ -339,7 +378,12 @@ def _fetch_quotes(symbols: List[str], crypto: set) -> Dict[str, Dict[str, Any]]:
                     rc = q.get("change_pct")
                     if isinstance(rc, (int, float)) and not isinstance(rc, bool):
                         existing["change_pct"] = rc
-            else:
+            elif user_sym.upper() in _crypto_universe():
+                # Bare quote had no valid price. Only adopt the -USD substitute
+                # when the symbol is plausibly crypto — otherwise a real equity
+                # whose feed briefly returned 0 would be overwritten with an
+                # unrelated coin. A non-crypto symbol keeps its (price-less)
+                # equity quote rather than a wrong one.
                 out[user_sym] = q
     return out
 

@@ -142,8 +142,8 @@
       +   row('P(drawdown ≥10%)',       _pct(sm.prob_drawdown_10pct))
       +   row('P(drawdown ≥20%)',       _pct(sm.prob_drawdown_20pct))
       +   row('P(+15% gain)',           _pct(sm.prob_target_15pct_gain))
-      +   row('1d 95% VaR',             (sm.value_at_risk_95_pct != null ? sm.value_at_risk_95_pct.toFixed(2) + '%' : '—'))
-      +   row('1d 95% ES',              (sm.expected_shortfall_95_pct != null ? sm.expected_shortfall_95_pct.toFixed(2) + '%' : '—'))
+      +   row('1d 95% VaR',             (typeof sm.value_at_risk_95_pct === 'number' ? sm.value_at_risk_95_pct.toFixed(2) + '%' : '—'))
+      +   row('1d 95% ES',              (typeof sm.expected_shortfall_95_pct === 'number' ? sm.expected_shortfall_95_pct.toFixed(2) + '%' : '—'))
       + '</div>'
 
       + '<div style="border:1px solid var(--border);padding:8px;border-radius:4px">'

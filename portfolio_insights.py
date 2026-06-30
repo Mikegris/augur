@@ -250,14 +250,28 @@ def portfolio_health(max_symbols: int = 25) -> Dict[str, Any]:
     above_50 = sum(1 for s in good if s.get("above_sma50"))
     near_high = sum(1 for s in good if (s.get("range_position_52w") or 0) >= 85)
     deep_dd = sum(1 for s in good if (s.get("max_drawdown_pct") or 0) <= -25)
-    # Weighted momentum (fall back to equal weight when weights are missing).
+    # Weighted momentum — use ONE weighting scheme consistently, not a mix of
+    # value-weights (for symbols present in `weights`) and 1/len (for absent
+    # ones), which skewed the average toward priced-but-light names. When value
+    # weights exist, weight ONLY the symbols that have one (the wsum/wtot ratio
+    # renormalizes over exactly that subset); otherwise fall back to a pure
+    # equal-weight average over all analyzed symbols.
     wsum = 0.0
     wtot = 0.0
-    for s in good:
-        w = weights.get(s["symbol"], 1.0 / len(good))
-        wsum += w * s["momentum_score"]
-        wtot += w
-    weighted_mom = round(wsum / wtot) if wtot else None
+    if weights:
+        for s in good:
+            w = weights.get(s["symbol"])
+            if w is None:
+                continue
+            wsum += w * s["momentum_score"]
+            wtot += w
+    if wtot:
+        weighted_mom = round(wsum / wtot)
+    elif good:
+        # Equal-weight fallback (no usable value weights for the analyzed set).
+        weighted_mom = round(sum(s["momentum_score"] for s in good) / len(good))
+    else:
+        weighted_mom = None
     hhi = round(sum(w * w for w in weights.values()), 3) if weights else None
 
     breadth = round(100.0 * above_50 / len(good))

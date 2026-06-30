@@ -155,7 +155,9 @@ def _channel_file(digest: Dict[str, str]) -> str:
 def _smtp_config() -> Optional[Dict[str, str]]:
     """SMTP creds from env > DB settings; None when not fully configured."""
     def g(env_key, set_key):
-        return (os.environ.get(env_key) or _setting(set_key)).strip()
+        # `or ""` so a None from _setting() can't raise AttributeError on
+        # .strip() and silently disable email through the outer try/except.
+        return (os.environ.get(env_key) or _setting(set_key) or "").strip()
     host = g("AUGUR_SMTP_HOST", "smtp_host")
     to = g("AUGUR_SMTP_TO", "smtp_to")
     sender = g("AUGUR_SMTP_FROM", "smtp_from") or g("AUGUR_SMTP_USER", "smtp_user")

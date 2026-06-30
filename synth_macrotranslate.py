@@ -360,17 +360,24 @@ def _close_series(symbol: str) -> Dict[str, float]:
 
 def _forward_return(closes: Dict[str, float], on_or_after: datetime.date,
                     days: int) -> Optional[float]:
-    """Return percent change from the first close on/after `on_or_after`
-    to `days` trading days later. None when either endpoint is missing.
+    """Return percent change measured from the NEXT trading day's close after
+    the release to `days` trading days later. None when either endpoint is
+    missing.
 
-    `days=0` is a no-op (returns 0.0 for live dates) — used as a sanity
-    pre-check that the start-date has any price at all.
+    Convention (matches the module docstring): the release lands during/after
+    a session, so we ENTER on the *next* trading day's close — not the
+    release-day close — to avoid capturing the pre-close, same-session reaction
+    that's already over by the time the print is actionable. Concretely: locate
+    the first session on/after the release (`release_idx`), then enter at
+    `release_idx + 1` and exit `days` sessions later.
+
+    `days=0` is a no-op (returns 0.0) — used as a sanity pre-check that a price
+    exists for the entry session.
     """
     if not closes:
         return None
     sorted_dates = sorted(closes.keys())
     target = on_or_after.isoformat()
-    start_idx = None
     # bisect-left without importing bisect (tiny lists, cheap)
     lo, hi = 0, len(sorted_dates)
     while lo < hi:
@@ -379,7 +386,12 @@ def _forward_return(closes: Dict[str, float], on_or_after: datetime.date,
             lo = mid + 1
         else:
             hi = mid
-    start_idx = lo
+    release_idx = lo
+    if release_idx >= len(sorted_dates):
+        return None
+    # Enter on the NEXT session after the release (next trading day), not the
+    # release-day close.
+    start_idx = release_idx + 1
     if start_idx >= len(sorted_dates):
         return None
     end_idx = start_idx + days
@@ -699,25 +711,29 @@ def macro_translate(release_id: str,
             "sector_returns_5d": avg_sectors,
         }
 
-        # Latest release pulled from the FRED series if available (gives
-        # the UI a "what just printed" header).
+        # Latest release "what just printed" header. REUSE the tail of the
+        # series we already pulled in _historical_release_dates (600 obs) via
+        # `episodes_raw` — the previous code re-fetched the SAME FRED series
+        # (observations=4) here, a redundant network round-trip per request.
+        # `episodes_raw` is (release_date, value) oldest→newest, so the last two
+        # value-bearing entries give us latest + prior for the delta.
         latest_date = None
         latest_value = None
         delta_pct = None
-        if rid != "FOMC" and fred_data is not None:
+        if rid != "FOMC":
             try:
-                s = fred_data.fetch_series(rid, observations=4)
-                pts = (s or {}).get("points") or []
-                if pts:
-                    latest_date = pts[-1].get("date")
-                    latest_value = pts[-1].get("value")
-                    if len(pts) >= 2:
+                valued = [(d, v) for (d, v) in episodes_raw if v is not None]
+                if valued:
+                    last_d, last_v = valued[-1]
+                    latest_date = last_d.isoformat() if hasattr(last_d, "isoformat") else str(last_d)
+                    latest_value = last_v
+                    if len(valued) >= 2:
                         # FRED point values can be numeric strings; coerce so the
                         # subtraction doesn't TypeError (which the bare except
                         # below would swallow, silently losing delta_pct).
                         try:
-                            lv = float(latest_value)
-                            pv = float(pts[-2].get("value"))
+                            lv = float(last_v)
+                            pv = float(valued[-2][1])
                         except (TypeError, ValueError):
                             lv = pv = None
                         if pv:

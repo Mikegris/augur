@@ -92,8 +92,33 @@ _inflight: Dict[str, "threading.Event"] = {}
 
 
 def _cache_key(symbol: str, cfg: Dict[str, Any]) -> str:
+    """Cache key for a council decision. Includes the analyst roster AND every
+    cfg knob that changes the advice (policy, buy/sell thresholds, debate-round
+    counts, personas, and the current regime). Omitting these served stale advice
+    for up to the cache TTL (6h) after a preset/regime change — a fresh preset or
+    a flipped regime now produces a fresh key (cache miss) instead."""
     analysts = ",".join(_selected_analysts(cfg))
-    return "{}|{}".format(str(symbol).upper(), analysts)
+    knobs = [
+        str(cfg.get("council_policy", "advisory")),
+        str(cfg.get("buy_prob_threshold", "")),
+        str(cfg.get("sell_prob_threshold", "")),
+        str(cfg.get("min_edge_pct_pts", "")),
+        str(int(cfg.get("max_research_rounds", 1) or 0)),
+        str(int(cfg.get("max_risk_rounds", 1) or 0)),
+        str(bool(cfg.get("personas_enabled", False))),
+        _current_regime(),
+    ]
+    return "{}|{}|{}".format(str(symbol).upper(), analysts, ",".join(knobs))
+
+
+def _current_regime() -> str:
+    """Best-effort current market regime for the cache key. Fail-open to '?' so a
+    regime-detection error never breaks caching (it just won't vary by regime)."""
+    try:
+        import aj_alpha
+        return str(aj_alpha.detect_regime())
+    except Exception:
+        return "?"
 
 
 def _cache_get(symbol: str, cfg: Dict[str, Any]) -> Optional[CouncilDecision]:
@@ -202,13 +227,17 @@ def _run_analysts(symbol: str, cfg: Dict[str, Any],
     return reports
 
 
-# avg score → rating thresholds (10 = most bullish).
+# avg score → rating thresholds (10 = most bullish). The neutral HOLD band is
+# centered SYMMETRICALLY on 5.0 (5.0 ± 0.75 => [4.25, 5.75]) with consistent
+# half-open boundary comparisons (>=), so a score of exactly 5.0 is HOLD and the
+# two boundaries (4.25, 5.75) are mirror images rather than landing in different
+# ratings.
 def _score_to_rating(avg: float) -> Rating:
     if avg >= 7.0:
         return Rating.BUY
     if avg >= 5.75:
         return Rating.OVERWEIGHT
-    if avg > 4.25:
+    if avg >= 4.25:          # HOLD band: [4.25, 5.75), centered on 5.0
         return Rating.HOLD
     if avg >= 3.0:
         return Rating.UNDERWEIGHT
@@ -222,7 +251,12 @@ def _consensus(reports: List[AnalystReport]):
         return Rating.HOLD, 0.0, "no analyst evidence", ""
     wsum = sum(r.confidence for r in backed) or 1.0
     avg = sum(r.score * r.confidence for r in backed) / wsum
-    conf = sum(r.confidence for r in backed) / len(backed)
+    # Conviction is CONFIDENCE-WEIGHTED (consistent with the score, which is also
+    # confidence-weighted): each analyst's confidence is weighted by itself, so a
+    # strong analyst dominates instead of being diluted by an unweighted mean of
+    # weak ones. Equivalent to Σc² / Σc; reduces to the plain mean when all the
+    # confidences are equal.
+    conf = clamp(sum(r.confidence * r.confidence for r in backed) / wsum, 0.0, 1.0, 0.0)
     rating = _score_to_rating(avg)
     # thesis: top key point or narrative per analyst
     bits = []
@@ -674,18 +708,35 @@ def _spy_return_since(ts_iso: str, end_iso: Optional[str] = None) -> float:
         # which would fabricate a huge, wrong benchmark return and corrupt alpha.
         if start is None:
             return 0.0
+        # Track the START bar's epoch so we can guarantee the END bar is at/after
+        # it; an end before the start would otherwise fabricate a backwards return.
+        start_ts_epoch = None
+        for b in bars:
+            bt = b.get("time")
+            if dt is not None and bt is not None and bt >= dt.timestamp():
+                start_ts_epoch = bt
+                break
         end = bars[-1].get("close")
         # Cap the benchmark window at the holding horizon's end (last sell), so a
         # closed trade's alpha isn't measured against SPY's move AFTER the exit.
+        # Only accept end bars AT OR AFTER the start bar — never before it.
         end_dt = aj_db.parse_iso(end_iso) if end_iso else None
         if end_dt is not None:
             cutoff = end_dt.timestamp()
+            end = None
             for b in bars:
                 bt = b.get("time")
-                if bt is not None and bt <= cutoff:
-                    end = b.get("close")
-                elif bt is not None and bt > cutoff:
+                if bt is None:
+                    continue
+                if bt > cutoff:
                     break
+                if start_ts_epoch is not None and bt < start_ts_epoch:
+                    continue  # before the start bar — not a valid window end
+                end = b.get("close")
+            # No bar at/after start AND at/before cutoff => window collapses to a
+            # single bar (or is inverted): the start IS the end => 0 return.
+            if end is None:
+                return 0.0
         if start and end and start > 0:
             return (float(end) - float(start)) / float(start)
     except Exception:

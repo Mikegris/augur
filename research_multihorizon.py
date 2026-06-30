@@ -161,9 +161,20 @@ def _h5_short_mom(hist: pd.DataFrame) -> Dict[str, Any]:
     # Expected return in % over the horizon (the actual move that drives prob_up).
     expected_pct = expected_move * 100.0
 
-    # Confidence: stronger when both stretch and vol agree
+    # Confidence tracks the directional edge |prob_up - 0.5|.
+    #
+    # WHY (Q16): the old factor 1/(1+max(vol_ratio-1,0)) shrank confidence
+    # exactly when 5d vol spiked — but a stretched RSI (the whole signal here)
+    # tends to COINCIDE with elevated short-vol, so the penalty fired hardest
+    # precisely when the mean-reversion edge was strongest, inverting the
+    # intent. prob_up is ALREADY vol-aware (it's Φ of a vol-scaled move), so a
+    # second vol haircut double-counts. Cap the vol-ratio penalty so it can
+    # only mildly trim confidence in genuinely abnormal vol, never dominate it,
+    # and let confidence otherwise track the edge directly.
+    vol_penalty = 1.0 / (1.0 + max(vol_ratio - 1.0, 0.0))
+    vol_penalty = max(0.8, vol_penalty)  # at most a 20% haircut
     confidence = float(np.clip(
-        abs(prob_up - 0.5) * 2.0 * (1.0 / (1.0 + max(vol_ratio - 1.0, 0))),
+        abs(prob_up - 0.5) * 2.0 * vol_penalty,
         0.05, 0.95
     ))
 
@@ -361,6 +372,15 @@ def _h120_long_trend(hist: pd.DataFrame) -> Dict[str, Any]:
     expected_move120 = (expected_pct / 100.0) * max(0.2, r2)
     prob_up = _cdf_prob(expected_move120, dispersion120)
 
+    # WHY (Q3): prob_up is computed from the R²-SHRUNK move (expected_move120),
+    # but the reported expected_return_pct used the raw, un-shrunk slope move
+    # (expected_pct) — so a low-R² drift could report a big +12% expected return
+    # while prob_up sat near 0.5, a direct contradiction the UI surfaces
+    # side-by-side. Report the same shrunk move that actually drives prob_up.
+    # `expected_pct` (raw slope projection) is preserved as raw_expected_pct.
+    raw_expected_pct = expected_pct
+    expected_pct = expected_move120 * 100.0
+
     # Confidence: prob distance × R^2 × vol-regime moderation
     confidence = float(np.clip(
         abs(prob_up - 0.5) * 2.0 * (0.4 + 0.6 * r2) / max(vol_regime_long, 0.7),
@@ -376,6 +396,7 @@ def _h120_long_trend(hist: pd.DataFrame) -> Dict[str, Any]:
         "features": {
             "slope_daily_log": round(float(slope), 6),
             "ann_return_pct": round((math.exp(slope * 252) - 1.0) * 100.0, 1),
+            "raw_expected_pct": round(raw_expected_pct, 2),
             "r_squared": round(r2, 3),
             "residual_std_log": round(res_std, 4),
             "vol_120d": round(vol120, 4),

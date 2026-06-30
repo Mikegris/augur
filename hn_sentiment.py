@@ -21,12 +21,40 @@ discourse style it's surprisingly serviceable.
 from __future__ import annotations
 
 import logging
+import random
 import time
 from datetime import datetime, timedelta
 
 import requests
 
 log = logging.getLogger("augur.hn")
+
+
+def _retry_after_ttl(resp, base_ttl, lo=30.0, hi=3600.0):
+    """Negative-cache TTL honoring `Retry-After` (clamped) + jitter; falls back
+    to `base_ttl` when no usable header is present. See alt_signals._retry_after_ttl."""
+    ttl = base_ttl
+    try:
+        ra = resp.headers.get("Retry-After") if resp is not None else None
+        if ra:
+            ra = ra.strip()
+            if ra.isdigit():
+                ttl = float(ra)
+            else:
+                try:
+                    from email.utils import parsedate_to_datetime
+                    when = parsedate_to_datetime(ra)
+                    if when is not None:
+                        delta = when.timestamp() - time.time()
+                        if delta > 0:
+                            ttl = delta
+                except Exception:
+                    ttl = base_ttl
+    except Exception:
+        ttl = base_ttl
+    ttl = max(lo, min(hi, ttl))
+    ttl *= random.uniform(0.85, 1.15)
+    return ttl
 
 HN_SEARCH = "https://hn.algolia.com/api/v1/search"
 HEADERS = {"User-Agent": "AUGUR/1.0 wealth-tracker"}
@@ -94,7 +122,14 @@ def _score_text(text: str) -> int:
 
 
 def _algolia_search(query: str, hours: int = 168, hits: int = 50):
-    """Search HN stories/comments matching query within the time window."""
+    """Search HN stories/comments matching query within the time window.
+
+    Returns a list of hits on success (possibly empty == genuinely no matches),
+    or None on a FETCH FAILURE (rate-limit / network error). The second return
+    value is a Retry-After-derived TTL hint (seconds) when a 429 was seen, else
+    None — callers use it to pick a short negative-cache TTL instead of pinning
+    an empty result for the full hour.
+    """
     cutoff = int(time.time() - hours * 3600)
     try:
         resp = requests.get(HN_SEARCH, params={
@@ -103,11 +138,14 @@ def _algolia_search(query: str, hours: int = 168, hits: int = 50):
             "numericFilters": f"created_at_i>{cutoff}",
             "hitsPerPage": hits,
         }, headers=HEADERS, timeout=15)
+        if resp.status_code == 429:
+            log.debug("HN search rate-limited for %s", query)
+            return None, _retry_after_ttl(resp, 600)
         resp.raise_for_status()
-        return resp.json().get("hits", [])
+        return resp.json().get("hits", []), None
     except Exception as e:
         log.debug("HN search failed for %s: %s", query, e)
-        return []
+        return None, _retry_after_ttl(None, 120, lo=30.0, hi=300.0)
 
 
 def fetch_mentions(symbol: str, hours: int = 168) -> dict:
@@ -122,9 +160,26 @@ def fetch_mentions(symbol: str, hours: int = 168) -> dict:
     company = TICKER_NAMES.get(sym)
 
     # Query both — symbol gives us low-noise hits, company name gives recall.
-    hits = _algolia_search(sym, hours=hours)
+    # Each call returns (hits_or_None, fail_ttl_or_None). Track whether ANY
+    # query was a genuine fetch FAILURE so we don't cache an empty result for
+    # the full hour after a transient 429.
+    fetch_failed = False
+    fail_ttl = None
+
+    sym_hits, sym_ttl = _algolia_search(sym, hours=hours)
+    if sym_hits is None:
+        fetch_failed = True
+        fail_ttl = sym_ttl
+        hits = []
+    else:
+        hits = sym_hits
     if company:
-        hits += _algolia_search(company, hours=hours)
+        co_hits, co_ttl = _algolia_search(company, hours=hours)
+        if co_hits is None:
+            fetch_failed = True
+            fail_ttl = fail_ttl or co_ttl
+        else:
+            hits += co_hits
 
     # Dedupe by HN object ID
     seen, deduped = set(), []
@@ -167,6 +222,10 @@ def fetch_mentions(symbol: str, hours: int = 168) -> dict:
         "company_searched": company,
         "window_hours": hours,
         "mention_count": len(scored),
+        # Distinguish "upstream failed/throttled us" from "we asked and there
+        # were genuinely no mentions" so consumers don't read a 429-induced
+        # empty as a real zero-mention signal.
+        "fetch_failed": fetch_failed,
         "stats": {
             "net_polarity": net_polarity,
             "avg_polarity": round(avg_polarity, 2),
@@ -176,5 +235,8 @@ def fetch_mentions(symbol: str, hours: int = 168) -> dict:
         },
         "mentions": scored[:25],  # cap response size
     }
-    _cache_set(cache_key, out, DEFAULT_TTL)
+    # On a fetch failure, cache for a short jittered (Retry-After-aware) window
+    # instead of the full hour so a recovered HN backend is picked up promptly.
+    ttl = (fail_ttl or _retry_after_ttl(None, 300, lo=30.0, hi=600.0)) if fetch_failed else DEFAULT_TTL
+    _cache_set(cache_key, out, ttl)
     return out

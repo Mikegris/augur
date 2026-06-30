@@ -128,10 +128,16 @@ def _score_revenue_momentum(fundamentals):
     return {"score": score, "detail": detail, "weight": 0.30}
 
 
-def _score_volume_divergence(symbol):
-    # type: (str) -> dict
-    """Signal 2: Volume Trend Divergence (weight 20%)."""
-    chart = fetcher.get_chart_data(symbol, period="3mo", interval="1d")
+def _score_volume_divergence(symbol, chart=None):
+    # type: (str, Optional[list]) -> dict
+    """Signal 2: Volume Trend Divergence (weight 20%).
+
+    `chart` (optional): a pre-fetched 3mo/1d series so the caller can share a
+    single get_chart_data round-trip with _score_sector_momentum. Falls back
+    to fetching its own series when not supplied.
+    """
+    if chart is None:
+        chart = fetcher.get_chart_data(symbol, period="3mo", interval="1d")
     if not chart or len(chart) < 40:
         return {"score": 50, "detail": "Insufficient chart data", "weight": 0.20}
 
@@ -349,35 +355,67 @@ def _score_analyst_velocity(fundamentals):
     return {"score": score, "detail": detail, "weight": 0.15}
 
 
-def _score_sector_momentum(symbol, fundamentals):
-    # type: (str, dict) -> dict
-    """Signal 5: Sector Relative Momentum (weight 15%)."""
+def _score_sector_momentum(symbol, fundamentals, chart=None):
+    # type: (str, dict, Optional[list]) -> dict
+    """Signal 5: Sector Relative Momentum (weight 15%).
+
+    `chart` (optional): a pre-fetched 3mo/1d series shared with
+    _score_volume_divergence so we don't double-fetch within one nowcast.
+    """
     sector = fundamentals.get("sector", "")
 
-    # Get sector performance
+    # Get sector performance. get_sector_performance() emits rows keyed on
+    # `sector` (the GICS name) and `symbol` (the sector ETF), with an INTRADAY
+    # `change_pct`. Match on `sector` (the old `name` key never existed, so
+    # this signal never fired).
     sector_perf = fetcher.get_sector_performance()
     sector_change = None
+    sector_window_return = None
+    sector_etf = None
     if sector_perf and sector:
         sector_lower = sector.lower()
         for sp in sector_perf:
-            sp_name = sp.get("name", "")
-            if sp_name and sector_lower in sp_name.lower():
+            sp_name = sp.get("sector", "")
+            if sp_name and (sector_lower in sp_name.lower() or sp_name.lower() in sector_lower):
                 sector_change = sp.get("change_pct")
+                sector_etf = sp.get("symbol")
                 break
 
-    # Get stock's 1-month return
-    chart = fetcher.get_chart_data(symbol, period="1mo", interval="1d")
-    if chart and len(chart) >= 2:
-        first_close = chart[0].get("close") or 0
-        last_close = chart[-1].get("close") or 0
-        if first_close > 0:
-            stock_return = (last_close - first_close) / first_close * 100
-        else:
-            stock_return = 0
-    else:
+    # Stock series (3mo/1d, shared with the volume-divergence signal).
+    if chart is None:
+        chart = fetcher.get_chart_data(symbol, period="3mo", interval="1d")
+    if not (chart and len(chart) >= 2):
         return {"score": 50, "detail": "Insufficient chart data for sector comparison", "weight": 0.15}
 
-    if sector_change is None:
+    # Use the trailing 1-month (~21 sessions) window so the comparison horizon
+    # is well-defined, then compute the SECTOR return over the SAME window
+    # (via the sector ETF) rather than subtracting an intraday sector tick from
+    # a multi-week stock return (incompatible horizons — the original bug).
+    window = chart[-21:] if len(chart) >= 21 else chart
+    first_close = window[0].get("close") or 0
+    last_close = window[-1].get("close") or 0
+    if first_close > 0:
+        stock_return = (last_close - first_close) / first_close * 100
+    else:
+        stock_return = 0
+
+    if sector_etf:
+        try:
+            sec_chart = fetcher.get_chart_data(sector_etf, period="3mo", interval="1d")
+            if sec_chart and len(sec_chart) >= 2:
+                sec_window = sec_chart[-len(window):] if len(sec_chart) >= len(window) else sec_chart
+                s_first = sec_window[0].get("close") or 0
+                s_last = sec_window[-1].get("close") or 0
+                if s_first > 0:
+                    sector_window_return = (s_last - s_first) / s_first * 100
+        except Exception:
+            sector_window_return = None
+
+    # Prefer the same-window sector return; fall back to the intraday tick only
+    # if the ETF series is unavailable (degraded, but better than nothing).
+    if sector_window_return is not None:
+        sector_change = sector_window_return
+    elif sector_change is None:
         sector_change = 0.0  # fallback
 
     try:
@@ -478,6 +516,15 @@ def nowcast_revenue(symbol):
         # Score all 6 signals, each wrapped in try/except
         signals = {}
 
+        # Fetch one 3mo/1d series and share it across the two chart-based
+        # signals (volume-divergence needs 3mo; sector-momentum slices a 1mo
+        # window out of it) so we don't pay two get_chart_data round-trips per
+        # symbol. Fail-open to None so each signal re-fetches on its own.
+        try:
+            shared_chart = fetcher.get_chart_data(symbol, period="3mo", interval="1d")
+        except Exception:
+            shared_chart = None
+
         try:
             signals["revenue_momentum"] = _score_revenue_momentum(fundamentals)
         except Exception as e:
@@ -485,7 +532,7 @@ def nowcast_revenue(symbol):
             signals["revenue_momentum"] = {"score": 50, "detail": "data unavailable", "weight": 0.30}
 
         try:
-            signals["volume_divergence"] = _score_volume_divergence(symbol)
+            signals["volume_divergence"] = _score_volume_divergence(symbol, chart=shared_chart)
         except Exception as e:
             logger.warning("Signal 2 (volume_divergence) failed for %s: %s", symbol, e)
             signals["volume_divergence"] = {"score": 50, "detail": "data unavailable", "weight": 0.20}
@@ -503,7 +550,7 @@ def nowcast_revenue(symbol):
             signals["analyst_velocity"] = {"score": 50, "detail": "data unavailable", "weight": 0.15}
 
         try:
-            signals["sector_momentum"] = _score_sector_momentum(symbol, fundamentals)
+            signals["sector_momentum"] = _score_sector_momentum(symbol, fundamentals, chart=shared_chart)
         except Exception as e:
             logger.warning("Signal 5 (sector_momentum) failed for %s: %s", symbol, e)
             signals["sector_momentum"] = {"score": 50, "detail": "data unavailable", "weight": 0.15}

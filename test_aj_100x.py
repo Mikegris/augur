@@ -203,6 +203,7 @@ def test_09_correlation_gate():
     # uncorrelated book (X trends smoothly, AAA oscillates) → allow
     osc = [100.0 + (5.0 if i % 2 else 0.0) for i in range(60)]
     A._closes = lambda s, p="6mo": (series if s == "X" else osc)
+    A.reset_cycle_cache()   # re-patched _closes -> drop the per-cycle returns memo
     check(A.entry_block_reason("X", "buy", 1, 100, {"max_book_correlation": 0.8}) is None,
           "09 correlation: allows a diversifying name")
 

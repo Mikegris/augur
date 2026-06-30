@@ -37,6 +37,42 @@ import numpy as np
 
 log = logging.getLogger("augur.factors")
 
+# US/Eastern tz for mapping bar epochs to the US trading date (Q6). zoneinfo is
+# stdlib on 3.9+ (no new dep); fall back to a fixed -05:00 offset if the tz DB
+# is missing — close enough for date-bucketing daily bars in the worst case.
+try:  # pragma: no cover - environment dependent
+    from zoneinfo import ZoneInfo
+    _US_EASTERN = ZoneInfo("America/New_York")
+except Exception:  # pragma: no cover
+    from datetime import timedelta as _timedelta
+    _US_EASTERN = timezone(_timedelta(hours=-5))
+
+# In-process memo of the parsed (dates, fac, rf) numpy arrays (Q17). Avoids
+# re-converting the full factor matrix from JSON lists on every per-symbol
+# regression. Short TTL so a daily refresh still propagates.
+import threading as _threading
+
+_FACTOR_ARRAYS_TTL = 3600.0  # seconds
+_factor_arrays_lock = _threading.Lock()
+_factor_arrays_box: Optional[Tuple[float, Tuple[List[str], np.ndarray, np.ndarray]]] = None
+
+
+def _factor_arrays_memo() -> Optional[Tuple[List[str], np.ndarray, np.ndarray]]:
+    with _factor_arrays_lock:
+        box = _factor_arrays_box
+    if box is None:
+        return None
+    ts, val = box
+    if (time.time() - ts) > _FACTOR_ARRAYS_TTL:
+        return None
+    return val
+
+
+def _store_factor_arrays_memo(val: Tuple[List[str], np.ndarray, np.ndarray]) -> None:
+    global _factor_arrays_box
+    with _factor_arrays_lock:
+        _factor_arrays_box = (time.time(), val)
+
 try:
     import cache_store  # type: ignore
 except Exception:  # pragma: no cover - cache_store should always be available
@@ -262,6 +298,13 @@ def _load_factor_data() -> Tuple[List[str], np.ndarray, np.ndarray]:
         payload = _fetch()
 
     if not payload:
+        # WHY (Q17): even with cache_store, the payload arrives as JSON lists
+        # that we re-`np.asarray` on every call. Fall back to a short in-process
+        # memo of the already-parsed numpy arrays so a burst of per-symbol
+        # regressions doesn't re-convert the full factor matrix each time.
+        memo = _factor_arrays_memo()
+        if memo is not None:
+            return memo
         raise RuntimeError("factor data unavailable")
     dates, fac_list, rf_list = payload
     if not dates:
@@ -269,9 +312,16 @@ def _load_factor_data() -> Tuple[List[str], np.ndarray, np.ndarray]:
         # cached an empty failure for some other reason.
         local = _load_csv_cache()
         if local is None:
+            memo = _factor_arrays_memo()
+            if memo is not None:
+                return memo
             raise RuntimeError("factor data unavailable (no local cache)")
+        _store_factor_arrays_memo(local)
         return local
-    return dates, np.asarray(fac_list, dtype=float), np.asarray(rf_list, dtype=float)
+    out = (dates, np.asarray(fac_list, dtype=float),
+           np.asarray(rf_list, dtype=float))
+    _store_factor_arrays_memo(out)
+    return out
 
 
 # ───────────────────────── stock returns ─────────────────────────
@@ -306,7 +356,15 @@ def _stock_log_returns(symbol: str, period_years: int) -> Tuple[List[str], np.nd
         if c is None or t is None or c <= 0:
             continue
         try:
-            d = datetime.fromtimestamp(int(t), tz=timezone.utc).strftime("%Y-%m-%d")
+            # WHY (Q6): the bar epoch is the session timestamp. Formatting it in
+            # UTC can roll a US market session onto the NEXT (or, for some feeds,
+            # PRIOR) calendar day — Fama-French factor rows are keyed by the US
+            # TRADING date, so a UTC date string mis-aligns the stock return with
+            # the factor row by a day (and silently drops the boundary days from
+            # the regression overlap). Convert to US/Eastern, then take the
+            # calendar date, so the key matches the French trading-date calendar.
+            d = (datetime.fromtimestamp(int(t), tz=timezone.utc)
+                 .astimezone(_US_EASTERN).strftime("%Y-%m-%d"))
         except Exception:
             continue
         closes.append(float(c))
@@ -342,7 +400,13 @@ def _newey_west_cov(X: np.ndarray, resid: np.ndarray, XtX_inv: np.ndarray,
     u = X * resid.reshape(-1, 1)  # (n, k) score contributions
     if lag is None:
         lag = int(np.floor(4.0 * (n / 100.0) ** (2.0 / 9.0)))
-    lag = max(0, min(int(lag), n - 1))
+    # WHY (Q8): with a small sample a large bandwidth weights autocovariances
+    # estimated from very few overlapping pairs (Γ_lag uses only n-lag terms),
+    # which makes the HAC covariance noisy and can even break PSD. Cap the lag
+    # at n//4 so every retained autocovariance is estimated from at least ~3/4
+    # of the sample — the standard rule-of-thumb upper bound for a Newey-West
+    # bandwidth relative to T.
+    lag = max(0, min(int(lag), n - 1, n // 4))
     # S = Γ0 + Σ_{l=1..lag} w_l (Γl + Γl')
     S = u.T @ u
     for l in range(1, lag + 1):
@@ -438,6 +502,21 @@ def _regress(
     rf: np.ndarray,
 ) -> Optional[Tuple[np.ndarray, np.ndarray, np.ndarray, float, int, str, np.ndarray]]:
     """Align stock + factor frames on date, run OLS, return (coef,t,p,R2,n,as_of,resid)."""
+    # WHY (Q17): the factor history spans ~60 years (~15k daily rows) while a
+    # stock regression only ever needs the ~1-5y window the stock has prices
+    # for. Building a dict over EVERY factor date per cache miss is wasted work
+    # (and memory) — slice the factor arrays to the stock's date span first, so
+    # fac_index only covers the dates that can actually match. Dates are
+    # zero-padded "YYYY-MM-DD" strings, so lexicographic compare == chronological.
+    if stock_dates:
+        lo = min(stock_dates)
+        hi = max(stock_dates)
+        span = [(i, d) for i, d in enumerate(fac_dates) if lo <= d <= hi]
+        if span:
+            sel = [i for i, _ in span]
+            fac_dates = [d for _, d in span]
+            fac = fac[sel]
+            rf = rf[sel]
     fac_index = {d: i for i, d in enumerate(fac_dates)}
     aligned_y: List[float] = []
     aligned_X: List[List[float]] = []

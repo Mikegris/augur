@@ -70,14 +70,26 @@ def update_position_state(book: Optional[Dict[str, Any]] = None) -> None:
                     "INSERT OR REPLACE INTO aj_position_state "
                     "(symbol, opened_at, peak_mark, last_mark, updated_at, last_exit_at) "
                     "VALUES (?,?,?,?,?,NULL)", (sym, now, mark, mark, now))
-        # positions that were open and are now flat -> record exit time
+        # positions that were open and are now flat -> record exit time AND
+        # clear any profit-ladder high-water mark so a re-opened position starts
+        # the ladder fresh. The operator's time-stop branch clears the ladder on
+        # a time-stop exit, but a TP/SL/trailing/manual close that flattens the
+        # position would otherwise leave a stale mark that suppresses the first
+        # rung on re-entry. Clearing here covers a flat-going via ANY exit path.
         for sym, row in existing.items():
             if sym not in positions and row.get("opened_at"):
                 conn.execute(
                     "UPDATE aj_position_state SET opened_at=NULL, peak_mark=NULL, "
                     "last_mark=?, updated_at=?, last_exit_at=? WHERE symbol=?",
                     (row.get("last_mark"), now, now, sym))
+                conn.execute("DELETE FROM settings WHERE key=?",
+                             ("__aj_ladder_" + sym,))
         conn.commit()
+    try:
+        import database as _db
+        _db._invalidate_settings_cache()
+    except Exception:
+        pass
 
 
 def _conn():
@@ -186,16 +198,24 @@ def expire_stale_orders(cfg: Optional[Dict[str, Any]] = None) -> int:
         "SELECT id, created_at FROM aj_orders WHERE state IN ('accepted','submitted')")
     if not open_orders:
         return 0
+    # Fetch the completed/recovered cycle start times ONCE (idx_aj_cycles_started_status)
+    # and count-since each order via bisect, instead of one COUNT(*) over
+    # aj_cycles per open order (the old O(orders × cycles) N+1 scan).
+    import bisect
+    cyc_rows = aj_db.query(
+        "SELECT started_at FROM aj_cycles WHERE status IN ('completed','recovered') "
+        "ORDER BY started_at ASC")
+    started = [r["started_at"] for r in cyc_rows if r.get("started_at")]
     n = 0
     import aj_execution
     for o in open_orders:
         created = aj_db.parse_iso(o.get("created_at"))
         if not created:
             continue
-        cycles_since = aj_db.query(
-            "SELECT COUNT(*) AS n FROM aj_cycles WHERE started_at > ? AND status IN ('completed','recovered')",
-            (o["created_at"],))
-        if cycles_since and int(cycles_since[0]["n"]) >= ttl:
+        # cycles with started_at strictly greater than the order's created_at.
+        # ISO-8601 UTC strings (utc_now_iso) sort lexicographically == chronologically.
+        cycles_since = len(started) - bisect.bisect_right(started, o["created_at"])
+        if cycles_since >= ttl:
             if aj_execution._set_state(o["id"], "expired"):
                 n += 1
                 aj_db.audit("order", {"order_id": o["id"], "expired": "TTL {} cycles".format(ttl)},
@@ -254,7 +274,15 @@ def enhanced_gate(symbol: str, side: str, qty: float, price: float,
         if wcap > 0 and side == "buy":
             import aj_risk
             import aj_alpha
-            marks = aj_risk._marks(list(positions.keys()) + [symbol])
+            # Resolve each held symbol (and the candidate) to its quote-convention
+            # symbol FIRST (crypto 'BTC' -> 'BTC-USD') so a bare crypto ticker
+            # never picks up an equity quote.
+            qsyms = {s: aj_risk._quote_symbol(s, p.get("asset_type") or "")
+                     for s, p in positions.items()}
+            cand_q = aj_risk._quote_symbol(symbol, aj_positions.infer_asset_type(symbol))
+            marks_q = aj_risk._marks(list(qsyms.values()) + [cand_q])
+            marks = {s: marks_q.get(qsyms[s]) for s in positions}
+            marks[symbol] = marks_q.get(cand_q)
             sym_val = 0.0
             for s, p in positions.items():
                 mv = float(p.get("qty") or 0) * (marks.get(s) or float(p.get("avg_cost") or 0))

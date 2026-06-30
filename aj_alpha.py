@@ -31,6 +31,7 @@ log = logging.getLogger("augur.aj_alpha")
 _SCORECARD_KEY = "__aj_scorecard"   # control-plane settings key (hidden)
 _ENTRY_CONVICTION_KEY = "__aj_entry_conviction"
 _TP_LADDER_KEY = "__aj_tp_ladder_fired"   # {symbol: [fired rung numbers]}
+_TP_LADDER_BASE_KEY = "__aj_tp_ladder_base_qty"   # {symbol: original position qty}
 
 
 # ── data wrappers (monkeypatchable in tests) ──────────────────────────────────
@@ -55,9 +56,68 @@ def _bars(symbol: str, period: str = "6mo") -> List[Dict[str, Any]]:
         return []
 
 
+# ── per-cycle memo caches (perf) ──────────────────────────────────────────────
+# A single cycle re-reads SPY closes once per symbol (relative-strength gate,
+# radar score, regime) and re-reads each held symbol's 6mo returns once per
+# candidate (correlation gates). Both are O(n^2) redundant network within a
+# cycle. We memoize on a SHORT TTL so reuse happens within a cycle while
+# staleness across cycles stays bounded with no external reset call required.
+# Fail-open: a cache miss/error always falls through to a fresh fetch.
+import time as _time
+import threading as _threading
+
+_CYCLE_TTL_S = 90.0
+_memo_lock = _threading.Lock()
+_market_closes_memo: Dict[str, Any] = {}      # period -> (expires_at, closes)
+_returns_memo: Dict[str, Any] = {}            # (symbol, period) -> (expires_at, returns)
+
+
+def reset_cycle_cache() -> None:
+    """Drop the per-cycle memo caches (SPY closes + per-symbol returns). Optional;
+    callers may invoke at a cycle boundary, but the caches also self-expire on a
+    short TTL so this is not required for correctness."""
+    with _memo_lock:
+        _market_closes_memo.clear()
+        _returns_memo.clear()
+
+
 def _market_closes(period: str = "1y") -> List[float]:
-    """Benchmark (SPY) closes for relative-strength / regime."""
-    return _closes("SPY", period)
+    """Benchmark (SPY) closes for relative-strength / regime. Memoized per cycle
+    (short TTL) so 150 candidates don't each refetch the same SPY series."""
+    try:
+        now = _time.time()
+        with _memo_lock:
+            hit = _market_closes_memo.get(period)
+            if hit and hit[0] > now:
+                return hit[1]
+        closes = _closes("SPY", period)
+        if closes:
+            with _memo_lock:
+                _market_closes_memo[period] = (now + _CYCLE_TTL_S, closes)
+        return closes
+    except Exception:
+        return _closes("SPY", period)
+
+
+def _symbol_returns_cached(symbol: str, period: str = "6mo") -> List[float]:
+    """Per-symbol daily returns over `period`, memoized per cycle (short TTL).
+    Used by the correlation gates so each held name's series is fetched once per
+    cycle instead of once per candidate (O(n) instead of O(n^2) network).
+    Fail-open: any error falls through to a fresh compute."""
+    try:
+        key = "{}|{}".format(str(symbol).upper(), period)
+        now = _time.time()
+        with _memo_lock:
+            hit = _returns_memo.get(key)
+            if hit and hit[0] > now:
+                return hit[1]
+        rets = _returns(_closes(symbol, period))
+        if rets:
+            with _memo_lock:
+                _returns_memo[key] = (now + _CYCLE_TTL_S, rets)
+        return rets
+    except Exception:
+        return _returns(_closes(symbol, period))
 
 
 def _paper_book() -> Dict[str, Any]:
@@ -309,19 +369,38 @@ def _clamp(x: float, lo: float, hi: float) -> float:
     return max(lo, min(hi, x))
 
 
-def _wilson_lower_bound(wins: int, n: int, z: float = 1.96) -> float:
-    """Wilson score interval LOWER bound for a binomial proportion. Used to
-    require statistically-supported evidence before a small-sample veto/adapt:
-    with few trades the lower bound stays near 0 even at a high raw win-rate, so
-    a 1/3 or 2/5 streak can't trigger a confident action. n<=0 -> 0.0."""
+def _wilson_bounds(wins: int, n: int, z: float = 1.96) -> Tuple[float, float]:
+    """Wilson score interval (lower, upper) for a binomial proportion, each
+    CLAMPED to [0, 1]. The single source of truth for both bounds so a hand-rolled
+    formula can't drift (e.g. an unclamped upper bound exceeding 1, which would
+    NEVER fall below 0.5 and so could never veto even a 0-win/4-loss name).
+    n<=0 -> (0.0, 0.0)."""
     if n <= 0:
-        return 0.0
+        return 0.0, 0.0
     phat = wins / n
     z2 = z * z
     denom = 1.0 + z2 / n
     centre = phat + z2 / (2 * n)
     margin = z * math.sqrt((phat * (1 - phat) + z2 / (4 * n)) / n)
-    return max(0.0, (centre - margin) / denom)
+    lo = (centre - margin) / denom
+    hi = (centre + margin) / denom
+    return max(0.0, min(1.0, lo)), max(0.0, min(1.0, hi))
+
+
+def _wilson_lower_bound(wins: int, n: int, z: float = 1.96) -> float:
+    """Wilson score interval LOWER bound for a binomial proportion. Used to
+    require statistically-supported evidence before a small-sample veto/adapt:
+    with few trades the lower bound stays near 0 even at a high raw win-rate, so
+    a 1/3 or 2/5 streak can't trigger a confident action. n<=0 -> 0.0."""
+    return _wilson_bounds(wins, n, z)[0]
+
+
+def _wilson_upper_bound(wins: int, n: int, z: float = 1.96) -> float:
+    """Wilson score interval UPPER bound for a binomial proportion, clamped to
+    [0,1]. A 0-win/4-loss name has an upper bound ≈ 0.49 (< 0.5), so it correctly
+    vetoes as a chronic loser; the clamp guarantees the bound can never exceed 1
+    and silently disable the veto."""
+    return _wilson_bounds(wins, n, z)[1]
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -368,10 +447,13 @@ def _kelly_factor(cfg: Dict[str, Any], decision: Optional[Dict[str, Any]]) -> fl
         # cold start: imply p from the forecast edge. `edge_pts` is already
         # (prob_up_cal - 0.5) x 100 — an ALREADY-calibrated edge in points — so
         # p = 0.5 + edge_pts/100 (NOT /200, which would re-halve a calibrated
-        # edge). Clamp to a sane band. Derive payoff from realized win/loss when
-        # any history exists, else assume 1:1.
-        edge = abs(float((decision or {}).get("edge_pts") or 0))
-        p = _clamp(0.5 + edge / 100.0, 0.5, 0.85)   # 10pp edge → p≈0.60
+        # edge). Use the SIGNED edge (NOT abs): a NEGATIVE edge implies p<0.5, so
+        # Kelly returns a non-positive bet and size shrinks toward zero instead of
+        # the old abs() which clamped p>=0.5 and sized UP a name with NEGATIVE
+        # edge. Clamp to a sane symmetric band [0.15, 0.85]. Derive payoff from
+        # realized win/loss when any history exists, else assume 1:1.
+        edge = float((decision or {}).get("edge_pts") or 0)
+        p = _clamp(0.5 + edge / 100.0, 0.15, 0.85)   # +10pp → p≈0.60; -10pp → p≈0.40
         b = b_realized if (b_realized and b_realized > 0) else 1.0
     kelly = p - (1.0 - p) / b if b > 0 else 0.0
     bet = _clamp(frac * kelly, 0.0, 1.0)
@@ -434,11 +516,9 @@ def _symbol_perf_factor(symbol: str, cfg: Dict[str, Any]) -> float:
     # a fragile 1/3-style raw streak. A small sample keeps the upper bound high
     # and the name is throttled (below) rather than hard-skipped.
     if n >= 4 and net < 0:
-        z2 = 1.96 * 1.96
-        denom = 1.0 + z2 / n
-        centre = wr + z2 / (2 * n)
-        margin = 1.96 * math.sqrt((wr * (1 - wr) + z2 / (4 * n)) / n)
-        wilson_upper = (centre + margin) / denom
+        # Shared, CLAMPED Wilson upper bound (never > 1) so a 0-win/4-loss name
+        # (upper ≈ 0.49 < 0.5) correctly vetoes instead of slipping through.
+        wilson_upper = _wilson_upper_bound(wins, n)
         if wilson_upper < 0.5:
             return 0.0                      # chronic loser — skip the name
     if net > 0 and wr >= 0.5:
@@ -486,10 +566,10 @@ def _correlation_budget_factor(symbol: str, cfg: Dict[str, Any]) -> float:
         others = [s for s in positions if str(s).upper() != symbol.upper()]
         if not others:
             return 1.0
-        sym_ret = _returns(_closes(symbol, "6mo"))
+        sym_ret = _symbol_returns_cached(symbol, "6mo")
         corrs = []
         for s in others:
-            c = _correlation(sym_ret, _returns(_closes(s, "6mo")))
+            c = _correlation(sym_ret, _symbol_returns_cached(s, "6mo"))
             if c is not None:
                 corrs.append(max(0.0, c))      # only positive corr adds risk
         if not corrs:
@@ -568,11 +648,9 @@ def entry_block_reason(symbol: str, side: str, qty: float, price: float,
         book = _paper_book()
         positions = book.get("positions") or {}
         held = float((positions.get(symbol) or {}).get("qty") or 0)
-        # Separate per-window caches: gates 6/7/8 use a 1y series, gate 9
-        # (correlation vs the book) needs a 6mo series. Sharing one `closes`
-        # made the window order-dependent and frequently the wrong length.
+        # gates 6/7/8 use a 1y series (cached here); gate 9 (correlation vs the
+        # book) uses 6mo returns via the per-cycle _symbol_returns_cached memo.
         closes_1y: Optional[List[float]] = None
-        closes_6mo: Optional[List[float]] = None
 
         # 6: momentum confirmation — price must be above the N-day SMA
         mdays = int(cfg.get("momentum_filter_days") or 0)
@@ -602,13 +680,12 @@ def entry_block_reason(symbol: str, side: str, qty: float, price: float,
         # 9: correlation gate — block if too correlated with the existing book
         ccap = float(cfg.get("max_book_correlation") or 0)
         if ccap > 0 and positions:
-            closes_6mo = closes_6mo if closes_6mo is not None else _closes(symbol, "6mo")
-            sym_ret_series = _returns(closes_6mo)
+            sym_ret_series = _symbol_returns_cached(symbol, "6mo")
             corrs = []
             for s in positions:
                 if s == symbol:
                     continue
-                c = _correlation(sym_ret_series, _returns(_closes(s, "6mo")))
+                c = _correlation(sym_ret_series, _symbol_returns_cached(s, "6mo"))
                 if c is not None:
                     corrs.append(c)
             if corrs:
@@ -643,11 +720,18 @@ def entry_block_reason(symbol: str, side: str, qty: float, price: float,
                         sec_val += mv
                 add = qty * price
                 sec_val += add
-                # Weight against ACCOUNT EQUITY (cash + positions MV incl. the
-                # add), not just invested notional — so the cap is blind neither
-                # to cash nor to leverage. With no configured cash (default),
-                # equity == positions MV and behaviour is unchanged.
-                equity = account_equity(positions, marks) + add
+                # Weight against PROJECTED ACCOUNT EQUITY after the buy. A buy is a
+                # CASH→POSITION swap: to the extent it's funded by cash, cash drops
+                # by `add` while positions MV rises by `add`, so total equity is
+                # UNCHANGED — adding the full `add` to the denominator (the old
+                # behaviour) double-counted a cash-funded buy and understated the
+                # projected sector weight. Only the UNFUNDED remainder (add beyond
+                # available cash) actually grows equity. With no configured cash
+                # (default), the whole `add` is unfunded and equity == positions MV
+                # incl. the add — preserving the prior behaviour exactly.
+                base_equity = account_equity(positions, marks)
+                unfunded = max(0.0, add - _paper_cash())
+                equity = base_equity + unfunded
                 if equity > 0 and sec_val / equity * 100.0 > scap:
                     return "{} sector {:.0f}% > {:g}% cap".format(sec, sec_val / equity * 100.0, scap)
 
@@ -697,13 +781,19 @@ def extra_exit_signals(cfg: Dict[str, Any]) -> List[Dict[str, Any]]:
         marks = aj_risk._marks(list(positions.keys()))
         state = {r["symbol"]: r for r in aj_db.query("SELECT * FROM aj_position_state")}
         ladder_fired = _tp_ladder_fired() if (ladder and tp > 0) else {}
+        ladder_base = _tp_ladder_base() if (ladder and tp > 0) else {}
         ladder_dirty = False
         if ladder and tp > 0:
-            # prune fired-rung memory for symbols no longer held (re-entry resets)
+            # prune fired-rung + base-qty memory for symbols no longer held
+            # (re-entry resets both so the next round-trip sizes off its own base)
             held_syms = {str(s).upper() for s in positions}
             for s in list(ladder_fired.keys()):
                 if s not in held_syms:
                     del ladder_fired[s]
+                    ladder_dirty = True
+            for s in list(ladder_base.keys()):
+                if s not in held_syms:
+                    del ladder_base[s]
                     ladder_dirty = True
         for sym, p in positions.items():
             qty = float(p.get("qty") or 0)
@@ -733,19 +823,32 @@ def extra_exit_signals(cfg: Dict[str, Any]) -> List[Dict[str, Any]]:
 
             # 14: take-profit ladder — scale out a third at tp / 1.5tp / 2tp.
             # Each rung fires at most once per open position (tracked in
-            # _TP_LADDER_KEY, reset on going flat) so repeat cycles past a rung
-            # don't keep dumping a fraction of the shrinking remainder.
+            # _TP_LADDER_KEY, reset on going flat). Intermediate rungs sell a
+            # fixed fraction of the ORIGINAL position size (base_qty, captured the
+            # first time we see the position), NOT of the shrinking LIVE qty — so
+            # the scale-out is a consistent thirds ladder regardless of how much
+            # has already been sold. The final rung liquidates whatever remains.
             if ladder and tp > 0:
                 key = str(sym).upper()
                 fired = set(ladder_fired.get(key) or [])
+                # Capture/grow the base size (max qty seen since open). A later
+                # add increases the base so fractions track the full position.
+                base = float(ladder_base.get(key) or 0.0)
+                if qty > base:
+                    base = qty
+                    ladder_base[key] = base
+                    ladder_dirty = True
+                third = round(base / 3.0, 6)
                 if gain >= 2 * tp and 3 not in fired:
+                    # final rung: sell the remaining live qty (never more than held)
                     out.append(_exit(sym, qty, "tp-ladder rung-3 +{:.1f}%".format(gain), mark))
                     fired.update({1, 2, 3})
                     ladder_fired[key] = sorted(fired)
                     ladder_dirty = True
                     continue
                 if gain >= 1.5 * tp and 2 not in fired:
-                    out.append(_exit(sym, round(qty / 2, 6), "tp-ladder rung-2 +{:.1f}%".format(gain), mark))
+                    # rung-2: a third of the ORIGINAL position (capped at live qty)
+                    out.append(_exit(sym, min(third, round(qty, 6)), "tp-ladder rung-2 +{:.1f}%".format(gain), mark))
                     # Only mark rung-2 fired: rung-1 wasn't sold here, so a later
                     # cycle may still scale out its third per the thirds ladder.
                     fired.add(2)
@@ -753,7 +856,8 @@ def extra_exit_signals(cfg: Dict[str, Any]) -> List[Dict[str, Any]]:
                     ladder_dirty = True
                     continue
                 if gain >= tp and 1 not in fired:
-                    out.append(_exit(sym, round(qty / 3, 6), "tp-ladder rung-1 +{:.1f}%".format(gain), mark))
+                    # rung-1: a third of the ORIGINAL position (capped at live qty)
+                    out.append(_exit(sym, min(third, round(qty, 6)), "tp-ladder rung-1 +{:.1f}%".format(gain), mark))
                     fired.add(1)
                     ladder_fired[key] = sorted(fired)
                     ladder_dirty = True
@@ -767,6 +871,7 @@ def extra_exit_signals(cfg: Dict[str, Any]) -> List[Dict[str, Any]]:
                     continue
         if ladder and tp > 0 and ladder_dirty:
             _set_tp_ladder_fired(ladder_fired)
+            _set_tp_ladder_base(ladder_base)
     except Exception:
         log.exception("extra_exit_signals failed -> none")
     return out
@@ -787,6 +892,25 @@ def _set_tp_ladder_fired(d: Dict[str, List[int]]) -> None:
         aj_db.set_setting_raw(_TP_LADDER_KEY, json.dumps(d))
     except Exception:
         log.debug("tp-ladder state write failed", exc_info=True)
+
+
+def _tp_ladder_base() -> Dict[str, float]:
+    """Original (max-seen) position size per symbol for the TP ladder (persisted,
+    reset on going flat). Intermediate rungs sell fixed fractions of THIS, not the
+    shrinking live qty, so the scale-out stays a consistent thirds ladder."""
+    try:
+        raw = aj_db.get_setting_raw(_TP_LADDER_BASE_KEY)
+        d = json.loads(raw) if raw else {}
+        return {str(k).upper(): float(v) for k, v in d.items()} if isinstance(d, dict) else {}
+    except Exception:
+        return {}
+
+
+def _set_tp_ladder_base(d: Dict[str, float]) -> None:
+    try:
+        aj_db.set_setting_raw(_TP_LADDER_BASE_KEY, json.dumps(d))
+    except Exception:
+        log.debug("tp-ladder base-qty write failed", exc_info=True)
 
 
 def _exit(symbol: str, qty: float, reason: str, mark: float) -> Dict[str, Any]:
@@ -847,9 +971,19 @@ def recent_hit_rate(n: int = 20) -> Optional[float]:
 
 def effective_config(cfg: Dict[str, Any]) -> Dict[str, Any]:
     """Return a cfg copy with adaptive (16) + regime (17) threshold nudges
-    applied. A no-op when both are off, so callers can always route through it."""
+    applied. A no-op when both are off, so callers can always route through it.
+
+    The adaptive (16) and regime (17) nudges previously each clamped the SAME
+    field in sequence, so the result depended on application ORDER (a clamp from
+    one could cap the headroom of the other). We now accumulate ONE combined
+    delta per field from both rules and clamp ONCE at the end — order-independent.
+    """
     eff = dict(cfg)
     try:
+        buy_delta = 0.0
+        sell_delta = 0.0
+        edge_delta = 0.0
+
         # 16: adaptive thresholds — tune to recent realized hit-rate, but only
         # on statistically-supported evidence: tighten when the Wilson UPPER
         # bound is still < 0.40 (confident the streak is bad), loosen when the
@@ -860,28 +994,35 @@ def effective_config(cfg: Dict[str, Any]) -> Dict[str, Any]:
             det = recent_hit_rate_detail(20)
             if det is not None:
                 _hr, _wins, _ntr = det
-                lo = _wilson_lower_bound(_wins, _ntr)
-                z2 = 1.96 * 1.96
-                _denom = 1.0 + z2 / _ntr
-                _centre = _hr + z2 / (2 * _ntr)
-                _margin = 1.96 * math.sqrt((_hr * (1 - _hr) + z2 / (4 * _ntr)) / _ntr)
-                hi = (_centre + _margin) / _denom
+                lo, hi = _wilson_bounds(_wins, _ntr)
                 if hi < 0.40:           # confidently bleeding — demand more edge
-                    eff["buy_prob_threshold"] = _clamp(float(eff.get("buy_prob_threshold") or 0.55) + 0.03, 0.5, 0.75)
-                    eff["min_edge_pct_pts"] = float(eff.get("min_edge_pct_pts") or 0) + 1.0
+                    buy_delta += 0.03
+                    edge_delta += 1.0
                 elif lo > 0.55:          # confident hot hand — capture a touch more
-                    eff["buy_prob_threshold"] = _clamp(float(eff.get("buy_prob_threshold") or 0.55) - 0.02, 0.50, 0.70)
+                    buy_delta -= 0.02
         # 17: regime-adaptive profile
         if cfg.get("regime_adaptive"):
             regime = detect_regime()
             eff["_regime"] = regime
             if regime == "bull":
-                eff["buy_prob_threshold"] = _clamp(float(eff.get("buy_prob_threshold") or 0.55) - 0.03, 0.50, 0.70)
-                eff["min_edge_pct_pts"] = max(0.0, float(eff.get("min_edge_pct_pts") or 0) - 0.5)
+                buy_delta -= 0.03
+                edge_delta -= 0.5
             elif regime == "bear":
-                eff["buy_prob_threshold"] = _clamp(float(eff.get("buy_prob_threshold") or 0.55) + 0.05, 0.50, 0.80)
-                eff["sell_prob_threshold"] = _clamp(float(eff.get("sell_prob_threshold") or 0.45) - 0.03, 0.30, 0.50)
-                eff["min_edge_pct_pts"] = float(eff.get("min_edge_pct_pts") or 0) + 1.5
+                buy_delta += 0.05
+                sell_delta -= 0.03
+                edge_delta += 1.5
+
+        # Apply the combined deltas ONCE, then clamp ONCE — so the two rules can't
+        # fight order-dependently. Bands are the union of the per-rule bands.
+        if buy_delta != 0.0:
+            eff["buy_prob_threshold"] = _clamp(
+                float(eff.get("buy_prob_threshold") or 0.55) + buy_delta, 0.50, 0.80)
+        if sell_delta != 0.0:
+            eff["sell_prob_threshold"] = _clamp(
+                float(eff.get("sell_prob_threshold") or 0.45) + sell_delta, 0.30, 0.50)
+        if edge_delta != 0.0:
+            eff["min_edge_pct_pts"] = max(0.0,
+                float(eff.get("min_edge_pct_pts") or 0) + edge_delta)
     except Exception:
         log.exception("effective_config failed -> base cfg")
         return dict(cfg)

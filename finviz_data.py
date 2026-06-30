@@ -72,6 +72,13 @@ def _safe_float(v):
         return None
 
 
+def _pct(v):
+    """Finviz group-overview "Change" ships as a decimal fraction (0.0123 for
+    +1.23%). Convert to a percent number (1.23). Returns None on bad input."""
+    f = _safe_float(v)
+    return None if f is None else round(f * 100, 2)
+
+
 def sector_heatmap() -> dict:
     """All 11 GICS sectors with valuation + day change. Maps directly to a
     grid layout in the UI. The ``change_1w`` field name is preserved for
@@ -108,10 +115,14 @@ def sector_heatmap() -> dict:
             "fwd_pe":       _safe_float(r.get("Fwd P/E")),
             "peg":          _safe_float(r.get("PEG")),
             "float_short":  _safe_float(r.get("Float Short")),
-            # Despite the field name, this is the current-day change (decimal
-            # fraction) from Finviz's sector-overview "Change" column, not a
-            # 1-week return. Name retained for UI-consumer compatibility.
-            "change_1w":    _safe_float(r.get("Change")),
+            # Finviz's sector-overview "Change" column is the CURRENT-DAY
+            # percent change expressed as a decimal FRACTION (0.0123 == +1.23%).
+            # It was being surfaced raw (~100x too small) AND mislabeled as a
+            # 1-week return. Scale to percent (×100) and expose under a correctly
+            # named field; `change_1w` is retained (now also in percent) for
+            # backward-compat with existing UI consumers.
+            "change_today_pct": _pct(r.get("Change")),
+            "change_1w":        _pct(r.get("Change")),
             "volume":       _safe_float(r.get("Volume")),
             "recom":        _safe_float(r.get("Recom")),
         })

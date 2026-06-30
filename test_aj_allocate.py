@@ -66,6 +66,9 @@ def _reset():
     AL._sector_of = lambda s: None
     A.account_equity = lambda *a, **k: 0.0
     AL._closes = lambda s, p="6mo": []
+    # drop the per-cycle returns memo so each test's _closes patch is honored
+    if hasattr(AL, "reset_cycle_cache"):
+        AL.reset_cycle_cache()
 
 
 # ── tests ───────────────────────────────────────────────────────────────────

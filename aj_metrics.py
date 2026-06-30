@@ -18,6 +18,16 @@ def _today() -> str:
     return aj_db.utc_now().strftime("%Y-%m-%d")
 
 
+def _utc_day_bounds() -> tuple:
+    """[start, end) ISO-UTC instants for the current UTC date, so a range scan
+    can use a created_at/ts index instead of an un-indexable substr() filter.
+    Matches the old `substr(col,1,10) = today` semantics (UTC calendar day)."""
+    from datetime import timedelta
+    start = aj_db.utc_now().replace(hour=0, minute=0, second=0, microsecond=0)
+    end = start + timedelta(days=1)
+    return (start.isoformat(), end.isoformat())
+
+
 def cumulative_pnl(mode: str = "paper") -> Dict[str, Any]:
     import aj_positions
     book = aj_positions.paper_book(mode)
@@ -26,9 +36,14 @@ def cumulative_pnl(mode: str = "paper") -> Dict[str, Any]:
     try:
         import aj_risk
         positions = book["positions"]
-        marks = aj_risk._marks(list(positions.keys()))
+        # Resolve each held symbol to its quote-convention symbol FIRST (crypto
+        # 'BTC' -> 'BTC-USD') so a bare crypto ticker never picks up an equity
+        # quote — mirroring compute_day_pnl.
+        qsyms = {sym: aj_risk._quote_symbol(sym, p.get("asset_type") or "")
+                 for sym, p in positions.items()}
+        marks = aj_risk._marks(list(qsyms.values()))
         for sym, p in positions.items():
-            mark = marks.get(sym)
+            mark = marks.get(qsyms[sym])
             if mark is None:
                 continue
             try:
@@ -70,8 +85,15 @@ def order_stats() -> Dict[str, Any]:
 
 
 def gate_stats(day: bool = True) -> Dict[str, Any]:
-    where = "WHERE substr(created_at,1,10) = ?" if day else ""
-    params = (_today(),) if day else ()
+    # Range scan on created_at (idx_aj_risk_events_created) instead of an
+    # un-indexable substr() filter; same UTC-calendar-day semantics.
+    if day:
+        start, end = _utc_day_bounds()
+        where = "WHERE created_at >= ? AND created_at < ?"
+        params = (start, end)
+    else:
+        where = ""
+        params = ()
     rows = aj_db.query(
         "SELECT decision, COUNT(*) AS n FROM aj_risk_events {} GROUP BY decision".format(where),
         params)
@@ -84,8 +106,14 @@ def recon_stats() -> Dict[str, Any]:
 
 
 def routing_stats(day: bool = True) -> Dict[str, Any]:
-    where = "WHERE substr(ts,1,10) = ?" if day else ""
-    params = (_today(),) if day else ()
+    # Range scan on ts (idx_aj_routing_ts) instead of an un-indexable substr().
+    if day:
+        start, end = _utc_day_bounds()
+        where = "WHERE ts >= ? AND ts < ?"
+        params = (start, end)
+    else:
+        where = ""
+        params = ()
     rows = aj_db.query(
         "SELECT COUNT(*) AS calls, "
         "SUM(ok) AS oks, SUM(escalated) AS escalations, "
@@ -130,7 +158,7 @@ def status() -> Dict[str, Any]:
     import aj_risk
     out = {
         # AJTA agent version. v3.4 adds the Analyst Council advisory layer.
-        "version": "3.10.0",
+        "version": "3.11.0",
         "trading_enabled": cfg.get("trading_enabled"),
         "live_trading_enabled": cfg.get("live_trading_enabled"),
         "session": aj_db.market_session(),
@@ -146,7 +174,7 @@ def status() -> Dict[str, Any]:
         "recon": recon_stats(),
         "routing_today": routing_stats(),
         "alerts": alerts(),
-        "audit_chain": aj_db.verify_audit_chain(),
+        "audit_chain": aj_db.verify_audit_chain(quick=True),
     }
     try:
         out["day_pnl"] = aj_risk.compute_day_pnl()

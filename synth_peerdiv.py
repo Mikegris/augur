@@ -711,7 +711,15 @@ def _enrich_with_stats(
             # were ranked against each other in the top-K. Multiply MAD by the
             # consistency constant 1.4826 so 1.4826·MAD ≈ σ — now both branches
             # produce comparable, σ-equivalent z-scores.
-            if mad > 0:
+            # SCALE-STABILITY FIX: at n==3 the MAD is frequently exactly 0
+            # (two of three peers identical), so the branch would flip to the
+            # stdev fallback on some metrics and use 1.4826·MAD on others —
+            # ranking σ-equivalent z's against MAD-derived z's on DIFFERENT
+            # effective scales within the same top-K. Require n>=4 before
+            # trusting the MAD; below that, use the stdev UNIFORMLY for every
+            # metric so all z's in the ranking share one scale. (1.4826·MAD ≈ σ
+            # for normal data, so both branches stay σ-comparable when used.)
+            if len(peer_vals) >= 4 and mad > 0:
                 denom = 1.4826 * mad
             else:
                 sd = _stdev(peer_vals)

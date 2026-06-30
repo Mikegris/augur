@@ -706,6 +706,37 @@ def get_transaction_stats():
                 "most_traded_symbol": None}
 
 
+def get_transaction_summary():
+    """Sum BUY/SELL `total` and count rows in a single SQL aggregate —
+    avoids loading the entire transactions table into Python just to sum it.
+    Actions are stored upper-cased, but upper(trim(...)) tolerates rows from
+    older builds / external imports. Returns zeros (never raises)."""
+    try:
+        conn = get_conn()
+        rows = conn.execute(
+            """SELECT upper(trim(action)) AS act,
+                      COALESCE(SUM(total), 0) AS sum_total,
+                      COUNT(*) AS cnt
+               FROM transactions
+               GROUP BY upper(trim(action))"""
+        ).fetchall()
+        total_buy = 0.0
+        total_sell = 0.0
+        count = 0
+        for r in rows:
+            cnt = int(r["cnt"] or 0)
+            count += cnt
+            act = r["act"]
+            amt = float(r["sum_total"] or 0)
+            if act == "BUY":
+                total_buy += amt
+            elif act == "SELL":
+                total_sell += amt
+        return {"total_buy": total_buy, "total_sell": total_sell, "count": count}
+    except Exception:
+        return {"total_buy": 0.0, "total_sell": 0.0, "count": 0}
+
+
 # ── Price Alerts ──────────────────────────────────────────────────────────────
 
 def get_price_alerts(include_triggered=False):
@@ -1111,6 +1142,39 @@ def get_cached_filing(accession):
                 d["ai_key_points"] = []
         return d
     return None
+
+
+def get_cached_filings(accessions):
+    """Batch variant of get_cached_filing: one query for many accessions.
+    Returns {accession: filing_dict} for those present & valid within 24h
+    (missing/expired keys are simply absent). Avoids the N+1 single-row
+    lookups the intel feed used to issue per filing."""
+    accs = [a for a in (accessions or []) if a]
+    if not accs:
+        return {}
+    out = {}
+    conn = get_conn()
+    # Chunk the IN-list so we never blow past SQLite's bound-variable limit
+    # (default 999) on a large filing batch.
+    CHUNK = 500
+    for i in range(0, len(accs), CHUNK):
+        chunk = accs[i:i + CHUNK]
+        placeholders = ",".join("?" * len(chunk))
+        rows = conn.execute(
+            "SELECT * FROM sec_filings_cache "
+            "WHERE accession IN (%s) "
+            "AND cached_at > datetime('now', '-24 hours')" % placeholders,
+            chunk,
+        ).fetchall()
+        for row in rows:
+            d = dict(row)
+            if d.get("ai_key_points"):
+                try:
+                    d["ai_key_points"] = json.loads(d["ai_key_points"])
+                except Exception:
+                    d["ai_key_points"] = []
+            out[d["accession"]] = d
+    return out
 
 
 def cache_filing(accession, ticker, form_type, filing_date, description, filing_text, ai_result):

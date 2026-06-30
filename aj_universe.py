@@ -219,7 +219,11 @@ def screen(cfg: Dict[str, Any] = None) -> List[str]:
             if dvol < min_dvol:
                 continue
             mcap = _num(q.get("market_cap"))
-            if min_mcap > 0 and 0 < mcap < min_mcap:
+            # When a min-market-cap floor is set, an UNKNOWN cap (mcap<=0, since
+            # _num coerces missing/NaN to 0) must FAIL the screen rather than
+            # bypass it — otherwise every name with no cap data slips through the
+            # large-cap filter.
+            if min_mcap > 0 and mcap < min_mcap:
                 continue
             momentum = abs(_num(q.get("change_pct")))
             scored.append((sym, momentum, dvol))

@@ -146,7 +146,8 @@ def test_insider_signal():
         check(sig is not None and sig["prob_up"] < 0.5 and _in_unit(sig["prob_up"]),
               "insider low composite -> prob < 0.5")
 
-    # Poor coverage dampens the tilt toward neutral.
+    # Poor coverage dampens the CONFIDENCE channel ONLY (no double penalty): the
+    # prob tilt stays at full strength while confidence is cut.
     with _Patch((synthetic_insider, "compute_composite",
                  lambda sym: {"composite_score": 90, "coverage": 1.0,
                               "convergence_count": 5})):
@@ -155,8 +156,10 @@ def test_insider_signal():
                  lambda sym: {"composite_score": 90, "coverage": 0.17,
                               "convergence_count": 1})):
         thin = S.insider_signal("AAA")
-    check(thin["prob_up"] < full["prob_up"] and thin["confidence"] < full["confidence"],
-          "insider poor coverage -> prob closer to neutral + lower confidence")
+    check(thin["confidence"] < full["confidence"],
+          "insider poor coverage -> lower confidence")
+    check(_approx(thin["prob_up"], full["prob_up"]),
+          "insider poor coverage -> prob tilt NOT also damped (single penalty)")
 
     with _Patch((synthetic_insider, "compute_composite",
                  lambda sym: {"error": "compute failed"})):

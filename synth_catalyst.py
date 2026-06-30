@@ -76,6 +76,7 @@ from __future__ import annotations
 import datetime
 import hashlib
 import logging
+import threading
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 log = logging.getLogger("augur.synth.catalyst")
@@ -220,24 +221,19 @@ def _normalize_symbols(symbols: Optional[Sequence[str]]) -> List[str]:
 # ── Calendar collection ──────────────────────────────────────────────────
 
 def _upcoming_earnings_for(symbol: str, horizon_end: datetime.date,
-                           today: datetime.date) -> Optional[datetime.date]:
+                           today: datetime.date,
+                           cal: Optional[Dict[str, Any]] = None) -> Optional[datetime.date]:
     """Return the next earnings date for `symbol` if it falls within
     [today, horizon_end]. Otherwise None.
 
-    Uses `yfinance.Ticker(symbol).calendar` first (cheap, one HTTP), and
-    falls back to `earnings_dates` (the upper rows are future entries
-    where `Reported EPS` is NaN — those are scheduled releases).
+    Uses a pre-fetched `yfinance.Ticker(symbol).calendar` (`cal`) first when
+    supplied — shared with the ex-div lookup so we pull the calendar once per
+    symbol — and falls back to `earnings_dates` (the upper rows are future
+    entries where `Reported EPS` is NaN — those are scheduled releases).
     """
+    # 1) Ticker.calendar — fastest, returns the single next date. Use the
+    # caller-supplied calendar when present so we don't re-fetch it.
     try:
-        import yfinance as yf
-        t = yf.Ticker(symbol)
-    except Exception as e:
-        log.debug("catalyst: yfinance unavailable for %s: %s", symbol, e)
-        return None
-
-    # 1) Ticker.calendar — fastest, returns the single next date.
-    try:
-        cal = t.calendar
         if cal:
             dates_list = cal.get("Earnings Date") or []
             if not isinstance(dates_list, list):
@@ -250,6 +246,12 @@ def _upcoming_earnings_for(symbol: str, horizon_end: datetime.date,
         log.debug("catalyst: calendar(%s) failed: %s", symbol, e)
 
     # 2) earnings_dates — covers names where calendar is empty.
+    try:
+        import yfinance as yf
+        t = yf.Ticker(symbol)
+    except Exception as e:
+        log.debug("catalyst: yfinance unavailable for %s: %s", symbol, e)
+        return None
     try:
         ed = t.earnings_dates
         if ed is not None and not ed.empty:
@@ -304,18 +306,22 @@ def _upcoming_opex(horizon_end: datetime.date,
 
 
 def _upcoming_ex_div(symbol: str, horizon_end: datetime.date,
-                     today: datetime.date) -> Optional[datetime.date]:
+                     today: datetime.date,
+                     cal: Optional[Dict[str, Any]] = None) -> Optional[datetime.date]:
     """Next ex-dividend date for `symbol` (yfinance Ticker.calendar carries
     a forward-looking `Ex-Dividend Date` for active dividend payers).
 
-    Falls back to None when not available — `fetcher.get_dividend_data()`
-    only carries past payments."""
-    try:
-        import yfinance as yf
-        t = yf.Ticker(symbol)
-        cal = t.calendar or {}
-    except Exception:
-        return None
+    Uses the caller-supplied calendar (`cal`, shared with the earnings lookup
+    so we pull it once per symbol) when present; otherwise fetches it. Falls
+    back to None when not available — `fetcher.get_dividend_data()` only
+    carries past payments."""
+    if cal is None:
+        try:
+            import yfinance as yf
+            cal = yf.Ticker(symbol).calendar or {}
+        except Exception:
+            return None
+    cal = cal or {}
     raw = cal.get("Ex-Dividend Date")
     if raw is None:
         return None
@@ -330,7 +336,71 @@ def _upcoming_ex_div(symbol: str, horizon_end: datetime.date,
 
 # ── Per-event enrichment helpers ─────────────────────────────────────────
 
-def _implied_move_pct(symbol: str, event_date: datetime.date) -> Optional[float]:
+# Request-scoped memo for option-implied move/skew. Both _implied_move_pct and
+# _implied_skew resolve the SAME (symbol, chosen_expiry) and pull the SAME RND
+# chain — and they're called once per (symbol × event_date). For FOMC/OPEX,
+# that's O(symbols × dates) identical chain pulls. We memoize the resolved RND
+# payload per (symbol, chosen_expiry) for the life of one request. Keyed by the
+# resolved expiry (not event_date) so two events that snap to the same expiry
+# share one pull. A lock guards the dict because the FOMC/OPEX loops touch the
+# same symbol's key serially while the earnings phase runs symbols in parallel
+# (disjoint symbols → disjoint keys, but the lock keeps it correct regardless).
+_RND_CACHE_LOCK = threading.Lock()
+
+
+def _resolve_expiry(symbol: str, event_date: datetime.date) -> Optional[str]:
+    """Resolve the nearest option expiry on/after `event_date`.
+
+    NOTE: fetcher exports ``get_options_dates`` (not ``get_option_expiries``),
+    so a hasattr check on the latter would always be False and fall through to
+    a bare yf.Ticker(symbol).options — which returns () under rate-limit
+    (v0.1.6 audit pattern). sorted() so "first expiry on/after the event" is
+    genuinely the nearest even when the provider returns dates out of order.
+    Returns None when nothing on/after the event is listed (RND picks default).
+    """
+    expiries: list = []
+    try:
+        if fetcher is not None and hasattr(fetcher, "get_options_dates"):
+            expiries = fetcher.get_options_dates(symbol) or []
+    except Exception:
+        expiries = []
+    ev_iso = event_date.isoformat()
+    for exp in sorted(expiries):
+        if exp >= ev_iso:
+            return exp
+    return None
+
+
+def _rnd_for(symbol: str, event_date: datetime.date,
+             rnd_cache: Optional[Dict[Tuple[str, Optional[str]], Any]] = None) -> Optional[Dict[str, Any]]:
+    """Fetch (and memoize) the RND payload for `symbol` at the expiry nearest
+    on/after `event_date`. Returns the RND dict, or None on failure/no-data.
+
+    Memoized per (symbol, chosen_expiry) within the request via `rnd_cache`
+    (None payloads are cached too so a failed pull isn't retried)."""
+    if research_iv_density is None:
+        return None
+    chosen = _resolve_expiry(symbol, event_date)
+    key = (symbol, chosen)
+    if rnd_cache is not None:
+        with _RND_CACHE_LOCK:
+            if key in rnd_cache:
+                return rnd_cache[key]
+    try:
+        rnd = research_iv_density.risk_neutral_density(symbol, expiry=chosen)
+    except Exception as e:
+        log.debug("catalyst: RND(%s, %s) failed: %s", symbol, chosen, e)
+        rnd = None
+    if not isinstance(rnd, dict) or rnd.get("error"):
+        rnd = None
+    if rnd_cache is not None:
+        with _RND_CACHE_LOCK:
+            rnd_cache[key] = rnd
+    return rnd
+
+
+def _implied_move_pct(symbol: str, event_date: datetime.date,
+                      rnd_cache: Optional[Dict[Tuple[str, Optional[str]], Any]] = None) -> Optional[float]:
     """Compute the option-implied 1-σ move % at the nearest expiry
     on/after `event_date`. Returns None when the chain is unavailable.
 
@@ -338,46 +408,9 @@ def _implied_move_pct(symbol: str, event_date: datetime.date) -> Optional[float]
     normalize by spot to get a percentage that's directly comparable to
     the historical avg-T0 figure from `event_study.summary`.
     """
-    if research_iv_density is None:
+    rnd = _rnd_for(symbol, event_date, rnd_cache)
+    if rnd is None:
         return None
-
-    # Pick an expiry: ask the fetcher for the chain calendar so we can
-    # snap to the next expiry ≥ event_date. The RND module's own
-    # _choose_expiry picks the first expiry >7d out, which can sit
-    # *before* the event — that would mis-attribute the implied move.
-    #
-    # NOTE: fetcher exports ``get_options_dates`` (not ``get_option_expiries``),
-    # so the original hasattr check was always False and we'd silently fall
-    # through to a bare yf.Ticker(symbol).options — which returns () under
-    # rate-limit (v0.1.6 audit pattern) without ever attempting the Yahoo /
-    # Finviz fallback chain.
-    chosen: Optional[str] = None
-    expiries: list = []
-    try:
-        if fetcher is not None and hasattr(fetcher, "get_options_dates"):
-            expiries = fetcher.get_options_dates(symbol) or []
-    except Exception:
-        expiries = []
-
-    ev_iso = event_date.isoformat()
-    # sorted() so "first expiry on/after the event" is genuinely the nearest,
-    # even if the provider returns expiry dates out of order.
-    for exp in sorted(expiries):
-        if exp >= ev_iso:
-            chosen = exp
-            break
-    # If nothing on/after the event is listed, the event is past the
-    # listed strip — let the RND module pick its own default.
-
-    try:
-        rnd = research_iv_density.risk_neutral_density(symbol, expiry=chosen)
-    except Exception as e:
-        log.debug("catalyst: RND(%s, %s) failed: %s", symbol, chosen, e)
-        return None
-
-    if not isinstance(rnd, dict) or rnd.get("error"):
-        return None
-
     spot = rnd.get("spot")
     moments = rnd.get("implied_moments") or {}
     std_implied = moments.get("std_implied")
@@ -392,44 +425,17 @@ def _implied_move_pct(symbol: str, event_date: datetime.date) -> Optional[float]
     return round(pct, 3)
 
 
-def _implied_skew(symbol: str, event_date: datetime.date) -> Optional[float]:
+def _implied_skew(symbol: str, event_date: datetime.date,
+                  rnd_cache: Optional[Dict[Tuple[str, Optional[str]], Any]] = None) -> Optional[float]:
     """Optional: reuse the RND skew (third moment) as an IV-skew proxy.
 
     Negative skew → downside is priced richer than upside (put skew),
     positive skew → upside is priced richer (call skew, less common).
-    Returns None on failure or no data."""
-    if research_iv_density is None:
-        return None
-    # Re-pick same expiry as the implied move call. We don't bother
-    # recomputing — research_iv_density.coalesce caches the full payload
-    # so this is essentially free on the second hit.
-    try:
-        # Route through fetcher.get_options_dates which carries the cache +
-        # fallback handling. The earlier hasattr() check was looking for a
-        # non-existent ``get_option_expiries`` name so it always fell through
-        # to a naked yf.Ticker(symbol).options — which silently returns ()
-        # whenever yfinance is rate-limited.
-        expiries: list = []
-        try:
-            if fetcher is not None and hasattr(fetcher, "get_options_dates"):
-                expiries = fetcher.get_options_dates(symbol) or []
-        except Exception:
-            expiries = []
-        chosen = None
-        ev_iso = event_date.isoformat()
-        # WHY (S12): _implied_move_pct picks the nearest on/after expiry via
-        # sorted(expiries), but this skew path iterated the RAW provider order.
-        # If the provider returns expiries unsorted, skew and move could anchor
-        # to DIFFERENT expiries — a silent mismatch. Sort here too so both
-        # quantities describe the same option strip.
-        for exp in sorted(expiries):
-            if exp >= ev_iso:
-                chosen = exp
-                break
-        rnd = research_iv_density.risk_neutral_density(symbol, expiry=chosen)
-    except Exception:
-        return None
-    if not isinstance(rnd, dict) or rnd.get("error"):
+    Returns None on failure or no data. Shares the same resolved expiry (and
+    memoized RND payload) as _implied_move_pct so both describe the same
+    option strip and incur at most one chain pull per (symbol, expiry)."""
+    rnd = _rnd_for(symbol, event_date, rnd_cache)
+    if rnd is None:
         return None
     skew = (rnd.get("implied_moments") or {}).get("skew_implied")
     if skew is None:
@@ -498,7 +504,8 @@ def _historical_overlay(symbol: str, event_type: str) -> Dict[str, Any]:
 def _current_signals(symbol: str,
                      event_date: datetime.date,
                      signal_cache: Dict[str, Dict[str, Any]],
-                     skew_symbol: Optional[str] = None) -> Dict[str, Any]:
+                     skew_symbol: Optional[str] = None,
+                     rnd_cache: Optional[Dict[Tuple[str, Optional[str]], Any]] = None) -> Dict[str, Any]:
     """Memoized per-symbol bundle of current signal stack. Each symbol
     appears multiple times across event types (earnings + FOMC + OPEX),
     so this is cached at the request scope.
@@ -513,7 +520,7 @@ def _current_signals(symbol: str,
     if cached is not None:
         # Re-derive iv_skew from the event date (skew varies by expiry).
         out = dict(cached)
-        skew = _implied_skew(skew_symbol, event_date)
+        skew = _implied_skew(skew_symbol, event_date, rnd_cache)
         out["iv_skew"] = _format_skew(skew)
         return out
 
@@ -563,7 +570,7 @@ def _current_signals(symbol: str,
     signal_cache[symbol] = bundle
 
     out = dict(bundle)
-    out["iv_skew"] = _format_skew(_implied_skew(skew_symbol, event_date))
+    out["iv_skew"] = _format_skew(_implied_skew(skew_symbol, event_date, rnd_cache))
     return out
 
 
@@ -665,17 +672,10 @@ def _build_note(event_type: str, implied: Optional[float],
 
 def _make_event(symbol: str, event_type: str, event_date: datetime.date,
                 signal_cache: Dict[str, Dict[str, Any]],
-                today: datetime.date) -> Dict[str, Any]:
+                today: datetime.date,
+                rnd_cache: Optional[Dict[Tuple[str, Optional[str]], Any]] = None) -> Dict[str, Any]:
     """Build the dict for a single event row."""
 
-    # WHY (S10): FOMC is a market-wide event, but the historical overlay below
-    # is always built from THIS symbol's own past reactions. Pricing the
-    # implied move off SPY while comparing it to the symbol's historical moves
-    # injected a pure beta artifact into edge_score (a high-beta name looks
-    # "cheap" and a low-beta name "expensive" purely from its beta, not any
-    # real mispricing). Use the symbol's OWN chain for the implied move so both
-    # sides of the comparison describe the same underlying.
-    implied = _implied_move_pct(symbol, event_date)
     skew_sym = symbol
 
     hist = _historical_overlay(symbol, event_type)
@@ -683,13 +683,32 @@ def _make_event(symbol: str, event_type: str, event_date: datetime.date,
     n_events = hist["n_events"]
     hit_rate = hist["hit_rate"]
 
+    # WHY (S10): FOMC is a market-wide event, but the historical overlay above
+    # is always built from THIS symbol's own past reactions. Pricing the
+    # implied move off SPY while comparing it to the symbol's historical moves
+    # injected a pure beta artifact into edge_score (a high-beta name looks
+    # "cheap" and a low-beta name "expensive" purely from its beta, not any
+    # real mispricing). Use the symbol's OWN chain for the implied move so both
+    # sides of the comparison describe the same underlying.
+    #
+    # PERF: the implied move is only meaningful as an overlay AGAINST a
+    # historical sample. For market-wide events (FOMC/OPEX) with no historical
+    # overlay for this name, the implied move has nothing to compare to and is
+    # the single most expensive call in the loop (an RND chain pull). Skip it.
+    is_market_wide = event_type in ("fed_fomc", "opex")
+    if is_market_wide and historical is None:
+        implied = None
+    else:
+        implied = _implied_move_pct(symbol, event_date, rnd_cache)
+
     # WHY (S11): pass the skew underlying straight into _current_signals so it
     # computes _implied_skew once on the correct symbol. The old code computed
     # _implied_skew(symbol) inside _current_signals and then, for FOMC, threw
     # it away and recomputed _implied_skew(SPY) here — two full chain pulls per
     # symbol per FOMC date. With skew_sym == symbol for every event type now,
     # there's nothing to override.
-    signals = _current_signals(symbol, event_date, signal_cache, skew_symbol=skew_sym)
+    signals = _current_signals(symbol, event_date, signal_cache,
+                               skew_symbol=skew_sym, rnd_cache=rnd_cache)
 
     return {
         "date": event_date.isoformat(),
@@ -720,6 +739,10 @@ def _compute(symbols: List[str], days_ahead: int) -> Dict[str, Any]:
     events: List[Dict[str, Any]] = []
     errors: List[str] = []
     signal_cache: Dict[str, Dict[str, Any]] = {}
+    # Request-scoped memo: RND payload per (symbol, chosen_expiry). Shared
+    # across earnings/ex-div/FOMC/OPEX so a name whose events snap to the same
+    # expiry pulls its option chain once instead of once per (symbol × date).
+    rnd_cache: Dict[Tuple[str, Optional[str]], Any] = {}
 
     # Decide whether the portfolio has equity exposure (FOMC otherwise
     # contributes nothing useful). Treat a non-empty symbol list as
@@ -732,17 +755,28 @@ def _compute(symbols: List[str], days_ahead: int) -> Dict[str, Any]:
     # concurrent workers touch disjoint keys.
     def _symbol_events(sym):
         ev, errs = [], []
+        # Fetch the yfinance calendar ONCE per symbol and share it between the
+        # earnings and ex-div lookups — previously each built its own
+        # yf.Ticker(sym).calendar (two HTTP pulls per symbol). None means
+        # "unavailable / not fetched"; the helpers fall back accordingly.
+        cal = None
         try:
-            er = _upcoming_earnings_for(sym, horizon_end, today)
+            import yfinance as yf
+            cal = yf.Ticker(sym).calendar
+        except Exception as e:
+            log.debug("catalyst: calendar(%s) prefetch failed: %s", sym, e)
+            cal = None
+        try:
+            er = _upcoming_earnings_for(sym, horizon_end, today, cal=cal)
             if er is not None:
-                ev.append(_make_event(sym, "earnings", er, signal_cache, today))
+                ev.append(_make_event(sym, "earnings", er, signal_cache, today, rnd_cache))
         except Exception as e:
             errs.append(f"earnings({sym}): {e}")
             log.debug("catalyst: earnings(%s) failed: %s", sym, e)
         try:
-            ed = _upcoming_ex_div(sym, horizon_end, today)
+            ed = _upcoming_ex_div(sym, horizon_end, today, cal=cal)
             if ed is not None:
-                ev.append(_make_event(sym, "ex_dividend", ed, signal_cache, today))
+                ev.append(_make_event(sym, "ex_dividend", ed, signal_cache, today, rnd_cache))
         except Exception as e:
             errs.append(f"ex_dividend({sym}): {e}")
             log.debug("catalyst: ex_div(%s) failed: %s", sym, e)
@@ -768,7 +802,7 @@ def _compute(symbols: List[str], days_ahead: int) -> Dict[str, Any]:
             for sym in symbols:
                 try:
                     events.append(
-                        _make_event(sym, "fed_fomc", fd, signal_cache, today)
+                        _make_event(sym, "fed_fomc", fd, signal_cache, today, rnd_cache)
                     )
                 except Exception as e:
                     errors.append(f"fomc({sym},{fd}): {e}")
@@ -780,7 +814,7 @@ def _compute(symbols: List[str], days_ahead: int) -> Dict[str, Any]:
             for sym in symbols:
                 try:
                     events.append(
-                        _make_event(sym, "opex", od, signal_cache, today)
+                        _make_event(sym, "opex", od, signal_cache, today, rnd_cache)
                     )
                 except Exception as e:
                     errors.append(f"opex({sym},{od}): {e}")

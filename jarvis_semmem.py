@@ -28,9 +28,20 @@ Design decisions, and why:
 """
 
 import logging
+import threading
 from array import array
 
 log = logging.getLogger(__name__)
+
+# Serializes the cap check-then-record in embed() so concurrent recall / store /
+# web_research threads in this process can't each pass the check before any of
+# them records, overshooting the daily budget. The lock is held only around the
+# (fast) check + record bracket, not the network call. Cross-PROCESS overshoot
+# (multiple workers) is still possible and accepted — the cap is a soft budget
+# guard, and a true cross-process reservation would need an atomic DB primitive
+# this module can't add. Within a single worker process the reservation is now
+# atomic, which is where the concurrent fan-out actually happens.
+_CAP_LOCK = threading.Lock()
 
 # Model + dimensionality are fixed together: vectors from different models
 # are not comparable, so changing the model means re-embedding the corpus.
@@ -101,12 +112,19 @@ def embed(texts):
             return failed
         # Respect the app-wide daily AI cap: embeddings are paid calls like
         # any other, and recall silently degrading is exactly the designed
-        # behavior when the budget is spent.
+        # behavior when the budget is spent. Check-and-RESERVE atomically under
+        # a lock: bumping the counter the instant the check passes (before the
+        # network call) closes the race where N concurrent threads each see the
+        # budget under-cap and all proceed, overshooting it. Reserving up-front
+        # may over-count by one if the API call then raises — a conservative
+        # error that keeps us UNDER budget, the safe direction for a cap.
         try:
-            if ai_summarizer._cap_exceeded():
-                return failed
+            with _CAP_LOCK:
+                if ai_summarizer._cap_exceeded():
+                    return failed
+                ai_summarizer._record_ai_call()  # one batched request = one call
         except Exception:
-            pass  # cap check is best-effort; don't let it block embedding
+            pass  # cap accounting is best-effort; don't let it block embedding
         # The API rejects empty strings; substitute a single space so one
         # blank entry can't sink the whole batch, and cap length so a huge
         # text can't blow the token limit for everyone else in the batch.
@@ -114,10 +132,6 @@ def embed(texts):
         from openai import OpenAI
         client = OpenAI(api_key=key, timeout=10)
         resp = client.embeddings.create(model=EMBED_MODEL, input=safe)
-        # The request was billed the moment it returned, regardless of shape —
-        # record it BEFORE validating length so a malformed/partial response
-        # can't slip through as "free" and under-count spend against the cap.
-        ai_summarizer._record_ai_call()  # one batched request = one call
         if not resp.data or len(resp.data) != len(texts):
             return failed
         # API may return out of order in theory; .index makes it explicit.
@@ -249,7 +263,12 @@ def recall(query, k=6, kinds=None):
 def index_memories():
     """Backfill: embed every jarvis_memory fact not yet in the table
     (kind="memory", ref_id=str(id)). Returns the number newly stored.
-    Idempotent — safe to call on every startup or after bulk imports."""
+    Idempotent — safe to call on every startup or after bulk imports.
+
+    The backlog is embedded in ONE batched embed() call rather than one
+    inline call per row: the first keyed recall triggers this backfill on the
+    request thread, and embedding N memories one-at-a-time stalled that thread
+    for multiple seconds. One batch request is a single round-trip."""
     try:
         import database as db
         _ensure_table()
@@ -257,16 +276,33 @@ def index_memories():
             r["ref_id"] for r in db.get_conn().execute(
                 "SELECT ref_id FROM jarvis_embeddings WHERE kind='memory'"
             ).fetchall())
-        added = 0
+        pending = []  # (ref_id, text) for memories not yet embedded
         for mem in db.jarvis_list_memories():
             ref = str(mem["id"])
             if ref in have:
                 continue
-            # store() embeds one row per call here rather than batching the
-            # whole backlog: simpler, and backfill happens rarely on a small
-            # corpus. If it ever matters, batch via embed() directly.
-            if store("memory", ref, mem["fact"]):
+            text = (mem.get("fact") or "").strip()[:MAX_TEXT_CHARS]
+            if text:
+                pending.append((ref, text))
+        if not pending:
+            return 0
+        # One API call for the whole backlog. embed() is fail-open: all-None on
+        # any failure, so a blip degrades to "nothing backfilled", never raises.
+        vecs = embed([t for _, t in pending])
+        added = 0
+        for (ref, text), vec in zip(pending, vecs):
+            if vec is None:
+                continue
+            try:
+                with db._write_lock:
+                    db.get_conn().execute(
+                        "INSERT OR REPLACE INTO jarvis_embeddings"
+                        " (kind, ref_id, text, vec) VALUES (?,?,?,?)",
+                        ("memory", ref, text, _to_blob(vec)))
+                    db.get_conn().commit()
                 added += 1
+            except Exception as e:
+                log.debug("semmem backfill row %s failed: %s", ref, e)
         return added
     except Exception as e:
         log.debug("semmem index_memories failed: %s", e)

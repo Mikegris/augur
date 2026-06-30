@@ -410,6 +410,32 @@ def _market_model_ar_curve(sym_closes: pd.Series, bench_closes: pd.Series,
     return car
 
 
+def _drop_overlapping_events(pairs, min_gap_days: int):
+    """Greedily select events whose windows don't overlap (Q12).
+
+    `pairs` is a list of (date_str, curve). Returns the subset, earliest-first,
+    keeping an event only if its date is at least `min_gap_days` CALENDAR days
+    after the last kept event's date. Events with unparseable dates are kept
+    (conservative — we can't prove overlap). Stable / deterministic.
+    """
+    parsed = []
+    for ds, curve in pairs:
+        d = _to_date(ds)
+        parsed.append((d, ds, curve))
+    # Sort by date; undated rows sink to the end and are appended as-is.
+    dated = sorted((p for p in parsed if p[0] is not None), key=lambda p: p[0])
+    undated = [p for p in parsed if p[0] is None]
+    kept = []
+    last_kept = None
+    for d, ds, curve in dated:
+        if last_kept is None or (d - last_kept).days >= min_gap_days:
+            kept.append((ds, curve))
+            last_kept = d
+    for _, ds, curve in undated:
+        kept.append((ds, curve))
+    return kept
+
+
 def _summary_stats(curves: np.ndarray, dates: List[str],
                    window_days: int) -> dict:
     """Compute the headline summary scalars described in the spec docstring."""
@@ -626,23 +652,43 @@ def _compute(symbol: str, event_type: str, window_days: int,
     # Aggregate the per-event market-model CAR paths and test H0: CAR=0 at the
     # end of the window with a cross-sectional t-stat. These are ADDED keys;
     # the legacy `abnormal_return_curve` (sym_avg − bench_avg) is preserved.
-    mm_valid = [c for c in mm_car_curves if c is not None
-                and np.all(np.isfinite(c))]
+    mm_valid_pairs = [(ds, c) for ds, c in zip(kept_dates, mm_car_curves)
+                      if c is not None and np.all(np.isfinite(c))]
+    mm_valid = [c for _, c in mm_valid_pairs]
+
+    # WHY (Q12): the cross-sectional CAR t-stat assumes the per-event terminal
+    # CARs are independent. Two events whose [-W, +W] windows overlap share
+    # return days, so their CARs are correlated — counting both as i.i.d.
+    # observations shrinks the standard error and OVERSTATES significance. Drop
+    # overlapping events (greedy, earliest-first) so the surviving set has
+    # non-overlapping windows before computing the t-stat. The curve average
+    # (mm_abnormal_curve) still uses every valid event; only the inference set
+    # is de-overlapped. Window half-width is `window_days` TRADING days; we
+    # approximate the calendar span as window_days * 7/5 days between event
+    # dates to guarantee non-overlap.
+    min_gap_days = math.ceil(2 * window_days * 7.0 / 5.0)
+    indep_pairs = _drop_overlapping_events(mm_valid_pairs, min_gap_days)
+    car_indep = [c for _, c in indep_pairs]
+
     market_model: dict = {
         "available": False,
         "n_events": len(mm_valid),
+        "n_events_independent": len(car_indep),
         "method": "market_model_ols_estimation_window",
         "estimation_window_days": _EST_WINDOW,
     }
     mm_abnormal_curve = np.full_like(avg, np.nan)
     if len(mm_valid) >= _MIN_EVENTS:
         car_mat = np.array(mm_valid, dtype=float)  # (n_valid, 2W+1)
-        mm_abnormal_curve = np.nanmean(car_mat, axis=0)
-        car_end = car_mat[:, -1]                    # terminal CAR per event
+        mm_abnormal_curve = np.nanmean(car_mat, axis=0)  # curve over ALL events
+        # Inference uses only the non-overlapping (independent) subset so the
+        # cross-sectional SE isn't shrunk by correlated overlapping windows.
+        # Fall back to the full set only if de-overlapping left too few events.
+        infer = car_indep if len(car_indep) >= _MIN_EVENTS else mm_valid
+        car_end = np.array([c[-1] for c in infer], dtype=float)
         n_mm = car_end.size
         mean_car = float(np.mean(car_end))
-        # Cross-sectional t-stat for H0: mean CAR = 0 (treats events as the
-        # i.i.d. cross-section; far less overlap-biased than the old curve).
+        # Cross-sectional t-stat for H0: mean CAR = 0 over independent events.
         sd = float(np.std(car_end, ddof=1)) if n_mm > 1 else 0.0
         se = sd / math.sqrt(n_mm) if sd > 0 and n_mm > 1 else float("nan")
         t_stat = mean_car / se if (se == se and se > 0) else float("nan")
@@ -651,6 +697,7 @@ def _compute(symbol: str, event_type: str, window_days: int,
                    if t_stat == t_stat else float("nan"))
         market_model.update({
             "available": True,
+            "n_events_used_for_tstat": int(n_mm),
             "mean_car_pct": round(mean_car * 100.0, 4),
             "car_std_pct": round(sd * 100.0, 4),
             "car_t_stat": round(t_stat, 3) if t_stat == t_stat else None,

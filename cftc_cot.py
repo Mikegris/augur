@@ -87,18 +87,25 @@ def _fetch_latest_two(dataset_id: str, contract_pattern: str) -> list:
     if cached is not None:
         return cached
     try:
-        # SoQL: filter on contract name + order by date desc, limit 2.
+        # SoQL: filter on contract name + order by date desc.
         # Escape single quotes in `contract_pattern` (SoQL string literal
         # escape is doubling the quote, same as ANSI SQL). Patterns are
         # hardcoded today, but defending the injection vector now means a
         # future caller threading user input through here won't break the
         # query or open a SoQL injection.
+        #
+        # A bare `like '%GOLD%'` + `limit 2` can return ONE row of GOLD and
+        # ONE of MICRO GOLD (or any other contract whose name contains the
+        # pattern) — then _net_position differences two DIFFERENT markets and
+        # produces a nonsense week-over-week delta. Pull a wider window (latest
+        # rows across all matching markets), pick a SINGLE exact
+        # contract_market_name, and return that market's latest two rows.
         safe_pattern = contract_pattern.replace("'", "''")
         url = f"{CFTC_BASE}/{dataset_id}.json"
         params = {
             "$where": f"contract_market_name like '%{safe_pattern}%'",
             "$order": "report_date_as_yyyy_mm_dd DESC",
-            "$limit": 2,
+            "$limit": 50,
         }
         resp = requests.get(url, params=params, headers=HEADERS, timeout=15)
         resp.raise_for_status()
@@ -106,8 +113,41 @@ def _fetch_latest_two(dataset_id: str, contract_pattern: str) -> list:
         if isinstance(rows, dict) and rows.get("error"):
             log.debug("cftc returned error for %s: %s", contract_pattern, rows.get("message"))
             return []
-        _cache_set(cache_key, rows, DEFAULT_TTL)
-        return rows
+        if not isinstance(rows, list) or not rows:
+            _cache_set(cache_key, [], DEFAULT_TTL)
+            return []
+
+        # Pick the single exact market name to use. Prefer an EXACT (case-
+        # insensitive) match to the configured pattern; otherwise prefer the
+        # SHORTEST matching name (e.g. "GOLD - ..." over "MICRO GOLD - ..." —
+        # the micro/mini variants are strict supersets of the base name) so we
+        # lock onto the headline contract rather than a derivative one.
+        pat_lower = contract_pattern.lower()
+        names = []
+        seen_names = set()
+        for r in rows:
+            nm = r.get("contract_market_name") or ""
+            if nm and nm not in seen_names:
+                seen_names.add(nm)
+                names.append(nm)
+        chosen = None
+        for nm in names:
+            if nm.lower() == pat_lower:
+                chosen = nm
+                break
+        if chosen is None:
+            # Shortest name whose normalized form still contains the pattern.
+            candidates = [nm for nm in names if pat_lower in nm.lower()]
+            if candidates:
+                chosen = min(candidates, key=len)
+        if chosen is None:
+            chosen = names[0] if names else None
+
+        # Take the latest two rows of the chosen market only (rows already
+        # ordered newest-first).
+        market_rows = [r for r in rows if (r.get("contract_market_name") or "") == chosen][:2]
+        _cache_set(cache_key, market_rows, DEFAULT_TTL)
+        return market_rows
     except Exception as e:
         log.debug("cftc fetch failed for %s/%s: %s", dataset_id, contract_pattern, e)
         return []

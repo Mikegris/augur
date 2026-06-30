@@ -65,6 +65,38 @@ def _quote_symbol(sym: str) -> str:
     return sym
 
 
+def _resolve_quote(sym: str):
+    """Fetch a quote, retrying SYM-USD when the bare quote returns no/negative
+    price. _quote_symbol only remaps coins the user currently HOLDS, so a quote
+    on an UNHELD coin (DOGE) falls through to the bare ticker — often an
+    unrelated equity/trust (the BTC-trust lesson). Mirrors jarvis_watches.
+    _fetch_quotes: if the resolved symbol's price is missing/non-positive and
+    it isn't already a -USD pair, try SYM-USD and accept it when it prices.
+    Returns (quote_dict, symbol_used). Fail-open: any error leaves the bare
+    result."""
+    import fetcher
+
+    def _good_price(q):
+        p = (q or {}).get("price")
+        return isinstance(p, (int, float)) and not isinstance(p, bool) and p > 0
+
+    resolved = _quote_symbol(sym)
+    try:
+        q = fetcher.get_quote(resolved) or {}
+    except Exception:
+        q = {}
+    if _good_price(q) or resolved.upper().endswith("-USD"):
+        return q, resolved
+    alt = sym.upper() + "-USD"
+    try:
+        q2 = fetcher.get_quote(alt) or {}
+    except Exception:
+        q2 = {}
+    if _good_price(q2):
+        return q2, alt
+    return q, resolved
+
+
 def _num_arg(v: Any) -> Optional[float]:
     """Coerce a model-supplied number that may arrive as '5000', '-30%', etc.
     Returns None if it isn't a finite number."""
@@ -91,9 +123,8 @@ def _portfolio_stock_symbols(max_n: int = 15) -> List[str]:
 # ─── read-tool implementations (condensed outputs) ───────────────────────────
 
 def _t_get_quote(args):
-    import fetcher
-    sym = _quote_symbol(_sym(args))
-    q = fetcher.get_quote(sym) or {}
+    sym0 = _sym(args)
+    q, sym = _resolve_quote(sym0)
     keep = ("symbol", "price", "change", "change_pct", "prev_close", "volume",
             "market_cap", "fifty_two_week_high", "fifty_two_week_low")
     if not q.get("price"):

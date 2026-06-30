@@ -300,6 +300,11 @@ _SUPPLIER_KW = {"supplier", "vendor", "manufacture", "supply", "foundry", "fabri
 _CUSTOMER_KW = {"customer", "client", "buyer", "end-user", "reseller", "distributor", "licensee"}
 _PARTNER_KW = {"partner", "collaborat", "joint venture", "alliance", "agreement", "co-develop", "strategic"}
 
+# All-caps 1-5 char candidate-ticker pattern. Hoisted to module scope: it was
+# re.compile()'d on every _parse_company_mentions call (runs once per 10-K),
+# recompiling the same constant pattern each time.
+_TICKER_RE = re.compile(r'\b([A-Z]{1,5})\b')
+
 # High-weight filing sections
 _HIGH_WEIGHT_SECTIONS = re.compile(
     r"(risk\s+factors|customers?|concentration|principal\s+customers?|"
@@ -403,13 +408,12 @@ def _parse_company_mentions(text):
             entry["_weight"] += 2.0 if in_key_section else 1.0
 
     # --- 2. Known ticker detection near relationship keywords ---
-    # Match all-caps 1-5 char words
-    ticker_pattern = re.compile(r'\b([A-Z]{1,5})\b')
+    # Match all-caps 1-5 char words (module-level compiled pattern _TICKER_RE)
     # Build set of context keywords
     context_keywords = _SUPPLIER_KW | _CUSTOMER_KW | _PARTNER_KW | {
         "revenue", "sales", "contract", "purchase", "order",
     }
-    for m in ticker_pattern.finditer(text):
+    for m in _TICKER_RE.finditer(text):
         candidate = m.group(1)
         if candidate not in _KNOWN_TICKERS:
             continue
@@ -534,25 +538,23 @@ def _compute_lag_correlation(symbol1, symbol2, max_lag=5):
         if len(sorted_times1) < 30 or len(sorted_times2) < 30:
             return (0.0, 0)
 
-        # Convert to aligned lists indexed by position
+        # Convert to aligned lists indexed by position.
         returns1 = [times1[t] for t in sorted_times1]
         returns2_by_pos = {}  # type: Dict[int, float]
-        # Map times2 into positional index relative to sorted_times1
-        time_to_pos1 = {t: i for i, t in enumerate(sorted_times1)}
-        # For each time in times2, find closest time in times1
+        # Map times2 onto symbol1's positional index. Daily bars on the same
+        # exchange share identical `time` keys, so an exact date-keyed
+        # intersection (O(n)) replaces the old nearest-time scan that was
+        # O(n^2) — for each of n times2 it linearly swept all n times1. We
+        # snap each timestamp to its UTC calendar day so bars stamped at
+        # slightly different intraday times still align.
+        SEC_PER_DAY = 86400
+        day_to_pos1 = {}  # type: Dict[int, int]
+        for i, t1 in enumerate(sorted_times1):
+            day_to_pos1[t1 // SEC_PER_DAY] = i
         for t2 in sorted_times2:
-            # Find exact or closest match (within 2 days = 172800 seconds)
-            best_pos = None
-            best_diff = 172800
-            for t1 in sorted_times1:
-                diff = abs(t2 - t1)
-                if diff < best_diff:
-                    best_diff = diff
-                    best_pos = time_to_pos1[t1]
-                elif t1 > t2 + 172800:
-                    break
-            if best_pos is not None:
-                returns2_by_pos[best_pos] = times2[t2]
+            pos = day_to_pos1.get(t2 // SEC_PER_DAY)
+            if pos is not None:
+                returns2_by_pos[pos] = times2[t2]
 
         # Compute lag-0 (contemporaneous) correlation first as the baseline.
         # Taking the plain max |corr| over 6 candidate lags is a data-snooping
@@ -696,8 +698,28 @@ def build_graph(symbol):
                 }
             filing_date = "curated"
 
-        # 5. Get fundamentals for source company
-        source_info = fetcher.get_fundamentals(symbol)
+        # 5+6. Fundamentals for the source company AND every connected ticker.
+        # Previously this was a serial N+1: one get_fundamentals() for the
+        # source plus one inside the per-peer loop below, each a network
+        # round-trip → O(peers x latency). Fetch the whole merged set in
+        # parallel once and index the results.
+        fund_tickers = [symbol] + [t for t in merged.keys() if t != symbol]
+
+        def _fund(tk):
+            try:
+                return fetcher.get_fundamentals(tk)
+            except Exception:
+                return None
+
+        try:
+            fund_results = safe_executor.parallel_map(
+                _fund, fund_tickers, max_workers=6,
+                thread_name_prefix="contagion-fund")
+        except Exception:
+            fund_results = [_fund(tk) for tk in fund_tickers]
+        fund_by_ticker = {tk: fr for tk, fr in zip(fund_tickers, fund_results)}
+
+        source_info = fund_by_ticker.get(symbol) or {}
         source_name = source_info.get("name", symbol)
         source_sector = source_info.get("sector", "")
 
@@ -706,17 +728,14 @@ def build_graph(symbol):
         edges = []
 
         for ticker, mention in merged.items():
-            # Try to get fundamentals for enrichment
+            # Use the pre-fetched fundamentals for enrichment.
             target_sector = ""
             target_name = mention.get("name", ticker)
-            try:
-                fund = fetcher.get_fundamentals(ticker)
-                if fund and "error" not in fund:
-                    target_sector = fund.get("sector", "")
-                    if fund.get("name"):
-                        target_name = fund["name"]
-            except Exception:
-                pass
+            fund = fund_by_ticker.get(ticker)
+            if fund and "error" not in fund:
+                target_sector = fund.get("sector", "")
+                if fund.get("name"):
+                    target_name = fund["name"]
 
             # Calculate edge weight based on mention count and relationship
             weight = min(mention["mention_count"] / 10.0, 1.0)
@@ -834,8 +853,16 @@ def assess_contagion(symbol, event_type="earnings_miss"):
             effective_corr = max(abs(correlation), abs(lag_corr))
             effective_lag = lag_days if abs(lag_corr) >= abs(correlation) else 0
 
-            # 4. Impact score: edge_weight * correlation * (1 / (1 + lag_days))
-            raw_score = edge_weight * effective_corr * (1.0 / (1.0 + effective_lag))
+            # 4. Impact score: edge_weight * correlation, with NO lag decay.
+            # The lag here means "ticker follows `symbol` by `effective_lag`
+            # days" — a genuine PREDICTIVE lead-lag edge. For contagion that's
+            # the MORE valuable signal (it's forward-looking and actionable),
+            # not less, so the old 1/(1+lag) penalty was backwards: it shrank
+            # exactly the clean lead-lag edges we most want to surface. We give
+            # a modest boost to a clean lead-lag edge and leave contemporaneous
+            # (lag 0) edges at their base strength.
+            lag_factor = 1.0 + min(effective_lag, 5) * 0.05  # 1.00 .. 1.25
+            raw_score = edge_weight * effective_corr * lag_factor
             impact_score = int(min(round(raw_score * 100), 100))
             impact_score = max(impact_score, 0)
 

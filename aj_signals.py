@@ -108,9 +108,11 @@ def insider_signal(symbol: str) -> Optional[dict]:
 
     compute_composite returns {"composite_score": <0-100>, "coverage": <0-1>,
     "convergence_count": int, "signal": str, ...} or {"error": str}. We map the
-    composite onto the shared score->prob curve and DAMPEN both confidence and
-    the directional tilt when coverage is poor (few live channels) — a composite
-    built from one live channel shouldn't speak as loudly as one built from six.
+    composite onto the shared score->prob curve and DAMPEN the CONFIDENCE channel
+    ONLY when coverage is poor (few live channels) — a composite built from one
+    live channel shouldn't be TRUSTED as much as one built from six. We do NOT
+    also pull the prob tilt toward neutral: damping both channels double-penalizes
+    the same coverage gap (the fusion layer already down-weights by confidence).
     Returns None on error or missing data.
     """
     try:
@@ -126,9 +128,10 @@ def insider_signal(symbol: str) -> Optional[dict]:
         coverage = res.get("coverage")
         coverage = float(coverage) if coverage is not None else 1.0
         coverage = _clamp(coverage, 0.0, 1.0)
-        # Poor coverage -> pull prob back toward neutral and cut confidence.
-        prob = 0.5 + (_score_to_prob(score) - 0.5) * coverage
-        prob = _clamp(prob, 0.05, 0.95)
+        # Poor coverage -> cut CONFIDENCE only (single channel). The prob tilt is
+        # left at full strength; the ensemble already scales each signal by its
+        # confidence, so damping prob too would penalize the same gap twice.
+        prob = _clamp(_score_to_prob(score), 0.05, 0.95)
         confidence = _score_to_confidence(score) * coverage
         conv = res.get("convergence_count")
         sig = res.get("signal") or ""
@@ -171,34 +174,52 @@ def congress_signal(symbol: str, days: int = 90) -> Optional[dict]:
             return None
 
         sym = (symbol or "").upper()
-        buy_amt = sell_amt = 0.0
-        n_buy = n_sell = 0
+        # First pass: collect this symbol's directional trades with their dollar
+        # amounts (None when the band is missing). We must NOT mix $-weighted and
+        # unit-$1 trades in one net — a single $50M-banded buy alongside three
+        # amountless sells would be wildly miscalibrated. So if ANY qualifying
+        # trade lacks an amount we fall back to pure TRADE-COUNT netting for ALL
+        # of this symbol's trades; otherwise we use the $-weighted net.
+        dir_trades = []   # (is_buy, amount_or_None)
+        any_missing_amt = False
         for t in trades:
             if not isinstance(t, dict):
                 continue
             if (t.get("ticker") or "").upper() != sym:
                 continue
             txn = (t.get("txn_type") or "").lower()
-            # Dollar weight: fall back to a nominal $1 when the band is missing
-            # so a trade still counts toward direction even without an amount.
+            if "buy" in txn or "purchase" in txn:
+                is_buy = True
+            elif "sell" in txn or "sale" in txn:
+                is_buy = False
+            else:
+                continue  # exchanges / other types are direction-neutral
             amt = t.get("amount_val")
             try:
-                amt = float(amt) if amt is not None else 0.0
+                amt = float(amt) if amt is not None else None
             except (TypeError, ValueError):
-                amt = 0.0
-            weight = amt if amt > 0 else 1.0
-            if "buy" in txn or "purchase" in txn:
-                buy_amt += weight
-                n_buy += 1
-            elif "sell" in txn or "sale" in txn:
-                sell_amt += weight
-                n_sell += 1
-            # exchanges / other types are direction-neutral -> ignored
+                amt = None
+            if amt is None or amt <= 0:
+                any_missing_amt = True
+                amt = None
+            dir_trades.append((is_buy, amt))
 
-        total = buy_amt + sell_amt
+        n_buy = sum(1 for is_buy, _ in dir_trades if is_buy)
+        n_sell = sum(1 for is_buy, _ in dir_trades if not is_buy)
         n = n_buy + n_sell
-        if n == 0 or total <= 0:
+        if n == 0:
             return None  # no directional trades for this symbol
+
+        if any_missing_amt:
+            # Pure trade-count netting (every trade weighted 1) so we never blend
+            # a $-banded trade with an amountless one.
+            buy_amt, sell_amt = float(n_buy), float(n_sell)
+        else:
+            buy_amt = sum(a for is_buy, a in dir_trades if is_buy)
+            sell_amt = sum(a for is_buy, a in dir_trades if not is_buy)
+        total = buy_amt + sell_amt
+        if total <= 0:
+            return None
 
         net = (buy_amt - sell_amt) / total  # in [-1, 1]
         # Small tilt: a fully one-sided book moves prob by at most +/-0.25.

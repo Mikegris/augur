@@ -132,13 +132,23 @@ def _session_open_unrealized(current_unrealized: float) -> float:
             return aj_db.money(raw)
         except Exception:
             pass
-    aj_db.set_setting_raw(key, str(aj_db.money(current_unrealized)))
-    # Opportunistically prune prior ET days' snapshots so the settings table
-    # does not accumulate one row per trading day forever (which also bloats
-    # every get_settings() refresh that shallow-copies all rows).
+    # First observation this ET session: stamp the baseline FIRST-WRITER-WINS.
+    # Two threads (or a basis-switch racing the gate) must not each stamp their
+    # own intra-day mark and reset the baseline — so claim the snapshot with an
+    # atomic INSERT OR IGNORE under the write lock and, if we lost, re-read and
+    # return the value the winner stored (never our own later mark).
+    val = aj_db.money(current_unrealized)
     try:
         with db._write_lock:
             conn = db.get_conn()
+            conn.execute(
+                "INSERT OR IGNORE INTO settings (key, value) VALUES (?,?)",
+                (key, str(val)))
+            conn.commit()
+            row = conn.execute(
+                "SELECT value FROM settings WHERE key=?", (key,)).fetchone()
+            # Prune prior ET days' snapshots so the settings table does not
+            # accumulate one row per trading day forever.
             conn.execute(
                 "DELETE FROM settings WHERE key LIKE '__aj_unreal_open_%' "
                 "AND key <> ?", (key,))
@@ -147,15 +157,28 @@ def _session_open_unrealized(current_unrealized: float) -> float:
             db._invalidate_settings_cache()
         except Exception:
             pass
+        if row is not None and row["value"] not in (None, ""):
+            try:
+                return aj_db.money(row["value"])
+            except Exception:
+                pass
     except Exception:
-        log.debug("unreal_open prune failed", exc_info=True)
-    return aj_db.money(current_unrealized)
+        log.debug("unreal_open snapshot failed", exc_info=True)
+    return val
 
 
 def compute_day_pnl(basis: Optional[str] = None) -> Dict[str, Any]:
     """day_pnl per §11.2, computed over the agent's PAPER BOOK (ADR-001 — the
     real portfolio is never touched by paper trading). Returns {day_pnl,
-    realized, unrealized_now, unrealized_open, warnings:[...]}. Never raises."""
+    realized, unrealized_now, unrealized_open, warnings:[...]}. Never raises.
+
+    The EXPENSIVE part — the full FIFO replay of aj_fills — is memoized inside
+    aj_positions.paper_book() (keyed on the fills fingerprint), so the gate's
+    per-proposal calls no longer re-replay the whole history. This function is
+    deliberately NOT memoized itself: the unrealized leg re-marks open positions
+    against LIVE quotes every call, and the daily-loss HALT must always see the
+    freshest unrealized drawdown (a cached P&L could mask a marks move and let a
+    breach go un-halted — a guardrail we never weaken)."""
     import aj_positions
     cfg = aj_config.get_config()
     if basis is None:
@@ -195,12 +218,13 @@ def compute_day_pnl(basis: Optional[str] = None) -> Dict[str, Any]:
         warnings.append("unrealized P&L unavailable")
     unreal = aj_db.money(unreal)
 
-    # On the realized basis the unrealized baseline is never used in day_pnl,
-    # so skip the session-open snapshot (a settings write + prune + cache
-    # invalidation) on the hot risk-gate read path. This also avoids stamping
-    # the "open" baseline to an arbitrary intra-day mark if the operator later
-    # switches basis to realized_plus_unrealized mid-session.
-    unreal_open = _session_open_unrealized(unreal) if basis != "realized" else unreal
+    # ALWAYS capture the session-open baseline at first observation, regardless
+    # of basis. The snapshot is first-writer-wins (INSERT OR IGNORE), so after
+    # the first call per ET session it is a cheap read — and capturing it even on
+    # the 'realized' basis means a mid-session switch to realized_plus_unrealized
+    # measures drawdown from the TRUE session open, not from an arbitrary later
+    # intra-day mark (which would silently reset the daily-loss baseline).
+    unreal_open = _session_open_unrealized(unreal)
 
     if basis == "realized":
         day_pnl = realized
@@ -376,13 +400,27 @@ def kill_switch(reason: str = "manual kill") -> Dict[str, Any]:
     """§11.4 — single operation, model NOT in the loop. Disables trading AND
     robinhood atomically, cancels open orders best-effort, disconnects live
     broker. Reachable from CLI / UI / signal file."""
-    aj_config.set_config({"trading_enabled": False, "robinhood_enabled": False})
+    # Cancel any open LIVE orders at the venue FIRST, while live trading is still
+    # enabled — otherwise disabling live_trading_enabled would make get_broker
+    # return a PaperBroker that knows nothing of the live order, and the venue
+    # order would never be canceled (force_live also builds the live adapter
+    # directly so a concurrent disable can't downgrade it mid-cancel).
     canceled = 0
     try:
         import aj_execution
-        canceled = aj_execution.cancel_all_open(reason="kill_switch")
+        canceled = aj_execution.cancel_all_open(reason="kill_switch", force_live=True)
     except Exception:
-        log.debug("kill_switch: cancel_all_open unavailable/failed", exc_info=True)
+        log.debug("kill_switch: pre-disable cancel_all_open failed", exc_info=True)
+    # Now disable trading + the live venues (the order of these two operations is
+    # the safety-critical part: disable AFTER the live cancel above).
+    aj_config.set_config({"trading_enabled": False, "robinhood_enabled": False})
+    try:
+        import aj_execution
+        # Sweep again now that live is disabled to catch any order that appeared
+        # during the first pass (paper orders are marked canceled locally).
+        canceled += aj_execution.cancel_all_open(reason="kill_switch")
+    except Exception:
+        log.debug("kill_switch: post-disable cancel_all_open failed", exc_info=True)
     try:
         import aj_execution
         aj_execution.disconnect_all()
@@ -521,6 +559,11 @@ def evaluate(proposal: Dict[str, Any]) -> RiskDecision:
         else:
             closing_sell = (side == "sell" and held_now > 0) or \
                            (side == "buy" and held_now < 0)
+        # The per-order notional-cap exemption is RESTRICTED to a CONFIRMED held
+        # position. On unknown book state a large SELL would OPEN a short
+        # (risk-INCREASING), so the cap must still bind there even though the
+        # allowlist exemption (closing_sell) is allowed through.
+        confirmed_closing_sell = (held_now is not None) and closing_sell
         # Open universe = universe_mode 'open'/'market_screen' OR legacy
         # allow_any_symbol. MUST mirror aj_operator._scan_universe (both call
         # aj_config.is_open_universe) so a screened symbol isn't blocked here.
@@ -583,14 +626,20 @@ def evaluate(proposal: Dict[str, Any]) -> RiskDecision:
             return RiskDecision(decision="block", reason="qty must be a finite number > 0")
         order_notional = aj_db.money(qty * price)
 
-        # Step 4 — per-order notional cap (0 => block)
+        # Step 4 — per-order notional cap (0 => block). A risk-REDUCING held-sell
+        # against a CONFIRMED position (confirmed_closing_sell) is EXEMPT: it can
+        # only unwind existing exposure, so capping it would strand a position
+        # whose value exceeds the entry-sizing cap (a stop/take-profit/time-stop
+        # could never fully close it). On UNKNOWN book state the cap still binds —
+        # a large sell there could open a short (risk-increasing).
         max_notional = aj_db.money(cfg.get("max_order_notional_usd") or 0)
-        if not (max_notional > 0 and order_notional <= max_notional):
-            _record("block", "order notional {} > cap {}".format(order_notional, max_notional),
-                    caps, None, pid)
-            return RiskDecision(decision="block",
-                                reason="order ${:,.2f} exceeds per-order cap ${:,.2f}".format(
-                                    order_notional, max_notional))
+        if not confirmed_closing_sell:
+            if not (max_notional > 0 and order_notional <= max_notional):
+                _record("block", "order notional {} > cap {}".format(order_notional, max_notional),
+                        caps, None, pid)
+                return RiskDecision(decision="block",
+                                    reason="order ${:,.2f} exceeds per-order cap ${:,.2f}".format(
+                                        order_notional, max_notional))
 
         # Step 5 — trades/day cap (0 => block)
         max_trades = int(cfg.get("max_trades_per_day") or 0)

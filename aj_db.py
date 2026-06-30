@@ -32,7 +32,7 @@ import database as db
 log = logging.getLogger("augur.aj_db")
 
 # ── schema version target (bump when adding a numbered migration step) ────────
-AJ_SCHEMA_TARGET = 6
+AJ_SCHEMA_TARGET = 7
 _SCHEMA_KEY = "aj_schema_version"
 
 # ── DDL (§5). CREATE TABLE IF NOT EXISTS is safe to re-run; column ADDs go
@@ -290,6 +290,18 @@ def aj_migrate() -> int:
     the base creation here only adds new `aj_*` tables, so no backup is needed
     for step 1. Future column-add steps should call backup_db() before running.
     """
+    # Take the (only) backup BEFORE acquiring the write lock. The sole step that
+    # ALTERs an existing table is step 4 (options columns); backup_db() opens its
+    # own connections and copies the whole DB via the Online Backup API, which
+    # can take a while — holding _write_lock across it would block EVERY other
+    # writer (audit, orders, fills) for the duration. Decide whether step 4 will
+    # run from the pre-lock applied version and snapshot first, outside the lock.
+    pre = _applied_version()
+    if pre < 4 <= AJ_SCHEMA_TARGET:
+        try:
+            backup_db()
+        except Exception:
+            log.debug("aj_migrate: pre-lock backup_db failed (continuing)", exc_info=True)
     with db._write_lock:
         conn = db.get_conn()
         current = _applied_version()
@@ -320,10 +332,9 @@ def aj_migrate() -> int:
         # This ALTERs existing tables, so back up first (§6). ADD COLUMN is
         # safe/idempotent-guarded (we check existing columns before each add).
         if current < 4:
-            try:
-                backup_db()
-            except Exception:
-                log.debug("aj_migrate v4: backup_db failed (continuing)", exc_info=True)
+            # Backup was already taken BEFORE the lock (see top of aj_migrate) to
+            # avoid holding _write_lock across the whole-DB copy. ADD COLUMN is
+            # idempotent-guarded (we check existing columns before each add).
             for table in ("aj_proposals", "aj_orders"):
                 have = {r["name"] for r in conn.execute(
                     "PRAGMA table_info({})".format(table)).fetchall()}
@@ -372,6 +383,21 @@ def aj_migrate() -> int:
             conn.execute("CREATE INDEX IF NOT EXISTS idx_aj_cycle_stats_ts ON aj_cycle_stats(ts)")
             conn.commit()
             current = 6
+        if current < 7:
+            # Hot-path indexes: the metrics/gate range scans and the trades/day +
+            # TTL cap queries were doing full table scans (substr() filters can't
+            # use an index; COUNT(*) over aj_cycles per order was O(orders×cycles)).
+            # All additive + idempotent (CREATE INDEX IF NOT EXISTS).
+            for stmt in (
+                "CREATE INDEX IF NOT EXISTS idx_aj_orders_mode ON aj_orders(mode)",
+                "CREATE INDEX IF NOT EXISTS idx_aj_orders_created ON aj_orders(created_at)",
+                "CREATE INDEX IF NOT EXISTS idx_aj_risk_events_created ON aj_risk_events(created_at)",
+                "CREATE INDEX IF NOT EXISTS idx_aj_routing_ts ON aj_routing(ts)",
+                "CREATE INDEX IF NOT EXISTS idx_aj_cycles_started_status ON aj_cycles(started_at, status)",
+            ):
+                conn.execute(stmt)
+            conn.commit()
+            current = 7
         set_setting_raw(_SCHEMA_KEY, str(current))
         log.info("aj_migrate: schema at version %d", current)
         return current
@@ -700,6 +726,21 @@ def mark_cycle(cycle_id: str, status: str) -> None:
         conn.commit()
 
 
+def claim_stale_cycle(cycle_id: str) -> bool:
+    """Atomically claim a stale 'running' cycle for crash recovery: flip it to
+    'crashed' ONLY if it is still 'running' (compare-and-set). Returns True iff
+    THIS caller won the claim (rowcount == 1). Two recovery passes racing the
+    same stale cycle must not both reconcile it — the loser sees rowcount 0 and
+    skips it. Closes the find-then-mark TOCTOU in recover_crashed_cycles."""
+    with db._write_lock:
+        conn = db.get_conn()
+        cur = conn.execute(
+            "UPDATE aj_cycles SET status='crashed' WHERE cycle_id=? AND status='running'",
+            (cycle_id,))
+        conn.commit()
+        return cur.rowcount == 1
+
+
 # ── append-only audit + hash chain (§8) ──────────────────────────────────────
 
 def _last_row_hash() -> Optional[str]:
@@ -749,27 +790,29 @@ def audit(kind: str, payload: Any, cycle_id: Optional[str] = None,
         return int(cur.lastrowid)
 
 
-def verify_audit_chain() -> Dict[str, Any]:
-    """Recompute the hash chain over aj_audit and report the first broken link
-    (if any). A clean chain means no row was edited or deleted out of band."""
-    conn = db.get_conn()
-    rows = conn.execute(
-        "SELECT id, ts, kind, ref_id, actor, payload_json, prev_hash, row_hash "
-        "FROM aj_audit ORDER BY id ASC").fetchall()
-    prev_row_hash = None     # the previous row's row_hash
+# Incremental-verify cache: the last clean (id, row_hash, total rows) we
+# verified up to. The hot path (status/health ticks) only re-verifies rows
+# APPENDED since, chaining from the cached row_hash — re-hashing the entire
+# append-only log on every tick was O(rows) per call and dominated those paths.
+_CHAIN_CACHE_LOCK = threading.Lock()
+_chain_cache: Dict[str, Any] = {"last_id": 0, "last_row_hash": None, "rows": 0}
+
+
+def _verify_chain_rows(rows, prev_row_hash) -> Dict[str, Any]:
+    """Verify `rows` (ordered by id ASC), linking the FIRST row's prev_hash to
+    `prev_row_hash` (None when `rows` begins the chain). Returns the standard
+    result dict; on success includes the last (id, row_hash) verified."""
+    last_id = None
+    last_hash = prev_row_hash
     for i, r in enumerate(rows):
         stored_prev = r["prev_hash"] or None
-        # Linkage: each row's prev_hash MUST equal the prior row's row_hash. The
-        # FIRST row must start the chain (null prev_hash) — a non-null prev_hash
-        # on row 0 means a contiguous prefix was deleted.
-        if i == 0:
+        if prev_row_hash is None and i == 0:
+            # genuine head of the chain must start cleanly (null prev_hash)
             if stored_prev is not None:
                 return {"ok": False, "broken_at": r["id"],
                         "reason": "chain does not start cleanly (prefix deleted?)"}
-        elif stored_prev != prev_row_hash:
+        elif stored_prev != last_hash:
             return {"ok": False, "broken_at": r["id"], "reason": "prev_hash linkage broken"}
-        # Recompute row_hash from the STORED prev_hash so any edit to prev_hash
-        # is caught here (row_hash binds it).
         material = "{}|{}|{}|{}|{}|{}".format(
             stored_prev or "", r["ts"], r["kind"],
             r["ref_id"] if r["ref_id"] is not None else "",
@@ -777,8 +820,59 @@ def verify_audit_chain() -> Dict[str, Any]:
         expect = hashlib.sha256(material.encode("utf-8")).hexdigest()
         if expect != r["row_hash"]:
             return {"ok": False, "broken_at": r["id"], "reason": "row_hash mismatch"}
-        prev_row_hash = r["row_hash"]
-    return {"ok": True, "rows": len(rows)}
+        last_hash = r["row_hash"]
+        last_id = r["id"]
+    return {"ok": True, "last_id": last_id, "last_row_hash": last_hash}
+
+
+def verify_audit_chain(quick: bool = False) -> Dict[str, Any]:
+    """Verify the aj_audit hash chain. A clean chain means no row was edited or
+    deleted out of band.
+
+    DEFAULT is a FULL re-scan from the chain head — the authoritative integrity
+    check (catches tampering ANYWHERE in the log). Pass quick=True for the hot
+    status/health path: it re-verifies only rows APPENDED since the last clean
+    verification (chaining from the cached row_hash), confirming the cached
+    anchor row is still present + unchanged before trusting the prefix. The
+    quick path is O(new rows); the full path is O(all rows). A stale anchor /
+    detected break falls back to a full re-scan."""
+    conn = db.get_conn()
+    if quick:
+        with _CHAIN_CACHE_LOCK:
+            c = dict(_chain_cache)
+        if c["last_id"] and c["last_row_hash"]:
+            # Confirm the cached anchor row is still present + unchanged (a
+            # delete/edit inside the verified prefix invalidates the cache).
+            anchor = conn.execute(
+                "SELECT row_hash FROM aj_audit WHERE id=?", (c["last_id"],)).fetchone()
+            if anchor and anchor["row_hash"] == c["last_row_hash"]:
+                new_rows = conn.execute(
+                    "SELECT id, ts, kind, ref_id, actor, payload_json, prev_hash, row_hash "
+                    "FROM aj_audit WHERE id > ? ORDER BY id ASC", (c["last_id"],)).fetchall()
+                res = _verify_chain_rows(new_rows, c["last_row_hash"])
+                if res["ok"]:
+                    last_id = res.get("last_id") or c["last_id"]
+                    last_hash = res.get("last_row_hash") or c["last_row_hash"]
+                    total = c["rows"] + len(new_rows)
+                    with _CHAIN_CACHE_LOCK:
+                        _chain_cache.update(last_id=last_id, last_row_hash=last_hash, rows=total)
+                    return {"ok": True, "rows": total}
+                # break in the tail — report it directly (no need to full-scan).
+                return {"ok": res["ok"], "broken_at": res.get("broken_at"),
+                        "reason": res.get("reason")}
+            # cache stale / anchor gone -> fall through to a full re-scan.
+    # Full scan from the head.
+    rows = conn.execute(
+        "SELECT id, ts, kind, ref_id, actor, payload_json, prev_hash, row_hash "
+        "FROM aj_audit ORDER BY id ASC").fetchall()
+    res = _verify_chain_rows(rows, None)
+    if res["ok"]:
+        with _CHAIN_CACHE_LOCK:
+            _chain_cache.update(last_id=res.get("last_id") or 0,
+                                last_row_hash=res.get("last_row_hash"),
+                                rows=len(rows))
+        return {"ok": True, "rows": len(rows)}
+    return {"ok": res["ok"], "broken_at": res.get("broken_at"), "reason": res.get("reason")}
 
 
 # ── generic row helpers for aj_* tables ──────────────────────────────────────

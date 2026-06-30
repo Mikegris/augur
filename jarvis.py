@@ -997,7 +997,10 @@ def _portfolio_pulse() -> Optional[Dict[str, Any]]:
         for sym in crypto_syms:
             q = cq.get((sym + "-USD").upper())
             if q:
-                prices[sym] = q
+                # Key UPPERCASE so the per-holding lookup below (which also
+                # uppercases) finds mixed-case crypto holdings — get_quotes_batch
+                # keys stocks UPPERCASE, so the whole prices map is uppercased.
+                prices[sym.upper()] = q
 
     total_value = 0.0
     total_cost = 0.0
@@ -1006,7 +1009,10 @@ def _portfolio_pulse() -> Optional[Dict[str, Any]]:
     day_pnl_known = False
     rows: List[Dict[str, Any]] = []
     for h in holdings:
-        q = prices.get(h["symbol"], {})
+        # get_quotes_batch keys UPPERCASE and the crypto map above is uppercased
+        # too; look up uppercased so mixed-case holdings ("Nvda", "btc") aren't
+        # silently dropped from value / P&L / weights.
+        q = prices.get(h["symbol"].upper(), {})
         price = q.get("price")
         if not price:
             continue
@@ -1027,6 +1033,12 @@ def _portfolio_pulse() -> Optional[Dict[str, Any]]:
             "unrealized_pct": round((mv - cost) / cost * 100, 2) if cost > 0 else None,
             "day_change_pct": q.get("change_pct"),
             "day_pnl": round(chg * h["shares"], 2) if chg is not None else None,
+            # Carry the already-fetched quote's price + 52-week range so the
+            # 52-week-extreme cards can reuse it instead of re-quoting each
+            # holding (saves up to 8 fresh round-trips per briefing).
+            "price": price,
+            "fifty_two_week_high": q.get("fifty_two_week_high"),
+            "fifty_two_week_low": q.get("fifty_two_week_low"),
         })
 
     if not rows:
@@ -1066,11 +1078,14 @@ def _market_regime() -> Optional[Dict[str, Any]]:
     regime_label = None
     regime_note = None
     vix_level = vix.get("price")
-    if vix_level is not None:
+    # Require a finite, positive print — a bad/negative/NaN value must not
+    # band-match into "CALM" (the lowest band) and report a falsely calm market.
+    _vix_finite = _finite(vix_level)
+    if _vix_finite is not None and _vix_finite > 0:
         for bound, label, note in _VIX_REGIMES:
             # <= so a VIX of exactly the threshold (15/20/28 — common round
             # prints) reads as the calmer regime, not one notch too alarming.
-            if vix_level <= bound:
+            if _vix_finite <= bound:
                 regime_label, regime_note = label, note
                 break
     return {
@@ -1221,7 +1236,9 @@ def _streak_card() -> List[Dict[str, Any]]:
 
 def _range_extreme_cards(pulse: Optional[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """Holdings sitting AT their 52-week high/low today (top 8 by value).
-    Per-symbol quotes are 30s-cached and warmed, so this is usually free."""
+    Reuses the price + 52-week range the pulse already fetched per holding —
+    no fresh per-symbol get_quote round-trips (get_quote ignores the batch
+    cache the pulse just wrote, so re-quoting cost up to 8 extra calls)."""
     if not pulse:
         return []
     # Equities only — a bare crypto symbol 404s on the stock quote endpoint
@@ -1231,12 +1248,22 @@ def _range_extreme_cards(pulse: Optional[Dict[str, Any]]) -> List[Dict[str, Any]
                   key=lambda r: -r["market_value"])[:8]
 
     def _one(r: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-        q = fetcher.get_quote(r["symbol"])
-        if not q or q.get("error"):
-            return None
-        p = _finite(q.get("price"))
-        hi = _finite(q.get("fifty_two_week_high"))
-        lo = _finite(q.get("fifty_two_week_low"))
+        # Prefer the quote data the pulse attached to the row. But the pulse
+        # sources prices from get_quotes_batch, which does NOT carry 52-week
+        # range fields — so fall back to a (30s-cached) per-symbol get_quote for
+        # the ≤8 top holdings when the row lacks them, else the card never shows.
+        p = _finite(r.get("price"))
+        hi = _finite(r.get("fifty_two_week_high"))
+        lo = _finite(r.get("fifty_two_week_low"))
+        if hi is None or lo is None:
+            try:
+                q = fetcher.get_quote(r["symbol"]) or {}
+                if p is None:
+                    p = _finite(q.get("price"))
+                hi = _finite(q.get("year_high") or q.get("fifty_two_week_high"))
+                lo = _finite(q.get("year_low") or q.get("fifty_two_week_low"))
+            except Exception:
+                pass
         if p is None or not hi or not lo or hi <= lo:
             return None
         if p >= hi * (1 - _RANGE_EPS_PCT / 100):
@@ -1253,16 +1280,12 @@ def _range_extreme_cards(pulse: Optional[Dict[str, Any]]) -> List[Dict[str, Any]
                          view="research", symbol=r["symbol"])
         return None
 
-    if safe_executor is not None:
-        results = safe_executor.parallel_map(_one, rows, max_workers=4,
-                                             thread_name_prefix="jarvis-range")
-    else:
-        results = []
-        for r in rows:
-            try:
-                results.append(_one(r))
-            except Exception:
-                results.append(None)
+    results = []
+    for r in rows:
+        try:
+            results.append(_one(r))
+        except Exception:
+            results.append(None)
     return [c for c in results if c][:2]
 
 
@@ -1581,14 +1604,17 @@ def away_digest(mark_seen: bool = True) -> Dict[str, Any]:
         # Too soon to count as an absence — don't burn the watermark, so
         # insights logged in this window survive to the next genuine digest.
         return out
-    # A genuine absence (or an unparseable gap): now advance the watermark.
-    _mark()
-
+    # A genuine absence (or an unparseable gap). Run the insight query FIRST,
+    # and only advance the watermark once it succeeds — if the query raises,
+    # marking seen would silently drop this window's insights forever.
     try:
         rows = db.jarvis_insights_since(last_seen, limit=10)
     except Exception as e:
         log.debug("away_digest: query failed: %s", e)
-        rows = []
+        # Don't burn the watermark on a failed read; the window survives to the
+        # next digest so its insights aren't lost.
+        return out
+    _mark()
     if not rows:
         return out
     out["insights"] = rows
@@ -2108,7 +2134,14 @@ def _extract_symbol(query: str) -> Optional[str]:
     # English words case-insensitively turned "is a recession coming" into a
     # quote of Agilent (A) and "should i sell now" into ServiceNow (NOW).
     for t in tokens:
-        if t.upper() in known and (t.isupper() or t.upper() not in _STOPWORDS):
+        if t.upper() not in known:
+            continue
+        # A held/watched ticker that is ALSO an English stopword (NOW, ALL, ON)
+        # is ambiguous: "should I sell NOW" must not quote ServiceNow just
+        # because NOW was typed in caps for emphasis. Such tokens resolve ONLY
+        # via the explicit $NOW path (handled above). Non-stopword held tickers
+        # still match in either case (caps or "how is nvda doing").
+        if t.upper() not in _STOPWORDS:
             return t.upper()
     # Company names: "apple", "nvidia", "berkshire" — lowercase words a ticker
     # match could never catch.
@@ -3297,9 +3330,21 @@ def _answer_trade(q: str) -> Optional[Dict[str, Any]]:
     import jarvis_tools
     verb = m.group("verb").lower()
     raw_sym = m.group("sym")
-    sym = _COMPANY_NAMES.get(raw_sym.lower(), raw_sym.upper())
+    company = _COMPANY_NAMES.get(raw_sym.lower())
+    sym = company or raw_sym.upper()
     if sym in _STOPWORDS or not re.match(r"^[A-Z][A-Z0-9.\-]{0,9}$", sym):
         return None
+    # Reject ordinary English words the regex captured as a pseudo-ticker
+    # ("sell 3 first at 10" → FIRST). Accept only when the token is plausibly
+    # a real ticker: a company-name hit, a symbol the user actually holds/
+    # watches, or an intentional ALL-CAPS ticker the user typed. A bare
+    # lowercase word that's in the name-skip set / not otherwise known is a
+    # false positive, not a trade.
+    if not company:
+        known = _known_symbols()
+        typed_caps = raw_sym.isupper()
+        if (raw_sym.lower() in _NAME_SKIP_WORDS or not typed_caps) and sym not in known:
+            return None
     try:
         shares = float(m.group("shares"))
         price = float(m.group("price").replace(",", ""))

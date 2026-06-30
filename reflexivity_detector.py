@@ -579,10 +579,17 @@ def _detect_short_squeeze(price_data, fundamentals):
                 strength += 15
 
             # Proximity: combination of short% and recent price movement.
-            # short_pct*200 saturated at 100 from a 50%-of-float short alone
-            # (no room for the price-move term); *100 lets both contribute.
-            proximity = min(100, short_pct * 100 + (pct_20d or 0) * 1.5)
-            proximity = max(0, proximity)
+            # Normalize EACH term to [0, 100] FIRST, then average them — rather
+            # than summing the raw scaled terms and clamping. Summing-then-
+            # clamping let a high short% alone hit the 100 cap and bury the
+            # price-move signal entirely (a 60%-short name scored 100 whether
+            # price was flat or ripping). Each leg saturates at its own ceiling
+            # (40% float-short → full short term; +30% 20d move → full price
+            # term) and contributes half of the final proximity.
+            short_term = min(50.0, max(0.0, short_pct / 0.40 * 50.0))   # 40% float-short → 50
+            move_term = min(50.0, max(0.0, (pct_20d or 0) / 30.0 * 50.0))  # +30% 20d → 50
+            proximity = short_term + move_term  # each ∈ [0,50]; sum ∈ [0,100]
+            proximity = min(100.0, max(0.0, proximity))
 
             if strength > 70:
                 timeline = "Active squeeze, days to 2 weeks"

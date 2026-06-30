@@ -101,26 +101,31 @@ def composite_edge(forecast: Any) -> float:
     return 0.0
 
 
-def _abs_score_key(item: Tuple[Any, Any]):
-    """NaN-safe sort key: rank by |composite_edge| DESCENDING, sinking any
-    degenerate score to the bottom. Mirrors the _score_key pattern in
-    aj_autonomy.build_briefing — coerce, sink NaN to +inf, negate so that a
-    plain ascending sort yields strongest-first.
+def _signed_score_key(item: Tuple[Any, Any]):
+    """NaN-safe sort key: rank by SIGNED composite_edge DESCENDING so the most
+    BULLISH name ranks first (this feeds a LONG-entry flow — a bearish/negative
+    edge must NOT be promoted to the top by its magnitude). Degenerate scores
+    (NaN/inf) sort as 0.0 conviction (neutral), sinking below any real positive
+    edge while still outranking real negatives. Negate so a plain ascending sort
+    yields most-bullish-first.
     """
     try:
         fv = float(composite_edge(item[1]))
     except (TypeError, ValueError):
-        return float("inf")
+        fv = 0.0
     if math.isnan(fv) or math.isinf(fv):
-        return float("inf")
-    return -abs(fv)
+        fv = 0.0
+    return -fv
 
 
 def cross_sectional_rank(candidates: Any, cfg: Optional[Dict[str, Any]] = None) -> List[Tuple[Any, Any]]:
-    """Rank (symbol, forecast) tuples by conviction strength: |composite_edge|
-    descending (strongest first). NaN/None/garbage edges sink to the bottom and
-    never crash the sort. Returns a NEW list; the input is not mutated. Empty or
-    non-iterable input returns []. `cfg` is accepted for signature symmetry.
+    """Rank (symbol, forecast) tuples by SIGNED composite_edge descending (most
+    BULLISH first). This feeds a long-entry flow, so a strongly NEGATIVE (bearish)
+    edge ranks LAST, not first — ranking by magnitude would wrongly fill the
+    top-N with shorts the agent can't take. NaN/None/garbage edges score 0.0
+    (neutral) and sit between positive and negative edges; the sort never crashes
+    on them. Returns a NEW list; the input is not mutated. Empty or non-iterable
+    input returns []. `cfg` is accepted for signature symmetry.
     """
     if not candidates:
         return []
@@ -138,17 +143,21 @@ def cross_sectional_rank(candidates: Any, cfg: Optional[Dict[str, Any]] = None) 
             continue
         pairs.append((sym, fc))
     # Stable sort preserves original order among equal-conviction names.
-    return sorted(pairs, key=_abs_score_key)
+    return sorted(pairs, key=_signed_score_key)
 
 
 def select_top_n(candidates: Any, cfg: Optional[Dict[str, Any]] = None) -> List[Tuple[Any, Any]]:
-    """Rank candidates, take the strongest `cross_sectional_top_n` (default 5),
-    and keep ONLY those whose |edge| still clears the absolute floor
-    `min_edge_pct_pts` (default 0).
+    """Select the best LONG-entry candidates: rank by SIGNED edge (most bullish
+    first), drop any non-bullish (edge <= 0) name, then take the strongest
+    `cross_sectional_top_n` (default 5) of those that also clear the absolute edge
+    floor `min_edge_pct_pts` (default 0).
 
-    The relative ranking decides WHICH of the floor-clearing names to trade; it
-    never lets a sub-floor name through. Both gates apply. Empty/garbage input
-    returns [] safely.
+    This feeds a long-only entry flow, so a BEARISH name is never selected no
+    matter how large its magnitude — ranking/selecting by |edge| would wrongly
+    promote shorts the agent can't take. The floor is applied to the (positive)
+    edge magnitude AFTER the bullish filter, and the relative top-N decides which
+    of the floor-clearing bullish names to trade. Empty/garbage input returns []
+    safely.
     """
     cfg = cfg or {}
     ranked = cross_sectional_rank(candidates, cfg)
@@ -167,11 +176,15 @@ def select_top_n(candidates: Any, cfg: Optional[Dict[str, Any]] = None) -> List[
         min_edge = 0.0
     min_edge = abs(min_edge)
 
-    out: List[Tuple[Any, Any]] = []
-    for sym, fc in ranked[:top_n]:
-        if abs(composite_edge(fc)) >= min_edge:
-            out.append((sym, fc))
-    return out
+    # Filter to BULLISH names clearing the absolute floor FIRST (ranked is already
+    # most-bullish-first), THEN take the top-N — so a dropped bearish/sub-floor
+    # name doesn't consume a top-N slot a tradable bullish name should have.
+    eligible: List[Tuple[Any, Any]] = []
+    for sym, fc in ranked:
+        edge = composite_edge(fc)
+        if edge > 0 and edge >= min_edge:
+            eligible.append((sym, fc))
+    return eligible[:top_n]
 
 
 def _classify(key: Any) -> int:

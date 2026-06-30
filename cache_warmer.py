@@ -238,9 +238,15 @@ def _record_failure(label: str) -> None:
 
 def _due(label: str, interval: float, now: float) -> bool:
     """True when a task's cadence has elapsed AND it isn't in failure backoff."""
-    if now - _last_cycle.get(label, 0) < interval:
+    # Snapshot both book values under _book_lock so a concurrent writer
+    # (_safe / _record_failure) can't produce a torn/stale read that
+    # double-fires or wrongly skips a task.
+    with _book_lock:
+        last_cycle = _last_cycle.get(label, 0)
+        next_retry = _next_retry.get(label, 0)
+    if now - last_cycle < interval:
         return False
-    return now >= _next_retry.get(label, 0)
+    return now >= next_retry
 
 
 def _vacuum_checked(_db):

@@ -239,8 +239,15 @@ def _compute_velocity(windows):
     Returns int clamped to [-100, +100].
     """
     w7 = windows.get("7d", {})
-    # Prefer the non-overlapping prior window; fall back to cumulative 14d.
-    w_prior = windows.get("7d_prior") or windows.get("14d", {})
+    # Use ONLY the non-overlapping prior window. Falling back to the cumulative
+    # 14d window reintroduces the damped/overlapping-window bug (the 14d figure
+    # already contains the 7d articles), which bites exactly on thin names where
+    # 7d_prior is sparse. When the disjoint prior window isn't available (or is
+    # itself insufficient), velocity is UNKNOWN → return 0 rather than emit a
+    # mechanically-damped number off the overlapping window.
+    w_prior = windows.get("7d_prior")
+    if not w_prior:
+        return 0
 
     # Can't compute if either window has insufficient data
     if w7.get("dominant") == "INSUFFICIENT DATA" or w_prior.get("dominant") == "INSUFFICIENT DATA":

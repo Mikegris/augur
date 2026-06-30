@@ -687,7 +687,12 @@ def _pair_row(symbol: str, pair: dict,
         mean, std = stats
         if std and std > 1e-9:
             return (norm - mean) / std
-        return norm - mean
+        # std≈0: every symbol shares (almost) the same value for this key, so
+        # mean-centering (norm-mean) collapses everyone to ~0 and erases any
+        # real divergence on the *other* leg of a pair. Fall back to the RAW
+        # norm so this key retains its directional magnitude instead of
+        # flattening to zero.
+        return norm
 
     za = _z(key_a, a["norm"])
     zb = _z(key_b, b["norm"])
@@ -696,10 +701,21 @@ def _pair_row(symbol: str, pair: dict,
     if magnitude <= _DIVERGENCE_THRESHOLD:
         return None
     # Require actual *opposition*, not just one big and one small same-sign.
-    # Use the standardized (sign-preserving) values for the sign test.
-    if (za > 0) == (zb > 0) and abs(za) > 0.05 and abs(zb) > 0.05:
-        # Same sign — both bullish or both bearish, just different magnitudes.
-        # Not a divergence; skip.
+    # CRITICAL: run the sign/opposition test on the RAW norms, NOT the
+    # mean-centered z-scores. A z-score is centered on the cross-sectional mean,
+    # so a *below-average bullish* signal has z<0 even though its raw read is
+    # bullish — pairing it with an above-average bullish signal (z>0) would read
+    # as opposite signs and manufacture a false divergence between two bullish
+    # signals. The z is only meaningful for the MAGNITUDE threshold above; the
+    # directional read must come from the raw norms.
+    try:
+        ra = float(a["norm"])
+        rb = float(b["norm"])
+    except (TypeError, ValueError, KeyError):
+        ra, rb = za, zb
+    if (ra > 0) == (rb > 0) and abs(ra) > 0.05 and abs(rb) > 0.05:
+        # Same raw sign — both bullish or both bearish, just different
+        # magnitudes. Not a divergence; skip.
         return None
 
     interpretation = _build_interpretation(pair, a, b)

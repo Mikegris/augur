@@ -38,11 +38,15 @@ def snapshot_equity() -> Dict[str, Any]:
 
 def equity_curve(days: int = 90) -> List[Dict[str, Any]]:
     """Latest equity per date (one point/day)."""
-    rows = aj_db.query(
-        "SELECT date, equity_usd, day_pnl_usd, realized_usd, unrealized_usd "
-        "FROM aj_equity WHERE id IN (SELECT MAX(id) FROM aj_equity GROUP BY date) "
-        "ORDER BY date ASC")
-    return rows[-days:] if days else rows
+    base = ("SELECT date, equity_usd, day_pnl_usd, realized_usd, unrealized_usd "
+            "FROM aj_equity WHERE id IN (SELECT MAX(id) FROM aj_equity GROUP BY date) ")
+    if days:
+        # Push the row limit into SQL: take the most-recent `days` dates, then
+        # reverse to chronological order — instead of loading the entire history
+        # and slicing the tail in Python.
+        rows = aj_db.query(base + "ORDER BY date DESC LIMIT ?", (days,))
+        return list(reversed(rows))
+    return aj_db.query(base + "ORDER BY date ASC")
 
 
 # ── ⑰ per-symbol P&L attribution ──────────────────────────────────────────────
@@ -54,7 +58,11 @@ def attribution() -> List[Dict[str, Any]]:
     realized = aj_positions.realized_by_symbol("paper")
     book = aj_positions.paper_book()
     positions = book.get("positions") or {}
-    marks = aj_risk._marks(list(positions.keys()))
+    # Resolve each held symbol to its quote-convention symbol FIRST (crypto
+    # 'BTC' -> 'BTC-USD') so a bare crypto ticker never picks up an equity quote.
+    qsyms = {sym: aj_risk._quote_symbol(sym, p.get("asset_type") or "")
+             for sym, p in positions.items()}
+    marks = aj_risk._marks(list(qsyms.values()))
     out: Dict[str, Dict[str, Any]] = {}
     for sym, r in realized.items():
         out.setdefault(sym, {"symbol": sym, "realized": 0.0, "unrealized": 0.0, "qty": 0.0})
@@ -62,7 +70,7 @@ def attribution() -> List[Dict[str, Any]]:
     for sym, p in positions.items():
         qty = float(p.get("qty") or 0)
         avg = float(p.get("avg_cost") or 0)
-        mark = marks.get(sym)
+        mark = marks.get(qsyms[sym])
         unreal = aj_db.money((mark - avg) * qty) if mark is not None else 0.0
         d = out.setdefault(sym, {"symbol": sym, "realized": 0.0, "unrealized": 0.0, "qty": 0.0})
         d["unrealized"] = unreal
@@ -219,7 +227,11 @@ def positions_detail() -> Dict[str, Any]:
     import aj_rules
     book = aj_positions.paper_book()
     positions = book.get("positions") or {}
-    marks = aj_risk._marks(list(positions.keys()))
+    # Resolve each held symbol to its quote-convention symbol FIRST (crypto
+    # 'BTC' -> 'BTC-USD') so a bare crypto ticker never picks up an equity quote.
+    qsyms = {sym: aj_risk._quote_symbol(sym, p.get("asset_type") or "")
+             for sym, p in positions.items()}
+    marks = aj_risk._marks(list(qsyms.values()))
     rows = []
     total_mv = 0.0
     gross_mv = 0.0
@@ -227,7 +239,7 @@ def positions_detail() -> Dict[str, Any]:
     for sym, p in positions.items():
         qty = float(p.get("qty") or 0)
         avg = float(p.get("avg_cost") or 0)
-        mark = marks.get(sym)
+        mark = marks.get(qsyms[sym])
         if mark is None:
             mark = avg
         mv = qty * mark

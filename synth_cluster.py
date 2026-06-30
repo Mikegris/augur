@@ -121,7 +121,13 @@ ACTIVE_PHASES = {"ACCELERATION", "EMERGENCE"}
 # 0.65/0.40 cutoff that mechanically tags whole sectors (mega-cap tech is
 # ~80% institutional almost universally — an absolute 0.65 bull cutoff fires
 # for nearly all of them and carries no cross-sectional information).
-_INST_SAMPLE: List[float] = []
+# Keyed by SYMBOL so the cross-section holds at most one observation per
+# distinct name. The old flat list let one mega-cap be appended many times per
+# scan (it's re-evaluated for both the bullish and bearish direction, and
+# across scan passes), over-representing it and skewing the percentile cutoffs
+# toward that name's ownership level. A dict de-dups by symbol, keeping its
+# latest value.
+_INST_SAMPLE: "Dict[str, float]" = {}
 _INST_SAMPLE_LOCK = threading.Lock()
 _INST_SAMPLE_MAX = 300
 _INST_MIN_SAMPLE = 20  # below this we fall back to the absolute thresholds
@@ -134,7 +140,7 @@ def _inst_percentile_thresholds() -> Optional[Tuple[float, float]]:
     with _INST_SAMPLE_LOCK:
         if len(_INST_SAMPLE) < _INST_MIN_SAMPLE:
             return None
-        vals = sorted(_INST_SAMPLE)
+        vals = sorted(_INST_SAMPLE.values())
     n = len(vals)
 
     def _pct(p: float) -> float:
@@ -148,11 +154,21 @@ def _inst_percentile_thresholds() -> Optional[Tuple[float, float]]:
     return (_pct(0.67), _pct(0.33))
 
 
-def _record_inst_observation(inst_f: float) -> None:
+def _record_inst_observation(inst_f: float, symbol: Optional[str] = None) -> None:
+    """Record one institutional-ownership observation, de-duplicated by symbol.
+
+    When `symbol` is supplied the value overwrites any prior reading for that
+    name (one observation per symbol in the cross-section). When it isn't (older
+    callers), we fall back to a synthetic per-value key so behaviour degrades to
+    "record it" rather than raising — but the primary path passes the symbol."""
+    key = (symbol or "").upper().strip() or "_anon_{}".format(round(inst_f, 6))
     with _INST_SAMPLE_LOCK:
-        _INST_SAMPLE.append(inst_f)
+        _INST_SAMPLE[key] = inst_f
+        # Bound the rolling cross-section: drop oldest-inserted keys (dict
+        # preserves insertion order) once we exceed the cap.
         if len(_INST_SAMPLE) > _INST_SAMPLE_MAX:
-            del _INST_SAMPLE[: len(_INST_SAMPLE) - _INST_SAMPLE_MAX]
+            for k in list(_INST_SAMPLE.keys())[: len(_INST_SAMPLE) - _INST_SAMPLE_MAX]:
+                del _INST_SAMPLE[k]
 
 
 # ---------------------------------------------------------------------------
@@ -281,8 +297,11 @@ def _component_congress_60d(symbol: str, direction: str) -> Tuple[bool, str, str
             sells += 1
             sell_val += amt
     net = buy_val - sell_val
+    # Both directions use a STRICT count majority so a tie (buys == sells)
+    # fires neither. The old bullish branch used `buys >= sells` (inclusive)
+    # while bearish used `sells > buys` (strict), so a tie was biased bullish.
     if direction == "bullish":
-        fired = buys >= sells and net > 0
+        fired = buys > sells and net > 0
     else:
         fired = sells > buys and net < 0
     value = f"${net/1000:+.0f}k net"
@@ -336,7 +355,7 @@ def _component_13f_institutional(symbol: str, direction: str) -> Tuple[bool, str
     # observed distribution); fall back to absolute 0.65/0.40 when the sample
     # is too small. Record this observation for future scans either way.
     if inst_f is not None:
-        _record_inst_observation(inst_f)
+        _record_inst_observation(inst_f, symbol)
     pct_cuts = _inst_percentile_thresholds()
     if pct_cuts is not None:
         bull_cut, bear_cut = pct_cuts

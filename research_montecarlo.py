@@ -205,7 +205,30 @@ def prob_of_target(
                                  (method or "historical_bootstrap").lower(), seed)
     initial_nav = sim.get("initial_nav", 0.0) or 0.0
     target_nav = float(target_nav)
+    requested_target_nav = target_nav
     paths = sim.pop("_paths", None)
+
+    # WHY (Q15): when some holdings are dropped for missing history, the sim
+    # runs on the SURVIVING book and reports initial_nav = surviving_mv (<
+    # full_nav). The caller's target_nav, however, is expressed against the
+    # FULL book the user actually holds — so comparing the full-book target to
+    # surviving-book paths measures the wrong threshold (it asks the smaller
+    # book to reach the bigger book's target, understating the probability).
+    # Rescale the target by surviving/full so it sits at the same fraction of
+    # the simulated (surviving) NAV that it did of the full NAV. Surface both
+    # the dropped value and the rescaled target so the caller can explain it.
+    full_nav = 0.0
+    try:
+        full_nav = float(sum(float(h.get("market_value", 0) or 0)
+                             for h in (clean or [])))
+    except Exception:
+        full_nav = 0.0
+    survival_ratio = 1.0
+    dropped_value = 0.0
+    if full_nav > 1e-9 and initial_nav > 1e-9 and initial_nav < full_nav:
+        survival_ratio = initial_nav / full_nav
+        dropped_value = full_nav - initial_nav
+        target_nav = requested_target_nav * survival_ratio
     # prob_touch from real paths is a discrete-daily approximation (intraday /
     # inter-step crossings aren't modeled, so it can slightly understate the
     # true touch probability). In the empty/failed-sim fallback it collapses
@@ -239,8 +262,13 @@ def prob_of_target(
         else None
     )
     return {
+        # `target_nav` is the (possibly rescaled-for-survivors) value the paths
+        # were actually compared against, preserving the existing key contract.
         "target_nav": round(target_nav, 2),
+        "requested_target_nav": round(requested_target_nav, 2),
         "initial_nav": round(initial_nav, 2),
+        "dropped_value": round(dropped_value, 2),
+        "survival_ratio": round(survival_ratio, 4),
         "horizon_days": hd,
         "n_paths": sim.get("n_paths", np_clamped),
         "method": sim.get("method", method),
@@ -420,6 +448,13 @@ def _simulate_paths_bootstrap(R: np.ndarray, weights: np.ndarray,
     nav_paths : np.ndarray of shape (n_paths, horizon_days)
         NAV / initial_NAV at each step. Multiply by initial_nav to get $.
     """
+    # WHY (Q1): the MVN path shrinks the daily drift 90% toward 0 (the sample
+    # mean is a noisy drift estimate that otherwise dominates a long horizon and
+    # bakes in the last year's luck). The bootstrap re-samples raw rows, so it
+    # silently keeps the FULL trailing drift — the two methods then disagree by
+    # exactly that drift over the horizon. Demean each asset's returns by the
+    # same shrink fraction so the bootstrap carries the same residual drift.
+    R = R - _MVN_DRIFT_SHRINK * R.mean(axis=0, keepdims=True)
     T = R.shape[0]
     L = int(max(1, min(block_size, T)))
     if L <= 1 or T <= 1:

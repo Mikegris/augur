@@ -230,7 +230,10 @@ else:
 test_amounts = [
     ("$1,001 - $15,000", 8000),
     ("$50,001 - $100,000", 75000),
-    ("Over $5,000,000", 5000000),
+    # "Over $X" is an open-ended top band: mapping it to the floor ($5,000,000)
+    # understated the biggest trades, so it now maps to a 1.5× sentinel above
+    # the floor (defect fix) rather than the floor itself.
+    ("Over $5,000,000", 7500000),
 ]
 all_pass = True
 for s, expected in test_amounts:

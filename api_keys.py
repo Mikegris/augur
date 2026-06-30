@@ -146,9 +146,18 @@ def save_key(provider: str, key: str) -> Dict[str, Any]:
     if is_masked(key):
         return {"error": "that's the masked placeholder, not a key"}
     fmt = spec.get("format")
-    if fmt and not re.match(fmt, key):
-        return {"error": "key doesn't look like a {} key ({})".format(
-            spec["label"], spec.get("hint", ""))}
+    if fmt:
+        if not re.match(fmt, key):
+            return {"error": "key doesn't look like a {} key ({})".format(
+                spec["label"], spec.get("hint", ""))}
+    else:
+        # No per-provider format regex: don't accept any non-empty string.
+        # Enforce a minimum length (provider-overridable via spec["min_length"])
+        # so a stray character or accidental paste can't be stored as a key.
+        min_len = spec.get("min_length", 8)
+        if len(key) < min_len:
+            return {"error": "{} key looks too short (need at least {} characters)".format(
+                spec["label"], min_len)}
     import database as db
     db.set_setting(spec["setting"], key)
     return {"status": "saved", "masked": mask(key)}

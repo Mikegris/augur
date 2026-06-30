@@ -210,10 +210,29 @@ def pick_contract(underlying: str, side: str, cfg: Dict[str, Any], *,
 
 # ── marking held options ──────────────────────────────────────────────────────
 
+def _config_multiplier() -> int:
+    """The configured option contract multiplier (option_contract_multiplier),
+    falling back to DEFAULT_MULTIPLIER. Fail-open: any error → DEFAULT."""
+    try:
+        import aj_config
+        cfg = aj_config.get_config() or {}
+        return int(cfg.get("option_contract_multiplier", DEFAULT_MULTIPLIER)
+                   or DEFAULT_MULTIPLIER)
+    except Exception:
+        return DEFAULT_MULTIPLIER
+
+
 def mark(option_symbol: str, *,
+         multiplier: Optional[int] = None,
          chain_fn: Optional[Callable[[str, str], Dict]] = None) -> Optional[float]:
     """Per-contract mark for a held option position. None if unpriceable
-    (expired / no chain / no quote) — callers treat None as 'no mark'."""
+    (expired / no chain / no quote) — callers treat None as 'no mark'.
+
+    The per-contract premium = per-share mid × multiplier. The multiplier MUST
+    match the one pick_contract stored at entry (option_contract_multiplier),
+    otherwise P&L is corrupted for any non-100 contract. Pass the held position's
+    stored `contract_multiplier` when available; otherwise we read the configured
+    option_contract_multiplier (NOT the hardcoded 100)."""
     meta = parse_symbol(option_symbol)
     if not meta:
         return None
@@ -222,7 +241,7 @@ def mark(option_symbol: str, *,
         return 0.0   # expired → worthless for marking (paper)
     chain = (chain_fn or _default_chain)(meta["underlying"], meta["expiry"])
     rows = (chain or {}).get("calls" if meta["option_type"] == "call" else "puts") or []
-    mult = DEFAULT_MULTIPLIER
+    mult = int(multiplier) if multiplier else _config_multiplier()
     for row in rows:
         try:
             if abs(float(row.get("strike")) - meta["strike"]) < 1e-6:

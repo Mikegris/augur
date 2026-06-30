@@ -263,9 +263,12 @@ def _score_congress_cluster(symbol):
 # ---------------------------------------------------------------------------
 def _score_institutional_signal(symbol):
     try:
-        data = smart_money.compute_score(symbol)
-        components = data.get("components", {})
-        inst = components.get("institutional", {})
+        # Channel 5 only needs the 0-15 institutional sub-score. Recomputing the
+        # FULL smart_money.compute_score() here fanned out insider Form-4 fetches,
+        # price history, options chains, SEC sentiment and an ML forecast per
+        # symbol just to read one number. Use the light institutional-only helper
+        # (ticker.info only) instead.
+        inst = smart_money.institutional_subscore(symbol)
         raw = inst.get("score", 0)
         max_val = inst.get("max", 15)
         if max_val == 0:
@@ -273,7 +276,7 @@ def _score_institutional_signal(symbol):
 
         score = int((raw / max_val) * 100)
         score = _clamp(score)
-        detail = "institutional {}/{} ({})".format(raw, max_val, data.get("signal", "n/a"))
+        detail = "institutional {}/{} ({})".format(raw, max_val, inst.get("detail", "n/a"))
         return {"score": score, "detail": detail, "firing": score >= 60, "weight": 0.10}
 
     except Exception as e:

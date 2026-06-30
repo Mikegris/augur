@@ -172,9 +172,16 @@ def news_sentiment(query: str) -> Dict[str, Any]:
         avg = round(sum(vals) / len(vals), 2) if vals else None
         trend = None
         if len(vals) >= 4:
-            first, last = vals[0], vals[-1]
-            trend = ("improving" if last > first
-                     else "deteriorating" if last < first else "flat")
+            # Compare smoothed MEANS of the first vs last third rather than the
+            # raw first vs last point — a single noisy endpoint otherwise flips
+            # the whole trend. Require a minimum delta so jitter reads "flat".
+            third = max(1, len(vals) // 3)
+            first_mean = sum(vals[:third]) / third
+            last_mean = sum(vals[-third:]) / third
+            _MIN_DELTA = 0.5  # GDELT tone units; below this is noise
+            delta = last_mean - first_mean
+            trend = ("improving" if delta > _MIN_DELTA
+                     else "deteriorating" if delta < -_MIN_DELTA else "flat")
         return {"query": query, "avg_tone": avg, "trend": trend,
                 "points": len(vals),
                 "note": "GDELT tone: positive = upbeat coverage, negative = downbeat."}
@@ -211,7 +218,16 @@ def search_sec_filings(query: str, forms: Optional[str] = None) -> Dict[str, Any
                 # as a success for the full TTL.
                 return {"error": "edgar_status",
                         "note": "EDGAR returned {} — it rate-limits; try again.".format(r.status_code)}
-            hits = (r.json().get("hits", {}) or {}).get("hits", []) or []
+            # A 200 with a non-JSON body (HTML throttle/maintenance page) is
+            # also transient — flag it with an "error" key rather than letting
+            # it fall through as an empty "no filings" result that cache_store
+            # would freeze for the full TTL.
+            try:
+                payload = r.json()
+            except Exception:
+                return {"error": "edgar_nonjson",
+                        "note": "EDGAR returned a non-JSON response — transient; try again."}
+            hits = (payload.get("hits", {}) or {}).get("hits", []) or []
         except Exception as e:
             log.debug("search_sec_filings failed: %s", e)
             return {"error": "sec_unavailable",

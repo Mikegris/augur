@@ -30,6 +30,41 @@ _EPS = 1e-9
 _CRYPTO_HINTS = {"BTC", "ETH", "SOL", "XRP", "DOGE", "ADA", "HBAR", "LTC",
                  "BCH", "AVAX", "DOT", "MATIC", "LINK", "UNI", "ATOM"}
 
+# ── paper_book memo ──────────────────────────────────────────────────────────
+# paper_book() replays the ENTIRE aj_fills history (FIFO) and is called many
+# times per cycle (the gate, exits, analytics, several enhancement gates). The
+# result is a pure function of the fills, so memoize it keyed on (mode, max
+# fill id, fill row count) + the ET trading day (realized_today rolls at the ET
+# boundary). Any new fill changes max(id) or the count and busts the memo; a new
+# trading day busts it via the day key. Process-local, tiny, and self-
+# invalidating — no manual clear needed.
+import threading as _threading
+_BOOK_MEMO_LOCK = _threading.Lock()
+_BOOK_MEMO: Dict[str, Any] = {}
+
+
+def _fills_fingerprint(mode: str):
+    """A cheap identity for the mode's fill set. Includes COUNT + MIN/MAX id AND
+    content sums (qty, price, qty×price, fees) so the fingerprint changes when
+    the data CONTENT changes even if COUNT and MAX(id) coincide — e.g. a test
+    that DELETEs then re-inserts a different two-fill set reusing the same
+    rowids. Without the content sums such a collision would serve a stale
+    memoized book/P&L."""
+    try:
+        rows = aj_db.query(
+            "SELECT COUNT(*) AS n, COALESCE(MAX(f.id),0) AS mx, "
+            "COALESCE(MIN(f.id),0) AS mn, "
+            "COALESCE(SUM(f.qty),0) AS sq, COALESCE(SUM(f.price),0) AS sp, "
+            "COALESCE(SUM(f.qty*f.price),0) AS sv, COALESCE(SUM(f.fees_usd),0) AS sf "
+            "FROM aj_fills f JOIN aj_orders o ON f.order_id = o.id WHERE o.mode = ?",
+            (mode,))
+        r = rows[0] if rows else {}
+        return (int(r.get("n") or 0), int(r.get("mx") or 0), int(r.get("mn") or 0),
+                round(float(r.get("sq") or 0), 6), round(float(r.get("sp") or 0), 6),
+                round(float(r.get("sv") or 0), 6), round(float(r.get("sf") or 0), 6))
+    except Exception:
+        return None
+
 
 def infer_asset_type(symbol: str) -> str:
     if isinstance(symbol, str) and symbol.startswith("OPT:"):
@@ -66,8 +101,28 @@ def paper_book(mode: str = "paper") -> Dict[str, Any]:
       positions: {SYM: {qty, avg_cost, cost_basis, asset_type}},
       realized_total, realized_today, fees_total, fees_today
     }
-    """
+
+    Memoized on (mode, fills fingerprint, ET trading day): the full FIFO replay
+    is recomputed only when a fill is added/removed or the trading day rolls,
+    not on every one of the many per-cycle callers. Falls through to a fresh
+    replay if the fingerprint can't be read (fail-safe toward correctness)."""
     today = _et_date(aj_db.utc_now())
+    fp = _fills_fingerprint(mode)
+    if fp is not None:
+        memo_key = mode
+        cache_key = (fp, today)
+        with _BOOK_MEMO_LOCK:
+            cached = _BOOK_MEMO.get(memo_key)
+            if cached is not None and cached[0] == cache_key:
+                return cached[1]
+        result = _paper_book_compute(mode, today)
+        with _BOOK_MEMO_LOCK:
+            _BOOK_MEMO[memo_key] = (cache_key, result)
+        return result
+    return _paper_book_compute(mode, today)
+
+
+def _paper_book_compute(mode: str, today: Optional[str]) -> Dict[str, Any]:
     lots: Dict[str, deque] = defaultdict(deque)   # SYM -> deque([qty, price])
     realized_total = 0.0
     realized_today = 0.0
@@ -149,11 +204,31 @@ def paper_book(mode: str = "paper") -> Dict[str, Any]:
             "fees_today": aj_db.money(fees_today)}
 
 
+_RT_MEMO: Dict[str, Any] = {}
+
+
 def realized_trades(mode: str = "paper") -> List[Dict[str, Any]]:
     """Replay fills FIFO and emit ONE record per closing trade — a sell that
     consumed long lots, or a buy that covered shorts — with its realized P&L
     (incl fees). Open lots are not emitted. Feeds win-rate + per-symbol P&L.
-    Separate pass from paper_book() to keep that hot path untouched."""
+    Separate pass from paper_book() to keep that hot path untouched.
+
+    Memoized on the fills fingerprint so an analytics render that calls this via
+    realized_by_symbol() AND trade_stats() replays the history once, not 2-3×."""
+    fp = _fills_fingerprint(mode)
+    if fp is not None:
+        with _BOOK_MEMO_LOCK:
+            ent = _RT_MEMO.get(mode)
+            if ent is not None and ent[0] == fp:
+                return ent[1]
+    out = _realized_trades_compute(mode)
+    if fp is not None:
+        with _BOOK_MEMO_LOCK:
+            _RT_MEMO[mode] = (fp, out)
+    return out
+
+
+def _realized_trades_compute(mode: str = "paper") -> List[Dict[str, Any]]:
     from collections import defaultdict, deque
     lots: Dict[str, deque] = defaultdict(deque)
     out: List[Dict[str, Any]] = []

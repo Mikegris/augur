@@ -583,6 +583,38 @@ def _score_ml_forecast(symbol):
     return score, detail
 
 
+def institutional_subscore(symbol):
+    """Light institutional-only sub-score for a symbol — fetches ONLY
+    `ticker.info` and runs `_score_institutional`, returning the same
+    {"score", "max"} shape as the "institutional" component of compute_score()
+    (scaled to a max of 15).
+
+    This exists so callers that need ONLY the institutional sub-score (e.g.
+    synthetic_insider's Channel 5) don't have to recompute the FULL smart-money
+    composite — which fans out insider Form-4 fetches, price history, options
+    chains, SEC sentiment and an ML forecast per symbol — just to read one
+    number. Fail-open to a neutral {"score": 0, "max": 15} on any error.
+    """
+    try:
+        symbol = symbol.upper()
+        ticker = yf.Ticker(symbol)
+        try:
+            info = ticker.info or {}
+        except Exception:
+            info = {}
+        institutional_score = _score_institutional(info)  # 0-20
+        institutional_scaled = round(institutional_score * 15 / 20)
+        return {
+            "score": institutional_scaled,
+            "max": 15,
+            "label": "Institutional Flow",
+            "detail": f"Short float: {_safe_float(info.get('shortPercentOfFloat'), 0)*100:.1f}%",
+        }
+    except Exception as e:
+        log.warning("institutional_subscore failed for %s: %s", symbol, e)
+        return {"score": 0, "max": 15, "label": "Institutional Flow", "detail": "data unavailable"}
+
+
 # ── Main scorer ────────────────────────────────────────────────────────────────
 
 def compute_score(symbol):

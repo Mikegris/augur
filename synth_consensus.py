@@ -658,16 +658,20 @@ def _compute(symbol: str) -> Dict[str, Any]:
             "computed_in_ms": round((time.time() - t0) * 1000),
         }
 
-    avg = weighted_sum / sum_w  # in roughly [-1, +1]
-    # Coverage attenuation: a consensus built from one thin source shouldn't
-    # get the same dynamic range as one corroborated by many. `coverage` is
-    # the fraction of the full static-weight budget that actually produced a
-    # value; we shrink `avg` toward 0 (→ score 50, neutral) proportionally.
-    # A single-source read at ~5-20% coverage is pulled hard toward neutral;
-    # near-full coverage leaves the score essentially unchanged.
+    # Coverage attenuation, applied EXACTLY ONCE (budget-weighted normalization).
+    # A consensus built from one thin source shouldn't get the same dynamic
+    # range as one corroborated by many. We normalize the dynamic-weighted sum
+    # by the *full static-weight budget* (total_static_w) rather than only the
+    # present contributors' weight (sum_w): a single-source read is thereby
+    # naturally shrunk toward 0 (→ score 50, neutral) in proportion to how
+    # little of the budget it covers, while a near-full-coverage read is left
+    # essentially unchanged. The previous code divided by `sum_w` (present
+    # contributors only) AND multiplied by `coverage`, pulling a single source
+    # toward neutral TWICE.
     coverage = sum_static_w / total_static_w if total_static_w > 0 else 1.0
     coverage = _clip(coverage, 0.0, 1.0)
-    avg *= coverage
+    avg = weighted_sum / total_static_w  # budget-weighted: single attenuation
+    avg = _clip(avg, -1.0, 1.0)
     # Tanh squash gives nice midrange spread; 50 + 50*tanh(1.6*avg) maps the
     # high-conviction tails (|avg|≈1) to ~96/4 and keeps the middle band
     # wide. The factor of 1.6 was chosen so |avg|=0.5 lands at ~83.

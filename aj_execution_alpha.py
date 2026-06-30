@@ -145,10 +145,14 @@ def cost_gate(edge_pts, symbol, quote, cfg):
 
     `edge_pts` is the expected edge expressed as a PERCENT (e.g. 2.5 == 2.5%).
 
-    Cost model (all in percent):
-        round_trip = (spread%/2) * 2 legs  == spread%        [enter + exit]
-                   + fee_bps/100 per leg * 2 legs            [enter + exit]
-        required   = round_trip * cost_edge_multiple (safety multiple)
+    Cost model (all in percent). A round trip = ENTER + EXIT, and on each leg we
+    pay HALF the quoted spread (cross from mid to the touch) plus one fee:
+        spread cost = (spread%/2) per leg × 2 legs   == FULL spread%
+        fee cost    = fee%        per leg × 2 legs   == 2 × fee%
+        round_trip  = FULL spread% + 2 × fee%        (half-spread per leg, twice)
+        required    = round_trip × cost_edge_multiple (safety multiple)
+    So `round_trip` is EXACTLY one full quoted spread plus two fees — consistent
+    with the half-spread-per-leg assumption above (½·2 = 1 full spread).
     Block (ok=False) when edge_pts < required.
 
     Gating:
@@ -163,13 +167,15 @@ def cost_gate(edge_pts, symbol, quote, cfg):
         if not _cfg_get(cfg, "cost_gate", False):
             return {"ok": True, "reason": "cost_gate off", "cost_pct": 0.0}
 
-        spread_pct = _spread_pct(quote, cfg)          # full spread, percent
+        spread_pct = _spread_pct(quote, cfg)          # FULL quoted spread, percent
         fee_bps = _f(_cfg_get(cfg, "fee_bps", 0), 0.0)
         fee_pct = fee_bps / 100.0                      # per leg, percent
 
-        # Round trip = cross half-spread twice (in + out) == one full spread,
-        # plus fees on both legs.
-        round_trip = spread_pct + 2.0 * fee_pct
+        # Round trip = half the quoted spread per leg, crossed twice (enter+exit)
+        # == one FULL spread, plus one fee per leg (2 fees). Written explicitly:
+        #   round_trip = (spread_pct/2)*2 + fee_pct*2 = spread_pct + 2*fee_pct
+        half_spread = spread_pct / 2.0
+        round_trip = 2.0 * half_spread + 2.0 * fee_pct   # == spread_pct + 2*fee_pct
         multiple = _f(_cfg_get(cfg, "cost_edge_multiple", 1.5), 1.5)
         required = round_trip * multiple
 
