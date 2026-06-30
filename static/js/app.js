@@ -111,11 +111,16 @@ const col = {
 // bare "HTTP 400" — routes return helpful messages (e.g. "Rate limited. Try
 // after a while.") that were being discarded, leaving users with an opaque code.
 async function _apiError(r) {
+  let msg = `HTTP ${r.status}`;
   try {
     const d = await r.json();
-    if (d && d.error) return new Error(d.error);
+    // routes use {error:...} for failures and {reason:...} for soft refusals
+    // (e.g. a 409 single-instance-lock "another cycle is running").
+    if (d && (d.error || d.reason)) msg = d.error || d.reason;
   } catch (_) { /* non-JSON body */ }
-  return new Error(`HTTP ${r.status}`);
+  const err = new Error(msg);
+  err.status = r.status;   // let callers branch on the HTTP status (e.g. 409)
+  return err;
 }
 // ── Resilient-API banner ──────────────────────────────────────────────────────
 // ≥3 consecutive API.get failures inside a 30s window → one dismissible
@@ -4646,7 +4651,18 @@ async function loadTradingView() {
       const executed = props.filter(p => p && p.result === 'executed').length;
       _ajToast('◉ Cycle complete: ' + executed + ' executed / ' + props.length + ' scanned');
       loadTradingView();
-    } catch (e) { _ajToast('Run failed: ' + (e.message || e), false); runBtn.disabled = false; runBtn.textContent = '▶ RUN CYCLE'; }
+    } catch (e) {
+      const msg = (e && e.message) || String(e);
+      // A 409 / "another cycle is running" is the single-instance lock working
+      // as designed (the auto-run scheduler or a prior run is mid-cycle), NOT a
+      // failure — surface it as info so it doesn't read as an error.
+      if ((e && e.status === 409) || /already running|another cycle|cycle is running/i.test(msg)) {
+        _ajToast('A cycle is already running — it’ll finish shortly. Try again in a moment.');
+      } else {
+        _ajToast('Run failed: ' + msg, false);
+      }
+      runBtn.disabled = false; runBtn.textContent = '▶ RUN CYCLE';
+    }
   });
   const rearmBtn = document.getElementById('aj-rearm');
   if (rearmBtn) rearmBtn.addEventListener('click', async () => {
