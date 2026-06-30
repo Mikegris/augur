@@ -232,21 +232,16 @@ def _sum_to_one_constraint() -> Dict:
     return {"type": "eq", "fun": lambda w: np.sum(w) - 1.0}
 
 
-def _initial_weights(n: int, bounds: List[Tuple[float, float]]) -> np.ndarray:
-    # Equal weight, then clip into bounds. If the clipped vector doesn't sum
-    # to 1 (e.g. n=2 with max_weight=0.3 — equal weights of 0.5 get clipped
-    # to 0.3 each, summing to 0.6) we distribute the residual into the slack
-    # of each component instead of normalising. Plain renormalisation would
-    # scale the clipped values back up above max_weight, handing SLSQP a
-    # starting point that already violates the box constraints — the
-    # optimiser then often fails ("Inequality constraints incompatible").
-    w = np.full(n, 1.0 / n)
+def _project_to_box(w: np.ndarray, bounds: List[Tuple[float, float]]) -> np.ndarray:
+    """Project a weight vector onto the box [lo,hi] per component while keeping
+    Σw≈1, by redistributing any residual into each component's remaining slack
+    (headroom hi-w when short, cushion w-lo when long). This NEVER pushes a
+    component back above its hi cap — unlike plain `w/Σw` renormalisation, which
+    scales an at-cap weight over `max_weight`. Used both to seed SLSQP and to
+    clean its output so the returned weights actually honour `max_weight`."""
     lo = np.array([b[0] for b in bounds])
     hi = np.array([b[1] for b in bounds])
-    w = np.clip(w, lo, hi)
-    s = w.sum()
-    # Push residual into headroom (hi - w_i) or pull from cushion (w_i - lo)
-    # until sum ≈ 1 or no slack remains in any direction.
+    w = np.clip(np.asarray(w, dtype=float), lo, hi)
     for _ in range(64):
         diff = 1.0 - float(w.sum())
         if abs(diff) < 1e-9:
@@ -265,6 +260,14 @@ def _initial_weights(n: int, bounds: List[Tuple[float, float]]) -> np.ndarray:
             w = w + cushion * (diff / tot)  # diff < 0 shrinks
         w = np.clip(w, lo, hi)
     return w
+
+
+def _initial_weights(n: int, bounds: List[Tuple[float, float]]) -> np.ndarray:
+    # Equal weight, then box-project (clip + redistribute residual into slack)
+    # so the SLSQP start point already honours the box constraints; a plain
+    # renormalise would hand the optimiser a start that violates max_weight
+    # ("Inequality constraints incompatible").
+    return _project_to_box(np.full(n, 1.0 / n), bounds)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -395,12 +398,12 @@ def markowitz_optimize(
         w_opt = w0
     else:
         w_opt = np.array(res.x, dtype=float)
-        # Numerical cleanup: clip tiny negatives, renormalize.
+        # Numerical cleanup: clip tiny negatives, then BOX-PROJECT (not plain
+        # renormalise) so a weight at its cap isn't scaled back above max_weight.
         if long_only:
             w_opt = np.where(w_opt < 0, 0.0, w_opt)
-        s = w_opt.sum()
-        if s > EPS:
-            w_opt = w_opt / s
+        if w_opt.sum() > EPS:
+            w_opt = _project_to_box(w_opt, bounds)
 
     ret, vol, sharpe = _portfolio_stats(w_opt, mean, cov, rf)
     frontier = _efficient_frontier(mean, cov, bounds, rf)
@@ -488,9 +491,13 @@ def risk_parity(symbols: Sequence[str], period: str = "2y") -> Dict:
         port_var = float(np.dot(w, cov @ w))
         if port_var < EPS:
             return 1e6
-        mrc = cov @ w  # marginal risk contribution
-        rc = w * mrc   # risk contribution per asset
-        avg = rc.mean()
+        mrc = cov @ w           # marginal risk contribution
+        rc = (w * mrc) / port_var   # FRACTION of total variance per asset
+        # Target equal fractional contributions (1/n). Normalising by port_var
+        # makes the objective scale-free and well-conditioned — minimising the
+        # raw (unnormalised) rc spread has a near-flat surface SLSQP often leaves
+        # at the equal-weight start instead of reaching true ERC.
+        avg = rc.mean()         # == 1/n
         return float(np.sum((rc - avg) ** 2))
 
     w0 = np.full(n, 1.0 / n)
@@ -574,8 +581,12 @@ def black_litterman(
     else:
         w_mkt = caps / caps.sum()
 
-    Sigma = cov
-    pi = risk_aversion * (Sigma @ w_mkt)  # implied excess returns (decimal)
+    Sigma = cov                            # ANNUALIZED covariance (cov_daily*252)
+    pi = risk_aversion * (Sigma @ w_mkt)  # ANNUAL implied excess returns (decimal)
+    # NOTE: because Sigma (and hence pi) is annualized, view `Q` values
+    # (expected_excess_return_pct below) MUST also be ANNUAL excess returns to
+    # blend consistently — the standard BL convention. Entering a horizon
+    # (e.g. monthly) return here would skew the posterior toward the views.
 
     # ── Build P, Q, Omega from views ──
     P_rows: List[np.ndarray] = []

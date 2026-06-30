@@ -1619,7 +1619,7 @@ async function loadMarkets() {
               <tbody>
                 ${(movers.gainers||[]).map((g,i)=>`<tr>
                   <td class="text-dim" style="font-size:10px">${i+1}</td>
-                  <td><span class="col-symbol" onclick="openResearch('${_esc(g.symbol)}')">${_esc(g.symbol)}</span></td>
+                  <td><span class="col-symbol" onclick="openResearch('${_jesc(g.symbol)}')">${_esc(g.symbol)}</span></td>
                   <td class="col-price">$${fmt.price(g.price)}</td>
                   <td class="col-positive">+$${fmt.price(g.change)}</td>
                   <td class="col-positive">${fmt.pct(g.change_pct)}</td>
@@ -1638,7 +1638,7 @@ async function loadMarkets() {
               <tbody>
                 ${(movers.losers||[]).map((g,i)=>`<tr>
                   <td class="text-dim" style="font-size:10px">${i+1}</td>
-                  <td><span class="col-symbol" onclick="openResearch('${_esc(g.symbol)}')">${_esc(g.symbol)}</span></td>
+                  <td><span class="col-symbol" onclick="openResearch('${_jesc(g.symbol)}')">${_esc(g.symbol)}</span></td>
                   <td class="col-price">$${fmt.price(g.price)}</td>
                   <td class="col-negative">-$${fmt.price(Math.abs(g.change))}</td>
                   <td class="col-negative">${fmt.pct(g.change_pct)}</td>
