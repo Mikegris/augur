@@ -72,7 +72,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(me
 
 # Single source of truth for the app version — surfaced at /api/version and
 # in jarvis.health_snapshot().
-APP_VERSION = "3.9.1"
+APP_VERSION = "3.10.0"
 
 _TICKER_RE = re.compile(r"^[A-Z0-9][A-Z0-9.\-]{0,9}$")
 
@@ -3759,6 +3759,113 @@ def aj_analytics_route():
     try:
         import aj_analytics
         return jsonify(aj_analytics.summary())
+    except Exception as e:
+        return _err(e)
+
+
+@app.route("/api/aj/cycles", methods=["GET"])
+def aj_cycles_route():
+    """Per-cycle decision funnel + latest scan snapshot (Insights: funnel,
+    activity timeline, selectivity scatter)."""
+    try:
+        import aj_db
+        import json as _json
+        aj_db.aj_init()
+        limit = max(1, _safe_int(request.args.get("limit"), 40))
+        rows = aj_db.query("SELECT * FROM aj_cycle_stats ORDER BY ts DESC LIMIT ?", (limit,))
+        for r in rows:
+            for k in ("result_json", "scan_json"):
+                try:
+                    r[k] = _json.loads(r.get(k) or ("{}" if k == "result_json" else "[]"))
+                except Exception:
+                    r[k] = {} if k == "result_json" else []
+        latest_scan = rows[0]["scan_json"] if rows else []
+        return jsonify({"cycles": rows, "latest_scan": latest_scan})
+    except Exception as e:
+        return _err(e)
+
+
+@app.route("/api/aj/signal_skill", methods=["GET"])
+def aj_signal_skill_route():
+    """Realized skill (IC / Brier-skill / hit-rate / n) + promotion verdict for
+    every forecast signal (Insights: signal-skill dashboard)."""
+    try:
+        import aj_config, aj_ic
+        cfg = aj_config.get_config()
+        names = ["rf_classifier", "bootstrap", "ml_composite", "trend",
+                 "mean_reversion", "narrative",
+                 "smart_money", "insider", "congress", "social"]
+        out = {}
+        for n in names:
+            try:
+                skill = aj_ic.signal_skill(n)
+                promo = aj_ic.signal_promoted(n, cfg)
+                out[n] = {"skill": skill, "promoted": promo.get("promoted"),
+                          "reason": promo.get("reason")}
+            except Exception:
+                out[n] = {"skill": None, "promoted": None, "reason": "unavailable"}
+        return jsonify({"signals": out,
+                        "gate_on": bool(cfg.get("signal_ic_gate", True)),
+                        "multi_factor": bool(cfg.get("multi_factor_signals"))})
+    except Exception as e:
+        return _err(e)
+
+
+@app.route("/api/aj/allocation", methods=["GET"])
+def aj_allocation_route():
+    """Current vs target book weights + drift (Insights: exposure treemap)."""
+    try:
+        import aj_config, aj_allocate
+        return jsonify(aj_allocate.rebalance_plan(aj_config.get_config()) or {})
+    except Exception as e:
+        return _err(e)
+
+
+@app.route("/api/aj/position/<symbol>", methods=["GET"])
+def aj_position_detail_route(symbol):
+    """Drill-down for one held name: entry thesis, current edge, stop/target,
+    ladder rungs, time-stop status (Insights: position drill-down)."""
+    try:
+        import aj_db, aj_positions, aj_config
+        aj_db.aj_init()
+        sym = (symbol or "").upper()
+        cfg = aj_config.get_config()
+        book = (aj_positions.paper_book().get("positions") or {})
+        pos = book.get(sym)
+        out = {"symbol": sym, "position": pos}
+        try:
+            rows = aj_db.query(
+                "SELECT created_at, thesis, notional_usd, side FROM aj_proposals "
+                "WHERE symbol=? AND side='buy' ORDER BY id DESC LIMIT 1", (sym,))
+            out["entry"] = rows[0] if rows else None
+        except Exception:
+            out["entry"] = None
+        try:
+            import forecast_ensemble
+            fc = forecast_ensemble.ensemble_forecast(sym, int(cfg.get("forecast_horizon_days") or 20))
+            ens = (fc or {}).get("ensemble") or {}
+            out["forecast"] = {"prob_up": ens.get("prob_up"),
+                               "edge_pct_pts": ens.get("edge_pct_pts"),
+                               "conviction": ens.get("conviction")}
+        except Exception:
+            out["forecast"] = None
+        if pos:
+            try:
+                import aj_risk, aj_execution_alpha
+                mark = (aj_risk._marks([sym]) or {}).get(sym)
+                out["mark"] = mark
+                p2 = dict(pos); p2["symbol"] = sym
+                out["time_stop"] = aj_execution_alpha.time_stop(p2, cfg, mark=mark,
+                                                                opened_at=pos.get("opened_at"))
+                out["profit_ladder"] = aj_execution_alpha.profit_ladder(p2, cfg, mark=mark)
+                avg = float(pos.get("avg_cost") or 0)
+                out["levels"] = {
+                    "take_profit": avg * (1 + float(cfg.get("take_profit_pct", 0) or 0) / 100.0) if avg else None,
+                    "stop_loss": avg * (1 - float(cfg.get("stop_loss_pct", 0) or 0) / 100.0) if avg else None,
+                }
+            except Exception:
+                pass
+        return jsonify(out)
     except Exception as e:
         return _err(e)
 

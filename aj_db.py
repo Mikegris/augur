@@ -32,7 +32,7 @@ import database as db
 log = logging.getLogger("augur.aj_db")
 
 # ── schema version target (bump when adding a numbered migration step) ────────
-AJ_SCHEMA_TARGET = 5
+AJ_SCHEMA_TARGET = 6
 _SCHEMA_KEY = "aj_schema_version"
 
 # ── DDL (§5). CREATE TABLE IF NOT EXISTS is safe to re-run; column ADDs go
@@ -353,6 +353,25 @@ def aj_migrate() -> int:
             conn.execute("CREATE INDEX IF NOT EXISTS idx_aj_screen_cache_ts ON aj_screen_cache(ts)")
             conn.commit()
             current = 5
+        if current < 6:
+            # Per-cycle decision funnel + scan snapshot — powers the Insights
+            # visualizations (decision funnel, activity timeline, selectivity
+            # scatter). Pure observability; never read by the trading path.
+            conn.execute("""CREATE TABLE IF NOT EXISTS aj_cycle_stats (
+                cycle_id     TEXT PRIMARY KEY,
+                ts           TEXT NOT NULL,
+                mode         TEXT,
+                session      TEXT,
+                scanned      INTEGER,
+                with_signal  INTEGER,
+                executed     INTEGER,
+                exits        INTEGER,
+                result_json  TEXT,
+                scan_json    TEXT
+            )""")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_aj_cycle_stats_ts ON aj_cycle_stats(ts)")
+            conn.commit()
+            current = 6
         set_setting_raw(_SCHEMA_KEY, str(current))
         log.info("aj_migrate: schema at version %d", current)
         return current
@@ -777,6 +796,8 @@ _ALLOWED_TABLES = frozenset({
     "aj_council_runs", "aj_analyst_reports", "aj_debate_turns", "aj_reflections",
     # screener quote cache (step 5)
     "aj_screen_cache",
+    # per-cycle decision funnel + scan snapshot (step 6, observability)
+    "aj_cycle_stats",
 })
 _IDENT_RE = _re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 

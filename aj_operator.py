@@ -537,6 +537,42 @@ def _process_exits(cycle_id: str, cfg: Dict[str, Any]) -> List[Dict[str, Any]]:
     return out
 
 
+# ── per-cycle observability snapshot (Insights visualizations) ─────────────────
+
+def _persist_cycle_stats(cycle_id: str, summary: Dict[str, Any],
+                         scan_edges: Dict[str, Dict[str, Any]]) -> None:
+    """Write a decision-funnel tally + scan snapshot for this cycle. Pure
+    observability — never read by the trading path. Caller wraps in try/except."""
+    import json
+    import collections
+    import database as _db
+    props = summary.get("proposals") or []
+    counts = collections.Counter(str(p.get("result") or "?") for p in props)
+    executed = int(counts.get("executed", 0))
+    exits = len(summary.get("exits") or [])
+    # scan snapshot: every name that produced a forecast this cycle, with its
+    # edge/conviction and final disposition (for the selectivity scatter + funnel
+    # reasons). Cap to keep the row small.
+    rows = []
+    for p in props:
+        sym = p.get("symbol")
+        se = scan_edges.get(sym) or {}
+        rows.append({"symbol": sym, "result": p.get("result"),
+                     "edge": se.get("edge"), "conviction": se.get("conviction"),
+                     "prob_up": se.get("prob_up")})
+    rows = rows[:300]
+    with _db._write_lock:
+        conn = _db.get_conn()
+        conn.execute(
+            "INSERT OR REPLACE INTO aj_cycle_stats "
+            "(cycle_id, ts, mode, session, scanned, with_signal, executed, exits, "
+            " result_json, scan_json) VALUES (?,?,?,?,?,?,?,?,?,?)",
+            (cycle_id, aj_db.utc_now_iso(), summary.get("mode"),
+             summary.get("session"), len(props), len(scan_edges), executed, exits,
+             json.dumps(dict(counts)), json.dumps(rows)))
+        conn.commit()
+
+
 # ── the cycle ─────────────────────────────────────────────────────────────────
 
 def run_once(mode: str = "paper") -> Dict[str, Any]:
@@ -634,6 +670,7 @@ def run_once(mode: str = "paper") -> Dict[str, Any]:
         # most council_topk BUY candidates per cycle (cost bound). No-op unless
         # council_active() (council_enabled + VERIFY-COUNCIL).
         council_budget = {"n": 0, "max": int(cfg.get("council_topk", 3) or 0)}
+        scan_edges: Dict[str, Dict[str, Any]] = {}   # observability: edge/conviction per scanned name
         for symbol in scan:
             try:
                 if symbol in _exited:
@@ -651,6 +688,10 @@ def run_once(mode: str = "paper") -> Dict[str, Any]:
                 if not fc or not fc.get("ensemble"):
                     summary["proposals"].append({"symbol": symbol, "result": "no_signal"})
                     continue
+                _ens = fc.get("ensemble") or {}
+                scan_edges[symbol] = {"edge": _ens.get("edge_pct_pts"),
+                                      "conviction": _ens.get("conviction"),
+                                      "prob_up": _ens.get("prob_up")}
                 decision = _judge(symbol, fc, cfg, held.get(symbol, 0.0))
                 if not decision:
                     # bearish + not-held + options on -> long PUT (no council)
@@ -828,6 +869,14 @@ def run_once(mode: str = "paper") -> Dict[str, Any]:
             summary["council_reflections"] = aj_council.reflect_due(cfg)
         except Exception:
             log.debug("council reflect_due skipped", exc_info=True)
+
+        # Persist the per-cycle decision funnel + scan snapshot (observability
+        # only — the Insights visualizations read this; the trading path never
+        # does). Fail-open: a stats write must never fail a cycle.
+        try:
+            _persist_cycle_stats(cycle_id, summary, scan_edges)
+        except Exception:
+            log.debug("cycle-stats persist skipped", exc_info=True)
 
         aj_db.close_cycle(cycle_id, "completed")
         aj_db.audit("disconnect", {"cycle_id": cycle_id, "status": "completed"},

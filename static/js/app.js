@@ -4367,6 +4367,7 @@ async function loadTradingView() {
       <button class="aj-tab" data-pane="council">Council</button>
       <button class="aj-tab" data-pane="config">Config</button>
       <button class="aj-tab" data-pane="analytics">Analytics</button>
+      <button class="aj-tab" data-pane="insights">Insights</button>
       <button class="aj-tab" data-pane="activity">Activity</button>
     </div>
 
@@ -4406,6 +4407,10 @@ async function loadTradingView() {
 
     <div class="aj-pane" data-pane="analytics">
       <div class="panel"><div class="panel-header"><span class="panel-title">ANALYTICS</span></div><div class="panel-body" id="aj-analytics"><div class="muted">loading…</div></div></div>
+    </div>
+
+    <div class="aj-pane" data-pane="insights">
+      <div id="aj-insights-root"><div class="muted">loading insights…</div></div>
     </div>
 
     <div class="aj-pane" data-pane="activity">
@@ -4607,6 +4612,12 @@ async function loadTradingView() {
     el.querySelectorAll('.aj-pane').forEach(p => p.classList.toggle('active', p.getAttribute('data-pane') === pane));
     // Lazy-load recent council decisions only the first time the Council tab is opened.
     if (pane === 'council' && !councilRecentLoaded) { councilRecentLoaded = true; councilLoadRecent(); }
+    // Insights tab — render the 10 visualization panels (re-render each open so
+    // the data is fresh; AJInsights.render is idempotent + destroys old charts).
+    if (pane === 'insights' && window.AJInsights) {
+      try { window.AJInsights.render(document.getElementById('aj-insights-root')); }
+      catch (e) { /* never break the tab */ }
+    }
   }));
   const refreshBtn = document.getElementById('aj-refresh');
   if (refreshBtn) refreshBtn.addEventListener('click', () => loadTradingView());
