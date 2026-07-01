@@ -4480,10 +4480,10 @@ async function loadTradingView() {
           f('HOLD size factor', num('aj-cfg-council_hold_size_factor', cfg.council_hold_size_factor, null, '×'), 'When the council is NEUTRAL (HOLD) on a buy: proceed at this fraction of size (0.5 = half). Set 0 to veto every HOLD (strict). A bearish council call always vetoes.') +
           f('Max research rounds', num('aj-cfg-max_research_rounds', cfg.max_research_rounds, null, 'rounds'), 'Debate rounds among the research analysts.') +
           f('Max risk rounds', num('aj-cfg-max_risk_rounds', cfg.max_risk_rounds, null, 'rounds'), 'Debate rounds for the risk review.') +
-          f('Fundamental analyst', yn('aj-cfg-council_analyst_fundamental', cfg.council_analyst_fundamental), 'Include the fundamentals viewpoint.') +
+          f('Fundamental analyst', yn('aj-cfg-council_analyst_fundamentals', cfg.council_analyst_fundamentals), 'Include the fundamentals viewpoint.') +
           f('Technical analyst', yn('aj-cfg-council_analyst_technical', cfg.council_analyst_technical), 'Include the price/technical viewpoint.') +
-          f('Sentiment analyst', yn('aj-cfg-council_analyst_sentiment', cfg.council_analyst_sentiment), 'Include the news/sentiment viewpoint.') +
-          f('Macro analyst', yn('aj-cfg-council_analyst_macro', cfg.council_analyst_macro), 'Include the macro/regime viewpoint.') +
+          f('Sentiment analyst', yn('aj-cfg-council_analyst_sentiment', cfg.council_analyst_sentiment), 'Include the sentiment viewpoint.') +
+          f('News analyst', yn('aj-cfg-council_analyst_news', cfg.council_analyst_news), 'Include the news-flow viewpoint.') +
           f('Analyst personas', yn('aj-cfg-personas_enabled', cfg.personas_enabled), 'Give each analyst a distinct persona/voice in the debate.')
         )}
 
@@ -4778,10 +4778,10 @@ async function loadTradingView() {
       council_hold_size_factor: vNum('aj-cfg-council_hold_size_factor'),
       max_research_rounds: vNum('aj-cfg-max_research_rounds'),
       max_risk_rounds: vNum('aj-cfg-max_risk_rounds'),
-      council_analyst_fundamental: vBool('aj-cfg-council_analyst_fundamental'),
+      council_analyst_fundamentals: vBool('aj-cfg-council_analyst_fundamentals'),
       council_analyst_technical: vBool('aj-cfg-council_analyst_technical'),
       council_analyst_sentiment: vBool('aj-cfg-council_analyst_sentiment'),
-      council_analyst_macro: vBool('aj-cfg-council_analyst_macro'),
+      council_analyst_news: vBool('aj-cfg-council_analyst_news'),
       personas_enabled: vBool('aj-cfg-personas_enabled'),
       // autonomy
       auto_run_enabled: vBool('aj-cfg-auto_run_enabled'),
