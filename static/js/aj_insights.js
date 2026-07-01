@@ -485,6 +485,63 @@
     } catch (e) { placeholder(body, "risk governor unavailable"); }
   }
 
+  // 14. BENCHMARK vs INDEXES (agent cumulative return vs SPY/QQQ/DIA/IWM)
+  // /api/aj/benchmark -> {verdict, agent:{cumulative_return_pct,series}, dates,
+  //   benchmarks:{SYM:{name,cumulative_return_pct,series}}, vs:{SYM:{alpha_pct,beat_rate,...}}}
+  var _BMK_COLORS = { agent: "#4ea1ff", SPY: "#2ecc71", QQQ: "#e67e22", DIA: "#9b59b6", IWM: "#95a5a6" };
+  async function loadBenchmark(body) {
+    try {
+      var d = await API.get("/api/aj/benchmark");
+      if (!d || d.error || d.verdict === "insufficient data") {
+        return placeholder(body, "Not enough history yet — the benchmark needs at least two daily equity snapshots. It’ll fill in as the agent trades.");
+      }
+      var ac = num(d.agent && d.agent.cumulative_return_pct);
+      var spyAlpha = num((d.vs && d.vs.SPY || {}).alpha_pct);
+      var col = /outperform/.test(String(d.verdict)) ? GREEN : (/underperform/.test(String(d.verdict)) ? RED : MUTED);
+      var h = '<div style="font-size:16px;font-weight:600;margin-bottom:2px;">' +
+        'agent ' + (ac === null ? "—" : (ac >= 0 ? "+" : "") + ac.toFixed(2) + "%") +
+        ' <span style="font-size:12px;color:' + col + ';">(' + esc(String(d.verdict)) +
+        (spyAlpha === null ? "" : ", " + (spyAlpha >= 0 ? "+" : "") + spyAlpha.toFixed(2) + "% vs S&P") + ')</span></div>' +
+        '<div class="muted" style="font-size:10px;margin-bottom:6px;">cumulative return over ' + num(d.n_days, 0) + ' trading days</div>';
+      h += '<div style="position:relative;height:150px;"><canvas id="aj-ins-bmk-canvas"></canvas></div>';
+      // summary table
+      h += '<table class="data-table" style="width:100%;font-size:11px;margin-top:8px;"><thead><tr><th>index</th><th>return</th><th>agent alpha</th><th>days won</th></tr></thead><tbody>';
+      var vs = d.vs || {};
+      Object.keys(vs).forEach(function (sym) {
+        var v = vs[sym] || {};
+        var b = (d.benchmarks || {})[sym] || {};
+        var a = num(v.alpha_pct), br = num(v.beat_rate);
+        h += '<tr><td>' + esc(v.name || sym) + '</td>' +
+          '<td>' + (num(b.cumulative_return_pct) === null ? "—" : num(b.cumulative_return_pct).toFixed(2) + "%") + '</td>' +
+          '<td style="color:' + (a === null ? MUTED : (a >= 0 ? GREEN : RED)) + ';">' + (a === null ? "—" : (a >= 0 ? "+" : "") + a.toFixed(2) + "%") + '</td>' +
+          '<td>' + (br === null ? "—" : (br * 100).toFixed(0) + "% (" + num(v.days_beaten, 0) + "/" + num(v.days_total, 0) + ")") + '</td></tr>';
+      });
+      h += '</tbody></table>';
+      body.innerHTML = h;
+      // chart: agent + each benchmark cumulative series over the shared dates
+      var ctx = document.getElementById("aj-ins-bmk-canvas");
+      if (ctx && window.Chart) {
+        var ds = [{ label: "Agent", data: (d.agent && d.agent.series) || [], borderColor: _BMK_COLORS.agent, borderWidth: 2.5, pointRadius: 0, tension: 0.15 }];
+        Object.keys(d.benchmarks || {}).forEach(function (sym) {
+          ds.push({ label: sym, data: d.benchmarks[sym].series || [], borderColor: _BMK_COLORS[sym] || MUTED, borderWidth: 1.2, pointRadius: 0, borderDash: [4, 3], tension: 0.15 });
+        });
+        keepChart("aj-ins-bmk", new Chart(ctx, {
+          type: "line",
+          data: { labels: d.dates || [], datasets: ds },
+          options: {
+            responsive: true, maintainAspectRatio: false,
+            plugins: { legend: { labels: { color: MUTED, boxWidth: 10, font: { size: 9 } } },
+                       tooltip: { callbacks: { label: function (i) { return i.dataset.label + ": " + (i.parsed.y == null ? "—" : i.parsed.y.toFixed(2) + "%"); } } } },
+            scales: {
+              x: { ticks: { color: MUTED, maxTicksLimit: 6, font: { size: 8 } }, grid: { color: "#1b1b1b" } },
+              y: { ticks: { color: MUTED, font: { size: 9 }, callback: function (v) { return v + "%"; } }, grid: { color: "#1b1b1b" } }
+            }
+          }
+        }));
+      }
+    } catch (e) { placeholder(body, "benchmark unavailable"); }
+  }
+
   // 6. RISK COCKPIT
   // /api/aj/status -> .day_pnl, .config{max_daily_loss_usd,max_trades_per_day,...},
   //   .halted, .audit_chain.ok, .orders
@@ -812,7 +869,8 @@
     ["10 · Selectivity Scatter",   "aj-ins-scatter-b", "edge vs conviction",        loadScatter],
     ["11 · Policy Expectancy",     "aj-ins-backtest",  "walk-forward edge of the policy", loadBacktest],
     ["12 · Learned Edge",          "aj-ins-metalabel", "meta-label P(profit) model", loadMetalabel],
-    ["13 · Risk Governor",         "aj-ins-governor",  "total exposure dial + circuit breaker", loadRiskGovernor]
+    ["13 · Risk Governor",         "aj-ins-governor",  "total exposure dial + circuit breaker", loadRiskGovernor],
+    ["14 · Benchmark vs Indexes",  "aj-ins-benchmark", "agent return vs SPY/QQQ/DIA/IWM", loadBenchmark]
   ];
 
   function render(rootEl) {

@@ -72,7 +72,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(me
 
 # Single source of truth for the app version — surfaced at /api/version and
 # in jarvis.health_snapshot().
-APP_VERSION = "3.13.0"
+APP_VERSION = "3.14.0"
 
 _TICKER_RE = re.compile(r"^[A-Z0-9][A-Z0-9.\-]{0,9}$")
 
@@ -3947,6 +3947,18 @@ def aj_risk_governor_route():
     try:
         import aj_config, aj_risk_governor
         return jsonify(aj_risk_governor.status(aj_config.get_config()))
+    except Exception as e:
+        return _err(e)
+
+
+@app.route("/api/aj/benchmark", methods=["GET"])
+def aj_benchmark_route():
+    """Agent day-over-day + cumulative return vs the leading indexes (SPY/QQQ/
+    DIA/IWM): per-index alpha and days-beaten (Insights: benchmark panel)."""
+    try:
+        import aj_config, aj_benchmark
+        days = max(5, _safe_int(request.args.get("days"), 90))
+        return jsonify(aj_benchmark.benchmark(aj_config.get_config(), days))
     except Exception as e:
         return _err(e)
 

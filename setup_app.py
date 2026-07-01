@@ -65,6 +65,8 @@ LOCAL_MODULES = [
     "aj_backtest", "aj_features", "aj_metalabel",
     # v3.13 portfolio risk governor (lazy-imported in strategy/routes)
     "aj_risk_governor",
+    # v3.14 index benchmark (lazy-imported in routes)
+    "aj_benchmark",
     "ai_summarizer",
     "alt_data_engine",
     "alt_signals",
