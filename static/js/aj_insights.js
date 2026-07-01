@@ -441,11 +441,17 @@
       var badge = promoted
         ? '<span style="color:' + GREEN + ';font-weight:600;">LIVE ✓</span>'
         : '<span class="muted">learning…</span>';
-      var h = '<div style="font-size:13px;margin-bottom:6px;">model: ' + badge + '</div>';
+      var tgt = String(d.target || "profit");
+      var isAlpha = tgt === "alpha";
+      var alphaBase = num(ls.alpha_base_rate);
+      var h = '<div style="font-size:13px;margin-bottom:4px;">model: ' + badge + '</div>';
+      h += '<div class="muted" style="font-size:10px;margin-bottom:6px;">learning: <b style="color:' +
+        (isAlpha ? "#4ea1ff" : MUTED) + ';">' + (isAlpha ? "beat the market (" + esc(d.benchmark || "SPY") + ")" : "absolute profit") + '</b></div>';
       h += '<div style="display:flex;justify-content:space-between;font-size:11px;padding:2px 0;"><span class="muted">out-of-sample AUC</span><span style="color:' +
         (auc !== null && auc >= 0.55 ? GREEN : MUTED) + ';">' + (auc === null ? "—" : auc.toFixed(3)) + '</span></div>';
       h += '<div style="display:flex;justify-content:space-between;font-size:11px;padding:2px 0;"><span class="muted">labeled trades</span><span>' + num(d.n, 0) + '</span></div>';
       h += '<div style="display:flex;justify-content:space-between;font-size:11px;padding:2px 0;"><span class="muted">base win-rate</span><span>' + (base === null ? "—" : (base * 100).toFixed(0) + "%") + '</span></div>';
+      h += '<div style="display:flex;justify-content:space-between;font-size:11px;padding:2px 0;"><span class="muted">beat-market rate</span><span>' + (alphaBase === null ? "— (need trades)" : (alphaBase * 100).toFixed(0) + "% of " + num(ls.n_alpha, 0)) + '</span></div>';
       h += '<div class="muted" style="font-size:10px;margin-top:8px;">' + esc(d.reason || "") + '</div>';
       body.innerHTML = h;
     } catch (e) { placeholder(body, "meta-label unavailable"); }

@@ -143,14 +143,17 @@ def train(cfg: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     min_samples = int(c.get("metalabel_min_samples", 50))
     min_auc = float(c.get("metalabel_min_auc", 0.55))
 
+    target = str(c.get("metalabel_target", "profit") or "profit").lower()
+    if target not in ("profit", "alpha"):
+        target = "profit"
     try:
         import aj_features
-        X, y, feature_names = aj_features.training_set()
+        X, y, feature_names = aj_features.training_set(target=target)
     except Exception as e:
         log.debug("metalabel.train: training_set unavailable", exc_info=True)
         return {"trained": False, "n": 0, "oos_auc": None, "promoted": False,
-                "base_rate": None, "reason": "training_set error: {}".format(e),
-                "error": str(e)}
+                "base_rate": None, "target": target,
+                "reason": "training_set error: {}".format(e), "error": str(e)}
 
     try:
         X = [[float(v) for v in row] for row in (X or [])]
@@ -163,13 +166,13 @@ def train(cfg: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
             model = {
                 "feature_names": feature_names, "mean": [], "std": [],
                 "coef": [], "intercept": 0.0, "oos_auc": None,
-                "n_train": n, "base_rate": base_rate,
+                "n_train": n, "base_rate": base_rate, "target": target,
                 "trained_at": time.time(), "promoted": False, "reason": reason,
             }
             _save_model(model)
             _set_last_train_n(n)
             return {"trained": True, "n": n, "oos_auc": None, "promoted": False,
-                    "base_rate": base_rate, "reason": reason}
+                    "base_rate": base_rate, "target": target, "reason": reason}
 
         if n < min_samples:
             return _persist_stub(
@@ -236,13 +239,13 @@ def train(cfg: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
             "feature_names": feature_names,
             "mean": mean, "std": std,
             "coef": coef, "intercept": intercept,
-            "oos_auc": oos_auc, "n_train": n, "base_rate": base_rate,
+            "oos_auc": oos_auc, "n_train": n, "base_rate": base_rate, "target": target,
             "trained_at": time.time(), "promoted": promoted, "reason": reason,
         }
         _save_model(model)
         _set_last_train_n(n)
         return {"trained": True, "n": n, "oos_auc": oos_auc, "promoted": promoted,
-                "base_rate": base_rate, "reason": reason}
+                "base_rate": base_rate, "target": target, "reason": reason}
     except Exception as e:
         log.debug("metalabel.train: unexpected failure", exc_info=True)
         return {"trained": False, "n": 0, "oos_auc": None, "promoted": False,
@@ -380,6 +383,8 @@ def status(cfg: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         "min_samples": int(c.get("metalabel_min_samples", 50)),
         "min_auc": float(c.get("metalabel_min_auc", 0.55)),
         "prob_threshold": float(c.get("metalabel_prob_threshold", 0.5)),
+        "target": str(c.get("metalabel_target", "profit") or "profit").lower(),
+        "benchmark": str(c.get("metalabel_benchmark", "SPY") or "SPY").upper(),
         "promoted": False, "oos_auc": None, "n_train": 0,
         "base_rate": None, "trained_at": None, "reason": "no model trained yet",
         "label_stats": {},

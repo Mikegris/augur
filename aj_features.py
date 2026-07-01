@@ -365,6 +365,36 @@ def build_labels(lookback_days: int = 365) -> Dict[str, Any]:
         except Exception:
             regime = None
 
+        # Benchmark closes fetched ONCE, to label each trade's alpha vs the market
+        # over its own holding window (opened_at -> closed_at). Fail-open to {}.
+        bench_closes: Dict[str, float] = {}
+        try:
+            import aj_config
+            import aj_benchmark
+            bench_sym = str(aj_config.get_config().get("metalabel_benchmark") or "SPY").upper()
+            bench_closes = aj_benchmark._index_closes(
+                bench_sym, "2y" if lookback_days > 200 else "1y") or {}
+        except Exception:
+            bench_closes = {}
+        _bsorted = sorted(bench_closes)
+
+        def _bench_ret(start, end):
+            """% market return between two dates (close on/before each)."""
+            if not bench_closes or not start or not end:
+                return None
+            s = str(start)[:10]
+            e = str(end)[:10]
+
+            def _on(d):
+                if d in bench_closes:
+                    return bench_closes[d]
+                prev = [x for x in _bsorted if x <= d]
+                return bench_closes[prev[-1]] if prev else None
+            p0, p1 = _on(s), _on(e)
+            if p0 is None or p1 is None or p0 <= 0:
+                return None
+            return (p1 / p0 - 1.0) * 100.0
+
         now = aj_db.utc_now_iso()
         built = 0
         with db._write_lock:
@@ -390,6 +420,11 @@ def build_labels(lookback_days: int = 365) -> Dict[str, Any]:
                 feats = _assemble_features(t, snap, hd, regime)
                 ret_pct = _return_pct(t.get("side"), t.get("entry_price"),
                                       t.get("exit_price"))
+                # benchmark-relative label: did the trade beat the market over
+                # its holding window? alpha = trade return - market return.
+                bret = _bench_ret(opened_at, closed_at)
+                alpha = (ret_pct - bret) if (ret_pct is not None and bret is not None) else None
+                beat = (1 if alpha > 0 else 0) if alpha is not None else None
                 try:
                     fjson = json.dumps(feats, default=str)
                 except Exception:
@@ -398,11 +433,31 @@ def build_labels(lookback_days: int = 365) -> Dict[str, Any]:
                     "INSERT OR IGNORE INTO aj_trade_labels "
                     "(symbol, side, opened_at, closed_at, holding_days, regime, "
                     " features_json, realized_return_pct, realized_pnl_usd, "
-                    " label, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                    " label, benchmark_return_pct, alpha_pct, beat_benchmark, "
+                    " created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     (sym, t.get("side"), opened_at, closed_at, hd, regime,
-                     fjson, ret_pct, aj_db.money(pnl), label, now))
+                     fjson, ret_pct, aj_db.money(pnl), label,
+                     bret, alpha, beat, now))
                 if cur.rowcount and cur.rowcount > 0:
                     built += 1
+            # backfill benchmark fields on any pre-existing rows that lack them
+            # (e.g. labeled before this feature, or when the fetch was down).
+            try:
+                miss = conn.execute(
+                    "SELECT id, opened_at, closed_at, realized_return_pct "
+                    "FROM aj_trade_labels WHERE beat_benchmark IS NULL").fetchall()
+                for m in miss:
+                    br = _bench_ret(m["opened_at"], m["closed_at"])
+                    rp = _f(m["realized_return_pct"])
+                    if br is None or rp is None:
+                        continue
+                    al = rp - br
+                    conn.execute(
+                        "UPDATE aj_trade_labels SET benchmark_return_pct=?, "
+                        "alpha_pct=?, beat_benchmark=? WHERE id=?",
+                        (br, al, 1 if al > 0 else 0, m["id"]))
+            except Exception:
+                log.debug("benchmark backfill skipped", exc_info=True)
             conn.commit()
 
         rows = aj_db.query(
@@ -416,18 +471,20 @@ def build_labels(lookback_days: int = 365) -> Dict[str, Any]:
         return {"error": str(e)}
 
 
-def training_set() -> Tuple[List[List[float]], List[int], List[str]]:
+def training_set(target: str = "profit") -> Tuple[List[List[float]], List[int], List[str]]:
     """Read all aj_trade_labels and produce aligned (X, y, feature_names).
 
-    X: list of equal-length float vectors in FEATURE_NAMES order, missing
-    features imputed to their fixed neutral value (so every row is the same
-    length and the model sees a consistent encoding). y: 0/1 labels. Fail-open
-    to ([], [], FEATURE_NAMES)."""
+    X: equal-length float vectors in FEATURE_NAMES order (missing features
+    imputed). y: the 0/1 target — `profit` uses the `label` column (net P&L>0);
+    `alpha` uses `beat_benchmark` (trade beat the market over its holding
+    window), dropping rows whose benchmark label is unknown. Fail-open to
+    ([], [], FEATURE_NAMES)."""
     X: List[List[float]] = []
     y: List[int] = []
+    use_alpha = str(target or "profit").lower() == "alpha"
     try:
         rows = aj_db.query(
-            "SELECT features_json, label, regime FROM aj_trade_labels "
+            "SELECT features_json, label, beat_benchmark, regime FROM aj_trade_labels "
             "ORDER BY closed_at ASC, id ASC")
     except Exception:
         log.debug("training_set query failed", exc_info=True)
@@ -451,12 +508,21 @@ def training_set() -> Tuple[List[List[float]], List[int], List[str]]:
         reg = (str(reg).lower() if reg is not None else None)
         for lvl in _REGIME_LEVELS:
             vec.append(1.0 if reg == lvl else 0.0)
-        try:
-            label = int(r.get("label") or 0)
-        except Exception:
-            label = 0
+        if use_alpha:
+            bb = r.get("beat_benchmark")
+            if bb is None:          # no benchmark label -> can't use this row for alpha
+                continue
+            try:
+                lab = 1 if int(bb) == 1 else 0
+            except Exception:
+                continue
+        else:
+            try:
+                lab = 1 if int(r.get("label") or 0) == 1 else 0
+            except Exception:
+                lab = 0
         X.append(vec)
-        y.append(1 if label == 1 else 0)
+        y.append(lab)
     return X, y, list(FEATURE_NAMES)
 
 
@@ -465,9 +531,11 @@ def label_stats() -> Dict[str, Any]:
     Fail-open to {"error": ...}."""
     try:
         rows = aj_db.query(
-            "SELECT regime, label, closed_at FROM aj_trade_labels")
+            "SELECT regime, label, beat_benchmark, closed_at FROM aj_trade_labels")
         n = len(rows)
         wins = 0
+        n_alpha = 0        # rows with a benchmark label
+        alpha_wins = 0     # rows that beat the market
         by_regime: Dict[str, Dict[str, Any]] = {}
         oldest = None
         newest = None
@@ -475,6 +543,13 @@ def label_stats() -> Dict[str, Any]:
         for r in rows:
             lab = 1 if int(r.get("label") or 0) == 1 else 0
             wins += lab
+            bb = r.get("beat_benchmark")
+            if bb is not None:
+                n_alpha += 1
+                try:
+                    alpha_wins += 1 if int(bb) == 1 else 0
+                except Exception:
+                    pass
             reg = r.get("regime") or "unknown"
             reg_acc[reg][0] += 1
             reg_acc[reg][1] += lab
@@ -488,7 +563,9 @@ def label_stats() -> Dict[str, Any]:
             by_regime[reg] = {"n": rn, "base_rate": (rw / rn) if rn else 0.0}
         return {
             "n": n,
-            "base_rate": (wins / n) if n else 0.0,
+            "base_rate": (wins / n) if n else 0.0,           # % profitable
+            "n_alpha": n_alpha,                               # rows with a market label
+            "alpha_base_rate": (alpha_wins / n_alpha) if n_alpha else None,  # % that beat the market
             "by_regime": by_regime,
             "oldest": oldest,
             "newest": newest,

@@ -4602,6 +4602,7 @@ async function loadTradingView() {
           f('Meta-label gate', yn('aj-cfg-metalabel_enabled', cfg.metalabel_enabled), 'Learn P(profit) from the agent’s own closed trades; skip low-probability setups and size by realized edge. Only acts once the model beats baseline out-of-sample.') +
           f('Meta-label min P(profit)', num('aj-cfg-metalabel_prob_threshold', cfg.metalabel_prob_threshold, null, ''), 'Skip a BUY whose learned P(profit) is below this (0–1).') +
           f('Meta-label size-by-edge', yn('aj-cfg-metalabel_size_by_edge', cfg.metalabel_size_by_edge), 'Scale position size by the model’s calibrated edge (kelly-lite; only shrinks).') +
+          f('Meta-label learns', `<select id="aj-cfg-metalabel_target"><option value="profit"${cfg.metalabel_target!=='alpha'?' selected':''}>Profit (net P&L &gt; 0)</option><option value="alpha"${cfg.metalabel_target==='alpha'?' selected':''}>Alpha (beat the market)</option></select>`, 'What the model predicts: absolute profit, or whether the trade BEATS the benchmark over its holding window (steers toward market-relative edge).') +
           f('Risk Governor', yn('aj-cfg-risk_governor_enabled', cfg.risk_governor_enabled), 'Scale TOTAL new-entry exposure by drawdown / regime / realized edge; circuit-breaker pauses entries on a hard drawdown or negative realized expectancy. Only shrinks (or pauses); never bypasses the risk gate.') +
           f('  ↳ derisk drawdown %', num('aj-cfg-rg_drawdown_derisk_pct', cfg.rg_drawdown_derisk_pct, null, '%'), 'Start shrinking total exposure above this portfolio drawdown.') +
           f('  ↳ breaker drawdown %', num('aj-cfg-rg_drawdown_breaker_pct', cfg.rg_drawdown_breaker_pct, null, '%'), 'Go flat (pause new entries) at/above this drawdown.') +
@@ -4806,6 +4807,7 @@ async function loadTradingView() {
       metalabel_enabled: vBool('aj-cfg-metalabel_enabled'),
       metalabel_prob_threshold: vNum('aj-cfg-metalabel_prob_threshold'),
       metalabel_size_by_edge: vBool('aj-cfg-metalabel_size_by_edge'),
+      metalabel_target: vStr('aj-cfg-metalabel_target'),
       risk_governor_enabled: vBool('aj-cfg-risk_governor_enabled'),
       rg_drawdown_derisk_pct: vNum('aj-cfg-rg_drawdown_derisk_pct'),
       rg_drawdown_breaker_pct: vNum('aj-cfg-rg_drawdown_breaker_pct'),

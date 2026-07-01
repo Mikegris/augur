@@ -237,6 +237,13 @@ DEFAULTS: Dict[str, Any] = {
     "metalabel_prob_threshold": 0.5,   # skip a BUY whose P(profit) is below this
     "metalabel_size_by_edge": True,    # scale size by the model's calibrated edge (kelly-lite)
     "metalabel_retrain_min_new": 10,   # retrain after this many new labeled trades
+    # What the meta-label model learns to predict:
+    #   'profit' — P(the trade is net profitable)          [absolute]
+    #   'alpha'  — P(the trade BEATS the benchmark over its holding window)
+    # 'alpha' steers entries toward market-relative edge (a +1% trade in a +3%
+    # market is a LOSS vs the index). Benchmark = metalabel_benchmark (SPY).
+    "metalabel_target":       "profit",
+    "metalabel_benchmark":    "SPY",
     # ── portfolio Risk Governor + alpha-decay circuit breaker ─────────────────
     # ONE global exposure multiplier G on NEW entries, from drawdown / regime /
     # realized alpha-decay. Opt-in, fail-open to G=1.0. Can only SHRINK exposure
@@ -339,7 +346,8 @@ _INT_KEYS = {"max_trades_per_day", "forecast_horizon_days", "scan_universe_max",
 _STR_KEYS = {"daily_loss_basis", "halt_rearm", "default_broker",
              "entry_order_type", "council_policy",
              "council_deep_model", "council_quick_model",
-             "universe_mode", "alloc_method"}
+             "universe_mode", "alloc_method",
+             "metalabel_target", "metalabel_benchmark"}
 
 _VALID_COUNCIL_POLICY = ("advisory", "confirm", "coequal")
 _VALID_UNIVERSE_MODE = ("allowlist", "open", "market_screen")
@@ -468,6 +476,8 @@ def get_config() -> Dict[str, Any]:
     cfg["universe_mode"] = um if um in _VALID_UNIVERSE_MODE else "market_screen"
     am = str(cfg.get("alloc_method") or "").lower()
     cfg["alloc_method"] = am if am in _VALID_ALLOC_METHOD else "risk_parity"
+    mt = str(cfg.get("metalabel_target") or "").lower()
+    cfg["metalabel_target"] = mt if mt in ("profit", "alpha") else "profit"
     cfg["session_whitelist"] = [s.lower() for s in cfg["session_whitelist"]
                                 if s.lower() in _TRADABLE_SESSIONS] or ["regular"]
     # numeric guards: caps/counts can never be negative; probs clamp to [0,1].

@@ -34,7 +34,7 @@ _fake._STATE = {"X": [], "y": [], "names": ["x", "noise"], "label_n": 0,
                 "build_calls": 0}
 
 
-def _training_set():
+def _training_set(target="profit"):
     s = _fake._STATE
     return (list(s["X"]), list(s["y"]), list(s["names"]))
 
@@ -276,7 +276,7 @@ def test_maybe_retrain_threshold():
 def test_train_fail_open_on_features_error():
     _reset_model()
 
-    def _boom():
+    def _boom(target="profit"):
         raise RuntimeError("features exploded")
     orig = _fake.training_set
     _fake.training_set = _boom

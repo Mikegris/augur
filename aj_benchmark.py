@@ -101,6 +101,36 @@ def _round_series(s: List[Optional[float]]) -> List[Optional[float]]:
     return [round(x, 3) if x is not None else None for x in s]
 
 
+def return_between(symbol: str, start_date: str, end_date: str,
+                   period: str = "1y") -> Optional[float]:
+    """% return of a benchmark ETF between two dates (close-on-or-before each).
+    Used to label a closed trade's alpha vs the market over its holding window.
+    None if unavailable. Never raises."""
+    try:
+        if not start_date or not end_date:
+            return None
+        closes = _index_closes(symbol, period)
+        if not closes:
+            return None
+        sd = sorted(closes)
+        s = str(start_date)[:10]
+        e = str(end_date)[:10]
+
+        def on(d):
+            if d in closes:
+                return closes[d]
+            prev = [x for x in sd if x <= d]
+            return closes[prev[-1]] if prev else None
+
+        p0, p1 = on(s), on(e)
+        if p0 is None or p1 is None or p0 <= 0:
+            return None
+        return (p1 / p0 - 1.0) * 100.0
+    except Exception:
+        log.debug("return_between failed", exc_info=True)
+        return None
+
+
 def benchmark(cfg: Optional[Dict[str, Any]] = None, days: int = 90) -> Dict[str, Any]:
     """Agent vs leading indexes over the agent's equity dates. Never raises."""
     try:

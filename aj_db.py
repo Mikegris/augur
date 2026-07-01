@@ -32,7 +32,7 @@ import database as db
 log = logging.getLogger("augur.aj_db")
 
 # ── schema version target (bump when adding a numbered migration step) ────────
-AJ_SCHEMA_TARGET = 8
+AJ_SCHEMA_TARGET = 9
 _SCHEMA_KEY = "aj_schema_version"
 
 # ── DDL (§5). CREATE TABLE IF NOT EXISTS is safe to re-run; column ADDs go
@@ -421,6 +421,21 @@ def aj_migrate() -> int:
             conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_aj_trade_labels_uniq ON aj_trade_labels(symbol, opened_at, closed_at)")
             conn.commit()
             current = 8
+        if current < 9:
+            # Benchmark-relative labels: was the trade's return over its holding
+            # window better than the market's (alpha)? Lets the meta-label model
+            # learn P(beats the benchmark) instead of only P(profit). Additive.
+            for stmt in (
+                "ALTER TABLE aj_trade_labels ADD COLUMN benchmark_return_pct REAL",
+                "ALTER TABLE aj_trade_labels ADD COLUMN alpha_pct REAL",
+                "ALTER TABLE aj_trade_labels ADD COLUMN beat_benchmark INTEGER",
+            ):
+                try:
+                    conn.execute(stmt)
+                except Exception:
+                    pass   # column already exists — idempotent
+            conn.commit()
+            current = 9
         set_setting_raw(_SCHEMA_KEY, str(current))
         log.info("aj_migrate: schema at version %d", current)
         return current
