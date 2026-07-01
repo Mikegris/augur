@@ -139,9 +139,30 @@ def get_full_equity_universe() -> List[str]:
             result = sorted(tickers)
             _full_equity_cache["data"] = result
             _full_equity_cache["ts"] = now
+            # Persist a LAST-GOOD copy to disk so a later SEC 429/outage (or an
+            # app restart, which clears the in-memory cache) doesn't collapse the
+            # universe to the ~160-name curated list. Long TTL — the listing set
+            # changes slowly; a stale full list beats losing 98% of breadth.
+            if len(result) >= 500:
+                try:
+                    _set_cache(("sec_universe_lastgood",), result, ttl=14 * 86400)
+                except Exception:
+                    pass
             logger.info("Loaded %d SEC tickers into full universe", len(result))
             return result
         except Exception as e:
+            # SEC fetch failed — reuse the last-good disk copy before collapsing
+            # to the tiny curated fallback.
+            try:
+                lastgood = _cached(("sec_universe_lastgood",), 14 * 86400)
+                if lastgood and len(lastgood) >= 500:
+                    logger.warning("SEC universe fetch failed (%s) — using last-good "
+                                   "disk copy (%d tickers)", e, len(lastgood))
+                    _full_equity_cache["data"] = lastgood
+                    _full_equity_cache["ts"] = now
+                    return list(lastgood)
+            except Exception:
+                pass
             logger.warning("SEC universe fetch failed (%s) — falling back to curated list", e)
             return list(EQUITY_UNIVERSE)
 
