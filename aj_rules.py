@@ -249,14 +249,17 @@ def enhanced_gate(symbol: str, side: str, qty: float, price: float,
         book = aj_positions.paper_book()
         positions = book.get("positions") or {}
         held = float((positions.get(symbol) or {}).get("qty") or 0)
-        # Opening a NEW name means buying while FLAT. A buy against a held
-        # SHORT is a risk-reducing cover — it must never be blocked by the
-        # new-entry gates (⑨/⑭), which is exactly when covering matters most.
-        opening_new = side == "buy" and abs(held) <= 1e-9
-        # Risk-reducing close of a confirmed held position, bounded by the held
-        # qty (a sell beyond the long would OPEN a short — not exempt).
-        closing = (side == "sell" and held > 1e-9 and qty <= held + 1e-9) or \
-                  (side == "buy" and held < -1e-9 and qty <= -held + 1e-9)
+        # aj_risk.classify_exit is the single source of truth for the
+        # closing / opening_new semantics (previously duplicated here and
+        # drifting from evaluate's). `closing` = risk-reducing close of a held
+        # position bounded by held qty (a sell beyond the long would OPEN a
+        # short — not exempt); `opening_new` = buying while FLAT (a buy
+        # against a held SHORT is a risk-reducing cover and must never be
+        # blocked by the new-entry gates ⑨/⑭ — exactly when covering matters).
+        import aj_risk
+        _exit = aj_risk.classify_exit(symbol, side, qty, held)
+        opening_new = _exit["opening_new"]
+        closing = _exit["closing"]
 
         # ⑫ time-of-day filter (regular session only; never blocks a
         # risk-reducing close — a stop-loss at the open must fire, not wait

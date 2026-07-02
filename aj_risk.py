@@ -43,6 +43,46 @@ def _held_qty(symbol: str) -> Optional[float]:
         return None
 
 
+def classify_exit(symbol: str, side: str, qty: Optional[float],
+                  held_qty: Optional[float]) -> Dict[str, Any]:
+    """SINGLE source of truth for the risk-reducing-exit classification. Three
+    drifting local definitions (evaluate's closing_sell/confirmed_closing_sell
+    + its flip guard, and enhanced_gate's closing/opening_new) previously
+    encoded the same semantics independently; they all consume this now.
+
+    Returns {closing, confirmed, flips, opening_new} where:
+      * closing      — the order reduces existing exposure: a SELL against a
+                       held LONG or a BUY-to-cover against a held SHORT,
+                       BOUNDED by the held qty (see flips). When held_qty is
+                       None (book state UNKNOWN) a SELL is still classified
+                       closing — it can only reduce risk, and exits/stop-losses
+                       must never be blocked by a book outage — but a BUY is
+                       NOT (it could open a new long, risk-increasing).
+      * confirmed    — closing AND the position is CONFIRMED (held_qty known).
+                       Cap exemptions require this: on unknown book state a
+                       large SELL could OPEN a short, so caps still bind.
+      * flips        — qty exceeds |held| (a sell beyond a held long opens a
+                       short; a cover beyond a held short opens a long). The
+                       excess is risk-INCREASING, so a flip clears BOTH closing
+                       flags. Pass qty=None when the order size isn't known yet
+                       (flip detection is skipped; re-classify once it is).
+      * opening_new  — a BUY while confirmed FLAT (opens a brand-new name);
+                       gates like max-open-positions / risk-off-VIX key on it.
+                       False on unknown book state (cannot confirm the name is
+                       new; those gates fail closed upstream anyway).
+    """
+    if held_qty is None:
+        return {"closing": side == "sell", "confirmed": False,
+                "flips": False, "opening_new": False}
+    held = float(held_qty)
+    sign_match = (side == "sell" and held > 0) or (side == "buy" and held < 0)
+    flips = bool(sign_match and qty is not None
+                 and float(qty) > abs(held) + 1e-9)
+    closing = sign_match and not flips
+    return {"closing": closing, "confirmed": closing, "flips": flips,
+            "opening_new": side == "buy" and abs(held) <= 1e-9}
+
+
 def _trading_enabled_fresh() -> bool:
     """Uncached read of the master switch — a kill/halt on another thread (or
     mid-evaluation) must be seen immediately, not up to 5s later through the
@@ -564,21 +604,14 @@ def evaluate(proposal: Dict[str, Any]) -> RiskDecision:
         # close what you hold; exits and stop-losses must never be blocked by a
         # since-narrowed allowlist).
         held_now = _held_qty(symbol)
-        if held_now is None:
-            # Position UNKNOWN (paper_book unavailable): do NOT silently block a
-            # potential exit. A SELL can only reduce risk, so permit it past the
-            # allowlist; all other caps still bind below. A BUY is NOT permitted
-            # on unknown state — it could open a new long (risk-increasing), so
-            # a covering BUY still requires a confirmed short below.
-            closing_sell = side == "sell"
-        else:
-            closing_sell = (side == "sell" and held_now > 0) or \
-                           (side == "buy" and held_now < 0)
-        # The per-order notional-cap exemption is RESTRICTED to a CONFIRMED held
-        # position. On unknown book state a large SELL would OPEN a short
-        # (risk-INCREASING), so the cap must still bind there even though the
-        # allowlist exemption (closing_sell) is allowed through.
-        confirmed_closing_sell = (held_now is not None) and closing_sell
+        # classify_exit is the single source of truth for closing/confirmed
+        # semantics (incl. the unknown-book and confirmed-only-cap-exemption
+        # rules — see its docstring). qty isn't parsed yet at this step, so
+        # classify WITHOUT the qty bound; the flip guard below re-classifies
+        # with the real qty before any cap exemption is applied.
+        _exit = classify_exit(symbol, side, None, held_now)
+        closing_sell = _exit["closing"]
+        confirmed_closing_sell = _exit["confirmed"]
         # Open universe = universe_mode 'open'/'market_screen' OR legacy
         # allow_any_symbol. MUST mirror aj_operator._scan_universe (both call
         # aj_config.is_open_universe) so a screened symbol isn't blocked here.
@@ -641,12 +674,11 @@ def evaluate(proposal: Dict[str, Any]) -> RiskDecision:
             return RiskDecision(decision="block", reason="qty must be a finite number > 0")
         order_notional = aj_db.money(qty * price)
 
-        # An order LARGER than the confirmed held position FLIPS it (a sell
-        # beyond a held long opens a short; a buy beyond a held short opens a
-        # long). The excess is risk-INCREASING, so the closing exemptions must
-        # not cover it: re-check the allowlist here and let the per-order cap
-        # below bind on the full order.
-        if closing_sell and held_now is not None and qty > abs(held_now) + 1e-9:
+        # An order LARGER than the confirmed held position FLIPS it (see
+        # classify_exit's `flips`). The excess is risk-INCREASING, so the
+        # closing exemptions must not cover it: re-check the allowlist here and
+        # let the per-order cap below bind on the full order.
+        if classify_exit(symbol, side, qty, held_now)["flips"]:
             closing_sell = False
             confirmed_closing_sell = False
             if not _open_universe and symbol not in allow:

@@ -207,16 +207,30 @@ def pick_contract(underlying: str, side: str, cfg: Dict[str, Any], *,
             continue
         if best is None or dist < best[0]:
             best = (dist, strike, prem)
-    chosen = best or fallback
+    # The unscreened fallback is GATED (option_allow_illiquid_fallback,
+    # default OFF): silently trading a contract that FAILED the OI/spread
+    # screen defeats the screen — a wide market bleeds the spread on entry
+    # AND exit. Fail-closed: with no liquid contract we return None and the
+    # caller falls back to the equity leg instead of an untradeable option.
+    # Flag ON keeps the old behavior but stamps `illiquid_fallback: True` on
+    # the payload so downstream logs/audits can see the screen was bypassed.
+    illiquid_fallback = False
+    chosen = best
+    if chosen is None and bool(cfg.get("option_allow_illiquid_fallback")):
+        chosen = fallback
+        illiquid_fallback = True
     if chosen is None:
         return None
     _, strike, prem = chosen
-    return {
+    out = {
         "symbol": format_symbol(underlying, expiry, opt_type, strike),
         "underlying": underlying, "option_type": opt_type, "strike": strike,
         "expiry": expiry, "premium_contract": prem, "contract_multiplier": mult,
         "spot": spot, "instrument_type": "option",
     }
+    if illiquid_fallback:
+        out["illiquid_fallback"] = True
+    return out
 
 
 # ── marking held options ──────────────────────────────────────────────────────

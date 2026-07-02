@@ -42,7 +42,10 @@ def test_pick_contract_atm_call():
         {"strike": 150, "bid": 5.0, "ask": 5.2, "lastPrice": 5.1},   # ATM (spot 151)
         {"strike": 160, "bid": 1.0, "ask": 1.2, "lastPrice": 1.1},
     ]
-    c = O.pick_contract("AAPL", "buy", {"option_target_dte": 35, "option_moneyness": 0.0},
+    # min OI 0: these fixtures carry no openInterest and the illiquid
+    # fallback is now gated OFF by default — this test is about ATM selection.
+    c = O.pick_contract("AAPL", "buy", {"option_target_dte": 35, "option_moneyness": 0.0,
+                                        "option_min_open_interest": 0},
                         spot=151.0, expirations=[exp], chain_fn=_chain(calls))
     assert c is not None
     assert c["strike"] == 150            # nearest to spot
@@ -55,7 +58,8 @@ def test_pick_contract_atm_call():
 def test_pick_contract_otm_via_moneyness():
     exp = _future(40)
     calls = [{"strike": 150, "bid": 5, "ask": 5.2}, {"strike": 160, "bid": 1, "ask": 1.2}]
-    c = O.pick_contract("AAPL", "buy", {"option_moneyness": 0.06},   # ~+6% OTM of 151 = 160
+    c = O.pick_contract("AAPL", "buy", {"option_moneyness": 0.06,   # ~+6% OTM of 151 = 160
+                                        "option_min_open_interest": 0},
                         spot=151.0, expirations=[exp], chain_fn=_chain(calls))
     assert c["strike"] == 160
 
@@ -185,6 +189,32 @@ def test_pick_contract_liquidity_filter():
     c = O.pick_contract("AAPL", "buy", {"option_min_open_interest": 50, "option_max_spread_pct": 0.30},
                         spot=151.0, expirations=[exp], chain_fn=_chain(calls))
     assert c["strike"] == 145, c
+    # a screened (liquid) pick must NOT carry the illiquid-fallback marker
+    assert "illiquid_fallback" not in c, c
+
+
+def test_pick_contract_illiquid_fallback_suppressed_by_default():
+    """Nothing passes the OI/spread screen + flag OFF (default) → None, NOT a
+    silent fallback to an untradeable contract (caller does equity instead)."""
+    exp = _future(40)
+    calls = [{"strike": 150, "bid": 1.0, "ask": 3.0, "openInterest": 0, "volume": 0}]
+    c = O.pick_contract("AAPL", "buy",
+                        {"option_min_open_interest": 50, "option_max_spread_pct": 0.30},
+                        spot=151.0, expirations=[exp], chain_fn=_chain(calls))
+    assert c is None, c
+
+
+def test_pick_contract_illiquid_fallback_honored_with_flag():
+    """option_allow_illiquid_fallback=True keeps the old behavior AND stamps
+    illiquid_fallback: True on the payload for observability."""
+    exp = _future(40)
+    calls = [{"strike": 150, "bid": 1.0, "ask": 3.0, "openInterest": 0, "volume": 0}]
+    c = O.pick_contract("AAPL", "buy",
+                        {"option_min_open_interest": 50, "option_max_spread_pct": 0.30,
+                         "option_allow_illiquid_fallback": True},
+                        spot=151.0, expirations=[exp], chain_fn=_chain(calls))
+    assert c is not None and c["strike"] == 150, c
+    assert c.get("illiquid_fallback") is True, c
 
 
 def test_option_fee_per_contract():

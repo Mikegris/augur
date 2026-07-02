@@ -38,8 +38,10 @@ Python 3.9 compatible.
 """
 from __future__ import annotations
 
+import hashlib
 import logging
 import math
+import random
 from typing import Any, Dict, List, Optional
 
 import numpy as np
@@ -61,6 +63,15 @@ _MAX_SYMBOLS = 15            # hard cap on universe size (cost guard)
 _MIN_BARS = 80               # need enough history to compute the leak-free edge
 _LOOKBACK = 60               # bars of context required before the first decision
 _VOL_FLOOR = 1e-6
+
+# Bootstrap CI over per-trade returns: a positive MEAN alone is fragile — with
+# few/noisy trades it flips sign under resampling, so the verdict would bless
+# luck. We report a nonparametric 95% CI of the mean and require its LOWER
+# bound to clear zero before calling the policy "positive expectancy".
+_BOOT_RESAMPLES = 1000       # bootstrap resamples per CI
+_BOOT_MIN_TRADES = 10        # below this the resampled means are pure noise —
+                             # skip the bootstrap (ci95=None, matches the
+                             # existing insufficient-data cutoff)
 
 
 # ───────────────────────────── data plumbing ────────────────────────────────
@@ -193,11 +204,41 @@ def _edge_at(hist: pd.DataFrame) -> Optional[Dict[str, float]]:
 
 # ───────────────────────────── metrics roll-up ──────────────────────────────
 
+def _bootstrap_ci95(rs: List[float]) -> Optional[List[float]]:
+    """Nonparametric bootstrap 95% CI of the MEAN per-trade net return,
+    reported in PERCENT (same units as expectancy_pct): resample the trade
+    list with replacement _BOOT_RESAMPLES times, take each sample's mean,
+    return the [2.5th, 97.5th] percentiles.
+
+    DETERMINISM: the RNG is a private random.Random seeded from a HASH OF THE
+    TRADE LIST itself — no wall clock, no global random state — so the same
+    trades always yield the same interval and the verdict cannot flap between
+    otherwise-identical runs. md5 (not built-in hash()) because str hashing is
+    salted per process and this must be stable across processes/restarts.
+
+    Returns None below _BOOT_MIN_TRADES — too few trades for resampling to
+    say anything; callers keep the existing insufficient-data behavior.
+    """
+    n = len(rs)
+    if n < _BOOT_MIN_TRADES:
+        return None
+    key = ",".join("{:.10e}".format(r) for r in rs).encode("utf-8")
+    rng = random.Random(int(hashlib.md5(key).hexdigest()[:16], 16))
+    means = []
+    for _ in range(_BOOT_RESAMPLES):
+        means.append(sum(rng.choices(rs, k=n)) / n)   # resample w/ replacement
+    means.sort()
+    lo = means[int(round(0.025 * (_BOOT_RESAMPLES - 1)))]
+    hi = means[int(round(0.975 * (_BOOT_RESAMPLES - 1)))]
+    return [round(lo * 100.0, 4), round(hi * 100.0, 4)]
+
+
 def _empty_metrics() -> Dict[str, Any]:
     return {
         "n_trades": 0, "hit_rate": 0.0, "avg_win": 0.0, "avg_loss": 0.0,
         "profit_factor": 0.0, "expectancy_pct": 0.0, "sharpe": 0.0,
         "max_drawdown": 0.0, "turnover": 0.0, "total_return": 0.0,
+        "ci95": None,
     }
 
 
@@ -271,6 +312,8 @@ def _metrics_from_trades(returns: List[float],
         "max_drawdown": round(max_dd * 100.0, 4),
         "turnover": float(n),   # each closed trade = one round-trip
         "total_return": round(total_return * 100.0, 4),
+        # 95% bootstrap CI of the mean return (%, [lo, hi]); None when n < 10.
+        "ci95": _bootstrap_ci95(rs),
     }
 
 
@@ -571,7 +614,9 @@ def policy_expectancy(
     non-empty, else a built-in liquid basket, capped at 15), runs
     `backtest_policy`, and returns the aggregate metrics plus a `verdict`
     ("positive expectancy" / "negative expectancy" / "insufficient data"),
-    `expectancy_pct`, `n_trades`, and a one-line `summary`. Fail-open.
+    `expectancy_pct`, `ci95` (bootstrap 95% CI of the mean return, %; the
+    positive verdict requires ci95[0] > 0), `n_trades`, and a one-line
+    `summary`. Fail-open.
     """
     try:
         if cfg is None:
@@ -624,19 +669,26 @@ def policy_expectancy(
         agg = bt.get("aggregate", _empty_metrics())
         n_trades = int(agg.get("n_trades", 0))
         exp = float(agg.get("expectancy_pct", 0.0))
+        ci95 = agg.get("ci95")   # [lo, hi] in %, or None below 10 trades
 
         if n_trades < 10:
             verdict = "insufficient data"
-        elif exp > 0:
+        elif exp > 0 and ci95 is not None and float(ci95[0]) > 0:
+            # "positive expectancy" now requires the WHOLE bootstrap CI to
+            # clear zero, not just the point estimate — a mean the resamples
+            # frequently flip negative is noise, not edge (fail-closed toward
+            # "no edge" so nothing sizes up on luck).
             verdict = "positive expectancy"
         else:
             verdict = "negative expectancy"
 
         summary = (
-            "{verdict}: {exp:+.2f}% net expectancy/trade over {n} trades "
-            "({sym} symbols, hit-rate {hr:.0%}, profit-factor {pf}, "
+            "{verdict}: {exp:+.2f}% net expectancy/trade (95% CI {ci}) over "
+            "{n} trades ({sym} symbols, hit-rate {hr:.0%}, profit-factor {pf}, "
             "regime={reg}). Scope: price signals only."
         ).format(
+            ci=("[{:+.2f}%, {:+.2f}%]".format(float(ci95[0]), float(ci95[1]))
+                if ci95 is not None else "n/a"),
             verdict=verdict,
             exp=exp,
             n=n_trades,
@@ -650,6 +702,9 @@ def policy_expectancy(
         return {
             "verdict": verdict,
             "expectancy_pct": round(exp, 4),
+            # bootstrap 95% CI of the mean per-trade return (%) — the verdict
+            # gate above; None below 10 trades (insufficient data).
+            "ci95": ci95,
             "n_trades": n_trades,
             "summary": summary,
             # non-None only when the survivorship-biased default basket ran

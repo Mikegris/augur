@@ -140,6 +140,80 @@ def test_budget_cap_blocks_calls():
     teardown()
 
 
+def test_make_call_threads_json_mode_to_router():
+    # ENHANCEMENT A: strict-JSON roles request native JSON output. The council's
+    # CallFn takes an OPTIONAL json_mode kwarg (default False — existing callers
+    # unchanged); aj_routing.call_json passes json_mode=True when supported and
+    # falls back to the plain 4-arg invocation for legacy fakes.
+    seen = {}
+    orig = aj_routing.complete_tiered
+    aj_routing.complete_tiered = lambda *a, **k: (
+        seen.update(k) or {"ok": True, "text": "{}", "cost_usd": 0.0})
+    try:
+        call = aj_council._make_call(aj_config.get_config(), aj_council.Budget(5), None)
+        assert aj_routing.call_json(call, "deep", "council.analyst.x", "s", "p") == "{}"
+        assert seen.get("json_mode") is True, seen
+        # default path (no call_json) keeps json_mode off
+        seen.clear()
+        assert call("deep", "council.reflect", "s", "p") == "{}"
+        assert seen.get("json_mode") is False
+    finally:
+        aj_routing.complete_tiered = orig
+    # legacy 4-positional fakes must be invoked WITHOUT the kwarg (no TypeError)
+    legacy = lambda tier, role, system, prompt: "legacy-ok"
+    assert aj_routing.call_json(legacy, "deep", "r", "s", "p") == "legacy-ok"
+    teardown()
+
+
+def test_hit_rate_weighting_cold_start_neutral():
+    # ENHANCEMENT C: below _HIT_RATE_MIN_SAMPLES resolved samples the skill
+    # multiplier is a NEUTRAL 1.0x — consensus must be bit-identical to the
+    # historical pure-confidence weighting. With warm (>=10 samples) skill data
+    # the proven analyst dominates. Any hit-rate error => fail-open to baseline.
+    import time as _t
+    reports = [AnalystReport(analyst="fundamentals", band="NEUTRAL", score=8.0,
+                             confidence=0.9, key_points=["f"], narrative="f"),
+               AnalystReport(analyst="technical", band="NEUTRAL", score=3.0,
+                             confidence=0.5, key_points=["t"], narrative="t")]
+    memo = aj_council._hit_rate_memo
+    try:
+        memo["rates"], memo["exp"] = {}, _t.time() + 60
+        base = aj_council._consensus(reports)
+        assert base[0] is Rating.OVERWEIGHT       # (8*.9+3*.5)/1.4 ≈ 6.21
+        # cold start: thin samples (n < 10) => identical rating AND conviction
+        memo["rates"] = {"fundamentals": (1.0, 9), "technical": (0.0, 3)}
+        cold = aj_council._consensus(reports)
+        assert cold[0] is base[0] and abs(cold[1] - base[1]) < 1e-12
+        # warm skill data: perfect fundamentals (1.5x) vs coin-toss-worse
+        # technical (0.5x) => avg ≈ 7.22 => rating strengthens to BUY
+        memo["rates"] = {"fundamentals": (1.0, 30), "technical": (0.0, 30)}
+        warm = aj_council._consensus(reports)
+        assert warm[0] is Rating.BUY, warm[0]
+        # fail-open: a raising hit-rate helper must yield the baseline result
+        orig = aj_council._analyst_hit_rates
+        aj_council._analyst_hit_rates = lambda: (_ for _ in ()).throw(RuntimeError("boom"))
+        try:
+            safe = aj_council._consensus(reports)
+            assert safe[0] is base[0] and abs(safe[1] - base[1]) < 1e-12
+        finally:
+            aj_council._analyst_hit_rates = orig
+    finally:
+        memo["rates"], memo["exp"] = {}, 0.0      # drop the memo for other tests
+    teardown()
+
+
+def test_cache_key_varies_with_council_models():
+    # ENHANCEMENT C2: swapping the deep/quick tier model must produce a fresh
+    # cache key so the old model's cached advice is never served for the TTL.
+    cfg = dict(aj_config.get_config())
+    k_a = aj_council._cache_key("AAPL", dict(cfg, council_deep_model="model-a"))
+    k_b = aj_council._cache_key("AAPL", dict(cfg, council_deep_model="model-b"))
+    k_q = aj_council._cache_key("AAPL", dict(cfg, council_quick_model="mini-x"))
+    assert k_a != k_b and k_a != k_q
+    assert k_a == aj_council._cache_key("AAPL", dict(cfg, council_deep_model="model-a"))
+    teardown()
+
+
 def test_cache_returns_same_decision():
     _set_analysts({"fundamentals": (8.0, 0.9)})
     aj_council.clear_cache()

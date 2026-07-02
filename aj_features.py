@@ -53,6 +53,14 @@ _NUMERIC_FEATURES: List[Tuple[str, float]] = [
     ("conviction", 0.5),
     ("prob_up", 0.5),
     ("side_long", 1.0),
+    # ── v2 contract: point-in-time technicals at ENTRY (appended per the
+    # append-only rule; a model trained on the v1 names keeps scoring
+    # self-consistently until its next retrain adopts these).
+    ("rsi14", 50.0),           # 14d RSI of the symbol's closes as of entry
+    ("vol14_pct", 0.0),        # mean |daily change| over 14d, % of price
+                               # (close-to-close ATR proxy; no OHLC needed)
+    ("sma20_dist_pct", 0.0),   # % distance of close from its 20d SMA
+    ("rs_spy20_pct", 0.0),     # 20d return minus SPY's 20d return (rel strength)
 ]
 # Regime is categorical -> stable one-hot columns (neutral 0.0 each). Unknown /
 # unseen regimes simply leave all three at 0.0 (still a valid, consistent row).
@@ -374,6 +382,112 @@ def _assemble_features(trade: Dict[str, Any], snap: Dict[str, Any],
     return feats
 
 
+# ── technical features (v2 contract) ─────────────────────────────────────────
+
+def tech_features_from_closes(closes: List[float],
+                              spy_closes: Optional[List[float]] = None) -> Dict[str, float]:
+    """Pure v2 technicals from a close series ENDING at the decision date —
+    the single implementation shared by training (historical closes as of
+    entry) and inference (live closes), so there is no train/serve skew.
+    Returns only the features it can honestly compute; callers/imputation
+    handle the rest. Never raises."""
+    out: Dict[str, float] = {}
+    try:
+        px = [float(c) for c in (closes or []) if c is not None and float(c) > 0]
+        if len(px) >= 15:
+            deltas = [px[i] - px[i - 1] for i in range(len(px) - 14, len(px))]
+            gains = sum(d for d in deltas if d > 0)
+            losses = sum(-d for d in deltas if d < 0)
+            if gains + losses > 0:
+                out["rsi14"] = round(100.0 * gains / (gains + losses), 2)
+            if px[-1] > 0:
+                out["vol14_pct"] = round(
+                    (sum(abs(d) for d in deltas) / 14.0) / px[-1] * 100.0, 3)
+        if len(px) >= 20 and px[-1] > 0:
+            sma20 = sum(px[-20:]) / 20.0
+            if sma20 > 0:
+                out["sma20_dist_pct"] = round((px[-1] / sma20 - 1.0) * 100.0, 3)
+        if len(px) >= 21:
+            r20 = (px[-1] / px[-21] - 1.0) * 100.0
+            spy = [float(c) for c in (spy_closes or []) if c is not None and float(c) > 0]
+            if len(spy) >= 21:
+                out["rs_spy20_pct"] = round(
+                    r20 - (spy[-1] / spy[-21] - 1.0) * 100.0, 3)
+    except Exception:
+        log.debug("tech_features_from_closes failed", exc_info=True)
+    return out
+
+
+_LIVE_TECH_MEMO: Dict[str, Any] = {}
+
+
+def live_tech_features(symbol: str) -> Dict[str, float]:
+    """v2 technicals from CURRENT history — the inference-time counterpart of
+    the training-side point-in-time computation (same pure function). Memoized
+    10 min per symbol so the operator loop doesn't refetch. Fail-open to {}."""
+    import time as _time
+    sym = (symbol or "").upper()
+    if not sym or sym.startswith("OPT:"):
+        return {}
+    now = _time.time()
+    hit = _LIVE_TECH_MEMO.get(sym)
+    if hit and now - hit[0] < 600:
+        return hit[1]
+    feats: Dict[str, float] = {}
+    try:
+        import fetcher
+        bars = fetcher.get_chart_data(sym, "6mo", "1d") or []
+        closes = [b.get("close") for b in bars if isinstance(b, dict)]
+        spy_bars = None
+        spy_hit = _LIVE_TECH_MEMO.get("__SPY__")
+        if spy_hit and now - spy_hit[0] < 600:
+            spy_bars = spy_hit[1]
+        else:
+            spy_bars = [b.get("close") for b in
+                        (fetcher.get_chart_data("SPY", "6mo", "1d") or [])
+                        if isinstance(b, dict)]
+            _LIVE_TECH_MEMO["__SPY__"] = (now, spy_bars)
+        feats = tech_features_from_closes(closes, spy_bars)
+    except Exception:
+        log.debug("live_tech_features failed for %s", sym, exc_info=True)
+    _LIVE_TECH_MEMO[sym] = (now, feats)
+    return feats
+
+
+# ── persisted decision features (#13 — v10 schema) ───────────────────────────
+
+def _persisted_entry_features(symbol: str, close_side: str,
+                              opened_at: Any) -> Optional[Dict[str, Any]]:
+    """The features_json persisted on the aj_proposals row that OPENED this
+    round-trip (written at decision time by the operator). Exact entry state —
+    preferred over the cycle-snapshot reconstruction, which is stamped at
+    cycle END and can be a cycle stale. The entry proposal is the latest one
+    for the symbol on the ENTRY side within [open-30min, open+5min] (the fill
+    lands seconds after the proposal row). None when unavailable."""
+    try:
+        if not opened_at:
+            return None
+        odt = aj_db.parse_iso(str(opened_at))
+        if odt is None:
+            return None
+        from datetime import timedelta
+        entry_side = "sell" if str(close_side or "").lower() == "buy" else "buy"
+        rows = aj_db.query(
+            "SELECT features_json FROM aj_proposals WHERE symbol=? AND side=? "
+            "AND features_json IS NOT NULL AND created_at >= ? AND created_at <= ? "
+            "ORDER BY created_at DESC LIMIT 1",
+            ((symbol or "").upper(), entry_side,
+             (odt - timedelta(minutes=30)).isoformat(),
+             (odt + timedelta(minutes=5)).isoformat()))
+        if not rows:
+            return None
+        d = json.loads(rows[0].get("features_json") or "{}")
+        return d if isinstance(d, dict) and d else None
+    except Exception:
+        log.debug("persisted entry features lookup failed", exc_info=True)
+        return None
+
+
 # ── point-in-time helpers (ET dates + historical regime) ──────────────────────
 
 def _et_date_str(ts: Any) -> Optional[str]:
@@ -489,6 +603,20 @@ def build_labels(lookback_days: int = 365) -> Dict[str, Any]:
 
         now = aj_db.utc_now_iso()
         built = 0
+        # Per-symbol close history for the point-in-time v2 technicals —
+        # fetched lazily ONCE per symbol (trades repeat symbols heavily).
+        sym_hist: Dict[str, List[Tuple[str, float]]] = {}
+
+        def _hist(s: str) -> List[Tuple[str, float]]:
+            if s not in sym_hist:
+                try:
+                    import aj_benchmark
+                    sym_hist[s] = sorted(
+                        (aj_benchmark._index_closes(s, "2y") or {}).items())
+                except Exception:
+                    sym_hist[s] = []
+            return sym_hist[s]
+
         with db._write_lock:
             conn = db.get_conn()
             for t in trades:
@@ -511,6 +639,24 @@ def build_labels(lookback_days: int = 365) -> Dict[str, Any]:
                 snap = _nearest_prior_snapshot(scan_idx, sym, opened_dt)
                 regime = _regime_asof(spy_hist, opened_at)
                 feats = _assemble_features(t, snap, hd, regime)
+                # v2 technicals AS OF the entry date — same pure function the
+                # live inference path uses, so there is no train/serve skew.
+                d_open = _et_date_str(opened_at)
+                if d_open and not sym.startswith("OPT:"):
+                    closes_asof = [c for dt2, c in _hist(sym) if dt2 <= d_open]
+                    spy_asof = [c for dt2, c in spy_hist if dt2 <= d_open]
+                    feats.update(tech_features_from_closes(closes_asof, spy_asof))
+                # Exact decision-time features persisted on the ENTRY proposal
+                # (v10, #13) beat any reconstruction — overlay them last.
+                pers = _persisted_entry_features(sym, t.get("side"), opened_at)
+                if pers:
+                    reg_p = next((lvl for lvl in _REGIME_LEVELS
+                                  if _f(pers.get("regime_" + lvl)) == 1.0), None)
+                    if reg_p:
+                        regime = reg_p
+                        feats["regime"] = reg_p
+                    feats.update({k: v for k, v in pers.items()
+                                  if not str(k).startswith("regime_")})
                 ret_pct = _return_pct(t.get("side"), t.get("entry_price"),
                                       t.get("exit_price"))
                 # benchmark-relative label: did the trade beat the market over

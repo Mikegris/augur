@@ -368,6 +368,63 @@ def test_symbol_cap_enforced():
         _restore_fetch()
 
 
+def test_bootstrap_ci95_deterministic_and_shaped():
+    # 12 solid positive trades → CI present, deterministic, mean inside it
+    rets = [0.01, 0.02] * 6
+    m1 = B._metrics_from_trades(rets)
+    m2 = B._metrics_from_trades(list(rets))
+    check(isinstance(m1.get("ci95"), list) and len(m1["ci95"]) == 2,
+          "bootstrap: ci95 is a [lo, hi] pair at n>=10")
+    check(m1["ci95"] == m2["ci95"],
+          "bootstrap: deterministic — same trades, same CI ({})".format(m1["ci95"]))
+    check(m1["ci95"][0] <= m1["expectancy_pct"] <= m1["ci95"][1],
+          "bootstrap: point estimate lies inside its CI")
+    check(m1["ci95"][0] > 0,
+          "bootstrap: all-positive trades → CI lower bound > 0")
+    # below 10 trades → no bootstrap, ci95 None (insufficient-data behavior)
+    check(B._metrics_from_trades([0.01] * 9).get("ci95") is None,
+          "bootstrap: skipped below 10 trades (ci95=None)")
+    check(B._empty_metrics().get("ci95") is None,
+          "bootstrap: empty metrics carry ci95=None")
+
+
+def _fake_bt(agg):
+    """A backtest_policy stand-in returning a fixed aggregate."""
+    return lambda syms, cfg=None, **k: {
+        "aggregate": agg, "n_symbols": 1, "regime": "test",
+        "coverage": "price_signals_only", "per_symbol": {}, "per_regime": {},
+        "params": {}, "symbols": list(syms),
+    }
+
+
+def test_verdict_gated_on_ci95_lower_bound():
+    # mean > 0 but hugely dispersed → CI spans zero → NOT positive expectancy
+    noisy = [0.5, -0.45] * 6            # mean +2.5%/trade, sd ~47%
+    agg_noisy = B._metrics_from_trades(noisy)
+    check(agg_noisy["expectancy_pct"] > 0 and agg_noisy["ci95"][0] <= 0,
+          "verdict-gate fixture: positive mean, CI spans zero ({})".format(
+              agg_noisy["ci95"]))
+    solid = [0.01, 0.02] * 6            # every resample mean > 0
+    agg_solid = B._metrics_from_trades(solid)
+    orig = B.backtest_policy
+    try:
+        B.backtest_policy = _fake_bt(agg_noisy)
+        rep = B.policy_expectancy(cfg=_cfg(), symbols=["X"])
+        check(rep["verdict"] != "positive expectancy",
+              "verdict: mean>0 with CI spanning zero is NOT positive ({})".format(
+                  rep["verdict"]))
+        check(rep.get("ci95") == agg_noisy["ci95"],
+              "verdict: payload reports the aggregate ci95")
+        B.backtest_policy = _fake_bt(agg_solid)
+        rep2 = B.policy_expectancy(cfg=_cfg(), symbols=["X"])
+        check(rep2["verdict"] == "positive expectancy",
+              "verdict: CI fully above zero → positive expectancy")
+        check("CI" in rep2.get("summary", ""),
+              "verdict: summary mentions the CI")
+    finally:
+        B.backtest_policy = orig
+
+
 if __name__ == "__main__":
     tests = [v for k, v in sorted(globals().items())
              if k.startswith("test_") and callable(v)]

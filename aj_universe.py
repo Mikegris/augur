@@ -241,7 +241,8 @@ def screen(cfg: Dict[str, Any] = None) -> List[str]:
         min_dvol = _num(cfg.get("screen_min_dollar_volume", 1_000_000))
         min_mcap = _num(cfg.get("screen_min_market_cap", 0))
 
-        equities, cursor_next = _rotate(_equity_population(cfg), batch)
+        pop_eq = _equity_population(cfg)
+        equities, cursor_next = _rotate(pop_eq, batch)
         cryptos = _crypto_population(cfg)
         if not equities and not cryptos:
             return []
@@ -314,6 +315,26 @@ def screen(cfg: Dict[str, Any] = None) -> List[str]:
         scored.sort(key=lambda x: (-x[1], -x[2]))
         out = [s for s, _, _ in scored[:smax]]
         out.extend(c for c in cryptos if c not in out)
+        # Sweep telemetry (#11): make a 429-driven universe collapse VISIBLE
+        # (cursor position, per-slice quote hit-rate, fresh-cache depth,
+        # shortlist size) instead of silently degrading to crypto-only.
+        # Surfaced through aj_metrics.status() -> dashboard / `aj status`.
+        try:
+            import json as _json
+            quoted = sum(1 for s in equities if s in quotes)
+            aj_db.set_setting_raw("__aj_screen_telemetry", _json.dumps({
+                "ts": aj_db.utc_now_iso(),
+                "population": len(pop_eq),
+                "cursor": cursor_next,
+                "slice_size": len(equities),
+                "slice_quoted": quoted,
+                "quote_hit_rate": round(quoted / len(equities), 3) if equities else None,
+                "cache_pool": len(pool),
+                "shortlist": len(out),
+                "crypto": len(cryptos),
+            }))
+        except Exception:
+            log.debug("screen telemetry persist skipped", exc_info=True)
         return out
     except Exception:
         log.exception("screen failed; returning empty (fail-closed)")

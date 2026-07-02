@@ -16,6 +16,10 @@ import smart_money  # noqa: E402
 import synthetic_insider  # noqa: E402
 import congress  # noqa: E402
 import alt_signals  # noqa: E402
+import fetcher  # noqa: E402
+import aj_db  # noqa: E402
+
+aj_db.aj_init()   # the adapter scorecard (section 6) needs aj_signal_scores
 
 PASS = []
 FAIL = []
@@ -308,6 +312,180 @@ def test_all_signals_survives_one_raising():
         check("insider" in out and "congress" in out,
               "all_signals: other adapters survive one raising")
         check("social" not in out, "all_signals: None adapter excluded")
+
+
+# --------------------------------------------------------------------------- #
+# 6. Adapter scorecard — ledger, scoring, confidence decay
+# --------------------------------------------------------------------------- #
+
+import database as _dbmod  # noqa: E402
+from datetime import timedelta  # noqa: E402
+
+
+def _clear_scores():
+    with _dbmod._write_lock:
+        conn = _dbmod.get_conn()
+        conn.execute("DELETE FROM aj_signal_scores")
+        conn.commit()
+    S._invalidate_adapter_weights()
+
+
+def _seed_scored(adapter, n, hit):
+    """n already-scored rows for `adapter` with the given hit outcome."""
+    now = aj_db.utc_now_iso()
+    with _dbmod._write_lock:
+        conn = _dbmod.get_conn()
+        conn.executemany(
+            "INSERT INTO aj_signal_scores (ts, symbol, adapter, prob_up, confidence,"
+            " horizon_days, price_at, scored_at, realized_up, hit)"
+            " VALUES (?,?,?,?,?,?,?,?,?,?)",
+            [(now, "AAA", adapter, 0.7, 0.5, 5, 100.0, now, int(hit), int(hit))
+             for _ in range(n)])
+        conn.commit()
+    S._invalidate_adapter_weights()
+
+
+def _seed_open(adapter, days_old, prob_up, price_at=100.0, horizon=5):
+    """One unscored (scored_at NULL) row `days_old` calendar days in the past."""
+    ts = (aj_db.utc_now() - timedelta(days=days_old)).isoformat()
+    with _dbmod._write_lock:
+        conn = _dbmod.get_conn()
+        cur = conn.execute(
+            "INSERT INTO aj_signal_scores (ts, symbol, adapter, prob_up, confidence,"
+            " horizon_days, price_at) VALUES (?,?,?,?,?,?,?)",
+            (ts, "AAA", adapter, prob_up, 0.5, horizon, price_at))
+        conn.commit()
+        return cur.lastrowid
+
+
+_SCORECARD_SOURCES = (
+    (smart_money, "compute_score", lambda sym: {"score": 80, "signal": "BUY"}),
+    (synthetic_insider, "compute_composite",
+     lambda sym: {"composite_score": 70, "coverage": 1.0, "convergence_count": 3}),
+    (congress, "get_recent_trades", lambda **k: {"trades": []}),   # -> None
+    (alt_signals, "stocktwits_symbol_sentiment",
+     lambda sym: {"bull_ratio": 0.8, "bullish": 16, "bearish": 4}),
+)
+
+
+def _score_rows():
+    return aj_db.query(
+        "SELECT * FROM aj_signal_scores ORDER BY id", ())
+
+
+def test_scorecard_hit_rate_weight_mapping():
+    # documented mapping: clamp((hr - 0.35)/0.15, 0.25, 1.0)
+    check(_approx(S._hit_rate_weight(0.5), 1.0), "weight 1.0 at hit-rate 0.5")
+    check(_approx(S._hit_rate_weight(0.9), 1.0), "weight clamped to 1.0 above 0.5")
+    check(_approx(S._hit_rate_weight(0.44), 0.6), "weight 0.6 at hit-rate 0.44")
+    check(_approx(S._hit_rate_weight(0.35), 0.25), "weight floored 0.25 at 0.35")
+    check(_approx(S._hit_rate_weight(0.0), 0.25), "weight never below the 0.25 floor")
+    check(S._hit_rate_weight(0.48) > S._hit_rate_weight(0.42) > S._hit_rate_weight(0.38),
+          "weight mapping is monotone in hit-rate")
+
+
+def test_scorecard_off_is_todays_behavior():
+    _clear_scores()
+    with _Patch(*_SCORECARD_SOURCES):
+        base = {}
+        for name, fn in S._ADAPTERS:
+            sig = fn("AAA")
+            if sig is not None:
+                base[name] = sig
+        n_before = len(_score_rows())
+        out = S.all_signals("AAA", cfg={})                 # flag absent -> OFF
+        out_default = S.all_signals("AAA")                 # real cfg, key not in DEFAULTS -> OFF
+    check(out == base, "scorecard OFF: fused signals identical to raw adapters")
+    check(out_default == base, "scorecard OFF: default-cfg call path unchanged")
+    check(len(_score_rows()) == n_before, "scorecard OFF: nothing logged")
+
+
+def test_scorecard_on_logs_and_cold_start_neutral():
+    _clear_scores()
+    cfg = {"adapter_scorecard": True, "forecast_horizon_days": 5}
+    with _Patch(*_SCORECARD_SOURCES,
+                (fetcher, "get_quotes_batch",
+                 lambda syms: {s.upper(): {"price": 100.0} for s in syms})):
+        off = S.all_signals("AAA", cfg={})
+        on = S.all_signals("AAA", cfg=cfg)
+    check(on == off, "scorecard ON + cold start (no scored history): confidences neutral")
+    rows = _score_rows()
+    check({r["adapter"] for r in rows} == set(on.keys()),
+          "scorecard ON: one ledger row per live adapter")
+    check(all(r["scored_at"] is None and r["price_at"] == 100.0
+              and r["horizon_days"] == 5 for r in rows),
+          "scorecard ON: rows logged open (scored_at NULL) with price/horizon")
+    check(all(_approx(r["prob_up"], on[r["adapter"]]["prob_up"]) for r in rows),
+          "scorecard ON: logged prob_up matches the adapter output")
+
+
+def test_scorecard_on_applies_decay_weights():
+    _clear_scores()
+    _seed_scored("social", 40, hit=0)        # 0% hit-rate -> floor weight 0.25
+    _seed_scored("smart_money", 40, hit=1)   # 100% hit-rate -> full 1.0
+    _seed_scored("insider", 10, hit=0)       # < 30 samples -> cold-start 1.0
+    w = S.adapter_weights()
+    check(_approx(w["social"], 0.25), "adapter_weights: chronic misser decayed to 0.25")
+    check(_approx(w["smart_money"], 1.0), "adapter_weights: proven adapter keeps 1.0")
+    check(_approx(w["insider"], 1.0), "adapter_weights: <30 samples stays neutral (cold start)")
+    check(_approx(w["congress"], 1.0), "adapter_weights: no history stays neutral")
+    cfg = {"adapter_scorecard": True, "forecast_horizon_days": 5}
+    with _Patch(*_SCORECARD_SOURCES,
+                (fetcher, "get_quotes_batch",
+                 lambda syms: {s.upper(): {"price": 100.0} for s in syms})):
+        off = S.all_signals("AAA", cfg={})
+        on = S.all_signals("AAA", cfg=cfg)
+    check(_approx(on["social"]["confidence"], off["social"]["confidence"] * 0.25),
+          "fusion: decayed adapter's confidence multiplied by its weight")
+    check(_approx(on["smart_money"]["confidence"], off["smart_money"]["confidence"]),
+          "fusion: full-weight adapter's confidence untouched")
+    check(_approx(on["social"]["prob_up"], off["social"]["prob_up"]),
+          "fusion: prob_up never reweighted (confidence channel only)")
+    # memoized for 10 min: new (bad) history doesn't move weights until refresh.
+    # 60 misses on top of the 40 hits -> trailing hit-rate 0.40 -> weight < 1.0
+    _seed_scored_no_invalidate = 60
+    now = aj_db.utc_now_iso()
+    with _dbmod._write_lock:
+        conn = _dbmod.get_conn()
+        conn.executemany(
+            "INSERT INTO aj_signal_scores (ts, symbol, adapter, prob_up, confidence,"
+            " horizon_days, price_at, scored_at, realized_up, hit)"
+            " VALUES (?,?,?,?,?,?,?,?,?,?)",
+            [(now, "AAA", "smart_money", 0.7, 0.5, 5, 100.0, now, 0, 0)
+             for _ in range(_seed_scored_no_invalidate)])
+        conn.commit()
+    check(_approx(S.adapter_weights()["smart_money"], 1.0),
+          "adapter_weights: memoized for the TTL (fresh rows ignored)")
+    S._invalidate_adapter_weights()
+    check(S.adapter_weights()["smart_money"] < 1.0,
+          "adapter_weights: refreshed after invalidation")
+
+
+def test_scorecard_scoring_pass():
+    _clear_scores()
+    id_hit = _seed_open("smart_money", days_old=10, prob_up=0.7)    # due (5*1.5=7.5d)
+    id_miss = _seed_open("social", days_old=10, prob_up=0.3)        # due, wrong call
+    id_fresh = _seed_open("insider", days_old=1, prob_up=0.9)       # NOT due yet
+    with _Patch((fetcher, "get_quotes_batch",
+                 lambda syms: {s.upper(): {"price": 110.0} for s in syms})):
+        res = S.score_due_adapter_signals()
+    check(res.get("scored") == 2, "scoring: exactly the due rows scored")
+    rows = {r["id"]: r for r in _score_rows()}
+    check(rows[id_hit]["realized_up"] == 1 and rows[id_hit]["hit"] == 1,
+          "scoring: bullish call + price up -> realized_up=1, hit=1")
+    check(rows[id_miss]["realized_up"] == 1 and rows[id_miss]["hit"] == 0,
+          "scoring: bearish call + price up -> hit=0")
+    check(rows[id_fresh]["scored_at"] is None,
+          "scoring: row inside its horizon left open")
+    # quote miss leaves the row open for the next pass (never falsely graded)
+    id_nq = _seed_open("congress", days_old=10, prob_up=0.6)
+    with _Patch((fetcher, "get_quotes_batch", lambda syms: {})):
+        res2 = S.score_due_adapter_signals()
+    check(res2.get("scored") == 0 and res2.get("skipped") == 1,
+          "scoring: quote miss skipped, not graded")
+    check({r["id"]: r for r in _score_rows()}[id_nq]["scored_at"] is None,
+          "scoring: quote-miss row still open")
+    _clear_scores()
 
 
 if __name__ == "__main__":

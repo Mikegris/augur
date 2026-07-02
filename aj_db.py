@@ -32,7 +32,7 @@ import database as db
 log = logging.getLogger("augur.aj_db")
 
 # ── schema version target (bump when adding a numbered migration step) ────────
-AJ_SCHEMA_TARGET = 9
+AJ_SCHEMA_TARGET = 10
 _SCHEMA_KEY = "aj_schema_version"
 
 # ── DDL (§5). CREATE TABLE IF NOT EXISTS is safe to re-run; column ADDs go
@@ -450,6 +450,66 @@ def aj_migrate() -> int:
                             raise
             conn.commit()
             current = 9
+        if current < 10:
+            # v3.16 enhancements groundwork:
+            #  - aj_journal: dated reflections/briefings journal (browsable +
+            #    weekly rollups) replacing per-day settings blobs.
+            #  - aj_signal_scores: per-adapter forecast ledger for the signal
+            #    scorecard (log at forecast time, score after the horizon).
+            #  - aj_proposals.features_json: decision-time features persisted
+            #    at proposal creation so ML labels come from exact entry state
+            #    instead of reconstructed cycle snapshots.
+            #  - append-only triggers on aj_audit: tampering is PREVENTED
+            #    in-band (RAISE ABORT), not just detected by the hash chain.
+            conn.execute("""CREATE TABLE IF NOT EXISTS aj_journal (
+                id           INTEGER PRIMARY KEY,
+                kind         TEXT NOT NULL,
+                date         TEXT NOT NULL,
+                ts           TEXT NOT NULL,
+                payload_json TEXT NOT NULL,
+                UNIQUE(kind, date)
+            )""")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_aj_journal_kind_date "
+                         "ON aj_journal(kind, date)")
+            conn.execute("""CREATE TABLE IF NOT EXISTS aj_signal_scores (
+                id           INTEGER PRIMARY KEY,
+                ts           TEXT NOT NULL,
+                symbol       TEXT NOT NULL,
+                adapter      TEXT NOT NULL,
+                prob_up      REAL,
+                confidence   REAL,
+                horizon_days INTEGER,
+                price_at     REAL,
+                scored_at    TEXT,
+                realized_up  INTEGER,
+                hit          INTEGER
+            )""")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_aj_signal_scores_due "
+                         "ON aj_signal_scores(scored_at, ts)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_aj_signal_scores_adapter "
+                         "ON aj_signal_scores(adapter)")
+            have = {r["name"] for r in conn.execute(
+                "PRAGMA table_info(aj_proposals)").fetchall()}
+            if "features_json" not in have:
+                try:
+                    conn.execute("ALTER TABLE aj_proposals ADD COLUMN features_json TEXT")
+                except sqlite3.OperationalError as e:
+                    if "duplicate column" not in str(e).lower():
+                        raise
+            # Guarded by the __aj_audit_unlock settings flag so explicit
+            # maintenance (test resets, retention) can lift it via
+            # audit_maintenance(); everything else is blocked in-band. An
+            # attacker with raw SQL could set the flag — but they could drop
+            # the trigger too; the hash chain remains the detection layer.
+            for trg, op in (("trg_aj_audit_no_update", "UPDATE"),
+                            ("trg_aj_audit_no_delete", "DELETE")):
+                conn.execute(
+                    "CREATE TRIGGER IF NOT EXISTS {} BEFORE {} ON aj_audit "
+                    "WHEN COALESCE((SELECT value FROM settings WHERE "
+                    "key='__aj_audit_unlock'), '') <> '1' "
+                    "BEGIN SELECT RAISE(ABORT, 'aj_audit is append-only'); END".format(trg, op))
+            conn.commit()
+            current = 10
         set_setting_raw(_SCHEMA_KEY, str(current))
         log.info("aj_migrate: schema at version %d", current)
         return current
@@ -806,6 +866,33 @@ def claim_stale_cycle(cycle_id: str) -> bool:
 
 
 # ── append-only audit + hash chain (§8) ──────────────────────────────────────
+
+import contextlib
+
+
+@contextlib.contextmanager
+def audit_maintenance():
+    """Scoped unlock of aj_audit's append-only triggers (schema v10) for
+    explicit maintenance — test resets, retention pruning. In-band app code
+    can never UPDATE/DELETE audit rows outside this context, and the hash
+    chain still detects anything mutated under it."""
+    with db._write_lock:
+        conn = db.get_conn()
+        conn.execute("INSERT OR REPLACE INTO settings (key, value) "
+                     "VALUES ('__aj_audit_unlock','1')")
+        conn.commit()
+    try:
+        yield
+    finally:
+        try:
+            with db._write_lock:
+                conn = db.get_conn()
+                conn.execute("DELETE FROM settings WHERE key='__aj_audit_unlock'")
+                conn.commit()
+            db._invalidate_settings_cache()
+        except Exception:
+            log.exception("audit_maintenance: relock failed")
+
 
 def _last_row_hash() -> Optional[str]:
     conn = db.get_conn()

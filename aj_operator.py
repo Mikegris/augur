@@ -278,6 +278,39 @@ def _size(symbol: str, side: str, cfg: Dict[str, Any], held_qty: float,
 
 # ── propose + gate + execute ──────────────────────────────────────────────────
 
+def _decision_features(symbol: str, decision: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Decision-time ML feature vector: edge/conviction/prob + current regime
+    one-hots + live v2 technicals (aj_features.live_tech_features — the same
+    pure computation the training side replays point-in-time, so there is no
+    train/serve skew). Persisted on the proposal row (v10 features_json) and
+    fed to the meta-label gate. Fail-open to the minimal dict / None."""
+    try:
+        conv = {"low": 0.0, "medium": 0.5, "high": 1.0}.get(
+            str(decision.get("conviction") or "").lower(), 0.5)
+        feats: Dict[str, Any] = {
+            "edge": float(decision.get("edge_pts") or 0.0),
+            "conviction": conv,
+            "prob_up": float(decision.get("prob_up") or 0.5),
+            "side_long": 1.0 if str(decision.get("side") or "buy") == "buy" else 0.0,
+        }
+        try:
+            import aj_alpha as _aa
+            reg = _aa.detect_regime()
+            for lvl in ("bull", "bear", "chop"):
+                feats["regime_" + lvl] = 1.0 if reg == lvl else 0.0
+        except Exception:
+            log.debug("decision features: regime skipped", exc_info=True)
+        try:
+            import aj_features as _ff
+            feats.update(_ff.live_tech_features(symbol) or {})
+        except Exception:
+            log.debug("decision features: technicals skipped", exc_info=True)
+        return feats
+    except Exception:
+        log.debug("decision features failed", exc_info=True)
+        return None
+
+
 def _propose_and_execute(cycle_id: str, symbol: str, decision: Dict[str, Any],
                          sizing: Dict[str, Any], cfg: Dict[str, Any],
                          instrument: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
@@ -301,6 +334,16 @@ def _propose_and_execute(cycle_id: str, symbol: str, decision: Dict[str, Any],
                    option_type=instrument.get("option_type"),
                    strike=instrument.get("strike"), expiry=instrument.get("expiry"),
                    contract_multiplier=instrument.get("contract_multiplier", 100))
+    # Persist the decision-time features (v10 schema): ML labeling reads the
+    # EXACT entry state from this row instead of reconstructing it from
+    # cycle-stats snapshots (stamped at cycle END — a cycle stale at best).
+    feats = decision.get("features") or _decision_features(symbol, decision)
+    if feats:
+        try:
+            import json as _json
+            ins["features_json"] = _json.dumps(feats, default=str)
+        except Exception:
+            log.debug("features_json serialize skipped", exc_info=True)
     pid = aj_db.insert("aj_proposals", **ins)
     aj_db.audit("proposal", {"proposal_id": pid, "symbol": symbol,
                              "side": decision["side"], "qty": qty,
@@ -808,6 +851,15 @@ def run_once(mode: str = "paper") -> Dict[str, Any]:
             try:
                 import aj_allocate
                 alloc_map = aj_allocate.target_weights(list(scan), cfg) or {}
+                # Correlation-aware throttle: down-weight names inside a
+                # highly-correlated cluster so the book isn't secretly one
+                # bet. Fail-open inside (returns input on error); gated by
+                # cfg['correlation_cap'] (default on within allocation).
+                try:
+                    alloc_map = aj_allocate.correlation_capped_weights(
+                        alloc_map, cfg) or alloc_map
+                except Exception:
+                    log.debug("correlation cap skipped", exc_info=True)
                 summary["allocation"] = {"names": len(alloc_map),
                                          "method": cfg.get("alloc_method")}
             except Exception:
@@ -929,17 +981,14 @@ def run_once(mode: str = "paper") -> Dict[str, Any]:
                     # the fail-closed risk gate. Fail-open.
                     if cfg.get("metalabel_enabled"):
                         try:
-                            import aj_metalabel, aj_alpha as _aa
-                            _reg = _aa.detect_regime()
-                            _conv = {"low": 0.0, "medium": 0.5, "high": 1.0}.get(
-                                str(decision.get("conviction") or "").lower(), 0.5)
-                            feats = {"edge": float(decision.get("edge_pts") or 0.0),
-                                     "conviction": _conv,
-                                     "prob_up": float(decision.get("prob_up") or 0.5),
-                                     "side_long": 1.0,
-                                     "regime_bull": 1.0 if _reg == "bull" else 0.0,
-                                     "regime_bear": 1.0 if _reg == "bear" else 0.0,
-                                     "regime_chop": 1.0 if _reg == "chop" else 0.0}
+                            import aj_metalabel
+                            # One shared feature builder (regime + live v2
+                            # technicals) — also stashed on the decision so
+                            # _propose_and_execute persists the SAME vector
+                            # the gate scored (v10 features_json).
+                            feats = _decision_features(symbol, decision) or {}
+                            decision = dict(decision)
+                            decision["features"] = feats
                             p_profit = aj_metalabel.predict_proba(feats, cfg)
                             if p_profit is not None:
                                 thr = float(cfg.get("metalabel_prob_threshold", 0.5) or 0.5)
@@ -1035,6 +1084,14 @@ def run_once(mode: str = "paper") -> Dict[str, Any]:
         except Exception:
             log.debug("score_due_forecasts failed", exc_info=True)
             summary["scored"] = None
+        # Adapter scorecard: mature per-adapter forecast rows whose horizon has
+        # elapsed (capped, fail-open; no-op unless adapter_scorecard is on).
+        if cfg.get("adapter_scorecard"):
+            try:
+                import aj_signals
+                summary["adapter_scored"] = aj_signals.score_due_adapter_signals()
+            except Exception:
+                log.debug("adapter scorecard scoring skipped", exc_info=True)
 
         # Meta-label learning loop (Phase 4): label any newly-closed trades and
         # retrain P(profit) when enough new labels accumulate. Cheap no-op unless

@@ -54,7 +54,10 @@ def _run(analyst: str, symbol: str, evidence: Dict[str, str], call: CallFn,
     sys = _SYS.format(role=analyst + " analyst", symbol=symbol)
     prompt = "Symbol: {}\nEvidence:\n{}".format(
         symbol, "\n".join("[{}] {}".format(k, v) for k, v in ev.items()))
-    text = call(aj_routing.DEEP, "council.analyst." + analyst, sys, prompt)
+    # Analysts demand STRICT JSON — request native JSON mode when the injected
+    # call supports it (backward compatible with legacy 4-arg callables).
+    text = aj_routing.call_json(call, aj_routing.DEEP,
+                                "council.analyst." + analyst, sys, prompt)
     if not text:
         return _neutral(analyst, "model unavailable; evidence gathered")
     refs = list(ev.keys())

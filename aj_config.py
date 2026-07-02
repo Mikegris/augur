@@ -40,6 +40,10 @@ DEFAULTS: Dict[str, Any] = {
     # paper fill model (§12.5)
     "paper_slippage_bps":     2.0,
     "paper_spread_fraction":  0.5,
+    # Paper partial-fill simulation: liquidity-bounded fills so partial-fill
+    # handling and order TTL are exercised in paper exactly as live. Opt-in.
+    "paper_partial_fills":    False,
+    "paper_fill_liquidity_usd": 25000.0,  # nominal per-order liquidity budget
     "fee_bps":                0.0,     # commission-free equities default
     "min_fee_usd":            0.0,
     "crypto_fee_bps":         10.0,    # exchange-typical for crypto venues
@@ -192,6 +196,10 @@ DEFAULTS: Dict[str, Any] = {
     # never hard-drops equities, so equity trading is unaffected.
     "option_prefer_optionable": True,
     "option_optionable_min_price": 10.0,  # names below this rarely have liquid options
+    # When nothing passes the OI/spread screen, allow falling back to the best
+    # UNSCREENED contract? Default OFF (fail-closed toward not trading illiquid
+    # contracts whose paper mids are unrealistic).
+    "option_allow_illiquid_fallback": False,
     # screener global-best cache: rank across recently-seen names, not just the
     # current rotating slice (closes the "rolling sweep only sees 400/cycle" gap).
     "screen_cache_ttl_min":   45,      # how long a screened quote stays rank-eligible
@@ -199,6 +207,7 @@ DEFAULTS: Dict[str, Any] = {
     # ALL opt-in, default OFF, fail-open. Never weakens the fail-closed gate.
     # Batch 1 — multi-factor alpha fusion (orthogonal signals into the ensemble)
     "multi_factor_signals":   False,   # fuse smart_money/insider/congress/social into prob_up
+    "adapter_scorecard":      False,   # log per-adapter forecasts + decay weak sources
     "regime_conditional_weights": False,  # tilt signal weights by detected regime
     # Batch 4 — signal validation / IC promotion gate (guards batch 1)
     "signal_ic_gate":         True,    # require realized-skill promotion before a new signal counts
@@ -285,15 +294,18 @@ _BOOL_KEYS = {"trading_enabled", "live_trading_enabled", "robinhood_enabled",
               "fingpt_sentiment_enabled",
               # universe screener
               "screen_full_equities", "include_crypto",
+              # paper fill realism
+              "paper_partial_fills",
               # options
               "trade_options", "option_trade_puts", "option_prefer_optionable",
+              "option_allow_illiquid_fallback",
               # effectiveness layer
               "multi_factor_signals", "regime_conditional_weights",
               "signal_ic_gate", "cross_sectional_selection",
               "limit_entry", "cost_gate", "profit_ladder", "gex_timing",
               "portfolio_construction", "correlation_cap",
               "metalabel_enabled", "metalabel_size_by_edge",
-              "risk_governor_enabled"}
+              "risk_governor_enabled", "adapter_scorecard"}
 _LIST_KEYS = {"symbol_allowlist", "session_whitelist"}
 _FLOAT_KEYS = {"max_order_notional_usd", "max_daily_loss_usd",
                "paper_slippage_bps", "paper_spread_fraction", "fee_bps",
@@ -328,7 +340,9 @@ _FLOAT_KEYS = {"max_order_notional_usd", "max_daily_loss_usd",
                "metalabel_min_auc", "metalabel_prob_threshold",
                "risk_governor_max", "risk_governor_min", "rg_drawdown_derisk_pct",
                "rg_drawdown_breaker_pct", "rg_vix_derisk", "rg_alpha_decay_floor_pct",
-               "rg_lever_min_expectancy_pct"}
+               "rg_lever_min_expectancy_pct",
+               # paper fill realism
+               "paper_fill_liquidity_usd"}
 _INT_KEYS = {"max_trades_per_day", "forecast_horizon_days", "scan_universe_max",
              "order_ttl_cycles", "exit_cooldown_min", "max_open_positions",
              "max_trades_per_symbol_per_day", "trade_skip_open_min",
@@ -389,6 +403,68 @@ def _valid_brokers() -> set:
 # Config keys that are probabilities — clamped to [0,1] so a typo can't make
 # the agent buy/sell on every signal.
 _PROB_KEYS = ("buy_prob_threshold", "sell_prob_threshold")
+
+# ── declarative config schema (#5) ────────────────────────────────────────────
+# ONE schema entry per key {type, default, min, max, enum}, built from the
+# typed key sets above and VERIFIED COMPLETE at import: every DEFAULTS key must
+# land in exactly one type set, so an untyped key (which used to load back as a
+# raw string with no clamping — the option_target_dte bug) is structurally
+# impossible to add without tripping _UNTYPED_KEYS (asserted empty in tests).
+_STATIC_ENUMS: Dict[str, tuple] = {
+    "daily_loss_basis": _VALID_LOSS_BASIS,
+    "halt_rearm": _VALID_REARM,
+    "entry_order_type": ("market", "limit"),
+    "council_policy": _VALID_COUNCIL_POLICY,
+    "universe_mode": _VALID_UNIVERSE_MODE,
+    "alloc_method": _VALID_ALLOC_METHOD,
+    "metalabel_target": ("profit", "alpha"),
+    # default_broker is validated dynamically against _valid_brokers()
+}
+_UNTYPED_KEYS: List[str] = []
+
+
+def _build_schema() -> Dict[str, Dict[str, Any]]:
+    schema: Dict[str, Dict[str, Any]] = {}
+    for k, dflt in DEFAULTS.items():
+        if k in _BOOL_KEYS:
+            t = "bool"
+        elif k in _LIST_KEYS:
+            t = "list"
+        elif k in _FLOAT_KEYS:
+            t = "float"
+        elif k in _INT_KEYS:
+            t = "int"
+        elif k in _STR_KEYS:
+            t = "str"
+        else:
+            # Never silently accept: record + loudly log (tests assert empty).
+            # Treated as str at runtime so a stray key still round-trips.
+            _UNTYPED_KEYS.append(k)
+            t = "str"
+        schema[k] = {
+            "type": t,
+            "default": dflt,
+            # numeric keys share one invariant: never negative (a negative cap
+            # resets to the default rather than silently disabling a guard)
+            "min": 0 if t in ("float", "int") else None,
+            "max": 1.0 if k in _PROB_KEYS else None,
+            "enum": _STATIC_ENUMS.get(k),
+        }
+    if _UNTYPED_KEYS:
+        log.error("aj_config: DEFAULTS keys missing from the typed key sets "
+                  "(add each to _BOOL/_LIST/_FLOAT/_INT/_STR_KEYS): %s",
+                  _UNTYPED_KEYS)
+    return schema
+
+
+_SCHEMA: Dict[str, Dict[str, Any]] = _build_schema()
+
+
+def config_schema() -> Dict[str, Dict[str, Any]]:
+    """Public, copy-safe view of the declarative config schema — the Config-tab
+    UI / CLI can render inputs (type, bounds, enum choices) from this instead
+    of hardcoding key lists."""
+    return {k: dict(v) for k, v in _SCHEMA.items()}
 
 
 def _coerce_bool(v: Any) -> bool:
@@ -460,13 +536,16 @@ def get_config() -> Dict[str, Any]:
         if sk not in raw:
             continue
         val = raw[sk]
-        if key in _BOOL_KEYS:
+        # Dispatch on the declarative schema (single source of truth) — an
+        # untyped key can no longer silently take the raw-str branch.
+        ktype = (_SCHEMA.get(key) or {}).get("type", "str")
+        if ktype == "bool":
             cfg[key] = _coerce_bool(val)
-        elif key in _LIST_KEYS:
+        elif ktype == "list":
             cfg[key] = _coerce_list(val, upper=(key != "session_whitelist"))
-        elif key in _FLOAT_KEYS:
+        elif ktype == "float":
             cfg[key] = _coerce_float(val, DEFAULTS[key])
-        elif key in _INT_KEYS:
+        elif ktype == "int":
             # round (not truncate): a fractional '0.6' must not silently collapse
             # to 0 and disable a guard the operator believed they enabled.
             cfg[key] = int(round(_coerce_float(val, DEFAULTS[key])))
@@ -523,21 +602,22 @@ def _serialize(key: str, value: Any) -> str:
     # persisted setting is never out-of-range or an invalid enum/session. This
     # keeps the round-trip lossless and protects any direct reader of the raw
     # setting (get_config still re-sanitizes defensively on read).
-    if key in _BOOL_KEYS:
+    ktype = (_SCHEMA.get(key) or {}).get("type", "str")
+    if ktype == "bool":
         return "true" if _coerce_bool(value) else "false"
-    if key in _LIST_KEYS:
+    if ktype == "list":
         items = _coerce_list(value, upper=(key != "session_whitelist"))
         if key == "session_whitelist":
             items = [s for s in items if s in _TRADABLE_SESSIONS] or ["regular"]
         return json.dumps(items)
-    if key in _FLOAT_KEYS:
+    if ktype == "float":
         f = _coerce_float(value, DEFAULTS[key])
         if f < 0:
             f = float(DEFAULTS[key])
         if key in _PROB_KEYS:
             f = min(1.0, max(0.0, f))
         return str(f)
-    if key in _INT_KEYS:
+    if ktype == "int":
         i = int(round(_coerce_float(value, DEFAULTS[key])))
         if i < 0:
             i = int(DEFAULTS[key])

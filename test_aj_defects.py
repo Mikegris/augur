@@ -32,8 +32,11 @@ _TABLES = ("aj_orders", "aj_fills", "aj_proposals", "aj_risk_events",
 
 def _reset():
     conn = db.get_conn()
-    for t in _TABLES:
-        conn.execute("DELETE FROM {}".format(t))
+    # audit_maintenance: aj_audit is append-only (v10 triggers); the test
+    # reset is explicit maintenance and must use the scoped unlock.
+    with aj_db.audit_maintenance():
+        for t in _TABLES:
+            conn.execute("DELETE FROM {}".format(t))
     conn.execute("DELETE FROM settings WHERE key LIKE 'aj_%' OR key LIKE '__aj_%'")
     conn.commit()
     try:
@@ -76,15 +79,36 @@ def test_lease_lock_actually_excludes():
     b.release()
 
 
+def test_audit_append_only_triggers_block_inband_tamper():
+    # v10 triggers: without the maintenance unlock, in-band UPDATE/DELETE on
+    # aj_audit must ABORT — tampering is prevented, not just detected.
+    _reset()
+    aj_db.audit("k", {"i": 1})
+    conn = db.get_conn()
+    import sqlite3
+    for stmt in ("DELETE FROM aj_audit",
+                 "UPDATE aj_audit SET prev_hash='x'"):
+        try:
+            conn.execute(stmt)
+            conn.commit()
+            assert False, "append-only trigger did not block: " + stmt
+        except sqlite3.DatabaseError as e:
+            assert "append-only" in str(e)
+    assert aj_db.verify_audit_chain()["ok"] is True
+
+
 def test_audit_chain_detects_prefix_deletion():
     _reset()
     for i in range(4):
         aj_db.audit("k", {"i": i})
     assert aj_db.verify_audit_chain()["ok"] is True
-    # delete the first row → new first row has a non-null prev_hash
+    # delete the first row → new first row has a non-null prev_hash. The
+    # unlock simulates an attacker with RAW DB access (who could equally drop
+    # the triggers) — the hash chain is the detection layer for that case.
     conn = db.get_conn()
-    conn.execute("DELETE FROM aj_audit WHERE id=(SELECT MIN(id) FROM aj_audit)")
-    conn.commit()
+    with aj_db.audit_maintenance():
+        conn.execute("DELETE FROM aj_audit WHERE id=(SELECT MIN(id) FROM aj_audit)")
+        conn.commit()
     v = aj_db.verify_audit_chain()
     assert v["ok"] is False and "prefix" in v["reason"]
 
@@ -93,8 +117,9 @@ def test_audit_chain_detects_prevhash_tamper():
     _reset()
     aj_db.audit("k", {"i": 1}); aj_db.audit("k", {"i": 2})
     conn = db.get_conn()
-    conn.execute("UPDATE aj_audit SET prev_hash='deadbeef' WHERE id=(SELECT MAX(id) FROM aj_audit)")
-    conn.commit()
+    with aj_db.audit_maintenance():
+        conn.execute("UPDATE aj_audit SET prev_hash='deadbeef' WHERE id=(SELECT MAX(id) FROM aj_audit)")
+        conn.commit()
     assert aj_db.verify_audit_chain()["ok"] is False
 
 

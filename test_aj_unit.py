@@ -32,8 +32,11 @@ _TABLES = ("aj_orders", "aj_fills", "aj_proposals", "aj_risk_events",
 
 def _reset():
     conn = db.get_conn()
-    for t in _TABLES:
-        conn.execute("DELETE FROM {}".format(t))
+    # audit_maintenance: aj_audit is append-only (v10 triggers); the test
+    # reset is explicit maintenance and must use the scoped unlock.
+    with aj_db.audit_maintenance():
+        for t in _TABLES:
+            conn.execute("DELETE FROM {}".format(t))
     conn.execute("DELETE FROM settings WHERE key LIKE 'aj_%' OR key LIKE '__aj_%'")
     conn.commit()
     try:
@@ -85,10 +88,13 @@ def test_audit_chain_and_tamper():
     aj_db.audit("proposal", {"x": 1}, cycle_id=cid)
     aj_db.audit("order", {"y": 2}, cycle_id=cid)
     assert aj_db.verify_audit_chain()["ok"] is True
-    # tamper: edit a payload out of band -> chain must break
+    # tamper: edit a payload out of band -> chain must break. The unlock
+    # simulates an attacker with RAW DB access (who could drop the v10
+    # append-only triggers); the hash chain is the detection layer there.
     conn = db.get_conn()
-    conn.execute("UPDATE aj_audit SET payload_json='{\"x\":999}' WHERE id=(SELECT MIN(id) FROM aj_audit)")
-    conn.commit()
+    with aj_db.audit_maintenance():
+        conn.execute("UPDATE aj_audit SET payload_json='{\"x\":999}' WHERE id=(SELECT MIN(id) FROM aj_audit)")
+        conn.commit()
     v = aj_db.verify_audit_chain()
     assert v["ok"] is False, v
 
@@ -107,6 +113,22 @@ def test_migrations_idempotent():
     v1 = aj_db.aj_migrate()
     v2 = aj_db.aj_migrate()
     assert v1 == v2 == aj_db.AJ_SCHEMA_TARGET
+
+
+def test_config_schema_complete():
+    # Every DEFAULTS key MUST be covered by exactly one typed key set — an
+    # untyped key loads back as a raw string with no clamping (the
+    # option_target_dte bug class). _build_schema records violations.
+    assert aj_config._UNTYPED_KEYS == [], \
+        "untyped config keys: {}".format(aj_config._UNTYPED_KEYS)
+    schema = aj_config.config_schema()
+    assert set(schema) == set(aj_config.DEFAULTS)
+    for k, s in schema.items():
+        assert s["type"] in ("bool", "list", "float", "int", "str"), (k, s)
+        assert s["default"] == aj_config.DEFAULTS[k]
+    # enum keys carry their choices for UI introspection
+    assert "advisory" in schema["council_policy"]["enum"]
+    assert schema["buy_prob_threshold"]["max"] == 1.0
 
 
 # ── risk gate ordering + fail-closed (§11.3) ──────────────────────────────────
@@ -292,6 +314,45 @@ def test_idempotency_keys_unique():
         assert row["client_order_id"] not in ids
         ids.add(row["client_order_id"])
     assert len(ids) == 5
+
+
+def test_classify_exit_edge_cases():
+    """classify_exit is the single source of truth for the risk-reducing-exit
+    semantics consumed by aj_risk.evaluate AND aj_rules.enhanced_gate."""
+    ce = aj_risk.classify_exit
+    # flat: nothing to close; a buy opens a NEW name
+    r = ce("NVDA", "sell", 5, 0.0)
+    assert not r["closing"] and not r["confirmed"] and not r["flips"], r
+    r = ce("NVDA", "buy", 5, 0.0)
+    assert r["opening_new"] and not r["closing"], r
+    # long: a bounded sell is a confirmed close; a buy adds (not opening_new)
+    r = ce("NVDA", "sell", 5, 10.0)
+    assert r["closing"] and r["confirmed"] and not r["flips"], r
+    r = ce("NVDA", "buy", 5, 10.0)
+    assert not r["closing"] and not r["opening_new"], r
+    # short: a bounded buy-to-cover is a confirmed close (never opening_new)
+    r = ce("NVDA", "buy", 5, -10.0)
+    assert r["closing"] and r["confirmed"] and not r["opening_new"], r
+    r = ce("NVDA", "sell", 5, -10.0)
+    assert not r["closing"], r          # adds to the short — risk-increasing
+    # oversize: qty beyond |held| FLIPS the position — NOT a close
+    r = ce("NVDA", "sell", 15, 10.0)
+    assert r["flips"] and not r["closing"] and not r["confirmed"], r
+    r = ce("NVDA", "buy", 15, -10.0)
+    assert r["flips"] and not r["closing"] and not r["confirmed"], r
+    # exact-size close (within the 1e-9 tolerance) is NOT a flip
+    r = ce("NVDA", "sell", 10, 10.0)
+    assert r["closing"] and not r["flips"], r
+    # unknown-held (book outage): a SELL is closing-but-UNCONFIRMED (exits must
+    # never be blocked by an outage; cap exemptions require confirmation) — a
+    # BUY is neither closing nor opening_new
+    r = ce("NVDA", "sell", 5, None)
+    assert r["closing"] and not r["confirmed"] and not r["flips"], r
+    r = ce("NVDA", "buy", 5, None)
+    assert not r["closing"] and not r["confirmed"] and not r["opening_new"], r
+    # qty unknown yet (evaluate's allowlist step): classify without flip check
+    r = ce("NVDA", "sell", None, 10.0)
+    assert r["closing"] and r["confirmed"] and not r["flips"], r
 
 
 if __name__ == "__main__":

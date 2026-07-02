@@ -9,6 +9,8 @@ Usage:
     python aj_cli.py recon                       # reconcile against broker truth
     python aj_cli.py config [--set k=v ...]      # show / set risk config
     python aj_cli.py verify                       # show VERIFY-gate status
+    python aj_cli.py explain [--cycle CYCLE_ID]  # decision funnel for a cycle
+    python aj_cli.py secret --rotate-key          # rotate the secrets master key
 
 The kill switch is intentionally a plain, dependency-light path — it must be
 reachable without the model or the web app in the loop.
@@ -127,9 +129,30 @@ def cmd_secret(argv):
         secret --set alpaca_key_id=@/path/key   # read value from a file
         secret --set alpaca_key_id=@env:KID      # read value from $KID
         secret --set alpaca_key_id=             # getpass prompt (no echo)
-    The legacy `--set scope=value` inline form still works but is discouraged."""
+    The legacy `--set scope=value` inline form still works but is discouraged.
+
+    `secret --rotate-key` rotates the MASTER key: every stored blob is
+    re-encrypted under a freshly generated Fernet key (atomic-ish — aborts
+    untouched unless every blob decrypts first). Prints counts only, never
+    key material."""
     import aj_db, aj_secrets
     aj_db.aj_init()
+    if "--rotate-key" in argv:
+        r = aj_secrets.rotate_master_key()
+        # Counts + locations only — the key itself must NEVER hit stdout (it
+        # would land in shell history / CI logs). The operator reads the key
+        # file directly if an external AUGUR_SECRETS_KEY source needs updating.
+        out = {"ok": bool(r.get("ok")), "rotated": r.get("rotated", 0)}
+        if r.get("key_file"):
+            out["key_file"] = r["key_file"]
+        if r.get("env_key_active"):
+            out["warning"] = ("AUGUR_SECRETS_KEY is set: update the external "
+                              "env source to the new key (see key_file) or the "
+                              "next restart cannot decrypt the rotated secrets")
+        if r.get("error"):
+            out["error"] = r["error"]
+        _print(out)
+        return 0 if out["ok"] else 1
     i, stored = 0, []
     while i < len(argv):
         if argv[i] == "--set" and i + 1 < len(argv) and "=" in argv[i + 1]:
@@ -226,6 +249,70 @@ def cmd_preset(argv):
         _print({"preset": name, "applied": True})
 
 
+def cmd_explain(argv):
+    """Human-readable decision funnel for one operator cycle (the latest by
+    default, or `--cycle CYCLE_ID`). Reads the aj_cycle_stats observability
+    snapshot only — plain text, no network, never touches the trading path."""
+    import aj_db
+    aj_db.aj_init()
+    cyc = None
+    if "--cycle" in argv:
+        i = argv.index("--cycle")
+        if i + 1 < len(argv):
+            cyc = argv[i + 1]
+    if cyc:
+        rows = aj_db.query("SELECT * FROM aj_cycle_stats WHERE cycle_id=?", (cyc,))
+    else:
+        rows = aj_db.query("SELECT * FROM aj_cycle_stats ORDER BY ts DESC LIMIT 1")
+    if not rows:
+        print("no cycle stats found" +
+              (" for cycle {!r}".format(cyc) if cyc else " — run a cycle first"))
+        return 1
+    r = rows[0]
+
+    def _i(k):
+        try:
+            return int(r.get(k) or 0)
+        except (TypeError, ValueError):
+            return 0
+
+    print("cycle   : {}".format(r.get("cycle_id")))
+    print("ts      : {}   session: {}   mode: {}".format(
+        r.get("ts"), r.get("session") or "?", r.get("mode") or "?"))
+    print("funnel  : scanned {} -> with_signal {} -> executed {}   (exits {})".format(
+        _i("scanned"), _i("with_signal"), _i("executed"), _i("exits")))
+
+    # Per-symbol dispositions, grouped by result so the operator reads "what
+    # blocked everything this cycle" at a glance rather than scanning JSON.
+    try:
+        scan = json.loads(r.get("scan_json") or "[]") or []
+    except (TypeError, ValueError):
+        scan = []
+    if not scan:
+        print("(no per-symbol scan rows recorded for this cycle)")
+        return 0
+    groups = {}
+    for row in scan:
+        groups.setdefault(str(row.get("result") or "?"), []).append(row)
+
+    def _num(v, fmt):
+        try:
+            return fmt.format(float(v))
+        except (TypeError, ValueError):
+            return "-"
+    # 'executed' first (the outcome), then the block reasons by frequency.
+    order = sorted(groups, key=lambda k: (k != "executed", -len(groups[k]), k))
+    for res in order:
+        rows_g = groups[res]
+        print("\n{} ({}):".format(res, len(rows_g)))
+        for row in rows_g:
+            print("  {:<10} edge={:>7}  prob_up={:>5}".format(
+                str(row.get("symbol") or "?"),
+                _num(row.get("edge"), "{:+.2f}"),
+                _num(row.get("prob_up"), "{:.2f}")))
+    return 0
+
+
 def cmd_verify(argv):
     import aj_db, database as dbase
     aj_db.aj_init()
@@ -248,6 +335,7 @@ _CMDS = {
     "recon": cmd_recon, "config": cmd_config, "verify": cmd_verify,
     "secret": cmd_secret, "verify-pass": cmd_verify_pass,
     "analytics": cmd_analytics, "journal": cmd_journal, "preset": cmd_preset,
+    "explain": cmd_explain,
 }
 
 

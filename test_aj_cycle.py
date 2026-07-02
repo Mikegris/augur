@@ -105,6 +105,36 @@ def test_cycle_audit_chain_intact_after_full_cycle():
     assert chain["ok"], chain
 
 
+def test_explain_cli_prints_decision_funnel():
+    # `aj explain` renders the aj_cycle_stats snapshot a cycle just wrote —
+    # network-free, plain text, and it must find the latest row by default.
+    _reset_state()
+    _full_cfg(trade_options=False)
+    _mocks(["AAPL"], {"ensemble": {"prob_up": 0.80, "edge_pct_pts": 10.0}})
+    out = aj_operator.run_once("paper")
+    assert out["ok"], out
+    import io
+    import contextlib
+    import aj_cli
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        rc = aj_cli.cmd_explain([])
+    text = buf.getvalue()
+    assert (rc or 0) == 0, text
+    assert "funnel" in text and "executed" in text and "AAPL" in text, text
+    # the cycle id printed is queryable back through --cycle
+    row = aj_db.query("SELECT cycle_id FROM aj_cycle_stats ORDER BY ts DESC LIMIT 1")[0]
+    buf2 = io.StringIO()
+    with contextlib.redirect_stdout(buf2):
+        rc2 = aj_cli.cmd_explain(["--cycle", row["cycle_id"]])
+    assert (rc2 or 0) == 0 and row["cycle_id"] in buf2.getvalue()
+    # unknown cycle -> non-zero, friendly message
+    buf3 = io.StringIO()
+    with contextlib.redirect_stdout(buf3):
+        rc3 = aj_cli.cmd_explain(["--cycle", "nope"])
+    assert rc3 == 1 and "no cycle stats" in buf3.getvalue()
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     print("aj_cycle — {} tests".format(len(fns)))
