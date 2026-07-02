@@ -114,13 +114,15 @@ def _days_to(expiry: str) -> Optional[int]:
     treated as already expired (marked 0.0 and force-closed at a fake loss).
     dte == 0 means 'expires today' — alive."""
     try:
+        import aj_db
         d = datetime.strptime(expiry[:10], "%Y-%m-%d").date()
+        # aj_db.utc_now (not datetime.now): honors the aj_replay sim clock so
+        # historical replays age options against the SIMULATED day.
         try:
             from zoneinfo import ZoneInfo
-            today = datetime.now(timezone.utc).astimezone(
-                ZoneInfo("America/New_York")).date()
+            today = aj_db.utc_now().astimezone(ZoneInfo("America/New_York")).date()
         except Exception:
-            today = datetime.now(timezone.utc).date()
+            today = aj_db.utc_now().date()
         return (d - today).days
     except Exception:
         return None

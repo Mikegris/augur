@@ -250,7 +250,10 @@ def time_stop(position, cfg, now=None, mark=None, opened_at=None):
         if opened is None:
             return {"exit": False, "reason": "no entry time -> hold"}
 
-        now_dt = now or datetime.now(timezone.utc)
+        # aj_db.utc_now honors the aj_replay sim clock (a frozen 'now' during
+        # historical replays); falls back to wall time outside a replay.
+        import aj_db
+        now_dt = now or aj_db.utc_now()
         if now_dt.tzinfo is None:
             now_dt = now_dt.replace(tzinfo=timezone.utc)
         held_days = (now_dt - opened).total_seconds() / 86400.0

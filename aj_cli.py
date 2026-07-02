@@ -11,6 +11,8 @@ Usage:
     python aj_cli.py verify                       # show VERIFY-gate status
     python aj_cli.py explain [--cycle CYCLE_ID]  # decision funnel for a cycle
     python aj_cli.py secret --rotate-key          # rotate the secrets master key
+    python aj_cli.py replay <run|grid|counterfactual|report|list|...> ...
+                                                  # historical replay engine
 
 The kill switch is intentionally a plain, dependency-light path — it must be
 reachable without the model or the web app in the loop.
@@ -49,6 +51,19 @@ def cmd_status(argv):
     import aj_db, aj_metrics
     aj_db.aj_init()
     _print(aj_metrics.status())
+
+
+def cmd_replay(argv):
+    """Run the replay engine in a FRESH subprocess: `run` must bind an
+    isolated DB before any aj import, and this CLI process has already bound
+    the live one — delegation gives isolation by construction."""
+    import os, subprocess
+    env = dict(os.environ)
+    env.pop("AUGUR_DB_PATH", None)   # let aj_replay pick the per-run DB
+    p = subprocess.run([sys.executable,
+                        os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                     "aj_replay.py")] + list(argv), env=env)
+    return p.returncode
 
 
 def cmd_kill(argv):
@@ -335,7 +350,7 @@ _CMDS = {
     "recon": cmd_recon, "config": cmd_config, "verify": cmd_verify,
     "secret": cmd_secret, "verify-pass": cmd_verify_pass,
     "analytics": cmd_analytics, "journal": cmd_journal, "preset": cmd_preset,
-    "explain": cmd_explain,
+    "explain": cmd_explain, "replay": cmd_replay,
 }
 
 

@@ -547,7 +547,28 @@ def money(x: Any) -> float:
 
 # ── time + market session (§7, §20.6) ────────────────────────────────────────
 
+# ── simulation clock (aj_replay) ──────────────────────────────────────────────
+# When set, EVERY aj_* component lives at the simulated instant: sessions,
+# day-P&L windows, order timestamps, position aging, journal keys. Only ever
+# set inside a dedicated replay process (isolated AUGUR_DB_PATH) — never in
+# the live app. Module-global (not thread-local) on purpose: the replay
+# process is single-purpose and the operator cycle spawns worker threads that
+# must all see the same simulated 'now'.
+_SIM_CLOCK: Optional[datetime] = None
+
+
+def set_sim_clock(dt: Optional[datetime]) -> None:
+    """Freeze utc_now() at `dt` (tz-aware, UTC) for this process; None clears.
+    aj_replay drives this one trading day at a time."""
+    global _SIM_CLOCK
+    if dt is not None and dt.tzinfo is None:
+        raise ValueError("sim clock must be timezone-aware")
+    _SIM_CLOCK = dt.astimezone(timezone.utc) if dt is not None else None
+
+
 def utc_now() -> datetime:
+    if _SIM_CLOCK is not None:
+        return _SIM_CLOCK
     return datetime.now(timezone.utc)
 
 
