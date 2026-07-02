@@ -26,6 +26,7 @@ from __future__ import annotations
 import json
 import logging
 from collections import defaultdict, deque
+from datetime import timedelta
 from typing import Any, Dict, List, Optional, Tuple
 
 import aj_db
@@ -38,11 +39,19 @@ log = logging.getLogger("augur.aj_features")
 # append (and bump the model). Each entry: (name, neutral_impute_value). The
 # numeric features come from the decision-time scan snapshot; `side` is encoded
 # as long(buy/cover-close=1.0) vs short(0.0); regime is one-hot expanded below.
+#
+# NOTE `holding_days` is deliberately NOT a model feature: it is only knowable
+# at trade EXIT, but the meta-label model scores P(profit|setup) at ENTRY time
+# (aj_operator never supplies it at inference, so it was silently imputed —
+# label leakage in training + train/serve skew in production). It stays in the
+# DB row / features_json for analysis only. A previously-persisted model that
+# still lists it in its stored feature_names keeps scoring self-consistently
+# (aj_metalabel aligns the vector to the MODEL's stored names, imputing the
+# stored mean); the next retrain picks up this leak-free contract.
 _NUMERIC_FEATURES: List[Tuple[str, float]] = [
     ("edge", 0.0),
     ("conviction", 0.5),
     ("prob_up", 0.5),
-    ("holding_days", 0.0),
     ("side_long", 1.0),
 ]
 # Regime is categorical -> stable one-hot columns (neutral 0.0 each). Unknown /
@@ -130,23 +139,43 @@ def _load_scan_index() -> Dict[str, List[Tuple]]:
 
 def _nearest_prior_snapshot(idx: Dict[str, List[Tuple]], symbol: str,
                             opened_at) -> Dict[str, Any]:
-    """Snapshot for `symbol` whose ts is the latest <= opened_at. Falls back to
-    the earliest snapshot if none precede the open (better a near miss than
-    nothing); {} when the symbol was never scanned."""
+    """Decision-time snapshot for `symbol` relative to opened_at.
+
+    `aj_cycle_stats.ts` is stamped at cycle END, so the cycle that DECIDED this
+    trade writes its snapshot shortly AFTER the fill — a plain "latest ts <=
+    opened_at" match selects the PREVIOUS cycle's edge/prob. Preference order:
+
+      1. the EARLIEST snapshot within a short window after the open (<= 30 min:
+         the same cycle's end-stamp);
+      2. the latest snapshot at/just-before the open (previous cycle — still
+         entry-time information, no look-ahead);
+      3. for first-ever trades with no prior cycle: the earliest post-open
+         snapshot, but only within a DAY of the open — anything later is
+         post-decision (future) data, not a near-miss of the entry scan.
+
+    {} when the symbol was never scanned / nothing usable."""
     lst = idx.get((symbol or "").upper())
     if not lst:
         return {}
     if opened_at is None:
         return dict(lst[0][1])
-    best = None
+    same_cycle_max = opened_at + timedelta(minutes=30)
+    prior = None
     for ts, feats in lst:
         if ts <= opened_at:
-            best = feats
+            prior = feats                  # latest at/just-before the open
+        elif ts <= same_cycle_max:
+            return dict(feats)             # same cycle's end-stamp — best match
         else:
-            break
-    if best is None:
-        best = lst[0][1]  # all snapshots are after the open -> nearest one
-    return dict(best)
+            break                          # sorted ascending: nothing closer follows
+    if prior is not None:
+        return dict(prior)
+    # No snapshot at-or-before the open at all (first trades): accept the
+    # earliest post-open snapshot only if it's within a day of the open.
+    first_ts, first_feats = lst[0]
+    if first_ts <= opened_at + timedelta(days=1):
+        return dict(first_feats)
+    return {}
 
 
 # ── round-trip reconstruction (entry price/time per closed trade) ──────────────
@@ -191,16 +220,19 @@ def _round_trips(mode: str = "paper") -> List[Dict[str, Any]]:
     out: List[Dict[str, Any]] = []
     for t in enriched:
         sym = (t.get("symbol") or "").upper()
-        if (t.get("entry_price") is None or t.get("opened_at") is None) and by_sym.get(sym):
-            rt = by_sym[sym].popleft()
-            merged = dict(rt)
-            merged.update({k: v for k, v in t.items() if v is not None})
-            # canonical realized P&L (net of fees) is authoritative
-            if t.get("realized_pnl_usd") is not None:
-                merged["realized_pnl_usd"] = t["realized_pnl_usd"]
-            out.append(merged)
-        else:
+        # Consume the symbol's FIFO round-trip for EVERY canonical close — even
+        # one that already carries entry fields. Skipping the pop for an
+        # already-enriched record left its round-trip in the deque, so the NEXT
+        # entry-less record for the symbol popped the EARLIER trade's entry
+        # (off-by-one misalignment when canonical records are mixed). Canonical
+        # (non-None) fields always win — including realized P&L, net of fees.
+        rt = by_sym[sym].popleft() if by_sym.get(sym) else None
+        if rt is None:
             out.append(t)
+            continue
+        merged = dict(rt)
+        merged.update({k: v for k, v in t.items() if v is not None})
+        out.append(merged)
     return out
 
 
@@ -342,6 +374,64 @@ def _assemble_features(trade: Dict[str, Any], snap: Dict[str, Any],
     return feats
 
 
+# ── point-in-time helpers (ET dates + historical regime) ──────────────────────
+
+def _et_date_str(ts: Any) -> Optional[str]:
+    """ET (America/New_York) calendar date 'YYYY-MM-DD' for a UTC ISO timestamp.
+    Market-data maps (benchmark closes, SPY history) are keyed by ET dates, so a
+    raw UTC [:10] slice mislabels an evening fill (>= 8pm ET) as the NEXT day.
+    Fail-open to the raw date slice when tz conversion is unavailable."""
+    if not ts:
+        return None
+    dt = aj_db.parse_iso(str(ts))
+    if dt is None:
+        s = str(ts)
+        return s[:10] if len(s) >= 10 else None
+    try:
+        from zoneinfo import ZoneInfo
+        return dt.astimezone(ZoneInfo("America/New_York")).strftime("%Y-%m-%d")
+    except Exception:
+        return str(ts)[:10]
+
+
+def _spy_history() -> List[Tuple[str, float]]:
+    """Sorted [(ET date, close), ...] for SPY over 2y — the source for the
+    POINT-IN-TIME regime reconstruction (fetched ONCE per build_labels call).
+    Module-level seam so tests can stub it. Fail-open to []."""
+    try:
+        import aj_benchmark
+        closes = aj_benchmark._index_closes("SPY", "2y") or {}
+        return sorted(closes.items())
+    except Exception:
+        log.debug("SPY history unavailable for regime reconstruction", exc_info=True)
+        return []
+
+
+def _regime_asof(spy_hist: List[Tuple[str, float]], opened_at: Any) -> Optional[str]:
+    """Market regime AS OF a trade's open, from the SPY closes ending at that
+    date (same 50d/200d-SMA thresholds as aj_alpha.detect_regime — reused via
+    aj_alpha.regime_from_closes). Stamping TODAY's detect_regime() on historical
+    trades was look-ahead mislabeling: the initial 365-day backfill wrote one
+    identical regime on every row. None (-> NULL regime, one-hots 0.0) when the
+    open time or enough history is unavailable — NEVER today's regime."""
+    if not spy_hist:
+        return None
+    d = _et_date_str(opened_at)
+    if not d:
+        return None
+    closes = [c for dt, c in spy_hist if dt <= d]
+    # detect_regime needs >= 60 closes for a meaningful verdict; with less we
+    # genuinely don't know -> None rather than a fake "chop".
+    if len(closes) < 60:
+        return None
+    try:
+        import aj_alpha
+        return aj_alpha.regime_from_closes(closes)
+    except Exception:
+        log.debug("regime_asof failed", exc_info=True)
+        return None
+
+
 # ── public API ─────────────────────────────────────────────────────────────────
 
 def build_labels(lookback_days: int = 365) -> Dict[str, Any]:
@@ -359,11 +449,9 @@ def build_labels(lookback_days: int = 365) -> Dict[str, Any]:
 
         trades = _round_trips("paper")
         scan_idx = _load_scan_index()
-        try:
-            import aj_alpha
-            regime = aj_alpha.detect_regime()
-        except Exception:
-            regime = None
+        # SPY history fetched ONCE; each trade gets the regime AS OF its own
+        # open (point-in-time), never today's detect_regime() (look-ahead).
+        spy_hist = _spy_history()
 
         # Benchmark closes fetched ONCE, to label each trade's alpha vs the market
         # over its own holding window (opened_at -> closed_at). Fail-open to {}.
@@ -379,11 +467,15 @@ def build_labels(lookback_days: int = 365) -> Dict[str, Any]:
         _bsorted = sorted(bench_closes)
 
         def _bench_ret(start, end):
-            """% market return between two dates (close on/before each)."""
+            """% market return between two dates (close on/before each).
+            bench_closes is keyed by ET dates (aj_benchmark._index_closes), so
+            the UTC ISO timestamps must be converted to ET before slicing."""
             if not bench_closes or not start or not end:
                 return None
-            s = str(start)[:10]
-            e = str(end)[:10]
+            s = _et_date_str(start)
+            e = _et_date_str(end)
+            if not s or not e:
+                return None
 
             def _on(d):
                 if d in bench_closes:
@@ -417,6 +509,7 @@ def build_labels(lookback_days: int = 365) -> Dict[str, Any]:
                 hd = _holding_days(opened_at, closed_at)
                 opened_dt = aj_db.parse_iso(opened_at)
                 snap = _nearest_prior_snapshot(scan_idx, sym, opened_dt)
+                regime = _regime_asof(spy_hist, opened_at)
                 feats = _assemble_features(t, snap, hd, regime)
                 ret_pct = _return_pct(t.get("side"), t.get("entry_price"),
                                       t.get("exit_price"))

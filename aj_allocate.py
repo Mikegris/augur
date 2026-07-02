@@ -150,9 +150,9 @@ def _clamp(x: float, lo: float, hi: float) -> float:
     return max(lo, min(hi, x))
 
 
-def _renormalize(weights: Dict[str, float]) -> Dict[str, float]:
-    """Drop non-positive/non-finite weights and scale the rest to sum to 1.
-    Returns {} if nothing positive survives."""
+def _clean_weights(weights: Dict[str, float]) -> Dict[str, float]:
+    """Drop non-positive/non-finite weights WITHOUT rescaling — the input sum
+    is preserved. Returns {} if nothing positive survives."""
     clean: Dict[str, float] = {}
     for k, v in weights.items():
         try:
@@ -161,24 +161,43 @@ def _renormalize(weights: Dict[str, float]) -> Dict[str, float]:
             continue
         if fv > 0 and fv == fv and fv not in (float("inf"), float("-inf")):
             clean[k] = fv
+    return clean
+
+
+def _renormalize(weights: Dict[str, float]) -> Dict[str, float]:
+    """Drop non-positive/non-finite weights and scale the rest to sum to 1.
+    Returns {} if nothing positive survives."""
+    clean = _clean_weights(weights)
     s = sum(clean.values())
     if s <= 0:
         return {}
     return {k: v / s for k, v in clean.items()}
 
 
-def _apply_position_cap(weights: Dict[str, float], cap: float) -> Dict[str, float]:
+def _apply_position_cap(weights: Dict[str, float], cap: float,
+                        renorm: bool = True) -> Dict[str, float]:
     """Iteratively cap each weight at `cap`, redistributing the excess
     proportionally onto names that still have headroom. The total is preserved
     at the (already-renormalized) input sum while there is headroom; when there
     is none (n*cap < 1) the excess is simply dropped, leaving a sum < 1 — which
     is the intended "≤ 1" behaviour (we never scale a capped name back ABOVE the
-    cap, which a final renormalize would do). cap <= 0 or >= 1 → renorm-only."""
+    cap, which a final renormalize would do). cap <= 0 or >= 1 → renorm-only.
+
+    renorm=False is the post-SECTOR-cap backstop mode: it skips the initial
+    scale-to-1 (renormalizing back up would scale every sector-capped weight
+    past max_sector_weight, undoing the cap just applied) AND clips WITHOUT
+    redistributing the excess. Redistribution is not sector-safe: this function
+    has no sector view, so absorbing a clipped name's excess into others can
+    push THEIR sector back over the cap (e.g. tech at exactly 0.40 climbing
+    back to 0.50). The only sector-safe move is weight-DECREASING — cap each
+    name and drop the excess, leaving Σ < 1, which the ≤ 1 contract allows."""
     if cap <= 0 or cap >= 1.0 or not weights:
-        return _renormalize(weights)
-    w = _renormalize(weights)
+        return _renormalize(weights) if renorm else _clean_weights(weights or {})
+    w = _renormalize(weights) if renorm else _clean_weights(weights)
     if not w:
         return {}
+    if not renorm:
+        return {k: min(v, cap) for k, v in w.items()}
     for _ in range(64):
         over = {k: v for k, v in w.items() if v > cap + 1e-12}
         if not over:
@@ -336,8 +355,11 @@ def target_weights(symbols: List[str], cfg: Dict[str, Any]) -> Dict[str, float]:
                 # sector redistribution can lift a single name back over the
                 # per-name cap. We must NOT call it with cap>=1 here, as that
                 # path renormalizes up and would undo the sector cap we just set.
+                # renorm=False for the same reason: the sector cap may have left
+                # Σ < 1, and renormalizing back up to 1 would scale every
+                # sector-capped weight past max_sector_weight again.
                 if 0.0 < max_pos < 1.0:
-                    capped = _apply_position_cap(capped, max_pos)
+                    capped = _apply_position_cap(capped, max_pos, renorm=False)
 
         # Round for cleanliness and drop non-positive residue. We deliberately
         # do NOT renormalize back up to 1 here: when a cap leaves the sum < 1

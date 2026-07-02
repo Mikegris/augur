@@ -80,9 +80,16 @@ def test_screen_fail_closed_on_quote_error():
 def test_rotation_advances_cursor():
     aj_db.set_setting_raw("__aj_screen_cursor", "0")
     pop = [str(i) for i in range(10)]
-    s1 = aj_universe._rotate(list(pop), 3)
-    s2 = aj_universe._rotate(list(pop), 3)
+    # _rotate no longer persists the cursor itself: the caller commits via
+    # _advance_cursor only after the slice's quotes succeed (so a 429/empty
+    # batch retries the same slice instead of skipping it).
+    s1, n1 = aj_universe._rotate(list(pop), 3)
+    aj_universe._advance_cursor(n1)                       # quotes "succeeded"
+    s2, n2 = aj_universe._rotate(list(pop), 3)
     assert s1 == ["0", "1", "2"] and s2 == ["3", "4", "5"]   # swept forward
+    # a failed batch (cursor NOT committed) must re-serve the same slice
+    s3, _ = aj_universe._rotate(list(pop), 3)
+    assert s3 == s2, "uncommitted cursor must retry the same slice"
 
 
 def test_scan_dispatch_market_screen():

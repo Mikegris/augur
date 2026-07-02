@@ -124,6 +124,38 @@ def _set_last_train_n(n: int) -> None:
         pass
 
 
+def _trade_windows(target: str, n: int) -> Optional[List[Tuple[Any, Any]]]:
+    """Per-row (opened_at, closed_at) holding windows, aligned to training_set().
+
+    aj_features.training_set() reads aj_trade_labels ORDER BY closed_at ASC,
+    id ASC (and, for the 'alpha' target, skips rows without a usable
+    beat_benchmark). We replay the SAME query + skip rule here so windows[i]
+    describes X[i]. Fail-open: returns None (→ purging is skipped) whenever the
+    query fails or the row count doesn't match the matrix — never guess an
+    alignment."""
+    try:
+        import aj_db
+        rows = aj_db.query(
+            "SELECT opened_at, closed_at, beat_benchmark FROM aj_trade_labels "
+            "ORDER BY closed_at ASC, id ASC")
+    except Exception:
+        log.debug("metalabel: trade-window query failed", exc_info=True)
+        return None
+    use_alpha = str(target or "profit").lower() == "alpha"
+    wins: List[Tuple[Any, Any]] = []
+    for r in rows:
+        if use_alpha:
+            bb = r.get("beat_benchmark")
+            if bb is None:
+                continue
+            try:
+                int(bb)
+            except Exception:
+                continue
+        wins.append((r.get("opened_at"), r.get("closed_at")))
+    return wins if len(wins) == n else None
+
+
 # ── training ────────────────────────────────────────────────────────────────────
 
 def train(cfg: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
@@ -199,6 +231,37 @@ def train(cfg: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         split = max(1, min(split, n - 1))   # guarantee both slices non-empty
         X_tr, X_ho = Xa[:split], Xa[split:]
         y_tr, y_ho = ya[:split], ya[split:]
+
+        # ── PURGE at the split boundary (López-de-Prado-style). Ordering is by
+        # closed_at, so every train trade CLOSES on/before the boundary — but a
+        # holdout trade that OPENED before the last train trade closed has a
+        # holding window overlapping the train data: its features/label share
+        # information the model was fit on, inflating the "out-of-sample" AUC.
+        # Drop those straddling holdout rows before scoring. Fail-open: if the
+        # windows can't be aligned to the matrix (or timestamps don't parse),
+        # skip purging rather than break training. ────────────────────────────────
+        n_purged = 0
+        windows = _trade_windows(target, n)
+        if windows is not None:
+            try:
+                import aj_db
+                boundary = aj_db.parse_iso(windows[split - 1][1])
+                if boundary is not None:
+                    keep = []
+                    for i in range(split, n):
+                        opened = aj_db.parse_iso(windows[i][0])
+                        # unparsable opened_at → keep (can't prove a straddle)
+                        if opened is not None and opened < boundary:
+                            n_purged += 1
+                        else:
+                            keep.append(i - split)
+                    if n_purged:
+                        X_ho, y_ho = X_ho[keep], y_ho[keep]
+                        log.debug("metalabel: purged %d boundary-straddling "
+                                  "holdout trades", n_purged)
+            except Exception:
+                log.debug("metalabel: purge failed; scoring unpurged holdout",
+                          exc_info=True)
 
         oos_auc: Optional[float] = None
         if len(set(y_tr.tolist())) >= 2 and len(set(y_ho.tolist())) >= 2:

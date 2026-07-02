@@ -154,10 +154,12 @@ def _current_equity() -> float:
 
 
 def _paper_cash() -> float:
-    """Configured paper cash balance (aj_paper_cash), or 0.0. This is the cash
-    leg of account equity used to base weight/sector caps on EQUITY rather than
-    invested notional. 0.0 (the default) makes equity == positions market value,
-    preserving the prior notional-based behaviour for an unfunded book."""
+    """RAW configured paper cash base (aj_paper_cash), or 0.0. This is the
+    static setting only — it is NEVER debited by fills, so it is NOT "available
+    cash" (see available_paper_cash for the ledger-derived balance). Kept raw
+    because callers use it as the "is a cash leg configured at all?" switch.
+    0.0 (the default) makes equity == positions market value, preserving the
+    prior notional-based behaviour for an unfunded book."""
     try:
         import database as _db
         raw = _db.get_settings().get("aj_paper_cash")
@@ -166,12 +168,43 @@ def _paper_cash() -> float:
         return 0.0
 
 
+def available_paper_cash() -> float:
+    """DERIVED available cash: the configured base (aj_paper_cash) minus the
+    capital currently tied up in open positions, plus realized P&L — all from
+    the fills ledger via aj_positions.paper_book(). The static setting alone is
+    never debited by buys, so consuming it raw double-counts invested capital.
+
+    NOTE paper_book's realized_total is ALREADY net of every fee (each fill's
+    realized is seeded with -fees), so fees are NOT subtracted again here.
+    Floored at 0 (paper fills can overspend the base; a real broker would have
+    rejected them). With NO base configured (0/unset) this returns 0.0 —
+    preserving the legacy unfunded-book behaviour for every consumer."""
+    base = _paper_cash()
+    if base <= 0:
+        return 0.0
+    try:
+        book = _paper_book()
+        positions = book.get("positions") or {}
+        open_cost = sum(float((p or {}).get("cost_basis") or 0)
+                        for p in positions.values())
+        realized = float(book.get("realized_total") or 0)
+        return max(0.0, base - open_cost + realized)
+    except Exception:
+        log.debug("available_paper_cash failed -> base", exc_info=True)
+        return max(0.0, base)
+
+
 def account_equity(positions: Optional[Dict[str, Any]] = None,
                    marks: Optional[Dict[str, Optional[float]]] = None) -> float:
-    """Account equity = cash (aj_paper_cash) + current market value of all open
-    paper positions. The correct base for per-symbol / sector weight caps (a
-    first position is then sized against equity, not always ~100% of an empty
+    """Account equity = available cash + current market value of all open paper
+    positions. The correct base for per-symbol / sector weight caps (a first
+    position is then sized against equity, not always ~100% of an empty
     'book'). Falls back to the paper book / live marks when not passed in.
+
+    With a configured cash base this is base + realized (net of fees) − open
+    cost basis + MV — i.e. TRUE equity. The old base + MV double-counted
+    invested capital (the base is never debited by buys). With no base (the
+    default) equity == positions MV, exactly the legacy behaviour.
     Fail-OPEN: any error yields just the positions market value (>= 0)."""
     try:
         if positions is None:
@@ -188,7 +221,16 @@ def account_equity(positions: Optional[Dict[str, Any]] = None,
             mk = marks.get(s)
             px = mk if mk is not None else float(p.get("avg_cost") or 0)
             mv += float(p.get("qty") or 0) * float(px or 0)
-        return max(0.0, _paper_cash() + mv)
+        base = _paper_cash()
+        if base <= 0:
+            return max(0.0, mv)            # unfunded book: equity == MV (legacy)
+        # Open cost basis comes from the same `positions` whose MV we just
+        # marked (callers pass the paper book), keeping the two legs consistent;
+        # realized P&L (net of fees) comes from the fills ledger.
+        open_cost = sum(float((p or {}).get("cost_basis") or 0)
+                        for p in positions.values())
+        realized = float((_paper_book() or {}).get("realized_total") or 0)
+        return max(0.0, base - open_cost + realized + mv)
     except Exception:
         log.debug("account_equity failed -> 0", exc_info=True)
         return 0.0
@@ -366,6 +408,16 @@ def _atr(bars: List[Dict[str, Any]], period: int = 14) -> Optional[float]:
 
 
 def _clamp(x: float, lo: float, hi: float) -> float:
+    """NaN-safe clamp. Python's max/min drop a NaN operand asymmetrically —
+    max(lo, min(hi, nan)) == hi — so a NaN sizing factor silently clamped to
+    the MAX (e.g. 2.5x leverage on corrupt vol data). A non-finite input now
+    fails toward the LOWER bound (the conservative side for every sizing /
+    throttle consumer here)."""
+    try:
+        if not math.isfinite(x):
+            return lo
+    except TypeError:
+        return lo
     return max(lo, min(hi, x))
 
 
@@ -471,15 +523,25 @@ def _vol_target_factor(symbol: str, cfg: Dict[str, Any]) -> float:
         return 1.0
     # Prefer the Garman-Klass OHLC estimator when bars are available (more
     # efficient than close-to-close); fall back to the close series otherwise.
+    # A vol estimate is unusable when missing, non-positive, OR non-finite: a
+    # NaN slips through `av <= 0` (NaN comparisons are False) and used to ride
+    # the unguarded _clamp up to the 2.5x MAX — max leverage on corrupt data.
+    def _bad_vol(v: Any) -> bool:
+        try:
+            return v is None or not math.isfinite(float(v)) or float(v) <= 0
+        except (TypeError, ValueError):
+            return True
+
     av = None
     try:
         av = _gk_annualized_vol(_bars(symbol, "6mo"))
     except Exception:
         av = None
-    if not av or av <= 0:
+    if _bad_vol(av):
         av = _ann_vol(_closes(symbol, "1y"))
-    if not av or av <= 0:
+    if _bad_vol(av):
         return 1.0
+    av = float(av)
     # portfolio_insights.annualized_vol always returns a PERCENT (e.g. 25.0, and
     # 4.0 for a genuinely quiet name). A magnitude-based fraction/percent guess
     # mis-detected real low-vol percents (<5.0) as fractions and inflated them
@@ -528,18 +590,41 @@ def _symbol_perf_factor(symbol: str, cfg: Dict[str, Any]) -> float:
     return 1.0
 
 
-def current_drawdown_pct() -> float:
-    """Peak-to-current drawdown of the paper equity curve, in %."""
+def current_drawdown_pct(cfg: Optional[Dict[str, Any]] = None) -> float:
+    """Peak-to-current drawdown of the agent's paper EQUITY, in %.
+
+    aj_equity.equity_usd (via aj_analytics.equity_curve) is CUMULATIVE P&L,
+    not an account value — computing % drawdown on the raw P&L series turned
+    tiny retracements into catastrophic readings (peak +$500 → +$100 read as an
+    "80% drawdown" and zeroed sizing through the throttle). Convert P&L to an
+    equity series by adding a capital BASE first: `compound_base_equity_usd`
+    (from the passed cfg or the typed config) or, failing that, the configured
+    paper cash (aj_paper_cash). Drawdown is then
+    (peak_equity - current_equity) / peak_equity.
+
+    When NO base is known (both unset/0) we deliberately keep the legacy
+    P&L-relative reading — there is no account size to scale by — but clamp it
+    to [0, 100] so a swing to negative P&L can never report a >100% drawdown."""
     curve = _equity_curve()
     if not curve:
         return 0.0
-    eqs = [float(r.get("equity_usd") or 0) for r in curve]
-    peak = max(eqs) if eqs else 0.0
-    last = eqs[-1] if eqs else 0.0
+    pnl = [float(r.get("equity_usd") or 0) for r in curve]
+    base = 0.0
+    try:
+        if cfg is None:
+            import aj_config
+            cfg = aj_config.get_config()
+        base = float(cfg.get("compound_base_equity_usd") or 0)
+    except Exception:
+        base = 0.0
+    if base <= 0:
+        base = _paper_cash()
+    eqs = [base + p for p in pnl]           # base 0 -> legacy P&L-relative
+    peak = max(eqs)
+    last = eqs[-1]
     if peak <= 0:
         return 0.0
-    dd = (peak - last) / peak * 100.0
-    return max(0.0, dd)
+    return _clamp((peak - last) / peak * 100.0, 0.0, 100.0)
 
 
 def _drawdown_factor(cfg: Dict[str, Any]) -> float:
@@ -547,7 +632,7 @@ def _drawdown_factor(cfg: Dict[str, Any]) -> float:
     thr = float(cfg.get("drawdown_throttle_pct") or 0)
     if thr <= 0:
         return 1.0
-    dd = current_drawdown_pct()
+    dd = current_drawdown_pct(cfg)
     return _clamp(1.0 - dd / thr, 0.0, 1.0)
 
 
@@ -706,8 +791,14 @@ def entry_block_reason(symbol: str, side: str, qty: float, price: float,
             sec = _sector_of(symbol)
             if sec:
                 import aj_risk
-                syms = list(positions.keys())
-                marks = aj_risk._marks(syms) if syms else {}
+                # Resolve each held key to its QUOTE-convention symbol FIRST
+                # (crypto 'BTC' -> 'BTC-USD') so a bare crypto ticker never
+                # picks up an equity quote / None; results are keyed back by
+                # the bare book symbol (same pattern as aj_rules' weight cap).
+                qsyms = {s: aj_risk._quote_symbol(str(s), (p or {}).get("asset_type") or "")
+                         for s, p in positions.items()}
+                marks_q = aj_risk._marks(list(qsyms.values())) if qsyms else {}
+                marks = {s: marks_q.get(qsyms[s]) for s in positions}
                 # resolve each held symbol's sector once (avoids O(positions)
                 # repeated lookups and keeps None-handling consistent)
                 sectors = {s: _sector_of(s) for s in positions}
@@ -726,11 +817,12 @@ def entry_block_reason(symbol: str, side: str, qty: float, price: float,
                 # UNCHANGED — adding the full `add` to the denominator (the old
                 # behaviour) double-counted a cash-funded buy and understated the
                 # projected sector weight. Only the UNFUNDED remainder (add beyond
-                # available cash) actually grows equity. With no configured cash
-                # (default), the whole `add` is unfunded and equity == positions MV
-                # incl. the add — preserving the prior behaviour exactly.
+                # AVAILABLE cash — the ledger-derived balance, not the raw base,
+                # which is never debited by buys) actually grows equity. With no
+                # configured cash (default), the whole `add` is unfunded and
+                # equity == positions MV incl. the add — prior behaviour exactly.
                 base_equity = account_equity(positions, marks)
-                unfunded = max(0.0, add - _paper_cash())
+                unfunded = max(0.0, add - available_paper_cash())
                 equity = base_equity + unfunded
                 if equity > 0 and sec_val / equity * 100.0 > scap:
                     return "{} sector {:.0f}% > {:g}% cap".format(sec, sec_val / equity * 100.0, scap)
@@ -778,7 +870,14 @@ def extra_exit_signals(cfg: Dict[str, Any]) -> List[Dict[str, Any]]:
         if not positions:
             return []
         import aj_risk
-        marks = aj_risk._marks(list(positions.keys()))
+        # Resolve book keys to QUOTE-convention symbols (crypto 'BTC' ->
+        # 'BTC-USD') before fetching marks, keying results back by the bare
+        # symbol — a raw-key fetch handed crypto tickers to the equity quote
+        # feed (None mark -> exits silently skipped). Same pattern as aj_rules.
+        qsyms = {s: aj_risk._quote_symbol(str(s), (p or {}).get("asset_type") or "")
+                 for s, p in positions.items()}
+        marks_q = aj_risk._marks(list(qsyms.values()))
+        marks = {s: marks_q.get(qsyms[s]) for s in positions}
         state = {r["symbol"]: r for r in aj_db.query("SELECT * FROM aj_position_state")}
         ladder_fired = _tp_ladder_fired() if (ladder and tp > 0) else {}
         ladder_base = _tp_ladder_base() if (ladder and tp > 0) else {}
@@ -828,6 +927,15 @@ def extra_exit_signals(cfg: Dict[str, Any]) -> List[Dict[str, Any]]:
             # first time we see the position), NOT of the shrinking LIVE qty — so
             # the scale-out is a consistent thirds ladder regardless of how much
             # has already been sold. The final rung liquidates whatever remains.
+            #
+            # DURABILITY: each rung's state is persisted (one _persist_tp_ladder
+            # call) at the moment it fires, BEFORE the sell signal is emitted.
+            # The old flow deferred persistence to the end of the loop, so an
+            # exception after emitting-but-before-persisting re-fired the rung
+            # next cycle and DOUBLE-TRIMMED. The inverse failure — rung persisted
+            # but the sell later blocked by a gate — consumes the rung without a
+            # sell: fail-closed (position kept, worst case a missed trim); the
+            # operator-side confirm for blocked sells is handled separately.
             if ladder and tp > 0:
                 key = str(sym).upper()
                 fired = set(ladder_fired.get(key) or [])
@@ -841,26 +949,29 @@ def extra_exit_signals(cfg: Dict[str, Any]) -> List[Dict[str, Any]]:
                 third = round(base / 3.0, 6)
                 if gain >= 2 * tp and 3 not in fired:
                     # final rung: sell the remaining live qty (never more than held)
-                    out.append(_exit(sym, qty, "tp-ladder rung-3 +{:.1f}%".format(gain), mark))
                     fired.update({1, 2, 3})
                     ladder_fired[key] = sorted(fired)
-                    ladder_dirty = True
+                    _persist_tp_ladder(ladder_fired, ladder_base)
+                    ladder_dirty = False
+                    out.append(_exit(sym, qty, "tp-ladder rung-3 +{:.1f}%".format(gain), mark))
                     continue
                 if gain >= 1.5 * tp and 2 not in fired:
-                    # rung-2: a third of the ORIGINAL position (capped at live qty)
-                    out.append(_exit(sym, min(third, round(qty, 6)), "tp-ladder rung-2 +{:.1f}%".format(gain), mark))
+                    # rung-2: a third of the ORIGINAL position (capped at live qty).
                     # Only mark rung-2 fired: rung-1 wasn't sold here, so a later
                     # cycle may still scale out its third per the thirds ladder.
                     fired.add(2)
                     ladder_fired[key] = sorted(fired)
-                    ladder_dirty = True
+                    _persist_tp_ladder(ladder_fired, ladder_base)
+                    ladder_dirty = False
+                    out.append(_exit(sym, min(third, round(qty, 6)), "tp-ladder rung-2 +{:.1f}%".format(gain), mark))
                     continue
                 if gain >= tp and 1 not in fired:
                     # rung-1: a third of the ORIGINAL position (capped at live qty)
-                    out.append(_exit(sym, min(third, round(qty, 6)), "tp-ladder rung-1 +{:.1f}%".format(gain), mark))
                     fired.add(1)
                     ladder_fired[key] = sorted(fired)
-                    ladder_dirty = True
+                    _persist_tp_ladder(ladder_fired, ladder_base)
+                    ladder_dirty = False
+                    out.append(_exit(sym, min(third, round(qty, 6)), "tp-ladder rung-1 +{:.1f}%".format(gain), mark))
                     continue
 
             # 15: ATR volatility stop — loss beyond mult x ATR from entry
@@ -870,11 +981,20 @@ def extra_exit_signals(cfg: Dict[str, Any]) -> List[Dict[str, Any]]:
                     out.append(_exit(sym, qty, "atr-stop {:.1f}x ATR".format(atr_mult), mark))
                     continue
         if ladder and tp > 0 and ladder_dirty:
-            _set_tp_ladder_fired(ladder_fired)
-            _set_tp_ladder_base(ladder_base)
+            # residual prune/base-capture changes with no rung fired this cycle
+            _persist_tp_ladder(ladder_fired, ladder_base)
     except Exception:
         log.exception("extra_exit_signals failed -> none")
     return out
+
+
+def _persist_tp_ladder(fired: Dict[str, List[int]], base: Dict[str, float]) -> None:
+    """Persist the FULL TP-ladder state (fired rungs + base qty) in one call.
+    Called at the moment a rung fires — before its sell signal is emitted — so
+    a crash mid-cycle can never leave an emitted signal with unpersisted rung
+    state (the double-trim window). Both setters fail-open individually."""
+    _set_tp_ladder_fired(fired)
+    _set_tp_ladder_base(base)
 
 
 def _tp_ladder_fired() -> Dict[str, List[int]]:
@@ -931,9 +1051,12 @@ def _age_days(state_row: Dict[str, Any]) -> Optional[float]:
 #  ADAPTIVE BRAIN (16-17)  → effective_config()
 # ════════════════════════════════════════════════════════════════════════════
 
-def detect_regime() -> str:
-    """'bull' | 'bear' | 'chop' from SPY vs its 50d/200d SMA and trend."""
-    closes = _market_closes("1y")
+def regime_from_closes(closes: List[float]) -> str:
+    """'bull' | 'bear' | 'chop' from a benchmark close series vs its 50d/200d
+    SMA and trend. Pure function of the series — the SINGLE source of the
+    regime thresholds, shared by detect_regime (today's SPY) and by
+    aj_features' POINT-IN-TIME reconstruction (SPY closes ending at each
+    historical trade's open) so the two can never drift apart."""
     if len(closes) < 60:
         return "chop"
     price = closes[-1]
@@ -946,6 +1069,11 @@ def detect_regime() -> str:
     if price < sma50 and (sma200 is None or sma50 <= sma200):
         return "bear"
     return "chop"
+
+
+def detect_regime() -> str:
+    """'bull' | 'bear' | 'chop' from SPY vs its 50d/200d SMA and trend."""
+    return regime_from_closes(_market_closes("1y"))
 
 
 def recent_hit_rate_detail(n: int = 20) -> Optional[Tuple[float, int, int]]:

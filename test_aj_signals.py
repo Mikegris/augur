@@ -83,6 +83,11 @@ def test_score_to_prob_mapping():
           "score->prob is monotone increasing")
     check(_approx(S._score_to_confidence(50), 0.0), "confidence 0 at neutral 50")
     check(_approx(S._score_to_confidence(100), 1.0), "confidence 1 at extreme 100")
+    # corrupt-data guard: a non-finite score must read NEUTRAL, never
+    # max-conviction (NaN used to clamp to prob 0.95 / confidence 1.0)
+    check(_approx(S._score_to_prob(float("nan")), 0.5), "NaN score -> neutral prob 0.5")
+    check(_approx(S._score_to_confidence(float("nan")), 0.0), "NaN score -> confidence 0")
+    check(_approx(S._score_to_prob(float("inf")), 0.5), "inf score -> neutral prob 0.5")
 
 
 # --------------------------------------------------------------------------- #

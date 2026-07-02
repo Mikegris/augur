@@ -185,14 +185,23 @@ class PaperBroker(BrokerClient):
             # else: not marketable -> rest
 
         if fill_price is None:
-            # resting limit order
+            # resting limit order — persist the order params in raw so the
+            # get_order() poll can re-check marketability and actually fill it
+            # later (a resting paper limit that can never fill would strand
+            # every limit_entry buy until TTL expiry).
             res = {"broker_order_id": boid, "state": "accepted", "filled_qty": 0.0,
                    "avg_fill_price": None, "fees_usd": 0.0, "fills": [],
-                   "raw": {"resting": True, "quote": quote, "limit": limit_price}}
+                   "raw": {"resting": True, "quote": quote, "limit": limit_price,
+                           "symbol": symbol, "side": side, "qty": qty,
+                           "asset_type": asset_type}}
             self._orders[boid] = res
             return res
 
-        fill_price = aj_db.money(fill_price)
+        # Round the PER-UNIT price to 8dp (matching _recompute_order), NOT to
+        # cents: money() rounding zeroed sub-cent prices (SHIB/PEPE fill at
+        # $0.00 => cost basis 0, infinite fake gain) and destroyed the modeled
+        # adverse slippage on any low-priced asset. Cents apply to notional/fees.
+        fill_price = round(float(fill_price), 8)
         notional = fill_price * qty
         fees = self._fees(notional, asset_type, qty=qty)
         fill = {"qty": qty, "price": fill_price, "fees_usd": fees,
@@ -214,8 +223,40 @@ class PaperBroker(BrokerClient):
         return {"broker_order_id": broker_order_id, "state": "canceled"}
 
     def get_order(self, broker_order_id: str) -> Dict[str, Any]:
-        return self._orders.get(broker_order_id,
-                                {"broker_order_id": broker_order_id, "state": "unknown"})
+        o = self._orders.get(broker_order_id)
+        if o is None:
+            # Paper orders live in process memory only: after a restart a
+            # resting/parked paper id is unresolvable forever. There is no real
+            # exposure behind a paper id, and any fill it DID produce was
+            # recorded synchronously at submit — so report it terminally
+            # expired rather than stranding it 'unknown' for every reconcile.
+            if str(broker_order_id or "").startswith("paper_"):
+                return {"broker_order_id": broker_order_id, "state": "expired"}
+            return {"broker_order_id": broker_order_id, "state": "unknown"}
+        # Re-check a resting limit against the CURRENT quote so paper resting
+        # orders can fill when the market comes to them (mirrors a real venue).
+        raw = o.get("raw") or {}
+        if o.get("state") == "accepted" and raw.get("resting") and raw.get("symbol"):
+            quote = self._quote(raw["symbol"], str(raw.get("asset_type") or "stock"))
+            lp = float(raw.get("limit") or 0)
+            side, qty = raw.get("side"), float(raw.get("qty") or 0)
+            fill_price = None
+            if quote is not None and lp > 0 and qty > 0:
+                adverse = self._adverse_bps() / 1e4
+                if side == "buy" and quote <= lp:
+                    fill_price = min(lp, quote * (1 + adverse))
+                elif side == "sell" and quote >= lp:
+                    fill_price = max(lp, quote * (1 - adverse))
+            if fill_price is not None:
+                fill_price = round(float(fill_price), 8)
+                fees = self._fees(fill_price * qty, str(raw.get("asset_type") or "stock"), qty=qty)
+                o.update({"state": "filled", "filled_qty": qty,
+                          "avg_fill_price": fill_price, "fees_usd": fees,
+                          "fills": [{"qty": qty, "price": fill_price,
+                                     "fees_usd": fees,
+                                     "broker_fill_id": "pf_" + uuid.uuid4().hex[:12],
+                                     "filled_at": aj_db.utc_now_iso()}]})
+        return o
 
     def positions(self) -> List[Dict[str, Any]]:
         # Paper truth = the agent's FIFO paper book (ADR-001), NOT the user's
@@ -228,10 +269,14 @@ class PaperBroker(BrokerClient):
             return []
 
     def cash(self) -> float:
+        # DERIVED available cash, not the raw aj_paper_cash setting: the static
+        # setting is never debited by buys, so reporting it raw overstates
+        # buying power once anything is invested. aj_alpha derives
+        # base − open cost basis + realized P&L (net of fees), floored at 0;
+        # with no base configured it returns 0.0 — same as the old raw read.
         try:
-            import database as db
-            raw = db.get_settings().get("aj_paper_cash")
-            return aj_db.money(raw) if raw is not None else 0.0
+            import aj_alpha
+            return aj_db.money(aj_alpha.available_paper_cash())
         except Exception:
             return 0.0
 

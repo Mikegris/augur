@@ -273,6 +273,58 @@ def test_maybe_retrain_threshold():
     check(r4["retrained"] is True, "maybe_retrain: >=min_new new labels -> retrains")
 
 
+def test_purge_drops_boundary_straddling_holdout_trades():
+    """Purging at the 70/30 boundary: holdout trades whose holding window OPENED
+    before the last train trade CLOSED leak train-period information. Fixture:
+    every straddling holdout row is class 0 and every clean holdout row class 1 —
+    with purging the holdout collapses to a single class, so the honest outcome
+    is oos_auc=None / not promoted. Without purging (old behavior) the leaked
+    rows made the holdout two-class and separable → wrongly promoted."""
+    import datetime
+    import database as db
+    _reset_model()
+    aj_db.aj_init()   # ensure aj_trade_labels exists in the temp DB
+
+    n, split = 120, 84   # floor(120 * 0.70)
+    t0 = datetime.datetime(2026, 1, 1, tzinfo=datetime.timezone.utc)
+
+    def _iso(minutes):
+        return (t0 + datetime.timedelta(minutes=minutes)).isoformat()
+
+    X, y = [], []
+    boundary_min = split - 1              # closed_at minute of the LAST train row
+    try:
+        for i in range(n):
+            if i < split:
+                lab = i % 2               # two-class train slice
+                opened = _iso(i - 1)      # opens/closes entirely pre-boundary
+            elif i < split + 18:
+                lab = 0                   # STRADDLERS: opened before the boundary
+                opened = _iso(boundary_min - 10)
+            else:
+                lab = 1                   # clean holdout: opened after boundary
+                opened = _iso(i - 1)
+            x = 2.0 + (i % 5) * 0.1 if lab else -2.0 - (i % 5) * 0.1
+            X.append([x, ((i * 7) % 11) - 5.0])
+            y.append(lab)
+            aj_db.insert("aj_trade_labels", symbol="T{}".format(i),
+                         opened_at=opened, closed_at=_iso(i),
+                         features_json="{}", label=lab, created_at=_iso(i))
+        _set_dataset(X, y)
+        res = ml.train(CFG)
+        check(res["oos_auc"] is None,
+              "purge: straddlers dropped -> single-class holdout -> oos_auc None")
+        check(res["promoted"] is False,
+              "purge: leaked separability can no longer promote the model")
+    finally:
+        # clean up so later tests' n=120 datasets don't falsely align to these rows
+        with db._write_lock:
+            conn = db.get_conn()
+            conn.execute("DELETE FROM aj_trade_labels")
+            conn.commit()
+        _reset_model()
+
+
 def test_train_fail_open_on_features_error():
     _reset_model()
 

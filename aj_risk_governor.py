@@ -125,7 +125,10 @@ def _compute(cfg: Dict[str, Any]) -> Dict[str, Any]:
 
     # ── 3. realized alpha-decay arm ──────────────────────────────────────────
     min_tr = int(_f(cfg, "rg_alpha_decay_min_trades", 20))
-    exp, n = _realized_expectancy(max(min_tr, 30))
+    unlock_tr = int(_f(cfg, "rg_lever_unlock_trades", 50))
+    # The window must cover the LARGEST n any consumer needs: lever-up requires
+    # n >= unlock_tr, so a window capped below it made the unlock unreachable.
+    exp, n = _realized_expectancy(max(min_tr, unlock_tr, 30))
     comps["realized_expectancy_pct"] = round(exp, 3) if exp is not None else None
     comps["realized_n"] = n
     if exp is not None and n >= min_tr:
@@ -138,7 +141,7 @@ def _compute(cfg: Dict[str, Any]) -> Dict[str, Any]:
 
     # ── lever up ONLY on proven edge (and only if max>1) ─────────────────────
     if not breaker and gmax > 1.0 and exp is not None \
-            and n >= int(_f(cfg, "rg_lever_unlock_trades", 50)) \
+            and n >= unlock_tr \
             and exp >= _f(cfg, "rg_lever_min_expectancy_pct", 0.5):
         lever = min(gmax, 1.0 + (gmax - 1.0) * min(1.0, exp / 1.0))
         if lever > G:

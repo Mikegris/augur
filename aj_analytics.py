@@ -22,12 +22,25 @@ log = logging.getLogger("augur.aj_analytics")
 # ── ⑯ equity curve ────────────────────────────────────────────────────────────
 
 def snapshot_equity() -> Dict[str, Any]:
-    """Append today's paper equity (realized + unrealized) to aj_equity."""
+    """Append today's paper equity (realized + unrealized) to aj_equity.
+
+    The `date` key is the AMERICA/NEW_YORK trading date, NOT the UTC date: an
+    evening cycle (20:00–24:00 ET) is still "today" on the exchange clock but
+    already tomorrow in UTC, which shifted the aj_benchmark join (index closes
+    are keyed by ET date) by a whole day. `ts` stays UTC for audit ordering;
+    rows stamped before this fix keep their stored dates (backward compat —
+    only NEW snapshots are keyed in ET)."""
     import aj_risk
     import aj_metrics
     pnl = aj_risk.compute_day_pnl()
     cum = aj_metrics.cumulative_pnl()
-    row = {"ts": aj_db.utc_now_iso(), "date": aj_db.utc_now().strftime("%Y-%m-%d"),
+    now = aj_db.utc_now()
+    try:
+        from zoneinfo import ZoneInfo
+        date_str = now.astimezone(ZoneInfo("America/New_York")).strftime("%Y-%m-%d")
+    except Exception:  # zoneinfo/tzdata missing → degrade to the old UTC date
+        date_str = now.strftime("%Y-%m-%d")
+    row = {"ts": aj_db.utc_now_iso(), "date": date_str,
            "realized_usd": cum.get("realized_total", 0.0),
            "unrealized_usd": cum.get("unrealized_open", 0.0),
            "equity_usd": cum.get("total", 0.0),
@@ -251,7 +264,11 @@ def positions_detail() -> Dict[str, Any]:
             "symbol": sym, "qty": round(qty, 4), "avg_cost": round(avg, 2),
             "mark": round(mark, 2), "market_value": aj_db.money(mv),
             "unrealized": aj_db.money(unreal),
-            "unrealized_pct": round((mark - avg) / avg * 100, 2) if avg > 0 else 0.0,
+            # % off the position's GROSS cost basis, sign-carried by the P&L
+            # itself: (mark-avg)/avg alone is INVERTED for a short (qty < 0),
+            # where a falling mark is a gain. unreal already embeds sign(qty).
+            "unrealized_pct": (round(unreal / (abs(avg) * abs(qty)) * 100, 2)
+                               if (avg > 0 and qty) else 0.0),
             "age_days": aj_rules.position_age_days(sym),
             "asset_type": p.get("asset_type") or "stock"})
     for r in rows:

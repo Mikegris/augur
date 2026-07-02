@@ -32,7 +32,9 @@ def cmd_run(argv):
         print(json.dumps({"ok": False,
                           "error": "unknown mode {!r}; expected paper|live".format(mode)}),
               file=sys.stderr)
-        return
+        # Non-zero so a cron/monitor sees the misconfiguration instead of an
+        # eternally-"successful" job that never runs a cycle.
+        return 2
     if mode == "live":
         # live cycles still NEVER auto-execute; the operator only proposes +
         # gates, leaving approval to a human. Make the posture explicit.
@@ -134,6 +136,15 @@ def cmd_secret(argv):
             k, raw = argv[i + 1].split("=", 1)
             scope = k.strip()
             v = _read_secret_value(scope, raw.strip())
+            # An empty resolved value (typo'd @env:NAME, empty file/stdin)
+            # would silently ENCRYPT AND OVERWRITE a working credential — the
+            # breakage only surfacing later as opaque broker auth failures.
+            # Refuse it; the getpass path already re-prompts interactively.
+            if not v:
+                stored.append({scope: "refused: resolved value is empty "
+                                      "(check @env:/@file source)"})
+                i += 2
+                continue
             ok = aj_secrets.store(scope, v)
             stored.append({scope: "stored" if ok else "failed"})
             i += 2
@@ -251,8 +262,10 @@ def main(argv=None):
         print("unknown command: {}\n{}".format(cmd, __doc__), file=sys.stderr)
         return 2
     try:
-        fn(argv[1:])
-        return 0
+        # Propagate a command's explicit exit code (e.g. cmd_run's invalid-mode
+        # 2) — swallowing it made every misconfigured invocation exit 0.
+        rc = fn(argv[1:])
+        return int(rc) if isinstance(rc, int) else 0
     except Exception as e:
         # Emit the full traceback to stderr (an operator debugging a kill/recon
         # failure needs it), but keep the secret-handling commands from echoing

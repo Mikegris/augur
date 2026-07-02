@@ -27,6 +27,7 @@ direction-symmetric (a volatility/timing signal, not a directional one) and is
 consumed for entry TIMING elsewhere, not as a prob_up signal.
 """
 
+import math
 from typing import Dict, Optional
 
 
@@ -54,17 +55,29 @@ def _score_to_prob(score: float) -> float:
     score=0   -> 0.05   (clamped from 0.00)
     score=75  -> 0.75
     score=25  -> 0.25
+
+    A NON-FINITE score (NaN/inf from a corrupt upstream composite) maps to the
+    NEUTRAL 0.5, never conviction: adapters only None-check, and an unguarded
+    NaN slid through the clamp asymmetry to a 0.95 max-conviction read.
     """
-    return _clamp(0.5 + (float(score) - 50.0) / 100.0, 0.05, 0.95)
+    s = float(score)
+    if not math.isfinite(s):
+        return 0.5
+    return _clamp(0.5 + (s - 50.0) / 100.0, 0.05, 0.95)
 
 
 def _score_to_confidence(score: float) -> float:
     """Confidence grows with distance from the neutral midpoint (50).
 
     A score sitting at 50 carries no directional conviction (confidence 0); a
-    score pinned at 0 or 100 carries full conviction (confidence 1).
+    score pinned at 0 or 100 carries full conviction (confidence 1). A
+    NON-FINITE score carries NO conviction (0.0) — a NaN used to clamp to the
+    MAX (1.0), full trust in corrupt data.
     """
-    return _clamp(abs(float(score) - 50.0) / 50.0, 0.0, 1.0)
+    s = float(score)
+    if not math.isfinite(s):
+        return 0.0
+    return _clamp(abs(s - 50.0) / 50.0, 0.0, 1.0)
 
 
 # --------------------------------------------------------------------------- #

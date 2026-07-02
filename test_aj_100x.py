@@ -460,8 +460,12 @@ def test_23_preset_escalation():
     try:
         r = AU.maybe_escalate({"auto_preset_escalation": True})
         check(r["changed"] and r["to"] == "aggressive", "23 escalation: strong record steps up to aggressive")
-        # deep drawdown steps back down
-        A._equity_curve = lambda: [{"equity_usd": 1000.0}, {"equity_usd": 800.0}]  # 20% dd
+        # deep drawdown steps back down. equity_usd rows are CUMULATIVE P&L;
+        # current_drawdown_pct now adds the capital base (typed-config default
+        # compound_base_equity_usd = 10k), so a 20% EQUITY drawdown is
+        # peak 10k+1000 = 11k -> 10k-1200 = 8.8k (the old 1000->800 stub only
+        # reads 20% under the buggy P&L-relative math).
+        A._equity_curve = lambda: [{"equity_usd": 1000.0}, {"equity_usd": -1200.0}]  # 20% dd
         r2 = AU.maybe_escalate({"auto_preset_escalation": True})
         check(r2["changed"] and r2["to"] == "moderate", "23 escalation: a drawdown steps back down")
         check(AU.maybe_escalate({})["changed"] is False, "23 escalation: off → no change")

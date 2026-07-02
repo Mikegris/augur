@@ -348,7 +348,14 @@ def aj_migrate() -> int:
                 ]
                 for col, decl in adds:
                     if col not in have:
-                        conn.execute("ALTER TABLE {} ADD COLUMN {} {}".format(table, col, decl))
+                        try:
+                            conn.execute("ALTER TABLE {} ADD COLUMN {} {}".format(table, col, decl))
+                        except sqlite3.OperationalError as e:
+                            # a concurrent migrator (app startup racing a CLI
+                            # aj_init) added it between our PRAGMA check and the
+                            # ALTER — the column exists, which is all we need
+                            if "duplicate column" not in str(e).lower():
+                                raise
             conn.commit()
             current = 4
         # Step 5 — screener quote cache (global-best ranking across cycles).
@@ -425,15 +432,22 @@ def aj_migrate() -> int:
             # Benchmark-relative labels: was the trade's return over its holding
             # window better than the market's (alpha)? Lets the meta-label model
             # learn P(beats the benchmark) instead of only P(profit). Additive.
-            for stmt in (
-                "ALTER TABLE aj_trade_labels ADD COLUMN benchmark_return_pct REAL",
-                "ALTER TABLE aj_trade_labels ADD COLUMN alpha_pct REAL",
-                "ALTER TABLE aj_trade_labels ADD COLUMN beat_benchmark INTEGER",
-            ):
-                try:
-                    conn.execute(stmt)
-                except Exception:
-                    pass   # column already exists — idempotent
+            # Idempotency comes from the column-existence check (like step 4) —
+            # a blanket except here would stamp version 9 even when a transient
+            # SQLITE_BUSY/disk error left the columns missing, permanently
+            # disabling alpha-labeling with no re-run path.
+            have = {r["name"] for r in conn.execute(
+                "PRAGMA table_info(aj_trade_labels)").fetchall()}
+            for col, decl in (("benchmark_return_pct", "REAL"),
+                              ("alpha_pct", "REAL"),
+                              ("beat_benchmark", "INTEGER")):
+                if col not in have:
+                    try:
+                        conn.execute("ALTER TABLE aj_trade_labels ADD COLUMN {} {}".format(col, decl))
+                    except sqlite3.OperationalError as e:
+                        # concurrent migrator won the race — fine
+                        if "duplicate column" not in str(e).lower():
+                            raise
             conn.commit()
             current = 9
         set_setting_raw(_SCHEMA_KEY, str(current))
@@ -655,6 +669,7 @@ class SingleInstanceLock:
                 except Exception:
                     return False
                 self._have = True
+                self._lease_val = new_val
                 return True
             # A lease row exists. If it is still within TTL, we lost.
             try:
@@ -676,6 +691,7 @@ class SingleInstanceLock:
             if c.rowcount != 1:
                 return False
         self._have = True
+        self._lease_val = new_val
         return True
 
     def release(self) -> None:
@@ -697,12 +713,22 @@ class SingleInstanceLock:
         try:
             with db._write_lock:
                 conn = db.get_conn()
-                conn.execute("DELETE FROM settings WHERE key=?",
-                             ("__aj_lease_{}".format(self.name),))
+                # Release only OUR lease (guard on the value we wrote): if a
+                # long run overshot the TTL and another process legitimately
+                # stole the lease, an unconditional DELETE would free the
+                # thief's lease and let a THIRD instance run concurrently.
+                val = getattr(self, "_lease_val", None)
+                if val is not None:
+                    conn.execute("DELETE FROM settings WHERE key=? AND value=?",
+                                 ("__aj_lease_{}".format(self.name), val))
+                else:
+                    conn.execute("DELETE FROM settings WHERE key=?",
+                                 ("__aj_lease_{}".format(self.name),))
                 conn.commit()
         except Exception:
             pass
         self._have = False
+        self._lease_val = None
 
     def __enter__(self):
         self._ok = self.acquire()
@@ -815,16 +841,36 @@ def audit(kind: str, payload: Any, cycle_id: Optional[str] = None,
     body = _canonical(payload)
     with db._write_lock:
         conn = db.get_conn()
-        prev = _last_row_hash()
-        material = "{}|{}|{}|{}|{}|{}".format(
-            prev or "", ts, kind, ref_id if ref_id is not None else "",
-            actor or "", body)
-        row_hash = hashlib.sha256(material.encode("utf-8")).hexdigest()
-        cur = conn.execute(
-            "INSERT INTO aj_audit (ts, cycle_id, kind, ref_id, actor, payload_json, prev_hash, row_hash) "
-            "VALUES (?,?,?,?,?,?,?,?)",
-            (ts, cycle_id, kind, ref_id, actor, body, prev, row_hash))
-        conn.commit()
+        # BEGIN IMMEDIATE takes the cross-PROCESS write lock before reading the
+        # chain tip. The in-process RLock alone lets a second process (Flask app
+        # vs CLI operator) interleave read-tip/insert, forking the hash chain —
+        # a false "prev_hash linkage broken" tamper verdict that never
+        # self-heals. Tolerate an already-open transaction (legacy isolation
+        # mode opens one implicitly after DML).
+        took_txn = False
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            took_txn = True
+        except sqlite3.OperationalError:
+            pass
+        try:
+            prev = _last_row_hash()
+            material = "{}|{}|{}|{}|{}|{}".format(
+                prev or "", ts, kind, ref_id if ref_id is not None else "",
+                actor or "", body)
+            row_hash = hashlib.sha256(material.encode("utf-8")).hexdigest()
+            cur = conn.execute(
+                "INSERT INTO aj_audit (ts, cycle_id, kind, ref_id, actor, payload_json, prev_hash, row_hash) "
+                "VALUES (?,?,?,?,?,?,?,?)",
+                (ts, cycle_id, kind, ref_id, actor, body, prev, row_hash))
+            conn.commit()
+        except Exception:
+            if took_txn:
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
+            raise
         return int(cur.lastrowid)
 
 

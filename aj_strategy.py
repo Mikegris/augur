@@ -102,7 +102,11 @@ def size_order(symbol: str, side: str, cfg: Dict[str, Any], held_qty: float,
             log.debug("risk governor skipped", exc_info=True)
 
     target = min(target, max_notional)
-    if target <= 0:
+    # A zero/negative sizing budget vetoes ENTRIES only (max_order_notional_usd
+    # defaults to 0.0). A sell is an EXIT sized from the held position, not from
+    # `target` — vetoing it here would strand risk a sell signal meant to remove.
+    # The dust floor and risk governor below already exempt sells the same way.
+    if side != "sell" and target <= 0:
         return None
 
     if side == "sell":

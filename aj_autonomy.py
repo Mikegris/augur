@@ -30,6 +30,19 @@ _REFLECTION_KEY = "__aj_reflection"        # + _YYYY-MM-DD
 _BRIEFING_KEY = "__aj_briefing"
 _ESCALATION_KEY = "__aj_preset_level"
 
+
+def _et_date() -> str:
+    """The ET trading date. Journal keys must roll with the ET session — a
+    UTC key means a 19:00-20:00 ET (EST) cycle files today's reflection under
+    TOMORROW'S date, permanently suppressing tomorrow's real entry (first-write
+    -wins) while today's own key is never written."""
+    try:
+        from zoneinfo import ZoneInfo
+        return aj_db.utc_now().astimezone(
+            ZoneInfo("America/New_York")).strftime("%Y-%m-%d")
+    except Exception:
+        return aj_db.utc_now().strftime("%Y-%m-%d")
+
 # health_check audit-chain cadence: full re-scan every Nth check (catches a
 # tampered prefix the quick tail-verify would miss), quick in between.
 _FULL_CHAIN_EVERY = 20
@@ -162,19 +175,24 @@ def run_scheduled(cfg: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         # run_once handles post-cycle autonomy (escalation/reflection/briefing).
         result = aj_operator.run_once("paper")
         if not result.get("ok"):
-            # e.g. a manual cycle holds the single-instance lock ("another cycle
-            # is running"). RESTORE the prior stamp so the next tick retries this
-            # interval rather than skipping it (we claimed it but didn't run).
-            try:
-                if prev_raw is not None:
-                    aj_db.set_setting_raw(_LAST_RUN_KEY, prev_raw)
-                else:
-                    # First-ever run: there was no prior stamp, so we INSERTed it.
-                    # Remove it (don't leave the slot marked done) so the next tick
-                    # retries instead of waiting a full interval.
-                    aj_db.set_setting_raw(_LAST_RUN_KEY, "")
-            except Exception:
-                log.debug("run_scheduled: stamp restore failed", exc_info=True)
+            # RESTORE the prior stamp ONLY when no cycle actually ran (lock
+            # contention — no cycle_id in the result). ok=False ALSO covers a
+            # CRASHED cycle that genuinely ran (exits/proposals may have
+            # executed before the fault); restoring its stamp would make the
+            # 30s scheduler tick re-fire a FULL trading cycle every tick for
+            # as long as the fault persists, instead of once per interval — a
+            # crashed cycle keeps its interval slot consumed.
+            if not result.get("cycle_id"):
+                try:
+                    if prev_raw is not None:
+                        aj_db.set_setting_raw(_LAST_RUN_KEY, prev_raw)
+                    else:
+                        # First-ever run: there was no prior stamp, so we INSERTed it.
+                        # Remove it (don't leave the slot marked done) so the next tick
+                        # retries instead of waiting a full interval.
+                        aj_db.set_setting_raw(_LAST_RUN_KEY, "")
+                except Exception:
+                    log.debug("run_scheduled: stamp restore failed", exc_info=True)
             return {"ran": False, "reason": result.get("reason") or "cycle did not run",
                     "result": result}
         # success — the claimed stamp already marks this interval done.
@@ -487,7 +505,7 @@ def build_reflection() -> Dict[str, Any]:
         takeaway = "Mixed day — win-rate {:.0%}. Review weakest names and entry timing.".format(wr or 0)
 
     refl = {
-        "date": aj_db.utc_now().strftime("%Y-%m-%d"),
+        "date": _et_date(),
         "day_pnl_usd": day.get("day_pnl"),
         "trades_closed": stats.get("trades"),
         "win_rate": wr,
@@ -522,7 +540,7 @@ def write_reflection() -> Dict[str, Any]:
     day don't double-write (and double-audit) the journal entry. If today's entry
     already exists, return it unchanged rather than rebuilding/overwriting it."""
     import database as _db
-    date = aj_db.utc_now().strftime("%Y-%m-%d")
+    date = _et_date()
     key = "{}_{}".format(_REFLECTION_KEY, date)
     existing = get_reflection(date)
     if existing is not None:
@@ -555,7 +573,7 @@ def write_reflection() -> Dict[str, Any]:
 
 
 def get_reflection(date: Optional[str] = None) -> Optional[Dict[str, Any]]:
-    date = date or aj_db.utc_now().strftime("%Y-%m-%d")
+    date = date or _et_date()
     raw = aj_db.get_setting_raw("{}_{}".format(_REFLECTION_KEY, date))
     if not raw:
         return None
@@ -621,6 +639,12 @@ def write_briefing(cfg: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     if existing is not None and existing.get("date") == today:
         return existing
     b = build_briefing(cfg)
+    # Never let an errored/empty build claim the day's first-write slot: a
+    # transient quote-feed outage at 4:05am would otherwise cache an empty
+    # briefing that every later premarket cycle and UI read serves all day.
+    # Skipping the persist keeps it self-healing (rebuilt next call).
+    if b.get("error") or not b.get("ideas"):
+        return b
     try:
         aj_db.set_setting_raw(_BRIEFING_KEY, json.dumps(b))
     except Exception:

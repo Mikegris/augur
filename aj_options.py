@@ -108,9 +108,20 @@ def _row_premium_contract(row: Dict[str, Any], mult: int) -> Optional[float]:
 
 
 def _days_to(expiry: str) -> Optional[int]:
+    """Whole calendar days to expiry BY DATE (ET, where listed options expire).
+    The old datetime subtraction measured from midnight of the expiry date, so
+    dte was -1 for the entire expiry day and a still-tradeable contract was
+    treated as already expired (marked 0.0 and force-closed at a fake loss).
+    dte == 0 means 'expires today' — alive."""
     try:
-        d = datetime.strptime(expiry[:10], "%Y-%m-%d").replace(tzinfo=timezone.utc)
-        return (d - datetime.now(timezone.utc)).days
+        d = datetime.strptime(expiry[:10], "%Y-%m-%d").date()
+        try:
+            from zoneinfo import ZoneInfo
+            today = datetime.now(timezone.utc).astimezone(
+                ZoneInfo("America/New_York")).date()
+        except Exception:
+            today = datetime.now(timezone.utc).date()
+        return (d - today).days
     except Exception:
         return None
 

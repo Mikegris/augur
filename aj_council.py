@@ -286,7 +286,9 @@ def _persist(dec: CouncilDecision, reports: List[AnalystReport],
     try:
         run_id = aj_db.insert(
             "aj_council_runs", ts=aj_db.utc_now_iso(), cycle_id=cycle_id,
-            symbol=dec.symbol, policy=None, status=dec.status,
+            symbol=dec.symbol,
+            policy=str(aj_config.get_config().get("council_policy", "advisory")),
+            status=dec.status,
             rating=dec.rating.value, action=dec.action.value,
             conviction=dec.conviction, thesis=dec.thesis,
             price_target=dec.price_target, time_horizon=dec.time_horizon,
@@ -373,7 +375,12 @@ def run(symbol: str, cfg: Optional[Dict[str, Any]] = None,
                 _inflight[key] = my_event
         if wait_on is not None:
             # Another thread owns this key — wait for it, then read its result.
-            wait_on.wait(timeout=120)
+            # The wait must comfortably exceed a WORST-CASE full council run
+            # (~12 sequential DEEP calls: analysts, debate rounds, manager,
+            # trader, risk rounds, arbiter — minutes, not seconds); a short
+            # timeout made waiters give up and recompute, doubling the LLM
+            # spend this in-flight registry exists to prevent.
+            wait_on.wait(timeout=600)
             cached = _cache_get(symbol, cfg)
             if cached is not None:
                 return cached
@@ -691,11 +698,25 @@ def _spy_return_since(ts_iso: str, end_iso: Optional[str] = None) -> float:
     horizon (S007). Fail-open to 0."""
     try:
         import fetcher
-        bars = fetcher.get_chart_data("SPY", "6mo", "1d")
-        if not isinstance(bars, list) or len(bars) < 2:
-            return 0.0
         import aj_db
         dt = aj_db.parse_iso(ts_iso)
+        # Size the fetch window from the trade's age — a fixed 6mo window gave
+        # any older round-trip the oldest available bar as its "start",
+        # understating the benchmark and overstating alpha.
+        period = "6mo"
+        if dt is not None:
+            age_days = (aj_db.utc_now() - dt).days
+            if age_days > 1500:
+                period = "10y"
+            elif age_days > 650:
+                period = "5y"
+            elif age_days > 300:
+                period = "2y"
+            elif age_days > 150:
+                period = "1y"
+        bars = fetcher.get_chart_data("SPY", period, "1d")
+        if not isinstance(bars, list) or len(bars) < 2:
+            return 0.0
         start = None
         for b in bars:
             bt = b.get("time")
@@ -767,24 +788,11 @@ def reflect_due(cfg: Optional[Dict[str, Any]] = None, max_per_call: int = 5,
         open_syms = set((aj_positions.paper_book().get("positions") or {}).keys())
     except Exception:
         open_syms = set()
-    try:
-        import aj_analytics
-        attr = {a["symbol"]: a for a in aj_analytics.attribution()}
-    except Exception:
-        attr = {}
     import hashlib
     for r in rows:
         if len(out) >= max_per_call:
             break
         sym, run_id = r["symbol"], r["id"]
-        situation = "run:{}".format(run_id)
-        h = hashlib.sha256(situation.encode("utf-8")).hexdigest()[:16]
-        try:
-            if conn.execute("SELECT 1 FROM aj_reflections WHERE situation_hash=?",
-                            (h,)).fetchone():
-                continue                      # already reflected
-        except Exception:
-            continue
         if sym in open_syms:
             continue                          # only reflect CLOSED round-trips
         # S006: return is realized P&L over the CLOSED round-trip's OWN cost
@@ -792,6 +800,22 @@ def reflect_due(cfg: Optional[Dict[str, Any]] = None, max_per_call: int = 5,
         rt = _closed_round_trip(sym)
         if not rt or rt.get("basis_usd", 0) <= 0:
             continue                          # no sound per-round-trip basis => skip
+        # Dedup on the ROUND-TRIP identity, not the council run id: every later
+        # BUY run of the same symbol (routine with the 6h decision cache, and
+        # many runs never trade at all) re-reflected the same last-closed
+        # round-trip, inflating track_record() past coequal_min_samples off a
+        # single real outcome. The legacy run-keyed hash is also checked so
+        # pre-existing reflections aren't duplicated once.
+        situation = "rt:{}:{}:{}".format(sym, rt.get("first_buy_ts") or "",
+                                         rt.get("last_sell_ts") or "")
+        h = hashlib.sha256(situation.encode("utf-8")).hexdigest()[:16]
+        legacy_h = hashlib.sha256("run:{}".format(run_id).encode("utf-8")).hexdigest()[:16]
+        try:
+            if conn.execute("SELECT 1 FROM aj_reflections WHERE situation_hash IN (?,?)",
+                            (h, legacy_h)).fetchone():
+                continue                      # this round-trip already reflected
+        except Exception:
+            continue
         raw = float(rt["realized_usd"]) / float(rt["basis_usd"])
         # S007: benchmark over the trade's actual holding window (first buy →
         # last sell), not run-ts→now. Fall back to run-ts→now if fills missing.

@@ -15,7 +15,7 @@ import logging
 from typing import Any, Callable, Dict, List, Optional
 
 import aj_routing
-from aj_schemas import AnalystReport, ResearchPlan, TraderProposal
+from aj_schemas import AnalystReport, ResearchPlan, TraderProposal, extract_json
 
 log = logging.getLogger("augur.aj_debate")
 
@@ -89,7 +89,12 @@ def research_manager(symbol: str, reports: List[AnalystReport],
     text = call(aj_routing.DEEP, "council.research_manager", sys, prompt)
     if not text:
         return None
-    return ResearchPlan.from_llm(text)
+    d = extract_json(text)
+    # Prose/unparseable output must fall back to the analyst consensus (None),
+    # not silently replace it with a parse-failure HOLD plan marked status "ok".
+    if not (d.get("recommendation") or d.get("rating")):
+        return None
+    return ResearchPlan.from_llm(d)
 
 
 # ── trader (plan → executable proposal) ───────────────────────────────────────
@@ -111,7 +116,14 @@ def trader(symbol: str, plan: ResearchPlan, call: CallFn) -> Optional[TraderProp
     text = call(aj_routing.DEEP, "council.trader", sys, prompt)
     if not text:
         return None
-    return TraderProposal.from_llm(text)
+    d = extract_json(text)
+    # Unparseable trader output must NOT default to a HOLD proposal: the
+    # decision layer takes proposal.action over the rating-implied action, so a
+    # silent HOLD would override a SELL plan with the 0.5 hold-trim factor.
+    # None lets the council derive the action from the plan (documented path).
+    if not (d.get("action") or d.get("decision")):
+        return None
+    return TraderProposal.from_llm(d)
 
 
 # ── risk debate (3 perspectives, hard-terminated) ─────────────────────────────

@@ -186,6 +186,12 @@ DEFAULTS: Dict[str, Any] = {
     "option_max_spread_pct":  0.30,    # skip contracts whose bid-ask > this × mid
     "option_fee_per_contract": 0.65,   # paper option commission per contract
     "option_trade_puts":      True,    # also buy long PUTS on bearish signals
+    # When options are on, bias the screener toward names likely to have a
+    # listed, liquid option chain (higher-priced, non-warrant/unit tickers) so
+    # buys can actually route to the options sleeve. Soft rank boost only — it
+    # never hard-drops equities, so equity trading is unaffected.
+    "option_prefer_optionable": True,
+    "option_optionable_min_price": 10.0,  # names below this rarely have liquid options
     # screener global-best cache: rank across recently-seen names, not just the
     # current rotating slice (closes the "rolling sweep only sees 400/cycle" gap).
     "screen_cache_ttl_min":   45,      # how long a screened quote stays rank-eligible
@@ -280,7 +286,7 @@ _BOOL_KEYS = {"trading_enabled", "live_trading_enabled", "robinhood_enabled",
               # universe screener
               "screen_full_equities", "include_crypto",
               # options
-              "trade_options", "option_trade_puts",
+              "trade_options", "option_trade_puts", "option_prefer_optionable",
               # effectiveness layer
               "multi_factor_signals", "regime_conditional_weights",
               "signal_ic_gate", "cross_sectional_selection",
@@ -312,6 +318,7 @@ _FLOAT_KEYS = {"max_order_notional_usd", "max_daily_loss_usd",
                "screen_min_price", "screen_min_dollar_volume",
                "screen_min_market_cap", "option_moneyness",
                "option_max_spread_pct", "option_fee_per_contract",
+               "option_optionable_min_price",
                # effectiveness layer
                "ic_min_brier_skill", "ic_min_ic", "wf_min_hit_rate",
                "wf_min_sharpe", "limit_entry_offset_bps", "assumed_spread_bps",
@@ -342,7 +349,13 @@ _INT_KEYS = {"max_trades_per_day", "forecast_horizon_days", "scan_universe_max",
              "ic_min_samples", "wf_min_signals", "cross_sectional_top_n",
              "time_stop_days", "event_blackout_days",
              "metalabel_min_samples", "metalabel_retrain_min_new",
-             "rg_alpha_decay_min_trades", "rg_lever_unlock_trades"}
+             "rg_alpha_decay_min_trades", "rg_lever_unlock_trades",
+             # options / screener knobs previously untyped: they loaded back as
+             # raw strings and int("35.5")-style coercion at the call sites
+             # raised, killing contract picking; negatives also bypassed the
+             # reset-to-default guard
+             "option_contract_multiplier", "option_min_open_interest",
+             "option_target_dte", "screen_cache_ttl_min"}
 _STR_KEYS = {"daily_loss_basis", "halt_rearm", "default_broker",
              "entry_order_type", "council_policy",
              "council_deep_model", "council_quick_model",

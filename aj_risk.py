@@ -116,7 +116,8 @@ def _session_date() -> str:
         return aj_db.utc_now().strftime("%Y-%m-%d")
 
 
-def _session_open_unrealized(current_unrealized: float) -> float:
+def _session_open_unrealized(current_unrealized: float,
+                             allow_stamp: bool = True) -> float:
     """The unrealized mark captured at session open. Snapshotted once per ET
     trading day on first observation; subsequent calls return the stored value
     so the day's delta is measured from a fixed baseline.
@@ -138,6 +139,12 @@ def _session_open_unrealized(current_unrealized: float) -> float:
     # atomic INSERT OR IGNORE under the write lock and, if we lost, re-read and
     # return the value the winner stored (never our own later mark).
     val = aj_db.money(current_unrealized)
+    if not allow_stamp:
+        # The caller's mark set was incomplete (quote outage / book failure):
+        # stamping it would poison the day-P&L baseline for the whole ET day,
+        # masking real intraday drawdown once quotes return. Use the value for
+        # THIS call only and leave the snapshot for the first clean mark set.
+        return val
     try:
         with db._write_lock:
             conn = db.get_conn()
@@ -224,7 +231,7 @@ def compute_day_pnl(basis: Optional[str] = None) -> Dict[str, Any]:
     # the 'realized' basis means a mid-session switch to realized_plus_unrealized
     # measures drawdown from the TRUE session open, not from an arbitrary later
     # intra-day mark (which would silently reset the daily-loss baseline).
-    unreal_open = _session_open_unrealized(unreal)
+    unreal_open = _session_open_unrealized(unreal, allow_stamp=not warnings)
 
     if basis == "realized":
         day_pnl = realized
@@ -256,7 +263,10 @@ def _et_day_bounds_utc() -> tuple:
         return ("", "")
 
 
-def _trades_today() -> int:
+def _trades_today() -> Optional[int]:
+    """Orders submitted this ET day, or None when the count is UNKNOWN (DB
+    error). Callers must treat None as fail-closed — returning 0 here would
+    silently disable the trades/day cap for as long as the fault persists."""
     try:
         start_utc, end_utc = _et_day_bounds_utc()
         if start_utc and end_utc:
@@ -274,19 +284,20 @@ def _trades_today() -> int:
         return int(rows[0]["n"]) if rows else 0
     except Exception:
         log.exception("_trades_today failed")
-        return 0
+        return None
 
 
 def _order_price(symbol: str, order_type: str, limit_price: Optional[float],
                  asset_type: str = "") -> Optional[float]:
     if order_type == "limit" and limit_price is not None and float(limit_price) > 0:
         return float(limit_price)
-    mark = _marks([symbol]).get(symbol)
-    if mark is None:
-        qsym = _quote_symbol(symbol, asset_type)
-        if qsym != symbol:
-            mark = _marks([qsym]).get(qsym)
-    return mark
+    # Resolve the quote-convention symbol FIRST (crypto 'SOL' -> 'SOL-USD'): the
+    # bare form of a crypto ticker can collide with an equity (SOL = Emeren on
+    # NYSE) and a plausible-but-wrong price mis-sizes the order by orders of
+    # magnitude. For that reason there is deliberately NO bare-symbol fallback
+    # when the resolved form differs — no price means no trade (fail-closed).
+    qsym = _quote_symbol(symbol, asset_type)
+    return _marks([qsym]).get(qsym)
 
 
 def _ips_block_reason(symbol: str, side: str, qty: float, price: float,
@@ -337,9 +348,13 @@ def _project_pulse(symbol: str, side: str, qty: float, price: float,
     positions = book.get("positions") or {}
     sym_u = symbol.upper()
     rows: Dict[str, Dict[str, Any]] = {}
-    marks = _marks(list(positions.keys()))
+    # Quote-convention resolution (crypto 'BTC' -> 'BTC-USD') so a bare crypto
+    # ticker never projects at a colliding equity's price.
+    qsyms = {s: _quote_symbol(s, p.get("asset_type") or "")
+             for s, p in positions.items()}
+    marks = _marks(list(qsyms.values()))
     for s, p in positions.items():
-        mark = marks.get(s) or float(p.get("avg_cost") or 0)
+        mark = marks.get(qsyms[s]) or float(p.get("avg_cost") or 0)
         rows[s] = {"symbol": s, "asset_type": p.get("asset_type") or "stock",
                    "shares": float(p.get("qty") or 0), "mark": mark}
     # apply the trade
@@ -626,6 +641,36 @@ def evaluate(proposal: Dict[str, Any]) -> RiskDecision:
             return RiskDecision(decision="block", reason="qty must be a finite number > 0")
         order_notional = aj_db.money(qty * price)
 
+        # An order LARGER than the confirmed held position FLIPS it (a sell
+        # beyond a held long opens a short; a buy beyond a held short opens a
+        # long). The excess is risk-INCREASING, so the closing exemptions must
+        # not cover it: re-check the allowlist here and let the per-order cap
+        # below bind on the full order.
+        if closing_sell and held_now is not None and qty > abs(held_now) + 1e-9:
+            closing_sell = False
+            confirmed_closing_sell = False
+            if not _open_universe and symbol not in allow:
+                _record("block", "flip beyond held qty; symbol not in allowlist",
+                        caps, None, pid)
+                return RiskDecision(
+                    decision="block",
+                    reason="{} {} qty {} exceeds held {} (would flip the position) "
+                           "and symbol is not in allowlist".format(
+                               symbol, side, qty, held_now))
+
+        # Day-P&L blindness is fail-CLOSED for risk-increasing orders: any
+        # warning from the P&L legs (paper book unavailable / missing marks)
+        # means the daily-loss HALT above ran on incomplete data, so only
+        # risk-reducing closes may proceed until the data heals.
+        if pnl.get("warnings") and not closing_sell:
+            wtxt = "; ".join(str(w) for w in pnl["warnings"])
+            _record("block", "day P&L degraded: " + wtxt[:200], caps,
+                    pnl.get("day_pnl"), pid)
+            return RiskDecision(
+                decision="block",
+                reason="day P&L degraded ({}) — new risk blocked (fail-closed)".format(
+                    wtxt[:120]))
+
         # Step 4 — per-order notional cap (0 => block). A risk-REDUCING held-sell
         # against a CONFIRMED position (confirmed_closing_sell) is EXEMPT: it can
         # only unwind existing exposure, so capping it would strand a position
@@ -641,9 +686,13 @@ def evaluate(proposal: Dict[str, Any]) -> RiskDecision:
                                     reason="order ${:,.2f} exceeds per-order cap ${:,.2f}".format(
                                         order_notional, max_notional))
 
-        # Step 5 — trades/day cap (0 => block)
+        # Step 5 — trades/day cap (0 => block; UNKNOWN count => block)
         max_trades = int(cfg.get("max_trades_per_day") or 0)
         done_today = _trades_today()
+        if done_today is None:
+            _record("block", "trades-today count unavailable", caps, None, pid)
+            return RiskDecision(decision="block",
+                                reason="trades/day count unavailable (fail-closed)")
         if not (max_trades > 0 and done_today < max_trades):
             _record("block", "trades today {} >= cap {}".format(done_today, max_trades),
                     caps, None, pid)

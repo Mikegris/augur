@@ -85,7 +85,21 @@ def _scan_universe() -> List[str]:
 
     universe.discard("")
     cap = int(cfg.get("scan_universe_max") or 25)
-    return sorted(universe)[:cap]
+    # Priority-first capping: a plain alphabetical slice deterministically
+    # blind-spots late-alphabet names FOREVER (their forecast-driven sells are
+    # never evaluated). Allowlist picks and currently-held paper-book names
+    # survive the cap first; the remainder fills alphabetically.
+    held_syms: List[str] = []
+    try:
+        import aj_positions
+        held_syms = sorted(
+            s for s, p in (aj_positions.paper_book().get("positions") or {}).items()
+            if float(p.get("qty") or 0) != 0 and not str(s).startswith("OPT:"))
+    except Exception:
+        log.debug("open-universe: paper book unavailable", exc_info=True)
+    prio = list(dict.fromkeys([s for s in allow if s in universe] + held_syms))
+    rest = sorted(universe - set(prio))
+    return (prio + rest)[:cap]
 
 
 # ── forecast ──────────────────────────────────────────────────────────────────
@@ -343,11 +357,17 @@ def _propose_and_execute(cycle_id: str, symbol: str, decision: Dict[str, Any],
 
 
 def _option_order(opt: Dict[str, Any], target_notional: float,
-                  base_thesis: str) -> Optional[Dict[str, Any]]:
+                  base_thesis: str, cap_notional: float = 0.0) -> Optional[Dict[str, Any]]:
     """Build {symbol, sizing, decision, instrument} for a long option from a
-    target notional (premium-sized, whole contracts). None if unaffordable."""
+    target notional (premium-sized, whole contracts). None if unaffordable.
+
+    When the target can't cover a single contract but `cap_notional` (the hard
+    per-order cap) can, size UP to one contract so the sleeve engages instead of
+    silently falling through — the risk gate still validates the result."""
     prem = float((opt or {}).get("premium_contract") or 0)
     n_ct = int(target_notional // prem) if prem > 0 else 0
+    if opt and n_ct < 1 and prem > 0 and 0 < prem <= float(cap_notional or 0):
+        n_ct = 1
     if not opt or n_ct < 1:
         return None
     t = opt["option_type"][0].upper()
@@ -395,7 +415,8 @@ def _bearish_put_entry(cycle_id: str, symbol: str, fc: Dict[str, Any],
     max_notional = aj_db.money(cfg.get("max_order_notional_usd") or 0)
     target = aj_db.money(cfg.get("order_notional_target_usd") or 0) or aj_db.money(max_notional * 0.5)
     target = min(target, max_notional)
-    oo = _option_order(opt, target, "rule: bearish prob_up={:.2f} -> long put".format(float(prob)))
+    oo = _option_order(opt, target, "rule: bearish prob_up={:.2f} -> long put".format(float(prob)),
+                       cap_notional=max_notional)
     if not oo:
         return None
     out = _propose_and_execute(cycle_id, oo["symbol"], oo["decision"], oo["sizing"],
@@ -426,20 +447,42 @@ def _close_expired_options(cycle_id: str, cfg: Dict[str, Any]) -> List[Dict[str,
             dte = aj_options._days_to(meta["expiry"])
             if dte is None or dte >= 0:
                 continue   # not expired
+            # Book the close at INTRINSIC value, not a hardcoded 0: an ITM
+            # contract is worth (spot - strike) x multiplier at expiry, and
+            # booking it worthless realizes a fake 100% loss that corrupts
+            # equity/drawdown stats and the trade labels the ML trains on.
+            close_px = 0.0
+            try:
+                import aj_risk
+                und = meta["underlying"]
+                spot = aj_risk._marks([und]).get(und)
+                if spot is not None and float(spot) > 0:
+                    mult = float(meta.get("contract_multiplier")
+                                 or aj_options._config_multiplier())
+                    strike = float(meta["strike"])
+                    if str(meta["option_type"]).lower().startswith("c"):
+                        intrinsic = max(0.0, float(spot) - strike)
+                    else:
+                        intrinsic = max(0.0, strike - float(spot))
+                    close_px = round(intrinsic * mult, 2)
+            except Exception:
+                log.debug("intrinsic pricing failed for %s; booking 0", sym,
+                          exc_info=True)
             try:
                 oid = aj_db.insert(
                     "aj_orders", proposal_id=0,
                     client_order_id="ajexp-{}-{}".format(sym, cycle_id),
                     broker="paper", mode="paper", symbol=sym, side="sell", qty=qty,
                     order_type="market", state="filled", filled_qty=qty,
-                    avg_fill_price=0.0, fees_usd=0.0, created_at=aj_db.utc_now_iso(),
+                    avg_fill_price=close_px, fees_usd=0.0, created_at=aj_db.utc_now_iso(),
                     terminal_at=aj_db.utc_now_iso(), instrument_type="option",
                     underlying=meta["underlying"], option_type=meta["option_type"],
                     strike=meta["strike"], expiry=meta["expiry"])
-                aj_db.insert("aj_fills", order_id=oid, qty=qty, price=0.0,
+                aj_db.insert("aj_fills", order_id=oid, qty=qty, price=close_px,
                              fees_usd=0.0, filled_at=aj_db.utc_now_iso())
                 aj_db.audit("option_expiry_close",
-                            {"symbol": sym, "qty": qty}, cycle_id=cycle_id)
+                            {"symbol": sym, "qty": qty, "price": close_px},
+                            cycle_id=cycle_id)
                 out.append({"symbol": sym, "result": "expired_closed", "qty": qty})
             except Exception:
                 log.exception("expiry close failed for %s", sym)
@@ -499,6 +542,16 @@ def _process_exits(cycle_id: str, cfg: Dict[str, Any]) -> List[Dict[str, Any]]:
                       and float(r.get("exec", {}).get("qty", 0) or 0) >= 0}
             done_syms = {r.get("symbol") for r in out}   # any sell processed this cycle
             marks = aj_risk._marks([s for s in book if s not in done_syms])
+            # Entry timestamps live in aj_position_state (stamped by
+            # aj_rules.update_position_state), NOT in the paper book — without
+            # this lookup pos.get("opened_at") is always None and the time-stop
+            # silently never fires.
+            opened_at_by_sym: Dict[str, Any] = {}
+            try:
+                opened_at_by_sym = {r["symbol"]: r.get("opened_at") for r in
+                                    aj_db.query("SELECT symbol, opened_at FROM aj_position_state")}
+            except Exception:
+                log.debug("position-state opened_at lookup failed", exc_info=True)
             for sym, pos in list(book.items()):
                 if sym in done_syms:
                     continue
@@ -510,7 +563,8 @@ def _process_exits(cycle_id: str, cfg: Dict[str, Any]) -> List[Dict[str, Any]]:
                 position["symbol"] = sym
                 lkey = "__aj_ladder_" + sym
                 # time-stop -> full exit
-                ts = _ea.time_stop(position, cfg, mark=mk, opened_at=pos.get("opened_at"))
+                ts = _ea.time_stop(position, cfg, mark=mk,
+                                   opened_at=pos.get("opened_at") or opened_at_by_sym.get(sym))
                 if ts.get("exit"):
                     dec = {"side": "sell", "thesis": "exit: " + str(ts.get("reason") or "time-stop"),
                            "edge_pts": 0.0}
@@ -520,10 +574,14 @@ def _process_exits(cycle_id: str, cfg: Dict[str, Any]) -> List[Dict[str, Any]]:
                     r["symbol"] = sym
                     r["exit_reason"] = "time_stop"
                     out.append(r)
-                    try:
-                        aj_db.set_setting_raw(lkey, "")        # clear ladder on full exit
-                    except Exception:
-                        pass
+                    # Clear the ladder mark only when the sell actually
+                    # EXECUTED — clearing on a gate-blocked sell would let
+                    # already-taken rungs re-trigger next cycle and double-trim.
+                    if r.get("result") == "executed":
+                        try:
+                            aj_db.set_setting_raw(lkey, "")    # clear ladder on full exit
+                        except Exception:
+                            pass
                     continue
                 # profit ladder -> trim only rungs ABOVE the high-water mark
                 rungs = [x for x in _ea.profit_ladder(position, cfg, mark=mk) if x.get("triggered")]
@@ -537,11 +595,13 @@ def _process_exits(cycle_id: str, cfg: Dict[str, Any]) -> List[Dict[str, Any]]:
                     import database as _db
                     rung = None
                     new_mark = None
+                    prev_raw = ""
                     try:
                         with _db._write_lock:
                             conn = _db.get_conn()
                             row = conn.execute(
                                 "SELECT value FROM settings WHERE key=?", (lkey,)).fetchone()
+                            prev_raw = "" if not row else (row["value"] or "")
                             try:
                                 done = float((row["value"] if row else 0) or 0)
                             except (TypeError, ValueError):
@@ -582,6 +642,24 @@ def _process_exits(cycle_id: str, cfg: Dict[str, Any]) -> List[Dict[str, Any]]:
                             r["symbol"] = sym
                             r["exit_reason"] = "profit_ladder"
                             out.append(r)
+                            if r.get("result") != "executed" and new_mark is not None:
+                                # The trim was blocked (halt/session/gate): roll
+                                # the high-water mark back with a CAS so the rung
+                                # isn't permanently consumed without a sell — it
+                                # re-triggers on a later cycle when unblocked.
+                                try:
+                                    with _db._write_lock:
+                                        conn = _db.get_conn()
+                                        conn.execute(
+                                            "UPDATE settings SET value=? WHERE key=? AND value=?",
+                                            (prev_raw, lkey, str(new_mark)))
+                                        conn.commit()
+                                    try:
+                                        _db._invalidate_settings_cache()
+                                    except Exception:
+                                        pass
+                                except Exception:
+                                    log.debug("ladder mark rollback failed", exc_info=True)
         except Exception:
             log.debug("supplementary exits skipped", exc_info=True)
     return out
@@ -636,9 +714,14 @@ def run_once(mode: str = "paper") -> Dict[str, Any]:
 
     summary: Dict[str, Any] = {"ok": True, "mode": mode, "proposals": [],
                                "session": None}
-    cycle_id = aj_db.open_cycle(mode)
-    summary["cycle_id"] = cycle_id
+    cycle_id: Optional[str] = None
     try:
+        # open_cycle INSIDE the try/finally: if it raises (DB locked/disk full),
+        # the finally below still releases the single-instance flock — otherwise
+        # a long-lived process leaks the held lock and every later scheduled or
+        # manual cycle reports "another operator cycle is running" until restart.
+        cycle_id = aj_db.open_cycle(mode)
+        summary["cycle_id"] = cycle_id
         session = aj_db.market_session()
         summary["session"] = session
         aj_db.audit("connect", {"cycle_id": cycle_id, "mode": mode,
@@ -690,6 +773,7 @@ def run_once(mode: str = "paper") -> Dict[str, Any]:
         # RELATIVE opportunities by realized forecast edge (not an absolute bar).
         # Forecasts are cached, so the per-symbol loop below reuses them. Exits
         # already ran above, so narrowing new-entry candidates is safe.
+        fc_cache: Dict[str, Any] = {}
         if cfg.get("cross_sectional_selection"):
             try:
                 import aj_select
@@ -698,8 +782,20 @@ def run_once(mode: str = "paper") -> Dict[str, Any]:
                     fcx = _forecast(s, horizon)
                     if fcx and fcx.get("ensemble"):
                         cands.append((s, fcx))
+                        # Reuse in the per-symbol loop: a second _forecast call
+                        # would log a duplicate accountability-ledger row per
+                        # selected name, double-weighting Brier/accuracy stats.
+                        fc_cache[s] = fcx
                 top = aj_select.select_top_n(cands, cfg)
                 scan = [s for s, _ in top]
+                # select_top_n keeps only BULLISH edges, but the scan drives
+                # SELLS too (_judge's forecast sell + the bearish-put entry) —
+                # held names whose forecast turned bearish must stay in the
+                # loop or they can only ever exit via mechanical stops.
+                held_scan = [s for s, q in held.items()
+                             if float(q or 0) > 0 and not str(s).startswith("OPT:")
+                             and s not in set(scan)]
+                scan = list(dict.fromkeys(scan + held_scan))
                 summary["cross_sectional"] = {"considered": len(cands),
                                               "selected": len(scan)}
             except Exception:
@@ -734,7 +830,7 @@ def run_once(mode: str = "paper") -> Dict[str, Any]:
                         continue
                 except Exception:
                     pass
-                fc = _forecast(symbol, horizon)
+                fc = fc_cache.get(symbol) or _forecast(symbol, horizon)
                 if not fc or not fc.get("ensemble"):
                     summary["proposals"].append({"symbol": symbol, "result": "no_signal"})
                     continue
@@ -877,6 +973,19 @@ def run_once(mode: str = "paper") -> Dict[str, Any]:
                         prem = float((opt or {}).get("premium_contract") or 0)
                         target = float(sizing.get("notional") or 0)
                         n_ct = int(target // prem) if prem > 0 else 0
+                        # The per-trade equity target is often smaller than a
+                        # single contract (premium x100), which silently floored
+                        # n_ct to 0 and forced the equity fallback every time —
+                        # the options sleeve never engaged. When a contract is
+                        # chosen but unaffordable at the equity size, size UP to
+                        # exactly one contract, bounded by the hard per-order
+                        # notional cap. The risk gate still validates the result
+                        # (exposure/buying-power) and may block it; this only
+                        # removes the silent 0-contract dead end.
+                        if opt and n_ct < 1 and prem > 0:
+                            cap = float(cfg.get("max_order_notional_usd") or 0)
+                            if 0 < prem <= cap:
+                                n_ct = 1
                         if opt and n_ct >= 1:
                             p_symbol = opt["symbol"]
                             p_sizing = {"qty": n_ct, "price": prem,
@@ -989,7 +1098,8 @@ def run_once(mode: str = "paper") -> Dict[str, Any]:
         return summary
     except Exception as e:
         log.exception("run_once failed")
-        aj_db.close_cycle(cycle_id, "crashed")
+        if cycle_id is not None:
+            aj_db.close_cycle(cycle_id, "crashed")
         summary["ok"] = False
         summary["error"] = str(e)
         return summary

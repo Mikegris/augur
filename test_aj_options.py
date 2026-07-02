@@ -205,7 +205,9 @@ def test_close_expired_options():
     for t in ("aj_fills", "aj_orders"):
         conn.execute("DELETE FROM " + t)
     conn.commit()
-    sym = O.format_symbol("AAPL", _future(-3), "call", 150.0)   # already expired
+    # already expired, deep OTM (strike far above any spot) so the intrinsic-
+    # value expiry pricing books it worthless — the full-premium-loss case
+    sym = O.format_symbol("AAPL", _future(-3), "call", 99999.0)
     oid = aj_db.insert("aj_orders", proposal_id=0, client_order_id="seed1", broker="paper",
                        mode="paper", symbol=sym, side="buy", qty=2, order_type="limit",
                        state="filled", filled_qty=2, avg_fill_price=500.0,
