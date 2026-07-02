@@ -109,6 +109,26 @@ def size_order(symbol: str, side: str, cfg: Dict[str, Any], held_qty: float,
     if side != "sell" and target <= 0:
         return None
 
+    # Cash-account clamp: never PROPOSE beyond available cash. The risk gate
+    # (step 4b) is the enforcing rail and would block the order anyway —
+    # clamping here turns a would-be block into a right-sized entry that
+    # spends what's actually left. Unknown cash => skip the entry (the gate
+    # would fail-close it); a no-cash-configured account is a no-op.
+    if side == "buy":
+        try:
+            import aj_alpha
+            bp = aj_alpha.buying_power(cfg)
+            if bp.get("enabled"):
+                avail = bp.get("available")
+                if avail is None:
+                    return None
+                if target > avail:
+                    target = aj_db.money(avail)
+                if target <= 0:
+                    return None
+        except Exception:
+            log.debug("buying-power clamp skipped", exc_info=True)
+
     if side == "sell":
         # A sell is an EXIT — close the full held position. The notional target
         # (half the per-order cap) is a sizing budget for opening exposure, not a

@@ -4529,6 +4529,7 @@ async function loadTradingView() {
           f('Limit offset', num('aj-cfg-entry_limit_offset_bps', cfg.entry_limit_offset_bps, '1', 'bps'), 'How far from the quote to place a limit order, in basis points.') +
           f('Order time-to-live', num('aj-cfg-order_ttl_cycles', cfg.order_ttl_cycles, null, 'cycles'), 'Cancel an unfilled order after this many cycles.') +
           f('Max slippage', num('aj-cfg-max_slippage_bps', cfg.max_slippage_bps, '0.5', 'bps'), 'Reject a fill if slippage exceeds this (basis points).') +
+          f('Account cash $', num('aj-cfg-paper_cash', cfg.paper_cash, null, '$'), 'The capital base the agent trades WITHIN: entries are sized to and gated by available cash (base − open positions + realized P&L). 0 = legacy unfunded book (no cash limit). Live mode uses the broker’s settled cash instead.') +
           f('Paper slippage', num('aj-cfg-paper_slippage_bps', cfg.paper_slippage_bps, '0.5', 'bps'), 'Simulated slippage added to paper fills, for realism.') +
           f('Paper partial fills', yn('aj-cfg-paper_partial_fills', cfg.paper_partial_fills), 'Simulate liquidity-bounded partial fills (remainder completes on later polls) so partial-fill handling is exercised in paper as it would be live.') +
           f('  ↳ fill liquidity $', num('aj-cfg-paper_fill_liquidity_usd', cfg.paper_fill_liquidity_usd, null, '$'), 'Nominal per-order liquidity budget; orders larger than this fill partially.') +
@@ -4723,6 +4724,7 @@ async function loadTradingView() {
       use_llm_synthesis: vBool('aj-cfg-use_llm_synthesis'),
       default_broker: vStr('aj-cfg-default_broker') || 'paper',
       auto_approve_paper: vBool('aj-cfg-auto_approve_paper'),
+      paper_cash: vNum('aj-cfg-paper_cash'),
       paper_slippage_bps: vNum('aj-cfg-paper_slippage_bps'),
       paper_partial_fills: vBool('aj-cfg-paper_partial_fills'),
       paper_fill_liquidity_usd: vNum('aj-cfg-paper_fill_liquidity_usd'),

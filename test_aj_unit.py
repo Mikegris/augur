@@ -198,6 +198,86 @@ def test_gate_missing_quote_blocks():
     assert d["decision"] == "block" and ("quote" in d["reason"] or "price" in d["reason"])
 
 
+# ── cash account / buying power (step 4b) ─────────────────────────────────────
+
+def test_cash_account_gate_and_reconciles():
+    import aj_alpha, aj_execution
+    _reset(); _quotes({"NVDA": 800}); _full_config(paper_cash=1000.0)
+    # buy within available cash passes; beyond it blocks
+    d = aj_risk.evaluate({"symbol": "NVDA", "side": "buy", "qty": 1, "order_type": "market"})
+    assert d["decision"] == "pass", d
+    d = aj_risk.evaluate({"symbol": "NVDA", "side": "buy", "qty": 2, "order_type": "market"})
+    assert d["decision"] == "block" and "available cash" in d["reason"], d
+    # consume cash with a real fill: available drops by cost, so a 1-share
+    # buy that fit before no longer does (800 spent of 1000 -> 200 left)
+    oid = aj_db.insert("aj_orders", proposal_id=7, client_order_id="c7",
+                       broker="paper", mode="paper", symbol="NVDA", side="buy",
+                       qty=1, order_type="market", state="filled", filled_qty=1,
+                       avg_fill_price=800.0, created_at=aj_db.utc_now_iso())
+    aj_db.insert("aj_fills", order_id=oid, qty=1, price=800.0, fees_usd=0.0,
+                 filled_at=aj_db.utc_now_iso())
+    bp = aj_alpha.buying_power()
+    assert bp["enabled"] and bp["source"] == "paper"
+    assert abs(bp["available"] - 200.0) < 1e-6, bp
+    d = aj_risk.evaluate({"symbol": "NVDA", "side": "buy", "qty": 1, "order_type": "market"})
+    assert d["decision"] == "block" and "available cash" in d["reason"], d
+    # a risk-reducing SELL always passes the cash gate (it RAISES cash) — and
+    # after it fills, the proceeds reconcile back into available cash
+    d = aj_risk.evaluate({"symbol": "NVDA", "side": "sell", "qty": 1, "order_type": "market"})
+    assert d["decision"] == "pass", d
+    oid2 = aj_db.insert("aj_orders", proposal_id=8, client_order_id="c8",
+                        broker="paper", mode="paper", symbol="NVDA", side="sell",
+                        qty=1, order_type="market", state="filled", filled_qty=1,
+                        avg_fill_price=900.0, created_at=aj_db.utc_now_iso())
+    aj_db.insert("aj_fills", order_id=oid2, qty=1, price=900.0, fees_usd=0.0,
+                 filled_at=aj_db.utc_now_iso())
+    bp = aj_alpha.buying_power()
+    # base 1000 - 0 open cost + 100 realized = 1100 (P&L flowed back in)
+    assert abs(bp["available"] - 1100.0) < 1e-6, bp
+    # reconcile's cash invariant holds
+    r = aj_execution.reconcile(venue="paper")
+    cash = (r["detail"]["scopes"].get("cash") or {})
+    assert cash.get("invariant_ok") is True, cash
+
+
+def test_cash_account_unknown_blocks_and_unfunded_unchanged():
+    import aj_alpha, aj_positions
+    _reset(); _quotes({"NVDA": 800}); _full_config(paper_cash=1000.0)
+    # ledger unreadable -> available UNKNOWN -> new risk blocked (fail-closed)
+    _orig = aj_positions.paper_book
+    aj_positions.paper_book = lambda *a, **k: (_ for _ in ()).throw(RuntimeError("db down"))
+    try:
+        bp = aj_alpha.buying_power()
+        assert bp["enabled"] and bp["available"] is None, bp
+        d = aj_risk.evaluate({"symbol": "NVDA", "side": "buy", "qty": 1,
+                              "order_type": "market"})
+        assert d["decision"] == "block", d
+    finally:
+        aj_positions.paper_book = _orig
+    # legacy unfunded book (paper_cash 0): gate inactive, buys pass as before
+    _reset(); _quotes({"NVDA": 800}); _full_config()
+    bp = aj_alpha.buying_power()
+    assert bp["enabled"] is False
+    d = aj_risk.evaluate({"symbol": "NVDA", "side": "buy", "qty": 5, "order_type": "market"})
+    assert d["decision"] == "pass", d
+
+
+def test_cash_account_sizing_clamps_to_available():
+    import aj_strategy, aj_config
+    _reset(); _quotes({"NVDA": 100}); _full_config(
+        paper_cash=500.0, max_order_notional_usd=10000,
+        order_notional_target_usd=2000.0)
+    s = aj_strategy.size_order("NVDA", "buy", aj_config.get_config(), 0.0,
+                               {"side": "buy", "edge_pts": 10})
+    assert s is not None, "entry should be clamped, not skipped"
+    # target 2000 clamped to the 500 available -> 5 shares at $100
+    assert s["notional"] <= 500.0 + 1e-6, s
+    # sells are never cash-clamped (they raise cash)
+    s = aj_strategy.size_order("NVDA", "sell", aj_config.get_config(), 3.0,
+                               {"side": "sell"})
+    assert s is not None and abs(s["qty"] - 3.0) < 1e-9, s
+
+
 def test_gate_exception_fails_closed():
     _reset(); _full_config()
     orig = aj_risk._order_price

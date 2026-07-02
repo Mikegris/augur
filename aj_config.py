@@ -44,6 +44,13 @@ DEFAULTS: Dict[str, Any] = {
     # handling and order TTL are exercised in paper exactly as live. Opt-in.
     "paper_partial_fills":    False,
     "paper_fill_liquidity_usd": 25000.0,  # nominal per-order liquidity budget
+    # Cash account: the capital base the agent may trade WITH. 0 (default)
+    # keeps the legacy unfunded book (no buying-power gate). When set, the
+    # agent derives available cash from its fills ledger (base - open cost +
+    # realized P&L), sizes entries within it, and the risk gate blocks any
+    # buy beyond it (live mode uses the broker's settled cash instead).
+    # Stored as aj_paper_cash — the same setting aj_alpha has always read.
+    "paper_cash":             0.0,
     "fee_bps":                0.0,     # commission-free equities default
     "min_fee_usd":            0.0,
     "crypto_fee_bps":         10.0,    # exchange-typical for crypto venues
@@ -341,8 +348,8 @@ _FLOAT_KEYS = {"max_order_notional_usd", "max_daily_loss_usd",
                "risk_governor_max", "risk_governor_min", "rg_drawdown_derisk_pct",
                "rg_drawdown_breaker_pct", "rg_vix_derisk", "rg_alpha_decay_floor_pct",
                "rg_lever_min_expectancy_pct",
-               # paper fill realism
-               "paper_fill_liquidity_usd"}
+               # paper fill realism + cash account
+               "paper_fill_liquidity_usd", "paper_cash"}
 _INT_KEYS = {"max_trades_per_day", "forecast_horizon_days", "scan_universe_max",
              "order_ttl_cycles", "exit_cooldown_min", "max_open_positions",
              "max_trades_per_symbol_per_day", "trade_skip_open_min",

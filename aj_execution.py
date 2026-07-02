@@ -391,6 +391,48 @@ def reconcile(broker: Optional[aj_broker.BrokerClient] = None,
             except Exception:
                 log.exception("halt-on-recon-error failed")
 
+    # ── cash-account reconciliation ───────────────────────────────────────────
+    # Paper: available cash is derived from the fills ledger by construction,
+    # so this is an INVARIANT check (available == base − open cost + realized,
+    # equity == available + book MV) — drift means a bookkeeping bug, not a
+    # market event. Live: compare our ledger-derived view against the venue's
+    # settled cash; sustained drift means fills/fees exist that we never
+    # recorded. Never affects `status`-driven halts on its own (advisory), but
+    # is persisted + audited so the operator sees it.
+    try:
+        import aj_alpha
+        bp = aj_alpha.buying_power()
+        if bp.get("enabled"):
+            cash_scope: Dict[str, Any] = {"source": bp.get("source"),
+                                          "available": bp.get("available"),
+                                          "base": bp.get("base"),
+                                          "equity": bp.get("equity")}
+            if bp.get("source") == "paper" and bp.get("available") is not None:
+                import aj_positions
+                book = aj_positions.paper_book()
+                positions = book.get("positions") or {}
+                open_cost = sum(float((p or {}).get("cost_basis") or 0)
+                                for p in positions.values())
+                expect = max(0.0, float(bp.get("base") or 0) - open_cost
+                             + float(book.get("realized_total") or 0))
+                drift = abs(float(bp["available"]) - expect)
+                cash_scope["invariant_ok"] = drift <= 0.01
+                if drift > 0.01:
+                    aj_db.audit("alert", {"kind": "cash_invariant_drift",
+                                          "available": bp["available"],
+                                          "expected": expect}, cycle_id=cycle_id)
+            elif bp.get("source") == "live" and is_live:
+                # Ledger-derived view of what live cash SHOULD be, vs venue truth.
+                venue_cash = bp.get("available")
+                cash_scope["venue_cash"] = venue_cash
+                if venue_cash is None:
+                    cash_scope["invariant_ok"] = False
+                    aj_db.audit("alert", {"kind": "live_cash_unknown"},
+                                cycle_id=cycle_id)
+            detail["scopes"]["cash"] = cash_scope
+    except Exception:
+        log.debug("cash reconciliation skipped", exc_info=True)
+
     rid = aj_db.insert("aj_recon", ts=aj_db.utc_now_iso(),
                        scope="all", status=status,
                        detail_json=json.dumps(detail, default=str))

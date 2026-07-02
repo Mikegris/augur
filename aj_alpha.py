@@ -194,6 +194,74 @@ def available_paper_cash() -> float:
         return max(0.0, base)
 
 
+def buying_power(cfg: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """The agent's cash account — ONE authority consumed by the risk gate,
+    sizing, reconciliation, and the UI, so they can never disagree about what
+    'available' means. Returns {source: 'paper'|'live', enabled, base,
+    available, equity}.
+
+      * paper — available is DERIVED from the fills ledger (base − open cost
+        basis + fee-net realized P&L), so every fill reconciles back into the
+        account by construction. No base configured => enabled=False and every
+        consumer preserves the legacy unfunded-book behaviour.
+      * live  — the venue's settled cash (broker.cash()) is authoritative;
+        hooking up a new broker changes nothing but this branch.
+
+    available is None when UNKNOWN (ledger/broker error): the risk gate treats
+    unknown as no-new-risk (fail-closed) — deliberately NOT the fail-open
+    available_paper_cash() fallback, which is for advisory sizing math."""
+    try:
+        import aj_config
+        cfg = cfg or aj_config.get_config()
+    except Exception:
+        cfg = cfg or {}
+    if cfg.get("live_trading_enabled"):
+        try:
+            import aj_broker
+            b = aj_broker.get_broker(cfg.get("default_broker") or "paper")
+            if getattr(b, "mode", "paper") == "live":
+                try:
+                    c = b.cash()
+                    avail = (float(c) if isinstance(c, (int, float))
+                             and math.isfinite(float(c)) and float(c) >= 0 else None)
+                except Exception:
+                    log.debug("buying_power: live cash read failed", exc_info=True)
+                    avail = None
+                return {"source": "live", "enabled": True, "base": None,
+                        "available": avail, "equity": None}
+        except Exception:
+            # The live adapter can't even be CONSTRUCTED (VERIFY gate off /
+            # secrets missing): no order can reach a live venue either
+            # (execute_trade rejects via BrokerNotEnabled), so the PAPER book
+            # below is the truthful account for anything that can still trade.
+            # Contrast: a CONSTRUCTED live broker whose cash() errors returns
+            # available=None above — that venue can hold real orders, so its
+            # unknown cash must fail closed.
+            log.debug("buying_power: live broker unavailable -> paper view",
+                      exc_info=True)
+    base = _paper_cash()
+    if base <= 0:
+        return {"source": "paper", "enabled": False, "base": 0.0,
+                "available": None, "equity": account_equity()}
+    try:
+        # Direct paper_book() call, NOT the _paper_book() wrapper: the wrapper
+        # swallows ledger errors into an empty book, which would report
+        # available == base while the truth is unknown — the exact fail-open
+        # this authority exists to prevent. Here an error must yield None.
+        import aj_positions
+        book = aj_positions.paper_book()
+        positions = book.get("positions") or {}
+        open_cost = sum(float((p or {}).get("cost_basis") or 0)
+                        for p in positions.values())
+        realized = float(book.get("realized_total") or 0)
+        avail = max(0.0, base - open_cost + realized)
+    except Exception:
+        log.debug("buying_power: ledger read failed -> unknown", exc_info=True)
+        avail = None
+    return {"source": "paper", "enabled": True, "base": base,
+            "available": avail, "equity": account_equity()}
+
+
 def account_equity(positions: Optional[Dict[str, Any]] = None,
                    marks: Optional[Dict[str, Optional[float]]] = None) -> float:
     """Account equity = available cash + current market value of all open paper

@@ -187,6 +187,13 @@ def status() -> Dict[str, Any]:
         out["scheduler"] = aj_autonomy.scheduler_status(cfg)
     except Exception:
         log.debug("status scheduler failed", exc_info=True)
+    # Cash account: base / available / equity from the single authority the
+    # gate and sizing consume — the dashboard shows exactly what binds.
+    try:
+        import aj_alpha
+        out["buying_power"] = aj_alpha.buying_power(cfg)
+    except Exception:
+        log.debug("status buying_power failed", exc_info=True)
     # Screen-sweep telemetry (#11): cursor/hit-rate/pool depth written by
     # aj_universe.screen() each cycle, so a 429-driven universe collapse is
     # visible on the dashboard instead of silently degrading to crypto-only.

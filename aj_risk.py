@@ -718,6 +718,43 @@ def evaluate(proposal: Dict[str, Any]) -> RiskDecision:
                                     reason="order ${:,.2f} exceeds per-order cap ${:,.2f}".format(
                                         order_notional, max_notional))
 
+        # Step 4b — buying power (cash account). Binds exactly when a REAL
+        # cash scope exists (bp.enabled): a configured paper base, or a
+        # constructed live broker. The legacy unfunded book — and live-enabled
+        # with an unverified/un-constructable adapter, where only the paper
+        # book can trade — stays untouched. A risk-reducing CLOSE is exempt
+        # (a sell RAISES cash; a confirmed cover must never be stranded for
+        # cash). UNKNOWN available cash blocks new risk — fail-closed,
+        # matching the day-P&L rule above.
+        if side == "buy" and not closing_sell:
+            bp = None
+            try:
+                import aj_alpha
+                bp = aj_alpha.buying_power(cfg)
+            except Exception:
+                log.exception("buying_power failed")
+            if bp is None:
+                # The authority itself crashed: fail closed only when a cash
+                # scope is configured — never break the legacy unfunded book.
+                if bool(cfg.get("live_trading_enabled")) or \
+                        aj_db.money(cfg.get("paper_cash") or 0) > 0:
+                    _record("block", "buying-power check failed", caps, None, pid)
+                    return RiskDecision(decision="block",
+                                        reason="available cash unknown (fail-closed)")
+            elif bp.get("enabled"):
+                avail = bp.get("available")
+                if avail is None:
+                    _record("block", "available cash unknown", caps, None, pid)
+                    return RiskDecision(decision="block",
+                                        reason="available cash unknown (fail-closed)")
+                if order_notional > avail + 0.01:
+                    _record("block", "order {} > available cash {}".format(
+                        order_notional, aj_db.money(avail)), caps, None, pid)
+                    return RiskDecision(
+                        decision="block",
+                        reason="order ${:,.2f} exceeds available cash ${:,.2f}".format(
+                            order_notional, avail))
+
         # Step 5 — trades/day cap (0 => block; UNKNOWN count => block)
         max_trades = int(cfg.get("max_trades_per_day") or 0)
         done_today = _trades_today()
