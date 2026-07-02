@@ -4470,7 +4470,8 @@ async function loadTradingView() {
           f('Trade options (long calls/puts, paper)', yn('aj-cfg-trade_options', cfg.trade_options), 'When on, the agent may express a signal as a long call or put instead of stock. Paper only.') +
           f('Option target DTE', num('aj-cfg-option_target_dte', cfg.option_target_dte, null, 'days'), 'Aim for a contract roughly this many days to expiration.') +
           f('Option moneyness (0=ATM)', num('aj-cfg-option_moneyness', cfg.option_moneyness, '0.01'), 'Strike offset from spot: 0=at-the-money, positive=out-of-the-money.') +
-          f('Contract multiplier', num('aj-cfg-option_contract_multiplier', cfg.option_contract_multiplier, null, '×'), 'Shares per contract (standard US equity options = 100).')
+          f('Contract multiplier', num('aj-cfg-option_contract_multiplier', cfg.option_contract_multiplier, null, '×'), 'Shares per contract (standard US equity options = 100).') +
+          f('Allow illiquid fallback', yn('aj-cfg-option_allow_illiquid_fallback', cfg.option_allow_illiquid_fallback), 'When nothing passes the open-interest/spread screen, still pick the best unscreened contract. OFF = screened-only (fail-closed).')
         )}
 
         ${group('🧠 Analyst Council (advisory)', 'A panel of analysts that debate a name — advisory only, never trades, double-gated', false,
@@ -4529,6 +4530,8 @@ async function loadTradingView() {
           f('Order time-to-live', num('aj-cfg-order_ttl_cycles', cfg.order_ttl_cycles, null, 'cycles'), 'Cancel an unfilled order after this many cycles.') +
           f('Max slippage', num('aj-cfg-max_slippage_bps', cfg.max_slippage_bps, '0.5', 'bps'), 'Reject a fill if slippage exceeds this (basis points).') +
           f('Paper slippage', num('aj-cfg-paper_slippage_bps', cfg.paper_slippage_bps, '0.5', 'bps'), 'Simulated slippage added to paper fills, for realism.') +
+          f('Paper partial fills', yn('aj-cfg-paper_partial_fills', cfg.paper_partial_fills), 'Simulate liquidity-bounded partial fills (remainder completes on later polls) so partial-fill handling is exercised in paper as it would be live.') +
+          f('  ↳ fill liquidity $', num('aj-cfg-paper_fill_liquidity_usd', cfg.paper_fill_liquidity_usd, null, '$'), 'Nominal per-order liquidity budget; orders larger than this fill partially.') +
           f('Paper spread crossed', num('aj-cfg-paper_spread_fraction', cfg.paper_spread_fraction, '0.1'), 'Fraction of the bid/ask spread paid on a paper fill (0–1).') +
           f('Skip after open', num('aj-cfg-trade_skip_open_min', cfg.trade_skip_open_min, null, 'min'), 'Avoid the volatile first N minutes after the open.') +
           f('Skip before close', num('aj-cfg-trade_skip_close_min', cfg.trade_skip_close_min, null, 'min'), 'Avoid the last N minutes before the close.') +
@@ -4572,6 +4575,7 @@ async function loadTradingView() {
           f('Pyramid max adds', num('aj-cfg-pyramid_max_adds', cfg.pyramid_max_adds, null, 'adds'), 'How many times you can add to one position.') +
           f('Pyramid min gain', num('aj-cfg-pyramid_min_gain_pct', cfg.pyramid_min_gain_pct, '0.5', '%'), 'A position must be up this much before adding.') +
           f('Signal scorecard', yn('aj-cfg-signal_scorecard', cfg.signal_scorecard), 'Track realized win-rate by entry conviction.') +
+          f('Adapter scorecard', yn('aj-cfg-adapter_scorecard', cfg.adapter_scorecard), 'Log every signal adapter’s forecasts, score them after the horizon, and decay the confidence of persistently uninformative sources.') +
           f('Opportunity radar', yn('aj-cfg-opportunity_radar', cfg.opportunity_radar), 'Rank the universe each cycle and trade only the best setups.') +
           f('Radar top-K', num('aj-cfg-opportunity_radar_top_k', cfg.opportunity_radar_top_k, null, 'names'), 'How many top-ranked names the radar keeps.')
         )}
@@ -4701,6 +4705,7 @@ async function loadTradingView() {
       screen_min_market_cap: vNum('aj-cfg-screen_min_market_cap'),
       // options (paper)
       trade_options: vBool('aj-cfg-trade_options'),
+      option_allow_illiquid_fallback: vBool('aj-cfg-option_allow_illiquid_fallback'),
       option_target_dte: vNum('aj-cfg-option_target_dte'),
       option_moneyness: vNum('aj-cfg-option_moneyness'),
       option_contract_multiplier: vNum('aj-cfg-option_contract_multiplier'),
@@ -4719,6 +4724,8 @@ async function loadTradingView() {
       default_broker: vStr('aj-cfg-default_broker') || 'paper',
       auto_approve_paper: vBool('aj-cfg-auto_approve_paper'),
       paper_slippage_bps: vNum('aj-cfg-paper_slippage_bps'),
+      paper_partial_fills: vBool('aj-cfg-paper_partial_fills'),
+      paper_fill_liquidity_usd: vNum('aj-cfg-paper_fill_liquidity_usd'),
       paper_spread_fraction: vNum('aj-cfg-paper_spread_fraction'),
       // enhancements
       conviction_sizing: vBool('aj-cfg-conviction_sizing'),
@@ -4769,6 +4776,7 @@ async function loadTradingView() {
       pyramid_max_adds: vNum('aj-cfg-pyramid_max_adds'),
       pyramid_min_gain_pct: vNum('aj-cfg-pyramid_min_gain_pct'),
       signal_scorecard: vBool('aj-cfg-signal_scorecard'),
+      adapter_scorecard: vBool('aj-cfg-adapter_scorecard'),
       opportunity_radar: vBool('aj-cfg-opportunity_radar'),
       opportunity_radar_top_k: vNum('aj-cfg-opportunity_radar_top_k'),
       // analyst council (advisory)
