@@ -60,9 +60,10 @@ def cmd_replay(argv):
     import os, subprocess
     env = dict(os.environ)
     env.pop("AUGUR_DB_PATH", None)   # let aj_replay pick the per-run DB
-    p = subprocess.run([sys.executable,
-                        os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                                     "aj_replay.py")] + list(argv), env=env)
+    # -m invocation (not a file path) so this also works from the frozen
+    # desktop bundle, where aj_replay lives inside python39.zip.
+    env["PYTHONPATH"] = os.pathsep.join(p for p in sys.path if p)
+    p = subprocess.run([sys.executable, "-m", "aj_replay"] + list(argv), env=env)
     return p.returncode
 
 

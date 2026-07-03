@@ -3657,6 +3657,117 @@ def aj_config_route():
         return _err(e)
 
 
+def _aj_replays_base(create=False):
+    """The replay artifacts dir, resolved robustly: env override first, then
+    repo-relative, then beside the (resolved) DB — the packaged desktop app
+    runs from a frozen bundle where __file__ is NOT the working repo."""
+    import os as _os
+    candidates = [
+        _os.environ.get("AJ_REPLAYS_DIR") or "",
+        _os.path.join(_os.path.dirname(_os.path.abspath(__file__)),
+                      "data", "replays"),
+    ]
+    try:
+        import database as _dbm
+        candidates.append(_os.path.join(
+            _os.path.dirname(_dbm.DB_PATH), "data", "replays"))
+        candidates.append(_os.path.join(
+            _os.path.dirname(_os.path.realpath(_dbm.DB_PATH)),
+            "data", "replays"))
+    except Exception:
+        pass
+    base = next((c for c in candidates if c and _os.path.isdir(c)), None)
+    if base is None:
+        # prefer beside-the-resolved-DB for a fresh dir (always writable and
+        # reachable from both the repo and the bundle)
+        base = candidates[-1] if len(candidates) > 2 else candidates[1]
+        if create:
+            _os.makedirs(base, exist_ok=True)
+    return base
+
+
+# One replay launch at a time from the UI; state lives here so /status can
+# report progress without a DB round-trip (the replay uses its OWN db anyway).
+_AJ_REPLAY_PROC = {"proc": None, "run_id": None, "started": None, "log": None}
+
+
+@app.route("/api/aj/replay/run", methods=["POST"])
+def aj_replay_run_route():
+    """Launch a historical replay in a fresh, DB-isolated subprocess. The
+    running app is never touched — artifacts land in the replays dir and the
+    Replay Lab panel picks them up when done."""
+    try:
+        import os as _os
+        import subprocess as _sp
+        import re as _re
+        from datetime import datetime as _dt, timedelta as _td, timezone as _tz
+        p = _AJ_REPLAY_PROC
+        if p["proc"] is not None and p["proc"].poll() is None:
+            return jsonify({"error": "a replay is already running",
+                            "run_id": p["run_id"]}), 409
+        data = request.get_json(silent=True) or {}
+        syms = [s.strip().upper() for s in
+                str(data.get("symbols") or "").replace(" ", ",").split(",")
+                if s.strip()]
+        syms = [s for s in syms if _re.match(r"^[A-Z0-9.\-^]{1,10}$", s)]
+        if not syms or len(syms) > 30:
+            return jsonify({"error": "1-30 valid symbols required"}), 400
+        end = str(data.get("end") or (_dt.now(_tz.utc) - _td(days=1)).strftime("%Y-%m-%d"))
+        start = str(data.get("start") or (_dt.now(_tz.utc) - _td(days=730)).strftime("%Y-%m-%d"))
+        if not (_re.match(r"^\d{4}-\d{2}-\d{2}$", start)
+                and _re.match(r"^\d{4}-\d{2}-\d{2}$", end) and start < end):
+            return jsonify({"error": "invalid start/end dates"}), 400
+        try:
+            cash = max(1000.0, min(1e8, float(data.get("cash") or 100000)))
+        except (TypeError, ValueError):
+            cash = 100000.0
+        import aj_replay
+        base = _aj_replays_base(create=True)
+        run_id = "ui_" + _dt.now(_tz.utc).strftime("%Y%m%d_%H%M%S")
+        prefix, env = aj_replay.spawn_cmd_env(run_id, base)
+        cache_dir = _os.path.join(_os.path.dirname(base), "replay_cache")
+        cmd = prefix + ["run", "--run-id", run_id, "--out-dir", base,
+                        "--cache-dir", cache_dir,
+                        "--symbols", ",".join(syms),
+                        "--start", start, "--end", end, "--cash", str(cash),
+                        "--forecaster",
+                        ("ensemble" if data.get("forecaster") == "ensemble"
+                         else "pit")]
+        log_path = _os.path.join(base, run_id, "run.log")
+        logf = open(log_path, "w")
+        proc = _sp.Popen(cmd, env=env, stdout=logf, stderr=_sp.STDOUT,
+                         cwd=_os.path.dirname(base) or None)
+        p.update({"proc": proc, "run_id": run_id, "log": log_path,
+                  "started": _dt.now(_tz.utc).isoformat()})
+        return jsonify({"launched": True, "run_id": run_id,
+                        "symbols": syms, "start": start, "end": end,
+                        "cash": cash})
+    except Exception as e:
+        return _err(e)
+
+
+@app.route("/api/aj/replay/status", methods=["GET"])
+def aj_replay_status_route():
+    try:
+        import os as _os
+        p = _AJ_REPLAY_PROC
+        if p["proc"] is None:
+            return jsonify({"running": False, "run_id": None})
+        rc = p["proc"].poll()
+        tail = ""
+        try:
+            if p["log"] and _os.path.exists(p["log"]):
+                with open(p["log"]) as f:
+                    tail = f.read()[-600:]
+        except Exception:
+            pass
+        return jsonify({"running": rc is None, "run_id": p["run_id"],
+                        "started": p["started"], "returncode": rc,
+                        "log_tail": tail})
+    except Exception as e:
+        return _err(e)
+
+
 @app.route("/api/aj/replays", methods=["GET"])
 def aj_replays_route():
     """Index + latest details of stored replay-engine artifacts (data/replays).
@@ -3665,25 +3776,7 @@ def aj_replays_route():
     try:
         import os as _os
         import json as _json
-        # Resolve the artifacts dir robustly: env override first, then the
-        # repo-relative default, then beside the DB (the packaged desktop app
-        # runs from a frozen bundle where __file__ is NOT the working repo).
-        candidates = [
-            _os.environ.get("AJ_REPLAYS_DIR") or "",
-            _os.path.join(_os.path.dirname(_os.path.abspath(__file__)),
-                          "data", "replays"),
-        ]
-        try:
-            import database as _dbm
-            candidates.append(_os.path.join(
-                _os.path.dirname(_dbm.DB_PATH), "data", "replays"))
-            candidates.append(_os.path.join(
-                _os.path.dirname(_os.path.realpath(_dbm.DB_PATH)),
-                "data", "replays"))
-        except Exception:
-            pass
-        base = next((c for c in candidates if c and _os.path.isdir(c)),
-                    candidates[1])
+        base = _aj_replays_base()
         runs, grids = [], []
         latest, latest_mtime = None, -1.0
         if _os.path.isdir(base):

@@ -862,16 +862,79 @@
   // ──────────────────────────────────────────────────────────────────────────
   //  15 · Replay Lab — historical replays + config grids (aj_replay artifacts)
   // ──────────────────────────────────────────────────────────────────────────
+  function replayForm() {
+    var today = new Date();
+    var end = new Date(today.getTime() - 86400000).toISOString().slice(0, 10);
+    var start = new Date(today.getTime() - 730 * 86400000).toISOString().slice(0, 10);
+    return '<div id="aj-replay-form" style="display:flex;flex-wrap:wrap;gap:6px;' +
+      'align-items:center;font-size:11px;margin-bottom:8px;padding:6px;' +
+      'background:#151515;border-radius:6px;">' +
+      '<input id="aj-replay-syms" placeholder="AAPL,MSFT,NVDA" ' +
+        'style="flex:2;min-width:130px;font-size:11px;" title="replay universe (comma-separated)">' +
+      '<input id="aj-replay-start" type="date" value="' + start + '" style="font-size:11px;">' +
+      '<input id="aj-replay-end" type="date" value="' + end + '" style="font-size:11px;">' +
+      '<input id="aj-replay-cash" type="number" value="100000" ' +
+        'style="width:80px;font-size:11px;" title="starting cash $">' +
+      '<button class="btn" id="aj-replay-go" style="font-size:11px;padding:3px 10px;">Run replay</button>' +
+      '<span id="aj-replay-status" class="muted" style="font-size:11px;"></span>' +
+      '</div>';
+  }
+
+  function wireReplayForm(body) {
+    var go = document.getElementById("aj-replay-go");
+    var st = document.getElementById("aj-replay-status");
+    if (!go) return;
+
+    function poll() {
+      API.get("/api/aj/replay/status").then(function (s) {
+        if (s.running) {
+          if (st) st.textContent = "running " + (s.run_id || "") + "…";
+          if (go) go.disabled = true;
+          setTimeout(poll, 5000);
+        } else if (s.run_id) {
+          if (st) st.textContent = s.returncode === 0
+            ? "done — " + s.run_id : "failed (see run.log)";
+          if (go) go.disabled = false;
+          if (s.returncode === 0) loadReplay(body);   // re-render with the new run
+        }
+      }).catch(function () { if (go) go.disabled = false; });
+    }
+
+    go.addEventListener("click", function () {
+      var syms = (document.getElementById("aj-replay-syms") || {}).value || "";
+      if (!syms.trim()) { if (st) st.textContent = "enter symbols first"; return; }
+      go.disabled = true;
+      if (st) st.textContent = "launching…";
+      API.post("/api/aj/replay/run", {
+        symbols: syms,
+        start: (document.getElementById("aj-replay-start") || {}).value,
+        end: (document.getElementById("aj-replay-end") || {}).value,
+        cash: (document.getElementById("aj-replay-cash") || {}).value
+      }).then(function (r) {
+        if (st) st.textContent = "running " + (r.run_id || "") +
+          "… (first run downloads history; isolated from live trading)";
+        setTimeout(poll, 5000);
+      }).catch(function (e) {
+        go.disabled = false;
+        if (st) st.textContent = "launch failed: " + (e && e.message || "error");
+      });
+    });
+    // a replay may already be in flight from an earlier visit
+    poll();
+  }
+
   function loadReplay(body) {
     return API.get("/api/aj/replays").then(function (data) {
       var latest = data && data.latest;
       var grids = (data && data.grids) || [];
       if (!latest && !grids.length) {
-        placeholder(body, "no replays yet — run: python aj_cli.py replay run " +
-          "--symbols AAPL,MSFT,... --start 2018-01-02 --end 2025-12-31 --cash 100000");
+        body.innerHTML = replayForm() +
+          '<div class="muted" style="font-size:12px;">no replays yet — pick a ' +
+          'universe and press Run (or use: python aj_cli.py replay run …)</div>';
+        wireReplayForm(body);
         return;
       }
-      var html = "";
+      var html = replayForm();
       if (latest) {
         var alpha = num(latest.alpha_pct);
         var aColor = alpha === null ? MUTED : (alpha >= 0 ? GREEN : RED);
@@ -915,6 +978,7 @@
           }).join("") + '</tbody></table>';
       });
       body.innerHTML = html;
+      wireReplayForm(body);
       if (!latest || !(latest.daily || []).length) return;
       // normalized % curves: agent equity vs buy-and-hold benchmark
       var d0 = latest.daily.filter(function (d) { return num(d.equity) !== null; });

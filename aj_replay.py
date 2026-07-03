@@ -361,16 +361,35 @@ def _render(r: Dict[str, Any]) -> str:
 
 # ── orchestration modes (parent process — never binds the live DB for runs) ──
 
+def spawn_cmd_env(run_id: str, out_dir: str) -> tuple:
+    """(argv-prefix, env) for launching a replay `run` in a FRESH process.
+    Uses `-m aj_replay` with the parent's sys.path (NOT a file path): inside
+    the frozen desktop bundle this module lives in python39.zip, so there is
+    no aj_replay.py on disk to exec — module invocation works in both the
+    source checkout and the py2app bundle."""
+    run_dir = os.path.join(out_dir, run_id)
+    os.makedirs(run_dir, exist_ok=True)
+    env = dict(os.environ)
+    env["AUGUR_DB_PATH"] = os.path.join(run_dir, "replay.db")
+    # sys.path's cwd entry is the EMPTY string — dropping it would strip the
+    # repo from the child's path; materialize it. In the frozen bundle this
+    # module's dirname is inside python39.zip (not a real dir) and sys.path
+    # already carries the zip, so only real directories are added.
+    paths = [p if p else os.getcwd() for p in sys.path]
+    here = os.path.dirname(os.path.abspath(__file__))
+    if os.path.isdir(here) and here not in paths:
+        paths.insert(0, here)
+    env["PYTHONPATH"] = os.pathsep.join(dict.fromkeys(paths))
+    return [sys.executable, "-m", "aj_replay"], env
+
+
 def _spawn_run(base_args: List[str], run_id: str, out_dir: str,
                extra_sets: List[str]) -> Optional[Dict[str, Any]]:
     run_dir = os.path.join(out_dir, run_id)
-    os.makedirs(run_dir, exist_ok=True)
-    cmd = [sys.executable, os.path.abspath(__file__), "run",
-           "--run-id", run_id, "--out-dir", out_dir] + base_args
+    prefix, env = spawn_cmd_env(run_id, out_dir)
+    cmd = prefix + ["run", "--run-id", run_id, "--out-dir", out_dir] + base_args
     for s in extra_sets:
         cmd += ["--set", s]
-    env = dict(os.environ)
-    env["AUGUR_DB_PATH"] = os.path.join(run_dir, "replay.db")
     p = subprocess.run(cmd, env=env, capture_output=True, text=True)
     if p.returncode != 0:
         print("run {} FAILED:\n{}".format(run_id, (p.stderr or "")[-2000:]),
