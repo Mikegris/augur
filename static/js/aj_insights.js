@@ -860,6 +860,114 @@
   }
 
   // ──────────────────────────────────────────────────────────────────────────
+  //  15 · Replay Lab — historical replays + config grids (aj_replay artifacts)
+  // ──────────────────────────────────────────────────────────────────────────
+  function loadReplay(body) {
+    return API.get("/api/aj/replays").then(function (data) {
+      var latest = data && data.latest;
+      var grids = (data && data.grids) || [];
+      if (!latest && !grids.length) {
+        placeholder(body, "no replays yet — run: python aj_cli.py replay run " +
+          "--symbols AAPL,MSFT,... --start 2018-01-02 --end 2025-12-31 --cash 100000");
+        return;
+      }
+      var html = "";
+      if (latest) {
+        var alpha = num(latest.alpha_pct);
+        var aColor = alpha === null ? MUTED : (alpha >= 0 ? GREEN : RED);
+        html += '<div style="font-size:12px;margin-bottom:6px;">' +
+          '<span class="muted">latest run</span> <b>' + esc(latest.run_id) + '</b>' +
+          ' <span class="muted">' + esc(latest.start) + " → " + esc(latest.end) + '</span></div>' +
+          '<div style="display:flex;flex-wrap:wrap;gap:10px;font-size:12px;margin-bottom:8px;">' +
+          '<span>return <b>' + fmtPct(latest.total_return_pct) + '</b></span>' +
+          '<span>bench ' + fmtPct(latest.benchmark_return_pct) + '</span>' +
+          '<span style="color:' + aColor + ';">alpha <b>' + fmtPct(latest.alpha_pct) + '</b></span>' +
+          '<span>sharpe ' + (num(latest.sharpe) === null ? "—" : latest.sharpe) + '</span>' +
+          '<span>maxDD ' + fmtPct(latest.max_drawdown_pct) + '</span>' +
+          '<span>trades ' + esc(latest.trades == null ? "—" : latest.trades) + '</span>' +
+          '<span>metalabel AUC ' + (latest.metalabel && num(latest.metalabel.oos_auc) !== null
+            ? Number(latest.metalabel.oos_auc).toFixed(3) : "—") + '</span>' +
+          '</div>';
+        html += '<div style="height:160px;"><canvas id="aj-ins-replay-chart"></canvas></div>';
+      }
+      grids.slice(-1).forEach(function (g) {
+        var win = g.winner || {};
+        html += '<div style="font-size:12px;margin-top:10px;">' +
+          '<span class="muted">grid</span> <b>' + esc(g.grid_id) + '</b>' +
+          ' <span class="muted">ranked on train window; judged on holdout</span></div>';
+        var cells = (g.cells || []).slice().sort(function (a, b) {
+          return (num(b.test_sharpe, -999)) - (num(a.test_sharpe, -999));
+        });
+        html += '<table class="data-table" style="width:100%;font-size:11px;margin-top:4px;">' +
+          '<thead><tr><th>params</th><th>train shp</th><th>holdout shp</th>' +
+          '<th>holdout ret</th><th>alpha</th></tr></thead><tbody>' +
+          cells.slice(0, 6).map(function (c) {
+            var isWin = win.run_id && c.run_id === win.run_id;
+            var p = Object.keys(c.params || {}).map(function (k) {
+              return k.replace(/_/g, " ").replace("pct", "%") + "=" + c.params[k];
+            }).join(" · ");
+            return '<tr' + (isWin ? ' style="color:' + AMBER + ';"' : '') + '><td>' +
+              esc(p) + (isWin ? " ★" : "") + '</td>' +
+              '<td>' + esc(c.train_sharpe == null ? "—" : c.train_sharpe) + '</td>' +
+              '<td><b>' + esc(c.test_sharpe == null ? "—" : c.test_sharpe) + '</b></td>' +
+              '<td>' + fmtPct(c.test_return_pct) + '</td>' +
+              '<td>' + fmtPct(c.alpha_pct) + '</td></tr>';
+          }).join("") + '</tbody></table>';
+      });
+      body.innerHTML = html;
+      if (!latest || !(latest.daily || []).length) return;
+      // normalized % curves: agent equity vs buy-and-hold benchmark
+      var d0 = latest.daily.filter(function (d) { return num(d.equity) !== null; });
+      if (!d0.length) return;
+      var e0 = num(d0[0].equity);
+      var labels = d0.map(function (d) { return d.date; });
+      var agent = d0.map(function (d) { return (num(d.equity) / e0 - 1) * 100; });
+      // benchmark aligned to the agent's dates (last close on/before each) so
+      // both lines share one axis even after independent decimation
+      var bmap = {};
+      (latest.benchmark_daily || []).forEach(function (b) {
+        if (num(b.close) !== null) bmap[b.date] = num(b.close);
+      });
+      var bkeys = Object.keys(bmap).sort();
+      var b0 = bkeys.length ? bmap[bkeys[0]] : null;
+      var bench = labels.map(function (d) {
+        if (b0 === null) return null;
+        var last = null;
+        for (var i = 0; i < bkeys.length && bkeys[i] <= d; i++) last = bkeys[i];
+        return last === null ? null : (bmap[last] / b0 - 1) * 100;
+      });
+      var ctx = document.getElementById("aj-ins-replay-chart");
+      if (!ctx || typeof Chart === "undefined") return;
+      var datasets = [{ label: "agent", data: agent, borderColor: ACCENT,
+                        borderWidth: 1.5, pointRadius: 0, tension: 0.1 }];
+      if (b0 !== null) {
+        datasets.push({ label: "benchmark", data: bench, borderColor: MUTED,
+                        borderWidth: 1, pointRadius: 0, borderDash: [4, 3], tension: 0.1 });
+      }
+      var chart = new Chart(ctx, {
+        type: "line",
+        data: { labels: labels, datasets: datasets },
+        options: {
+          responsive: true, maintainAspectRatio: false, animation: false,
+          plugins: {
+            legend: { labels: { color: MUTED, font: { size: 10 }, boxWidth: 12 } },
+            title: { display: true, text: "replayed equity vs benchmark (%)",
+                     color: MUTED, font: { size: 11 } }
+          },
+          scales: {
+            x: { ticks: { color: MUTED, font: { size: 9 }, maxTicksLimit: 8 },
+                 grid: { color: "#1b1b1b" } },
+            y: { ticks: { color: MUTED, font: { size: 9 },
+                          callback: function (v) { return v + "%"; } },
+                 grid: { color: "#1b1b1b" } }
+          }
+        }
+      });
+      keepChart("aj-ins-replay-chart", chart);
+    });
+  }
+
+  // ──────────────────────────────────────────────────────────────────────────
   //  render
   // ──────────────────────────────────────────────────────────────────────────
   var PANELS = [
@@ -876,7 +984,8 @@
     ["11 · Policy Expectancy",     "aj-ins-backtest",  "walk-forward edge of the policy", loadBacktest],
     ["12 · Learned Edge",          "aj-ins-metalabel", "meta-label P(profit) model", loadMetalabel],
     ["13 · Risk Governor",         "aj-ins-governor",  "total exposure dial + circuit breaker", loadRiskGovernor],
-    ["14 · Benchmark vs Indexes",  "aj-ins-benchmark", "agent return vs SPY/QQQ/DIA/IWM", loadBenchmark]
+    ["14 · Benchmark vs Indexes",  "aj-ins-benchmark", "agent return vs SPY/QQQ/DIA/IWM", loadBenchmark],
+    ["15 · Replay Lab",            "aj-ins-replay",    "historical replays + config grids (aj_replay)", loadReplay]
   ];
 
   function render(rootEl) {

@@ -3657,6 +3657,77 @@ def aj_config_route():
         return _err(e)
 
 
+@app.route("/api/aj/replays", methods=["GET"])
+def aj_replays_route():
+    """Index + latest details of stored replay-engine artifacts (data/replays).
+    Read-only file reads — replays themselves always run out-of-process
+    against isolated DBs (see aj_replay)."""
+    try:
+        import os as _os
+        import json as _json
+        base = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)),
+                             "data", "replays")
+        runs, grids = [], []
+        latest, latest_mtime = None, -1.0
+        if _os.path.isdir(base):
+            for d in sorted(_os.listdir(base)):
+                rp = _os.path.join(base, d, "result.json")
+                gp = _os.path.join(base, d, "grid.json")
+                if _os.path.exists(rp):
+                    try:
+                        with open(rp) as f:
+                            r = _json.load(f)
+                    except Exception:
+                        continue
+                    runs.append({"run_id": d, "start": r.get("start"),
+                                 "end": r.get("end"),
+                                 "total_return_pct": r.get("total_return_pct"),
+                                 "benchmark_return_pct": r.get("benchmark_return_pct"),
+                                 "alpha_pct": r.get("alpha_pct"),
+                                 "sharpe": r.get("sharpe"),
+                                 "max_drawdown_pct": r.get("max_drawdown_pct"),
+                                 "trades": (r.get("trades") or {}).get("trades"),
+                                 "forecaster": r.get("forecaster")})
+                    m = _os.path.getmtime(rp)
+                    if m > latest_mtime:
+                        latest_mtime = m
+                        # decimate the daily series so the payload stays small
+                        daily = r.get("daily") or []
+                        step = max(1, len(daily) // 400)
+                        bench = r.get("benchmark_daily") or []
+                        bstep = max(1, len(bench) // 400)
+                        latest = dict(runs[-1])
+                        latest.update({
+                            "daily": daily[::step],
+                            "benchmark_daily": bench[::bstep],
+                            "gate": r.get("gate"),
+                            "metalabel": {"oos_auc": (r.get("metalabel") or {}).get("oos_auc")},
+                            "labels_built": (r.get("labels") or {}).get("built"),
+                            "win_rate": (r.get("trades") or {}).get("win_rate"),
+                            "profit_factor": (r.get("trades") or {}).get("profit_factor"),
+                            "caveats": r.get("caveats"),
+                        })
+                elif _os.path.exists(gp):
+                    try:
+                        with open(gp) as f:
+                            g = _json.load(f)
+                    except Exception:
+                        continue
+                    grids.append({
+                        "grid_id": d, "start": g.get("start"), "end": g.get("end"),
+                        "params": g.get("params"), "winner": g.get("winner"),
+                        "train_frac": g.get("train_frac"),
+                        "cells": [{k: c.get(k) for k in
+                                   ("run_id", "params", "train_sharpe",
+                                    "test_sharpe", "test_return_pct",
+                                    "alpha_pct", "max_drawdown_pct")}
+                                  for c in (g.get("cells") or [])],
+                    })
+        return jsonify({"runs": runs, "grids": grids, "latest": latest})
+    except Exception as e:
+        return _err(e)
+
+
 @app.route("/api/aj/proposals", methods=["GET"])
 def aj_proposals_route():
     try:

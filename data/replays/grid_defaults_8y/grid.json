@@ -1,0 +1,182 @@
+{
+ "kind": "grid",
+ "grid_id": "grid_defaults_8y",
+ "params": {
+  "buy_prob_threshold": [
+   "0.55",
+   "0.60",
+   "0.65"
+  ],
+  "stop_loss_pct": [
+   "5",
+   "8",
+   "12"
+  ]
+ },
+ "start": "2018-01-02",
+ "end": "2025-12-31",
+ "symbols": "AAPL,MSFT,NVDA,AMZN,GOOGL,META,TSLA,JPM,XOM,UNH",
+ "train_frac": 0.7,
+ "cells": [
+  {
+   "run_id": "grid_defaults_8y_c007",
+   "params": {
+    "buy_prob_threshold": "0.65",
+    "stop_loss_pct": "8"
+   },
+   "total_return_pct": 189.77,
+   "sharpe": 0.84,
+   "alpha_pct": 36.05,
+   "max_drawdown_pct": 28.24,
+   "trades": 517,
+   "train_sharpe": 0.98,
+   "test_sharpe": 0.53,
+   "test_return_pct": 20.04,
+   "split_date": "2023-08-08"
+  },
+  {
+   "run_id": "grid_defaults_8y_c000",
+   "params": {
+    "buy_prob_threshold": "0.55",
+    "stop_loss_pct": "5"
+   },
+   "total_return_pct": 204.13,
+   "sharpe": 0.85,
+   "alpha_pct": 50.41,
+   "max_drawdown_pct": 31.51,
+   "trades": 677,
+   "train_sharpe": 0.95,
+   "test_sharpe": 0.59,
+   "test_return_pct": 24.34,
+   "split_date": "2023-08-08"
+  },
+  {
+   "run_id": "grid_defaults_8y_c008",
+   "params": {
+    "buy_prob_threshold": "0.65",
+    "stop_loss_pct": "12"
+   },
+   "total_return_pct": 181.61,
+   "sharpe": 0.82,
+   "alpha_pct": 27.89,
+   "max_drawdown_pct": 28.34,
+   "trades": 516,
+   "train_sharpe": 0.95,
+   "test_sharpe": 0.52,
+   "test_return_pct": 20.01,
+   "split_date": "2023-08-08"
+  },
+  {
+   "run_id": "grid_defaults_8y_c006",
+   "params": {
+    "buy_prob_threshold": "0.65",
+    "stop_loss_pct": "5"
+   },
+   "total_return_pct": 178.22,
+   "sharpe": 0.82,
+   "alpha_pct": 24.5,
+   "max_drawdown_pct": 28.36,
+   "trades": 533,
+   "train_sharpe": 0.94,
+   "test_sharpe": 0.53,
+   "test_return_pct": 20.29,
+   "split_date": "2023-08-08"
+  },
+  {
+   "run_id": "grid_defaults_8y_c003",
+   "params": {
+    "buy_prob_threshold": "0.60",
+    "stop_loss_pct": "5"
+   },
+   "total_return_pct": 181.95,
+   "sharpe": 0.8,
+   "alpha_pct": 28.23,
+   "max_drawdown_pct": 29.43,
+   "trades": 601,
+   "train_sharpe": 0.89,
+   "test_sharpe": 0.6,
+   "test_return_pct": 24.48,
+   "split_date": "2023-08-08"
+  },
+  {
+   "run_id": "grid_defaults_8y_c001",
+   "params": {
+    "buy_prob_threshold": "0.55",
+    "stop_loss_pct": "8"
+   },
+   "total_return_pct": 185.25,
+   "sharpe": 0.79,
+   "alpha_pct": 31.53,
+   "max_drawdown_pct": 31.47,
+   "trades": 650,
+   "train_sharpe": 0.87,
+   "test_sharpe": 0.6,
+   "test_return_pct": 25.57,
+   "split_date": "2023-08-08"
+  },
+  {
+   "run_id": "grid_defaults_8y_c004",
+   "params": {
+    "buy_prob_threshold": "0.60",
+    "stop_loss_pct": "8"
+   },
+   "total_return_pct": 185.77,
+   "sharpe": 0.8,
+   "alpha_pct": 32.05,
+   "max_drawdown_pct": 29.34,
+   "trades": 580,
+   "train_sharpe": 0.85,
+   "test_sharpe": 0.69,
+   "test_return_pct": 30.22,
+   "split_date": "2023-08-08"
+  },
+  {
+   "run_id": "grid_defaults_8y_c002",
+   "params": {
+    "buy_prob_threshold": "0.55",
+    "stop_loss_pct": "12"
+   },
+   "total_return_pct": 172.92,
+   "sharpe": 0.76,
+   "alpha_pct": 19.2,
+   "max_drawdown_pct": 31.47,
+   "trades": 647,
+   "train_sharpe": 0.84,
+   "test_sharpe": 0.56,
+   "test_return_pct": 23.72,
+   "split_date": "2023-08-08"
+  },
+  {
+   "run_id": "grid_defaults_8y_c005",
+   "params": {
+    "buy_prob_threshold": "0.60",
+    "stop_loss_pct": "12"
+   },
+   "total_return_pct": 166.34,
+   "sharpe": 0.75,
+   "alpha_pct": 12.62,
+   "max_drawdown_pct": 30.19,
+   "trades": 569,
+   "train_sharpe": 0.8,
+   "test_sharpe": 0.64,
+   "test_return_pct": 27.86,
+   "split_date": "2023-08-08"
+  }
+ ],
+ "winner": {
+  "run_id": "grid_defaults_8y_c007",
+  "params": {
+   "buy_prob_threshold": "0.65",
+   "stop_loss_pct": "8"
+  },
+  "total_return_pct": 189.77,
+  "sharpe": 0.84,
+  "alpha_pct": 36.05,
+  "max_drawdown_pct": 28.24,
+  "trades": 517,
+  "train_sharpe": 0.98,
+  "test_sharpe": 0.53,
+  "test_return_pct": 20.04,
+  "split_date": "2023-08-08"
+ }
+}

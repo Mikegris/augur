@@ -303,8 +303,11 @@ def _metrics(daily, bench_closes, cash, args, symbols, halts,
             if peak > 0:
                 mdd = max(mdd, (peak - v) / peak)
         out["max_drawdown_pct"] = round(mdd * 100.0, 2)
-        # benchmark over the same dates (buy-and-hold the index)
+        # benchmark over the same dates (buy-and-hold the index) — the daily
+        # series also ships in the artifact so the UI can chart agent vs index
         bd = [bench_closes.get(d) for d, _ in eq]
+        out["benchmark_daily"] = [{"date": d, "close": c}
+                                  for (d, _), c in zip(eq, bd) if c]
         pairs = [(a, b) for (_, a), b in zip(eq, bd) if a and b]
         if len(pairs) >= 2:
             b0, b1 = pairs[0][1], pairs[-1][1]
