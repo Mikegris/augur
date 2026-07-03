@@ -19,6 +19,10 @@ import aj_positions             # noqa: E402
 import fetcher                  # noqa: E402
 
 aj_db.aj_init()
+# Deterministic session: without this the suite fails whenever it runs on a
+# market holiday/weekend (e.g. July-4 observed) — the operator's session gate
+# correctly reports 'closed' and every cycle proposal blocks.
+aj_db.market_session = lambda dt=None: "regular"
 
 
 def _full_cfg(**over):
