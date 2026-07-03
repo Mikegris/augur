@@ -3665,8 +3665,25 @@ def aj_replays_route():
     try:
         import os as _os
         import json as _json
-        base = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)),
-                             "data", "replays")
+        # Resolve the artifacts dir robustly: env override first, then the
+        # repo-relative default, then beside the DB (the packaged desktop app
+        # runs from a frozen bundle where __file__ is NOT the working repo).
+        candidates = [
+            _os.environ.get("AJ_REPLAYS_DIR") or "",
+            _os.path.join(_os.path.dirname(_os.path.abspath(__file__)),
+                          "data", "replays"),
+        ]
+        try:
+            import database as _dbm
+            candidates.append(_os.path.join(
+                _os.path.dirname(_dbm.DB_PATH), "data", "replays"))
+            candidates.append(_os.path.join(
+                _os.path.dirname(_os.path.realpath(_dbm.DB_PATH)),
+                "data", "replays"))
+        except Exception:
+            pass
+        base = next((c for c in candidates if c and _os.path.isdir(c)),
+                    candidates[1])
         runs, grids = [], []
         latest, latest_mtime = None, -1.0
         if _os.path.isdir(base):
