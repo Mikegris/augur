@@ -3838,6 +3838,62 @@ def aj_replays_route():
         return _err(e)
 
 
+@app.route("/api/aj/trades/<path:symbol>", methods=["GET"])
+def aj_trades_route(symbol):
+    """Per-symbol trade history drill-down: every fill (with the proposal's
+    thesis), the FIFO round-trips with realized P&L, and the current position.
+    Answers 'did the agent actually buy this, and did the sell add up?'
+    without scrolling the recent-orders table."""
+    try:
+        import re as _re
+        import aj_db
+        sym = str(symbol or "").upper().strip()
+        if not _re.match(r"^[A-Z0-9.:\-^_]{1,24}$", sym):
+            return jsonify({"error": "invalid symbol"}), 400
+        fills = aj_db.query(
+            "SELECT f.id AS fill_id, f.order_id, o.side, f.qty, f.price, "
+            "f.fees_usd, f.filled_at, o.state, o.proposal_id, p.thesis, "
+            "p.risk_reason FROM aj_fills f "
+            "JOIN aj_orders o ON f.order_id = o.id "
+            "LEFT JOIN aj_proposals p ON o.proposal_id = p.id "
+            "WHERE o.symbol = ? AND o.mode = 'paper' "
+            "ORDER BY f.filled_at ASC, f.id ASC", (sym,))
+        for f in fills:
+            f["thesis"] = (f.get("thesis") or f.get("risk_reason") or "")[:160]
+            f.pop("risk_reason", None)
+        trips = []
+        try:
+            import aj_features
+            for t in aj_features._round_trips("paper"):
+                if (t.get("symbol") or "").upper() != sym:
+                    continue
+                ep, xp = t.get("entry_price"), t.get("exit_price")
+                gain = None
+                try:
+                    if ep and xp and float(ep) > 0:
+                        gain = round((float(xp) / float(ep) - 1.0) * 100.0, 2)
+                except (TypeError, ValueError):
+                    pass
+                trips.append({"opened_at": t.get("opened_at"),
+                              "closed_at": t.get("closed_at"),
+                              "qty": t.get("qty"), "side": t.get("side"),
+                              "entry_price": ep, "exit_price": xp,
+                              "realized_pnl_usd": t.get("realized_pnl_usd"),
+                              "gain_pct": gain})
+        except Exception:
+            pass
+        position = None
+        try:
+            import aj_positions
+            position = (aj_positions.paper_book().get("positions") or {}).get(sym)
+        except Exception:
+            pass
+        return jsonify({"symbol": sym, "position": position,
+                        "fills": fills, "round_trips": trips})
+    except Exception as e:
+        return _err(e)
+
+
 @app.route("/api/aj/proposals", methods=["GET"])
 def aj_proposals_route():
     try:

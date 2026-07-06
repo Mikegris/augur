@@ -4236,6 +4236,79 @@ function _ajMoney(v) {
   const n = Number(v);
   return (n < 0 ? '-$' : '$') + Math.abs(n).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 }
+// Per-symbol trade-history drill-down: every fill + FIFO round-trips + the
+// current position, in an overlay. Opened by clicking a symbol in the
+// proposals/orders tables — answers "did it actually buy this?" without
+// scrolling table history.
+async function _ajTradeDrilldown(sym) {
+  if (!sym) return;
+  const old = document.getElementById('aj-drill-overlay');
+  if (old) old.remove();
+  const ov = document.createElement('div');
+  ov.id = 'aj-drill-overlay';
+  ov.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.65);z-index:9999;' +
+    'display:flex;align-items:center;justify-content:center;padding:24px;';
+  ov.innerHTML = '<div class="panel" style="max-width:860px;width:100%;max-height:85vh;' +
+    'overflow:auto;padding:16px;" id="aj-drill-box"><div class="muted">loading ' +
+    _esc(_ajFmtSymbol(sym)) + ' history…</div></div>';
+  const close = () => ov.remove();
+  ov.addEventListener('click', (e) => { if (e.target === ov) close(); });
+  document.addEventListener('keydown', function esc(e) {
+    if (e.key === 'Escape') { close(); document.removeEventListener('keydown', esc); }
+  });
+  document.body.appendChild(ov);
+  let d;
+  try { d = await API.get('/api/aj/trades/' + encodeURIComponent(sym)); }
+  catch (e) {
+    document.getElementById('aj-drill-box').innerHTML =
+      '<div class="muted">could not load history: ' + _esc(e.message || 'error') + '</div>';
+    return;
+  }
+  const pos = d.position;
+  const fills = d.fills || [];
+  const trips = d.round_trips || [];
+  const dt = (ts) => ts ? String(ts).replace('T', ' ').slice(0, 16) : '—';
+  const pnlCell = (v) => {
+    const n = Number(v);
+    if (!isFinite(n)) return '—';
+    return '<span style="color:' + (n >= 0 ? '#2ecc71' : '#e74c3c') + ';font-weight:600;">' +
+      _ajMoney(n) + '</span>';
+  };
+  let html = '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">' +
+    '<span class="panel-title">' + _esc(_ajFmtSymbol(sym)) + ' — trade history</span>' +
+    '<button class="btn" id="aj-drill-close" style="font-size:11px;padding:2px 10px;">close</button></div>';
+  html += '<div style="font-size:12px;margin-bottom:10px;">current position: ' +
+    (pos ? ('<b>' + _esc(String(pos.qty)) + '</b> @ avg ' + _ajMoney(pos.avg_cost))
+         : '<b>FLAT</b>') + '</div>';
+  html += '<div class="muted" style="font-size:11px;margin:6px 0 2px;">closed round-trips (FIFO)</div>';
+  html += trips.length ? '<table class="data-table" style="width:100%;font-size:11px;"><thead><tr>' +
+    '<th>opened</th><th>closed</th><th>qty</th><th>entry</th><th>exit</th><th>gain</th><th>P&L (net)</th>' +
+    '</tr></thead><tbody>' + trips.map(t =>
+      '<tr><td>' + dt(t.opened_at) + '</td><td>' + dt(t.closed_at) + '</td>' +
+      '<td>' + _esc(String(t.qty ?? '—')) + '</td>' +
+      '<td>' + _ajMoney(t.entry_price) + '</td><td>' + _ajMoney(t.exit_price) + '</td>' +
+      '<td>' + (t.gain_pct === null || t.gain_pct === undefined ? '—' :
+        ('<span style="color:' + (t.gain_pct >= 0 ? '#2ecc71' : '#e74c3c') + ';">' +
+          t.gain_pct + '%</span>')) + '</td>' +
+      '<td>' + pnlCell(t.realized_pnl_usd) + '</td></tr>').join('') +
+    '</tbody></table>' :
+    '<div class="muted" style="font-size:11px;">none yet (position still open or never traded)</div>';
+  html += '<div class="muted" style="font-size:11px;margin:12px 0 2px;">all fills</div>';
+  html += fills.length ? '<table class="data-table" style="width:100%;font-size:11px;"><thead><tr>' +
+    '<th>time</th><th>side</th><th>qty</th><th>price</th><th>fees</th><th>order</th><th>thesis</th>' +
+    '</tr></thead><tbody>' + fills.map(f =>
+      '<tr><td>' + dt(f.filled_at) + '</td>' +
+      '<td style="color:' + (String(f.side) === 'buy' ? '#2ecc71' : '#e74c3c') + ';">' + _esc(f.side) + '</td>' +
+      '<td>' + _esc(String(f.qty ?? '')) + '</td><td>' + _ajMoney(f.price) + '</td>' +
+      '<td>' + _ajMoney(f.fees_usd) + '</td><td>#' + _esc(String(f.order_id)) + '</td>' +
+      '<td class="muted" style="font-size:10px;">' + _esc((f.thesis || '').slice(0, 90)) + '</td></tr>').join('') +
+    '</tbody></table>' :
+    '<div class="muted" style="font-size:11px;">no fills recorded for this symbol</div>';
+  const box = document.getElementById('aj-drill-box');
+  box.innerHTML = html;
+  const cb = document.getElementById('aj-drill-close');
+  if (cb) cb.addEventListener('click', close);
+}
 // Render an option ticker like "OPT:AAPL:20260717:C:150.0" as a human label
 // "AAPL $150 CALL 07/17/26". Non-option symbols pass through unchanged.
 function _ajFmtSymbol(sym) {
@@ -4829,24 +4902,30 @@ async function loadTradingView() {
     catch (e) { _ajToast('Save failed: ' + e.message, false); }
   });
 
-  // tables (best-effort)
+  // tables (best-effort) — symbols are clickable: per-symbol trade history
+  const _drillCell = (sym) =>
+    `<a href="#" class="aj-drill" data-s="${_esc(sym || '')}" style="color:inherit;text-decoration:underline dotted;">${_esc(_ajFmtSymbol(sym))}</a>`;
   try {
     const [pr, od] = await Promise.all([
-      API.get('/api/aj/proposals?limit=10').catch(() => ({ proposals: [] })),
-      API.get('/api/aj/orders?limit=10').catch(() => ({ orders: [] })),
+      API.get('/api/aj/proposals?limit=25').catch(() => ({ proposals: [] })),
+      API.get('/api/aj/orders?limit=25').catch(() => ({ orders: [] })),
     ]);
     const pEl = document.getElementById('aj-proposals');
     if (pEl) {
       const rows = (pr.proposals || []);
       pEl.innerHTML = rows.length ? `<table class="data-table" style="width:100%"><thead><tr><th>Symbol</th><th>Side</th><th>Qty</th><th>Status</th><th>Thesis</th></tr></thead><tbody>${rows.map(p =>
-        `<tr><td>${_esc(_ajFmtSymbol(p.symbol))}</td><td>${_esc(p.side)}</td><td>${_esc(String(p.qty || ''))}</td><td>${_esc(p.status)}</td><td class="muted" style="font-size:11px">${_esc((p.thesis || p.risk_reason || '').slice(0, 80))}</td></tr>`).join('')}</tbody></table>` : '<div class="muted">No proposals yet — run a cycle.</div>';
+        `<tr><td>${_drillCell(p.symbol)}</td><td>${_esc(p.side)}</td><td>${_esc(String(p.qty || ''))}</td><td>${_esc(p.status)}</td><td class="muted" style="font-size:11px">${_esc((p.thesis || p.risk_reason || '').slice(0, 80))}</td></tr>`).join('')}</tbody></table>` : '<div class="muted">No proposals yet — run a cycle.</div>';
     }
     const oEl = document.getElementById('aj-orders');
     if (oEl) {
       const rows = (od.orders || []);
       oEl.innerHTML = rows.length ? `<table class="data-table" style="width:100%"><thead><tr><th>Symbol</th><th>Side</th><th>Qty</th><th>State</th><th>Avg fill</th><th>Mode</th></tr></thead><tbody>${rows.map(o =>
-        `<tr><td>${_esc(_ajFmtSymbol(o.symbol))}</td><td>${_esc(o.side)}</td><td>${_esc(String(o.qty || ''))}</td><td>${_esc(o.state)}</td><td>${o.avg_fill_price ? _ajMoney(o.avg_fill_price) : '—'}</td><td>${_esc(o.mode)}</td></tr>`).join('')}</tbody></table>` : '<div class="muted">No orders yet.</div>';
+        `<tr><td>${_drillCell(o.symbol)}</td><td>${_esc(o.side)}</td><td>${_esc(String(o.qty || ''))}</td><td>${_esc(o.state)}</td><td>${o.avg_fill_price ? _ajMoney(o.avg_fill_price) : '—'}</td><td>${_esc(o.mode)}</td></tr>`).join('')}</tbody></table>` : '<div class="muted">No orders yet.</div>';
     }
+    el.querySelectorAll('.aj-drill').forEach(a => a.addEventListener('click', (ev) => {
+      ev.preventDefault();
+      _ajTradeDrilldown(a.getAttribute('data-s'));
+    }));
   } catch (e) {}
 
   // preset buttons
