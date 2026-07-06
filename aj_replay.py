@@ -188,6 +188,27 @@ def run_replay(args) -> Dict[str, Any]:
     aj_config.set_config(cfg_over)
     cfg = aj_config.get_config()
 
+    # 3b) optional FROZEN model import: install a pooled/pre-trained meta-label
+    # model into this run's isolated DB before the day loop. Combined with
+    # `--set metalabel_enabled=true --set metalabel_retrain_min_new=999999`
+    # this replays the pipeline FILTERED by a model that never retrains —
+    # the clean holdout test of the filter itself.
+    imported_model = None
+    if getattr(args, "import_model", None):
+        with open(args.import_model) as f:
+            imported_model = json.load(f)
+        aj_db.set_setting_raw("__aj_metalabel_model", json.dumps(imported_model))
+        # CRITICAL: stamp the last-train counter too. maybe_retrain treats a
+        # missing counter as "never trained" and trains IMMEDIATELY on cycle 1
+        # — on a fresh replay DB that fit sees zero labels and overwrites the
+        # imported model with a non-promoted stub, silently disabling the
+        # filter for the whole run (how the first validation run went dark).
+        aj_db.set_setting_raw("__aj_metalabel_last_train_n",
+                              str(int(imported_model.get("n_train") or 0)))
+        print("imported meta-label model: oos_auc={} promoted={}".format(
+            imported_model.get("oos_auc"), imported_model.get("promoted")),
+            file=sys.stderr)
+
     # 4) forecaster
     if args.forecaster == "pit":
         import forecast_ensemble
@@ -242,12 +263,33 @@ def run_replay(args) -> Dict[str, Any]:
     aj_benchmark._index_closes = lambda sym, period, _h=full_hist: dict(_h)
     aj_features._spy_history = lambda _h=sorted(full_hist.items()): list(_h)
     labels = aj_features.build_labels(lookback_days=10 ** 5)
-    ml_cfg = dict(cfg)
-    ml_cfg["metalabel_enabled"] = True
-    try:
-        ml = aj_metalabel.train(ml_cfg)
-    except Exception as e:
-        ml = {"error": str(e)[:200]}
+    if imported_model is not None:
+        # A frozen-model validation run: do NOT retrain at the end (it would
+        # overwrite the artifact of record). Report the model that actually
+        # filtered the run, plus how often it fired.
+        ml = {"imported": True, "oos_auc": imported_model.get("oos_auc"),
+              "n_train": imported_model.get("n_train"),
+              "promoted": imported_model.get("promoted")}
+        try:
+            import database as _dbm
+            skips = 0
+            for row in _dbm.get_conn().execute(
+                    "SELECT result_json FROM aj_cycle_stats"):
+                try:
+                    skips += int((json.loads(row["result_json"] or "{}")
+                                  ).get("metalabel_skip") or 0)
+                except Exception:
+                    pass
+            ml["skips"] = skips
+        except Exception:
+            pass
+    else:
+        ml_cfg = dict(cfg)
+        ml_cfg["metalabel_enabled"] = True
+        try:
+            ml = aj_metalabel.train(ml_cfg)
+        except Exception as e:
+            ml = {"error": str(e)[:200]}
     aj_db.set_sim_clock(None)
 
     # 7) metrics
@@ -517,6 +559,56 @@ def run_counterfactual(args) -> Dict[str, Any]:
     return run_grid(args)
 
 
+def pool_train(args) -> Dict[str, Any]:
+    """Train ONE meta-label model on the UNION of label rows from many replay
+    DBs (step 1+2 of the win-rate program: replay-scale training data instead
+    of the live book's dozens of trades). Read-only on every replay DB; the
+    result is written to a JSON file — nothing touches the live model store
+    until an explicit export/enable."""
+    import sqlite3
+    rows: List[Dict[str, Any]] = []
+    used = []
+    for rid in [r.strip() for r in args.runs.split(",") if r.strip()]:
+        db_path = os.path.join(args.out_dir, rid, "replay.db")
+        if not os.path.exists(db_path):
+            print("WARN: no replay DB for {} — skipped".format(rid),
+                  file=sys.stderr)
+            continue
+        conn = sqlite3.connect("file:{}?mode=ro".format(db_path), uri=True)
+        conn.row_factory = sqlite3.Row
+        q = ("SELECT features_json, label, beat_benchmark, regime, opened_at, "
+             "closed_at FROM aj_trade_labels")
+        params: tuple = ()
+        if args.cutoff:
+            q += " WHERE closed_at < ?"
+            params = (args.cutoff,)
+        got = [dict(r) for r in conn.execute(q, params).fetchall()]
+        conn.close()
+        rows.extend(got)
+        used.append({"run": rid, "labels": len(got)})
+    # ONE time-ordering across the whole pool — the purged walk-forward split
+    # inside the fit assumes closed_at ascending.
+    rows.sort(key=lambda r: (r.get("closed_at") or "", r.get("opened_at") or ""))
+    import aj_metalabel
+    cfg = {"metalabel_min_samples": args.min_samples,
+           "metalabel_min_auc": args.min_auc}
+    model = aj_metalabel.train_from_rows(rows, cfg, target=args.target)
+    summary = {"kind": "pool_train", "runs": used, "n_pooled": len(rows),
+               "cutoff": args.cutoff, "target": args.target,
+               "oos_auc": model.get("oos_auc"), "promoted": model.get("promoted"),
+               "C": model.get("C"), "n_purged": model.get("n_purged"),
+               "base_rate": model.get("base_rate"),
+               "reason": model.get("reason") or model.get("error")}
+    if model.get("error"):
+        print(json.dumps(summary, indent=1, default=str))
+        raise SystemExit(1)
+    with open(args.out, "w") as f:
+        json.dump(model, f, indent=1, default=str)
+    summary["model_file"] = args.out
+    print(json.dumps(summary, indent=1, default=str))
+    return summary
+
+
 def export_model(args) -> None:
     """Copy a replay-trained meta-label model into the LIVE DB (with
     provenance) so live inference benefits from replay-scale training."""
@@ -610,6 +702,8 @@ def main(argv=None) -> int:
     _add_common(rp)
     rp.add_argument("--run-id", default=None)
     rp.add_argument("--progress", action="store_true", default=True)
+    rp.add_argument("--import-model", default=None,
+                    help="JSON model file to install (frozen) before the day loop")
 
     gp = sub.add_parser("grid", help="config grid (spawns one process per cell)")
     _add_common(gp)
@@ -638,6 +732,17 @@ def main(argv=None) -> int:
                         help="replay-trained meta-label model -> live DB")
     ep.add_argument("--run", required=True)
     ep.add_argument("--out-dir", default=None)
+
+    pt = sub.add_parser("pool-train",
+                        help="train ONE model on labels pooled from many runs")
+    pt.add_argument("--runs", required=True, help="comma-separated run ids")
+    pt.add_argument("--out", required=True, help="output model JSON file")
+    pt.add_argument("--cutoff", default=None,
+                    help="only labels closed BEFORE this ISO date (holdout hygiene)")
+    pt.add_argument("--target", choices=["profit", "alpha"], default="profit")
+    pt.add_argument("--min-samples", type=int, default=200)
+    pt.add_argument("--min-auc", type=float, default=0.55)
+    pt.add_argument("--out-dir", default=None)
 
     sub.add_parser("list", help="index of stored runs").add_argument(
         "--out-dir", default=None)
@@ -690,6 +795,9 @@ def main(argv=None) -> int:
         return 0
     if args.cmd == "export-model":
         export_model(args)
+        return 0
+    if args.cmd == "pool-train":
+        pool_train(args)
         return 0
     if args.cmd == "report":
         cmd_report(args)

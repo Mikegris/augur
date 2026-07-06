@@ -305,6 +305,14 @@ def _decision_features(symbol: str, decision: Dict[str, Any]) -> Optional[Dict[s
             feats.update(_ff.live_tech_features(symbol) or {})
         except Exception:
             log.debug("decision features: technicals skipped", exc_info=True)
+        # v3 context: current VIX + edge×regime interactions — the SAME
+        # finalize the labeler applies point-in-time (no train/serve skew).
+        try:
+            import aj_features as _ff
+            import aj_rules as _ar
+            _ff.finalize_features(feats, vix=_ar.current_vix())
+        except Exception:
+            log.debug("decision features: context finalize skipped", exc_info=True)
         return feats
     except Exception:
         log.debug("decision features failed", exc_info=True)

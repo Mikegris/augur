@@ -61,6 +61,16 @@ _NUMERIC_FEATURES: List[Tuple[str, float]] = [
                                # (close-to-close ATR proxy; no OHLC needed)
     ("sma20_dist_pct", 0.0),   # % distance of close from its 20d SMA
     ("rs_spy20_pct", 0.0),     # 20d return minus SPY's 20d return (rel strength)
+    # ── v3 contract: market context + regime-conditional edge. The deployed
+    # model is deliberately LINEAR (JSON-safe, no pickle), so regime gating is
+    # expressed as interaction features — edge×regime gives the linear model a
+    # separate edge coefficient PER regime, which is exactly a regime-gated
+    # entry filter once fit. Computed by finalize_features() at BOTH label
+    # time (point-in-time VIX) and inference (current VIX) — no skew.
+    ("vix", 20.0),             # VIX close at entry (neutral ~long-run median)
+    ("edge_x_bull", 0.0),      # edge when regime==bull else 0
+    ("edge_x_bear", 0.0),      # edge when regime==bear else 0
+    ("edge_x_chop", 0.0),      # edge when regime==chop else 0
 ]
 # Regime is categorical -> stable one-hot columns (neutral 0.0 each). Unknown /
 # unseen regimes simply leave all three at 0.0 (still a valid, consistent row).
@@ -382,6 +392,39 @@ def _assemble_features(trade: Dict[str, Any], snap: Dict[str, Any],
     return feats
 
 
+# ── context features (v3 contract) ───────────────────────────────────────────
+
+def finalize_features(feats: Dict[str, Any], regime: Optional[str] = None,
+                      vix: Optional[float] = None) -> Dict[str, Any]:
+    """Complete a feature dict with the v3 context features — ONE shared
+    implementation for training (point-in-time regime/VIX) and inference
+    (current regime/VIX), so there is no train/serve skew. Mutates + returns
+    `feats`. Missing inputs leave features absent (imputed to neutral by the
+    vectorizer/model). Never raises."""
+    try:
+        if vix is not None:
+            try:
+                fv = float(vix)
+                if fv == fv and fv > 0:
+                    feats["vix"] = round(fv, 2)
+            except (TypeError, ValueError):
+                pass
+        reg = regime
+        if reg is None:
+            reg = next((lvl for lvl in _REGIME_LEVELS
+                        if _f(feats.get("regime_" + lvl)) == 1.0), None)
+        if reg is None:
+            r = feats.get("regime")
+            reg = str(r).lower() if r else None
+        edge = _f(feats.get("edge"))
+        if edge is not None and reg in _REGIME_LEVELS:
+            for lvl in _REGIME_LEVELS:
+                feats["edge_x_" + lvl] = edge if reg == lvl else 0.0
+    except Exception:
+        log.debug("finalize_features failed", exc_info=True)
+    return feats
+
+
 # ── technical features (v2 contract) ─────────────────────────────────────────
 
 def tech_features_from_closes(closes: List[float],
@@ -566,6 +609,14 @@ def build_labels(lookback_days: int = 365) -> Dict[str, Any]:
         # SPY history fetched ONCE; each trade gets the regime AS OF its own
         # open (point-in-time), never today's detect_regime() (look-ahead).
         spy_hist = _spy_history()
+        # ^VIX history for the point-in-time market-fear context feature (v3).
+        vix_hist: List[Tuple[str, float]] = []
+        try:
+            import aj_benchmark
+            vix_hist = sorted((aj_benchmark._index_closes(
+                "^VIX", "2y" if lookback_days > 200 else "1y") or {}).items())
+        except Exception:
+            log.debug("VIX history unavailable for labeling", exc_info=True)
 
         # Benchmark closes fetched ONCE, to label each trade's alpha vs the market
         # over its own holding window (opened_at -> closed_at). Fail-open to {}.
@@ -657,6 +708,13 @@ def build_labels(lookback_days: int = 365) -> Dict[str, Any]:
                         feats["regime"] = reg_p
                     feats.update({k: v for k, v in pers.items()
                                   if not str(k).startswith("regime_")})
+                # v3 context: point-in-time VIX + edge×regime interactions —
+                # the same finalize the live inference path applies.
+                pit_vix = None
+                if d_open and vix_hist:
+                    prior = [v for dt2, v in vix_hist if dt2 <= d_open]
+                    pit_vix = prior[-1] if prior else None
+                finalize_features(feats, regime=regime, vix=pit_vix)
                 ret_pct = _return_pct(t.get("side"), t.get("entry_price"),
                                       t.get("exit_price"))
                 # benchmark-relative label: did the trade beat the market over
@@ -710,41 +768,39 @@ def build_labels(lookback_days: int = 365) -> Dict[str, Any]:
         return {"error": str(e)}
 
 
-def training_set(target: str = "profit") -> Tuple[List[List[float]], List[int], List[str]]:
-    """Read all aj_trade_labels and produce aligned (X, y, feature_names).
+def vectorize_rows(rows: List[Dict[str, Any]], target: str = "profit"
+                   ) -> Tuple[List[List[float]], List[int], List[str],
+                              List[Tuple[Optional[str], Optional[str]]]]:
+    """Vectorize aj_trade_labels-shaped row dicts into aligned
+    (X, y, feature_names, windows). The ONE assembly used by the live
+    training_set AND cross-DB pooled training (aj_replay pool-train), so a
+    model trained on pooled replay labels scores live features identically.
 
-    X: equal-length float vectors in FEATURE_NAMES order (missing features
-    imputed). y: the 0/1 target — `profit` uses the `label` column (net P&L>0);
-    `alpha` uses `beat_benchmark` (trade beat the market over its holding
-    window), dropping rows whose benchmark label is unknown. Fail-open to
-    ([], [], FEATURE_NAMES)."""
+    Rows must be time-ordered (closed_at ASC). `windows` carries each KEPT
+    row's (opened_at, closed_at) for the purged walk-forward split. Rows are
+    finalized (v3 interactions derived from stored edge+regime) so labels
+    written before the v3 contract still vectorize consistently."""
     X: List[List[float]] = []
     y: List[int] = []
+    windows: List[Tuple[Optional[str], Optional[str]]] = []
     use_alpha = str(target or "profit").lower() == "alpha"
-    try:
-        rows = aj_db.query(
-            "SELECT features_json, label, beat_benchmark, regime FROM aj_trade_labels "
-            "ORDER BY closed_at ASC, id ASC")
-    except Exception:
-        log.debug("training_set query failed", exc_info=True)
-        return [], [], list(FEATURE_NAMES)
-
-    for r in rows:
+    for r in rows or []:
         try:
             feats = json.loads(r.get("features_json") or "{}")
             if not isinstance(feats, dict):
                 feats = {}
         except Exception:
             feats = {}
-        vec: List[float] = []
-        for name, neutral in _NUMERIC_FEATURES:
-            v = _f(feats.get(name))
-            vec.append(neutral if v is None else v)
         # one-hot regime: prefer the features_json value, fall back to column.
         reg = feats.get("regime")
         if reg is None:
             reg = r.get("regime")
         reg = (str(reg).lower() if reg is not None else None)
+        finalize_features(feats, regime=reg)
+        vec: List[float] = []
+        for name, neutral in _NUMERIC_FEATURES:
+            v = _f(feats.get(name))
+            vec.append(neutral if v is None else v)
         for lvl in _REGIME_LEVELS:
             vec.append(1.0 if reg == lvl else 0.0)
         if use_alpha:
@@ -762,7 +818,27 @@ def training_set(target: str = "profit") -> Tuple[List[List[float]], List[int], 
                 lab = 0
         X.append(vec)
         y.append(lab)
-    return X, y, list(FEATURE_NAMES)
+        windows.append((r.get("opened_at"), r.get("closed_at")))
+    return X, y, list(FEATURE_NAMES), windows
+
+
+def training_set(target: str = "profit") -> Tuple[List[List[float]], List[int], List[str]]:
+    """Read all aj_trade_labels and produce aligned (X, y, feature_names).
+
+    X: equal-length float vectors in FEATURE_NAMES order (missing features
+    imputed). y: the 0/1 target — `profit` uses the `label` column (net P&L>0);
+    `alpha` uses `beat_benchmark` (trade beat the market over its holding
+    window), dropping rows whose benchmark label is unknown. Fail-open to
+    ([], [], FEATURE_NAMES)."""
+    try:
+        rows = aj_db.query(
+            "SELECT features_json, label, beat_benchmark, regime, opened_at, "
+            "closed_at FROM aj_trade_labels ORDER BY closed_at ASC, id ASC")
+    except Exception:
+        log.debug("training_set query failed", exc_info=True)
+        return [], [], list(FEATURE_NAMES)
+    X, y, names, _ = vectorize_rows(rows, target)
+    return X, y, names
 
 
 def label_stats() -> Dict[str, Any]:

@@ -168,7 +168,12 @@ def test_pure_numpy_matches_sklearn():
     Xa = np.asarray(X, dtype=float)
     ya = np.asarray(y, dtype=int)
     sc = StandardScaler().fit(Xa)
-    clf = LogisticRegression(max_iter=1000).fit(sc.transform(Xa), ya)
+    # Mirror the DEPLOYED training recipe: class_weight='balanced' and the
+    # holdout-chosen C persisted on the model (v3 recipe) — the point of this
+    # test is inference parity, so the reference fit must match the shipped fit.
+    stored = ml._load_model() or {}
+    clf = LogisticRegression(max_iter=1000, C=float(stored.get("C", 1.0)),
+                             class_weight="balanced").fit(sc.transform(Xa), ya)
 
     max_err = 0.0
     for row in [[2.5, 0.0], [-2.5, 1.0], [0.3, -3.0], [1.1, 4.0]]:
