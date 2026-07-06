@@ -220,6 +220,13 @@ DEFAULTS: Dict[str, Any] = {
     # results land in the Replay Lab panel next morning. The rolling "are my
     # current settings still the evidence-backed ones?" loop.
     "nightly_counterfactual": False,
+    # Research Scientist (aj_lab): nightly hypothesis -> K-fold walk-forward
+    # twin replays -> bounded, audited promotion (or rejection) with an
+    # automatic demotion watchdog. Tunes ONLY whitelisted strategy keys within
+    # hard bounds; never touches switches, caps, cash, or the allowlist.
+    "lab_enabled":            False,
+    "lab_folds":              3,       # walk-forward folds per experiment
+    "lab_fold_days":          180,     # calendar days per fold
     "regime_conditional_weights": False,  # tilt signal weights by detected regime
     # Batch 4 — signal validation / IC promotion gate (guards batch 1)
     "signal_ic_gate":         True,    # require realized-skill promotion before a new signal counts
@@ -299,7 +306,7 @@ _BOOL_KEYS = {"trading_enabled", "live_trading_enabled", "robinhood_enabled",
               "opportunity_radar", "risk_based_sizing",
               "auto_run_enabled", "auto_run_align_to_clock", "health_autohalt",
               "auto_preset_escalation", "daily_reflection", "premarket_briefing",
-              "nightly_counterfactual",
+              "nightly_counterfactual", "lab_enabled",
               # council layer
               "council_enabled", "council_analyst_fundamentals",
               "council_analyst_news", "council_analyst_sentiment",
@@ -377,6 +384,8 @@ _INT_KEYS = {"max_trades_per_day", "forecast_horizon_days", "scan_universe_max",
              "time_stop_days", "event_blackout_days",
              "metalabel_min_samples", "metalabel_retrain_min_new",
              "rg_alpha_decay_min_trades", "rg_lever_unlock_trades",
+             # research scientist
+             "lab_folds", "lab_fold_days",
              # options / screener knobs previously untyped: they loaded back as
              # raw strings and int("35.5")-style coercion at the call sites
              # raised, killing contract picking; negatives also bypassed the

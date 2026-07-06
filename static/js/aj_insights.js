@@ -923,8 +923,51 @@
     poll();
   }
 
+  function labSection(lab) {
+    if (!lab || lab.error) return "";
+    var badge = lab.enabled
+      ? '<span style="color:' + GREEN + ';">\u25cf on</span>'
+      : '<span class="muted">\u25cb off</span>';
+    var html = '<div style="font-size:12px;margin-top:12px;border-top:1px solid #1b1b1b;padding-top:8px;">' +
+      '<b>Research Scientist</b> ' + badge +
+      ' <span class="muted">\u00b7 ' + esc(String(lab.experiments_total || 0)) +
+      ' experiments \u00b7 promotion bar \u0394sharpe \u2265 ' + esc(String(lab.current_margin)) +
+      ' \u00b7 queue ' + esc(String((lab.queue || []).length)) + '</span></div>';
+    var recent = (lab.recent || []).slice(0, 5);
+    if (recent.length) {
+      html += '<table class="data-table" style="width:100%;font-size:11px;margin-top:4px;">' +
+        '<thead><tr><th>hypothesis</th><th>verdict</th><th>\u0394sharpe</th><th>wins</th></tr></thead><tbody>' +
+        recent.map(function (r) {
+          var col = r.verdict === "promoted" ? GREEN :
+                    (r.verdict === "rejected" ? RED : MUTED);
+          return '<tr><td>' + esc((r.hypothesis || "").slice(0, 60)) + '</td>' +
+            '<td style="color:' + col + ';">' + esc(r.verdict || "\u2014") + '</td>' +
+            '<td>' + esc(r.mean_delta === null || r.mean_delta === undefined ? "\u2014" : r.mean_delta) + '</td>' +
+            '<td>' + esc(r.wins === null || r.wins === undefined ? "\u2014" : r.wins) + '</td></tr>';
+        }).join("") + '</tbody></table>';
+    }
+    var promos = (lab.promotions || []).slice(0, 4);
+    if (promos.length) {
+      html += '<div class="muted" style="font-size:11px;margin-top:6px;">promotions</div>' +
+        promos.map(function (p) {
+          var col = p.status === "active" ? GREEN :
+                    (p.status === "demoted" ? RED : MUTED);
+          return '<div style="font-size:11px;">' + esc(p.key) + ': ' +
+            esc(String(p.old_value)) + ' \u2192 <b>' + esc(String(p.new_value)) + '</b> ' +
+            '<span style="color:' + col + ';">[' + esc(p.status) + ']</span>' +
+            (p.demote_reason ? ' <span class="muted">' + esc(p.demote_reason) + '</span>' : '') +
+            '</div>';
+        }).join("");
+    }
+    return html;
+  }
+
   function loadReplay(body) {
-    return API.get("/api/aj/replays").then(function (data) {
+    return Promise.all([
+      API.get("/api/aj/replays"),
+      API.get("/api/aj/lab").catch(function () { return null; })
+    ]).then(function (both) {
+      var data = both[0], lab = both[1];
       var latest = data && data.latest;
       var grids = (data && data.grids) || [];
       if (!latest && !grids.length) {
@@ -977,6 +1020,7 @@
               '<td>' + fmtPct(c.alpha_pct) + '</td></tr>';
           }).join("") + '</tbody></table>';
       });
+      html += labSection(lab);
       body.innerHTML = html;
       wireReplayForm(body);
       if (!latest || !(latest.daily || []).length) return;

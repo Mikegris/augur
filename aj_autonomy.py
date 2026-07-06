@@ -354,6 +354,7 @@ def _scheduler_loop() -> None:
     while True:
         _scheduler_tick()
         _maybe_nightly_counterfactual()
+        _maybe_nightly_lab()
         time.sleep(_SCHED_TICK_SECONDS)
 
 
@@ -449,6 +450,55 @@ def _maybe_nightly_counterfactual() -> bool:
         return True
     except Exception:
         log.debug("nightly counterfactual gate failed", exc_info=True)
+        return False
+
+
+# ── nightly research scientist (aj_lab) ───────────────────────────────────────
+
+_LAB_STAMP_KEY = "__aj_last_lab_run"
+_lab_thread: Optional[threading.Thread] = None
+
+
+def _maybe_nightly_lab() -> bool:
+    """Run the Research Scientist once per ET evening (after the
+    counterfactual window opens): police active promotions, then run ONE
+    queued experiment (K-fold twin replays in isolated subprocesses). Gated
+    by lab_enabled; a slow experiment runs on a daemon worker so the trading
+    scheduler's tick never stalls. Never raises."""
+    global _lab_thread
+    try:
+        cfg = aj_config.get_config()
+        if not cfg.get("lab_enabled"):
+            return False
+        if _lab_thread is not None and _lab_thread.is_alive():
+            return False
+        try:
+            from zoneinfo import ZoneInfo
+            now_et = aj_db.utc_now().astimezone(ZoneInfo("America/New_York"))
+        except Exception:
+            now_et = aj_db.utc_now()
+        if now_et.hour < 21:
+            return False
+        today = now_et.strftime("%Y-%m-%d")
+        if str(aj_db.get_setting_raw(_LAB_STAMP_KEY) or "") == today:
+            return False
+        aj_db.set_setting_raw(_LAB_STAMP_KEY, today)
+
+        def _work():
+            try:
+                import aj_lab
+                res = aj_lab.run_due(budget=1)
+                log.info("nightly lab: %s", json.dumps(
+                    {k: res.get(k) for k in ("ran", "watchdog")}, default=str))
+            except Exception:
+                log.exception("nightly lab failed")
+
+        _lab_thread = threading.Thread(target=_work, daemon=True,
+                                       name="aj-nightly-lab")
+        _lab_thread.start()
+        return True
+    except Exception:
+        log.debug("nightly lab gate failed", exc_info=True)
         return False
 
 

@@ -32,7 +32,7 @@ import database as db
 log = logging.getLogger("augur.aj_db")
 
 # ── schema version target (bump when adding a numbered migration step) ────────
-AJ_SCHEMA_TARGET = 10
+AJ_SCHEMA_TARGET = 11
 _SCHEMA_KEY = "aj_schema_version"
 
 # ── DDL (§5). CREATE TABLE IF NOT EXISTS is safe to re-run; column ADDs go
@@ -510,6 +510,46 @@ def aj_migrate() -> int:
                     "BEGIN SELECT RAISE(ABORT, 'aj_audit is append-only'); END".format(trg, op))
             conn.commit()
             current = 10
+        if current < 11:
+            # v3.20 Research Scientist (aj_lab): the experiment queue/ledger —
+            # every hypothesis, its K-fold evidence, and the verdict — plus
+            # promotion records so live config changes stay traceable to the
+            # experiment that earned them AND auto-demotable when live
+            # performance falls short of the promoted expectation.
+            conn.execute("""CREATE TABLE IF NOT EXISTS aj_lab_experiments (
+                id           INTEGER PRIMARY KEY,
+                created_at   TEXT NOT NULL,
+                status       TEXT NOT NULL DEFAULT 'queued'
+                             CHECK (status IN ('queued','running','done','error')),
+                kind         TEXT,
+                hypothesis   TEXT,
+                rationale    TEXT,
+                params_json  TEXT NOT NULL,
+                evidence_json TEXT,
+                verdict      TEXT CHECK (verdict IN
+                             ('promoted','rejected','inconclusive', NULL)),
+                started_at   TEXT,
+                finished_at  TEXT
+            )""")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_aj_lab_exp_status "
+                         "ON aj_lab_experiments(status, id)")
+            conn.execute("""CREATE TABLE IF NOT EXISTS aj_lab_promotions (
+                id            INTEGER PRIMARY KEY,
+                experiment_id INTEGER,
+                promoted_at   TEXT NOT NULL,
+                key           TEXT NOT NULL,
+                old_value     TEXT,
+                new_value     TEXT,
+                expectation_json TEXT,
+                status        TEXT NOT NULL DEFAULT 'active'
+                              CHECK (status IN ('active','demoted','superseded')),
+                demoted_at    TEXT,
+                demote_reason TEXT
+            )""")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_aj_lab_prom_status "
+                         "ON aj_lab_promotions(status)")
+            conn.commit()
+            current = 11
         set_setting_raw(_SCHEMA_KEY, str(current))
         log.info("aj_migrate: schema at version %d", current)
         return current
@@ -1086,6 +1126,10 @@ _ALLOWED_TABLES = frozenset({
     "aj_cycle_stats",
     # meta-labeling training store (step 8, ML training data)
     "aj_trade_labels",
+    # journal + adapter scorecard (step 10)
+    "aj_journal", "aj_signal_scores",
+    # Research Scientist experiment queue/ledger + promotions (step 11)
+    "aj_lab_experiments", "aj_lab_promotions",
 })
 _IDENT_RE = _re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 

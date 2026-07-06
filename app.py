@@ -3768,6 +3768,17 @@ def aj_replay_status_route():
         return _err(e)
 
 
+@app.route("/api/aj/lab", methods=["GET"])
+def aj_lab_route():
+    """Research Scientist status: experiment queue, recent verdicts with
+    evidence, promotions/demotions, and the current deflated promotion bar."""
+    try:
+        import aj_lab
+        return jsonify(aj_lab.status())
+    except Exception as e:
+        return _err(e)
+
+
 @app.route("/api/aj/replays", methods=["GET"])
 def aj_replays_route():
     """Index + latest details of stored replay-engine artifacts (data/replays).

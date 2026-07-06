@@ -67,6 +67,21 @@ def cmd_replay(argv):
     return p.returncode
 
 
+def cmd_lab(argv):
+    """Research Scientist: propose | run | watchdog | status (default)."""
+    import aj_db, aj_lab
+    aj_db.aj_init()
+    sub = next((a for a in argv if not a.startswith("-")), "status")
+    if sub == "propose":
+        _print(aj_lab.propose())
+    elif sub == "run":
+        _print(aj_lab.run_next())
+    elif sub == "watchdog":
+        _print(aj_lab.check_promotions())
+    else:
+        _print(aj_lab.status())
+
+
 def cmd_kill(argv):
     import aj_db, aj_risk
     aj_db.aj_init()
@@ -351,7 +366,7 @@ _CMDS = {
     "recon": cmd_recon, "config": cmd_config, "verify": cmd_verify,
     "secret": cmd_secret, "verify-pass": cmd_verify_pass,
     "analytics": cmd_analytics, "journal": cmd_journal, "preset": cmd_preset,
-    "explain": cmd_explain, "replay": cmd_replay,
+    "explain": cmd_explain, "replay": cmd_replay, "lab": cmd_lab,
 }
 
 
