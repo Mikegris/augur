@@ -215,6 +215,11 @@ DEFAULTS: Dict[str, Any] = {
     # Batch 1 — multi-factor alpha fusion (orthogonal signals into the ensemble)
     "multi_factor_signals":   False,   # fuse smart_money/insider/congress/social into prob_up
     "adapter_scorecard":      False,   # log per-adapter forecasts + decay weak sources
+    # Nightly counterfactual: after the evening session, replay the last ~30
+    # sessions under the LIVE config and its neighbors (isolated subprocesses);
+    # results land in the Replay Lab panel next morning. The rolling "are my
+    # current settings still the evidence-backed ones?" loop.
+    "nightly_counterfactual": False,
     "regime_conditional_weights": False,  # tilt signal weights by detected regime
     # Batch 4 — signal validation / IC promotion gate (guards batch 1)
     "signal_ic_gate":         True,    # require realized-skill promotion before a new signal counts
@@ -294,6 +299,7 @@ _BOOL_KEYS = {"trading_enabled", "live_trading_enabled", "robinhood_enabled",
               "opportunity_radar", "risk_based_sizing",
               "auto_run_enabled", "auto_run_align_to_clock", "health_autohalt",
               "auto_preset_escalation", "daily_reflection", "premarket_briefing",
+              "nightly_counterfactual",
               # council layer
               "council_enabled", "council_analyst_fundamentals",
               "council_analyst_news", "council_analyst_sentiment",

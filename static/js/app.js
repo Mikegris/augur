@@ -4661,7 +4661,8 @@ async function loadTradingView() {
           f('Health auto-halt', yn('aj-cfg-health_autohalt', cfg.health_autohalt), 'Self-halt on fill-rate collapse, divergence, or a broken audit chain.') +
           f('Preset escalation', yn('aj-cfg-auto_preset_escalation', cfg.auto_preset_escalation), 'Earn your way up conservative→moderate→aggressive; step down on drawdown.') +
           f('Daily reflection', yn('aj-cfg-daily_reflection', cfg.daily_reflection), 'Write an end-of-day self-review of what worked.') +
-          f('Pre-market briefing', yn('aj-cfg-premarket_briefing', cfg.premarket_briefing), 'Build a ranked “what to watch” list before the open.')
+          f('Pre-market briefing', yn('aj-cfg-premarket_briefing', cfg.premarket_briefing), 'Build a ranked “what to watch” list before the open.') +
+          f('Nightly counterfactual', yn('aj-cfg-nightly_counterfactual', cfg.nightly_counterfactual), 'Each evening, replay the last ~30 sessions under your live config and its neighbors (isolated; never touches the live book). Results appear in the Replay Lab panel next morning.')
         )}
 
         ${group('🎯 Effectiveness — better buys & sells', 'Richer signals, pick the best names, trade smarter (all opt-in)', false,
@@ -4874,6 +4875,7 @@ async function loadTradingView() {
       auto_preset_escalation: vBool('aj-cfg-auto_preset_escalation'),
       daily_reflection: vBool('aj-cfg-daily_reflection'),
       premarket_briefing: vBool('aj-cfg-premarket_briefing'),
+      nightly_counterfactual: vBool('aj-cfg-nightly_counterfactual'),
       // effectiveness layer
       multi_factor_signals: vBool('aj-cfg-multi_factor_signals'),
       signal_ic_gate: vBool('aj-cfg-signal_ic_gate'),

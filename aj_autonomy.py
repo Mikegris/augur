@@ -353,7 +353,103 @@ def _scheduler_loop() -> None:
     log.info("aj scheduler loop running (tick=%ss)", _SCHED_TICK_SECONDS)
     while True:
         _scheduler_tick()
+        _maybe_nightly_counterfactual()
         time.sleep(_SCHED_TICK_SECONDS)
+
+
+# ── nightly counterfactual (Replay Lab evidence loop) ─────────────────────────
+# Once per ET evening, replay the recent past under the LIVE config and its
+# neighbors in ISOLATED subprocesses (aj_replay counterfactual). Results land
+# in data/replays and surface in the Insights Replay Lab panel next morning —
+# config drift becomes a rolling measurement instead of a one-shot grid.
+# In-app (not an OS crontab) so it runs wherever the app runs, gated by the
+# nightly_counterfactual config toggle, and can never touch the live book:
+# every child process binds its own throwaway DB.
+
+_CF_STAMP_KEY = "__aj_last_counterfactual"
+_CF_BASKET = "AAPL,MSFT,NVDA,AMZN,GOOGL,META,TSLA,JPM,XOM,UNH"
+_cf_thread: Optional[threading.Thread] = None
+
+
+def _replays_base_dirs() -> tuple:
+    """(out_dir, cache_dir) beside the RESOLVED live DB — reachable from both
+    the source checkout and the frozen desktop bundle (whose CWD/__file__ are
+    not the repo)."""
+    import os
+    import database as _db
+    root = os.path.dirname(os.path.realpath(_db.DB_PATH))
+    return (os.path.join(root, "data", "replays"),
+            os.path.join(root, "data", "replay_cache"))
+
+
+def _maybe_nightly_counterfactual() -> bool:
+    """Fire the nightly counterfactual once per ET day after the evening cutoff.
+    Never raises; the work runs on a daemon worker thread so a slow grid can
+    never stall the trading scheduler's tick."""
+    global _cf_thread
+    try:
+        cfg = aj_config.get_config()
+        if not cfg.get("nightly_counterfactual"):
+            return False
+        if _cf_thread is not None and _cf_thread.is_alive():
+            return False
+        try:
+            from zoneinfo import ZoneInfo
+            now_et = aj_db.utc_now().astimezone(ZoneInfo("America/New_York"))
+        except Exception:
+            now_et = aj_db.utc_now()
+        if now_et.hour < 21:      # after the extended session is done
+            return False
+        today = now_et.strftime("%Y-%m-%d")
+        if str(aj_db.get_setting_raw(_CF_STAMP_KEY) or "") == today:
+            return False
+        aj_db.set_setting_raw(_CF_STAMP_KEY, today)   # claim before the slow work
+
+        allow = [s for s in (cfg.get("symbol_allowlist") or []) if s]
+        syms = ",".join(allow[:15]) if allow else _CF_BASKET
+
+        def _work():
+            import os
+            import subprocess
+            import sys as _sys
+            try:
+                out_dir, cache_dir = _replays_base_dirs()
+                os.makedirs(out_dir, exist_ok=True)
+                env = dict(os.environ)
+                env["PYTHONPATH"] = os.pathsep.join(
+                    p if p else os.getcwd() for p in _sys.path)
+                log_path = os.path.join(out_dir, "nightly.log")
+                with open(log_path, "a") as lf:
+                    lf.write("\n-- nightly counterfactual {} --\n".format(today))
+                    lf.flush()
+                    # 1) refresh the bar cache (the only network step)
+                    subprocess.run(
+                        [_sys.executable, "-m", "aj_replay", "build-cache",
+                         "--symbols", syms + ",SPY,^VIX", "--period", "2y",
+                         "--refresh", "--cache-dir", cache_dir],
+                        env=env, stdout=lf, stderr=subprocess.STDOUT, timeout=1800)
+                    # 2) live-config ± neighbors over the last 30 sessions
+                    subprocess.run(
+                        [_sys.executable, "-m", "aj_replay", "counterfactual",
+                         "--days", "30", "--symbols", syms, "--offline",
+                         "--max-cells", "8", "--out-dir", out_dir,
+                         "--cache-dir", cache_dir,
+                         "--grid-id", "cf_{}".format(today.replace("-", ""))],
+                        env=env, stdout=lf, stderr=subprocess.STDOUT, timeout=5400)
+                aj_db.audit("alert", {"kind": "nightly_counterfactual",
+                                      "date": today, "symbols": syms},
+                            actor="system")
+                log.info("nightly counterfactual complete (%s)", today)
+            except Exception:
+                log.exception("nightly counterfactual failed")
+
+        _cf_thread = threading.Thread(target=_work, daemon=True,
+                                      name="aj-nightly-counterfactual")
+        _cf_thread.start()
+        return True
+    except Exception:
+        log.debug("nightly counterfactual gate failed", exc_info=True)
+        return False
 
 
 def start_scheduler() -> bool:
