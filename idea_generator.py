@@ -69,6 +69,17 @@ EQUITY_UNIVERSE = sorted(set(
     + scanner.UNIVERSE_INCOME
 ))
 
+# Known ETFs within the curated universe. asset_class="etf" (a documented API
+# value that used to be a silent no-op returning individual stocks) filters
+# the equity pool down to these. They deliberately KEEP the 'stock' tag in
+# the pool tuples: every downstream consumer branches on 'stock' vs 'crypto'
+# only (yfinance symbol shape, dossier job selection, correlation), and an
+# 'etf' tag would route them down the "-USD" crypto path.
+ETF_UNIVERSE = [
+    "SPY", "QQQ", "IWM", "DIA", "VTI", "VOO", "IVV", "EFA", "EEM",
+    "XLK", "XLF", "XLE", "XLV", "XLY", "XLP", "XLI", "XLU", "XLRE", "XLB",
+]
+
 CRYPTO_UNIVERSE = list(scanner.UNIVERSE_CRYPTO_IDS.keys())
 
 # Pick weights (must sum to 1.0)
@@ -175,14 +186,23 @@ def get_full_crypto_universe(top_n: int = _FULL_CRYPTO_TARGET) -> List[Dict[str,
     with _full_crypto_lock:
         now = time.time()
         cached = _full_crypto_cache.get("data")
-        if cached and (now - _full_crypto_cache.get("ts", 0)) < _FULL_CRYPTO_TTL and len(cached) >= top_n:
+        # Freshness is judged by what the cached fetch was ASKED for
+        # ("target"), not by how many entries survived: symbol-dedup and
+        # short/failed pages routinely leave len(entries) < top_n, so the old
+        # `len(cached) >= top_n` condition never held and every call re-ran
+        # the whole paging loop (1.2s sleeps included) for the entire TTL.
+        if cached and (now - _full_crypto_cache.get("ts", 0)) < _FULL_CRYPTO_TTL \
+                and _full_crypto_cache.get("target", 0) >= top_n:
             return cached[:top_n]
 
-        try:
-            entries: List[Dict[str, str]] = []
-            seen_symbols = set()
-            pages = max(1, (top_n + 249) // 250)
-            for page in range(1, pages + 1):
+        entries: List[Dict[str, str]] = []
+        seen_symbols = set()
+        pages = max(1, (top_n + 249) // 250)
+        for page in range(1, pages + 1):
+            # Per-page guard: a 429 on page 2 must not throw away page 1's
+            # 250 coins — keep (and cache) the partial result instead of
+            # collapsing the full-discovery pool to the ~20 curated coins.
+            try:
                 page_data = fetcher._cg_get("/coins/markets", {
                     "vs_currency": "usd",
                     "order": "market_cap_desc",
@@ -190,28 +210,35 @@ def get_full_crypto_universe(top_n: int = _FULL_CRYPTO_TARGET) -> List[Dict[str,
                     "page": page,
                     "sparkline": "false",
                 })
-                if not page_data:
-                    break
-                for c in page_data:
-                    sym = (c.get("symbol") or "").upper().strip()
-                    cid = c.get("id")
-                    if not sym or not cid or sym in seen_symbols:
-                        continue
-                    seen_symbols.add(sym)
-                    entries.append({"symbol": sym, "id": cid, "name": c.get("name") or sym})
-                    if len(entries) >= top_n:
-                        break
+            except Exception as e:
+                logger.warning("CoinGecko page %d fetch failed (%s) — keeping "
+                               "%d entries fetched so far", page, e, len(entries))
+                break
+            if not page_data:
+                break
+            for c in page_data:
+                sym = (c.get("symbol") or "").upper().strip()
+                cid = c.get("id")
+                if not sym or not cid or sym in seen_symbols:
+                    continue
+                seen_symbols.add(sym)
+                entries.append({"symbol": sym, "id": cid, "name": c.get("name") or sym})
                 if len(entries) >= top_n:
                     break
-                # Be polite to the free CoinGecko endpoint
-                time.sleep(1.2)
-            if entries:
-                _full_crypto_cache["data"] = entries
-                _full_crypto_cache["ts"] = now
-                logger.info("Loaded %d crypto entries into full universe", len(entries))
-                return entries
-        except Exception as e:
-            logger.warning("CoinGecko universe fetch failed (%s) — falling back to curated list", e)
+            if len(entries) >= top_n:
+                break
+            # Be polite to the free CoinGecko endpoint
+            time.sleep(1.2)
+        if entries:
+            _full_crypto_cache["data"] = entries
+            _full_crypto_cache["ts"] = now
+            # Record the requested size so a shorter-than-asked result (dedup
+            # or a mid-paging failure) still counts as a fresh fetch for this
+            # top_n and isn't re-pulled on every roll for the whole TTL.
+            _full_crypto_cache["target"] = top_n
+            logger.info("Loaded %d crypto entries into full universe", len(entries))
+            return entries
+        logger.warning("CoinGecko universe fetch returned nothing — falling back to curated list")
 
         fallback = [
             {"symbol": s, "id": cid, "name": s}
@@ -259,7 +286,13 @@ def _filtered_universe(
     pools = {"equity": [], "crypto": [], "watchlist": []}
 
     # ── Equity pool ──
-    if asset_class in (None, "any", "stock", "etf"):
+    if asset_class == "etf":
+        # The SEC full universe carries no ETF metadata, so both discovery
+        # modes draw from the curated ETF list. Tag stays 'stock' — see the
+        # WHY on ETF_UNIVERSE.
+        for sym in ETF_UNIVERSE:
+            pools["equity"].append((sym, "stock", "universe"))
+    elif asset_class in (None, "any", "stock"):
         if discovery_mode == "full":
             sec_tickers = get_full_equity_universe()
             for sym in sec_tickers:
@@ -272,6 +305,27 @@ def _filtered_universe(
         else:
             for sym in EQUITY_UNIVERSE:
                 pools["equity"].append((sym, "stock", "universe"))
+
+    # Pre-narrow the equity pool by sector where a curated map exists. The
+    # post-pick re-roll loop in generate_random_idea stays as the correctness
+    # backstop (yfinance's sector string is authoritative), but without this
+    # the `sector` parameter did nothing at pool time and 4 attempts drawn
+    # from the full universe rarely landed on a small sector. Unknown sector
+    # names (or ETF pools — SECTOR_PEERS holds no ETFs) fail open to the
+    # unfiltered pool.
+    if sector and pools["equity"]:
+        sector_syms = set(SECTOR_PEERS.get(sector)
+                          or SECTOR_PEERS.get(str(sector).title()) or [])
+        if sector_syms:
+            narrowed = [c for c in pools["equity"] if c[0] in sector_syms]
+            if not narrowed:
+                # The curated pool has no overlap with this sector's map
+                # (e.g. Utilities — none of NEE/DUK/SO/AEP/D are in
+                # EQUITY_UNIVERSE). The user explicitly asked for the
+                # sector, and the map's tickers are all liquid large caps,
+                # so draw from the map itself rather than the full pool.
+                narrowed = [(s, "stock", "sector_map") for s in sorted(sector_syms)]
+            pools["equity"] = narrowed
 
     # ── Crypto pool ──
     if asset_class in (None, "any", "crypto"):
@@ -698,7 +752,13 @@ def _build_fast_dossier(symbol: str, asset_class: str, source: str, strategy: st
         "from_cache": False,
     }
 
-    _set_cache(cache_key, dossier, ttl=DOSSIER_CACHE_TTL)
+    # Don't cache a total-failure dossier (no price ⇒ every fan-out job
+    # failed, e.g. a transient network blip). Caching it would make every
+    # re-pick of this symbol skip it via the price gate for the full 10-min
+    # TTL — shrinking the effective pool — and would feed /api/ideas/enrich
+    # a permanently empty snapshot even after connectivity recovers.
+    if snapshot.get("price"):
+        _set_cache(cache_key, dossier, ttl=DOSSIER_CACHE_TTL)
     return dossier
 
 
@@ -1095,6 +1155,14 @@ def _compute_peers(symbol: str, sector: Optional[str]):
     ranks = {}
     for key, (label, higher_better) in METRICS.items():
         vals = [(r["symbol"], r.get(key)) for r in rows if isinstance(r.get(key), (int, float))]
+        if not higher_better:
+            # Lower-is-better multiples (P/E, forward P/E, P/S): a NEGATIVE
+            # value means negative earnings/sales (yfinance passes forwardPE
+            # raw when forwardEps < 0), not a cheap stock — without this,
+            # loss-makers sorted to rank #1 on valuation. Rank positives only;
+            # a filtered-out pick simply skips the metric via the `sym_u not
+            # in order_upper` guard below.
+            vals = [(s, v) for s, v in vals if v > 0]
         if len(vals) < 2:
             continue
         sorted_vals = sorted(vals, key=lambda x: x[1], reverse=higher_better)
@@ -1351,7 +1419,6 @@ def _compute_trade_plan(snapshot, forecast, risk):
     annual_vol = (risk or {}).get("annual_volatility_pct") or 25.0
     fifty_two_low = (snapshot or {}).get("fifty_two_week_low")
     sma_50 = (snapshot or {}).get("fifty_day_avg")
-    sma_200 = (snapshot or {}).get("two_hundred_day_avg")
 
     # Entry zone: ±0.5σ daily (annual_vol / sqrt(252)) around current price.
     # This is the typical 1-day range — gives a few-day window to scale in.
@@ -1367,6 +1434,10 @@ def _compute_trade_plan(snapshot, forecast, risk):
         candidates.append(("ML lower-CI", round(lower_ci, 2)))
     if sma_50 and sma_50 < price:
         candidates.append(("50d SMA", round(sma_50, 2)))
+    # Recent-low support (52-week low) — the candidate promised by the
+    # comment above; previously read from the snapshot but never appended.
+    if fifty_two_low and fifty_two_low < price:
+        candidates.append(("52w-low support", round(fifty_two_low, 2)))
     # Fixed ATR-style fallback: 1× monthly vol below price
     monthly_vol = annual_vol / (12 ** 0.5)
     atr_stop = round(price * (1 - monthly_vol / 100 * 1.5), 2)
@@ -1509,12 +1580,18 @@ def generate_random_idea(
         if snap.get("price") in (None, 0):
             continue
 
-        last_dossier = dossier
-
         if sector and ac == "stock":
             sec = snap.get("sector") or ""
             if sec.lower() != sector.lower():
                 continue
+
+        # Only a dossier that PASSED the sector filter may serve as the
+        # exhausted-attempts fallback below — capturing it before the sector
+        # check meant a Utilities request could come back with an AAPL
+        # dossier (mislabeled 'below_threshold') once the re-rolls ran out.
+        # With no sector-matching pick at all, the honest answer is the
+        # error return, not a wrong-sector idea.
+        last_dossier = dossier
 
         # We don't have a strength score yet — that's in enrichment. Skip the
         # min_score gate here for fast picks (it's still enforced for warmed

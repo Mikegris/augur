@@ -430,7 +430,15 @@ def _c_congress(symbol: str) -> Optional[Tuple[Any, float]]:
         # txn labels via congress.TXN_LABELS: "Buy", "Sell", "Sell (Partial)",
         # "Purchase (Exercise)", "Sale (Exercise)", "Exchange". Raw codes:
         # "P", "S", "PE", "SE", "S (partial)", "S (Exchange)", "E (Exchange)".
-        # Use prefix matches so partials/exchanges fall on the right side.
+        # Use prefix matches so partials fall on the right side.
+        # WHY (#217): Exchange legs are NON-directional (both "S (Exchange)"
+        # and "E (Exchange)" map to the same "Exchange" label) — the old
+        # startswith("S") match counted the S-coded leg as a full-size sell
+        # while silently dropping the E-coded leg, letting a swap move the
+        # contributor up to full -1.0 saturation with zero open-market flow.
+        # Skip them entirely, mirroring synth_sectorflow._congress_index.
+        if "EXCHANGE" in raw or "EXCHANGE" in txn:
+            continue
         if (
             "PURCHASE" in txn
             or txn.startswith("BUY")
@@ -660,17 +668,24 @@ def _compute(symbol: str) -> Dict[str, Any]:
 
     # Coverage attenuation, applied EXACTLY ONCE (budget-weighted normalization).
     # A consensus built from one thin source shouldn't get the same dynamic
-    # range as one corroborated by many. We normalize the dynamic-weighted sum
-    # by the *full static-weight budget* (total_static_w) rather than only the
-    # present contributors' weight (sum_w): a single-source read is thereby
-    # naturally shrunk toward 0 (→ score 50, neutral) in proportion to how
-    # little of the budget it covers, while a near-full-coverage read is left
-    # essentially unchanged. The previous code divided by `sum_w` (present
-    # contributors only) AND multiplied by `coverage`, pulling a single source
-    # toward neutral TWICE.
+    # range as one corroborated by many, so the direction estimate is scaled
+    # by the fraction of the STATIC weight budget that produced a value. The
+    # previous code divided by `sum_w` (present contributors only) AND
+    # multiplied by `coverage`, pulling a single source toward neutral TWICE.
+    #
+    # WHY (#211): normalize the dynamic-weighted sum by the DYNAMIC weights
+    # actually used (sum_w) — not the static budget. Dividing by the static
+    # budget made tracker upweighting inflate the consensus MAGNITUDE instead
+    # of reallocating voice: identical +0.3 signals scored a whole label band
+    # more extreme when tracked contributors hit their 2x multiplier (and
+    # compressed toward 50 when all earned <1x), with zero new directional
+    # information. weighted_sum/sum_w is a true weighted MEAN of the
+    # normalized signals (multiplier-invariant when signals agree); coverage
+    # then applies the single attenuation. When every multiplier is 1x this
+    # reduces exactly to the old weighted_sum/total_static_w.
     coverage = sum_static_w / total_static_w if total_static_w > 0 else 1.0
     coverage = _clip(coverage, 0.0, 1.0)
-    avg = weighted_sum / total_static_w  # budget-weighted: single attenuation
+    avg = (weighted_sum / sum_w) * coverage  # single attenuation, via coverage
     avg = _clip(avg, -1.0, 1.0)
     # Tanh squash gives nice midrange spread; 50 + 50*tanh(1.6*avg) maps the
     # high-conviction tails (|avg|≈1) to ~96/4 and keeps the middle band

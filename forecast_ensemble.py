@@ -40,7 +40,7 @@ import logging
 import math
 import time
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import safe_executor
 
@@ -52,6 +52,15 @@ except Exception:  # pragma: no cover
     cache_store = None
 
 _CACHE_TTL = 900  # 15 min — the underlying engines cache for ~1h each
+
+# (symbol, horizon_days) -> "YYYY-MM-DD" of the last accountability log. The
+# 15-min cache TTL means an auto-refreshing dashboard would otherwise log
+# ~26 near-identical ledger rows/day per symbol, which the Brier/hit-rate
+# machinery then treats as independent samples (pseudo-replication that can
+# satisfy _MIN_N_FOR_ADAPT with effectively n=1 of evidence). One row per
+# (symbol, horizon, UTC calendar day) is plenty. In-memory only — a restart
+# may re-log once, which is harmless.
+_LOGGED_DAY: Dict[Tuple[str, int], str] = {}
 
 # Default trust weights per signal. Renormalized over whatever is available.
 # The two real statistical models (RF classifier, bootstrap) carry the most
@@ -307,7 +316,8 @@ def _conviction(edge: float, consensus: float, n: int) -> str:
 
 def _build_return_cone(bootstrap: Optional[Dict[str, Any]],
                        trend_ret: Optional[float],
-                       tilt: float) -> Optional[Dict[str, Any]]:
+                       tilt: float,
+                       horizon_days: int = 30) -> Optional[Dict[str, Any]]:
     """Return forecast cone. Prefer the bootstrap distribution (real,
     fat-tailed). Tilt is the ensemble directional lean in [-0.5,0.5]; it
     nudges the central estimate toward the consensus direction without
@@ -330,10 +340,15 @@ def _build_return_cone(bootstrap: Optional[Dict[str, Any]],
             "tilt_applied_pct": round(shift, 2),
         }
     if trend_ret is not None:
+        # The trend model's forecast is a FIXED 30-day return; the caller may
+        # have asked for any horizon. Rescale linearly so a 5-day cone isn't
+        # labeled with the full 30d move (which would also over-state the
+        # magnitude the accountability ledger scores at horizon_days).
+        scaled = float(trend_ret) * (float(max(1, horizon_days)) / 30.0)
         return {
             "source": "trend",
-            "expected_return_pct": round(float(trend_ret), 2),
-            "p05": None, "p25": None, "median": round(float(trend_ret), 2),
+            "expected_return_pct": round(scaled, 2),
+            "p05": None, "p25": None, "median": round(scaled, 2),
             "p75": None, "p95": None, "tilt_applied_pct": 0.0,
         }
     return None
@@ -424,7 +439,11 @@ def _run_uncached(symbol: str, horizon_days: int) -> Dict[str, Any]:
     try:
         import forecast_accountability
         weights = forecast_accountability.adaptive_weights(eff_base, horizon_days)
-        if forecast_accountability.weights_are_adapted(_BASE_WEIGHTS):
+        # Label on the SAME inputs the applied weights were computed from
+        # (eff_base + this horizon) — checking _BASE_WEIGHTS pooled could say
+        # "adaptive" while the h-specific weights in use are pure base (or
+        # vice-versa), and the UI note would misreport.
+        if forecast_accountability.weights_are_adapted(eff_base, horizon_days):
             weights_source = "adaptive"
     except Exception as e:
         log.debug("adaptive_weights unavailable: %s", e)
@@ -501,7 +520,8 @@ def _run_uncached(symbol: str, horizon_days: int) -> Dict[str, Any]:
     signal_rows.sort(key=lambda r: r["weight"], reverse=True)
 
     trend_ret = (ml_signals.get("trend") or {}).get("expected_return_pct")
-    cone = _build_return_cone(bootstrap, trend_ret, tilt=edge)
+    cone = _build_return_cone(bootstrap, trend_ret, tilt=edge,
+                              horizon_days=horizon_days)
 
     notes: List[str] = []
     n_agree = sum(1 for r in signal_rows if r.get("agrees") is True)
@@ -545,11 +565,15 @@ def _run_uncached(symbol: str, horizon_days: int) -> Dict[str, Any]:
     }
 
     # Accountability loop: record this forecast so it gets scored once the
-    # horizon elapses. Runs only on the uncached path (≈ once per symbol per
-    # cache-TTL), and is fire-and-forget — never breaks the forecast.
+    # horizon elapses. Deduped to one row per (symbol, horizon, UTC day) —
+    # see _LOGGED_DAY — and fire-and-forget: never breaks the forecast.
     try:
-        import forecast_accountability
-        forecast_accountability.log_ensemble(symbol, horizon_days, result)
+        today = datetime.now(tz=timezone.utc).strftime("%Y-%m-%d")
+        mark = (symbol, horizon_days)
+        if _LOGGED_DAY.get(mark) != today:
+            import forecast_accountability
+            forecast_accountability.log_ensemble(symbol, horizon_days, result)
+            _LOGGED_DAY[mark] = today
     except Exception as e:
         log.debug("log_ensemble failed for %s: %s", symbol, e)
 

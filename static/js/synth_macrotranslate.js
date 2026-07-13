@@ -348,16 +348,24 @@
   }
 
   async function _runQuery(containerEl, releaseId, surprise, portfolio) {
+    // Ordering guard: flipping the release select fires a query per change
+    // with no cancellation, so a slow FRED-backed response (CPI) can resolve
+    // AFTER a faster later one (PAYEMS) and repaint stale data under the new
+    // dropdown label. Each run bumps the container's generation; responses
+    // whose captured generation is no longer current are dropped.
+    const gen = (containerEl._mtGen = (containerEl._mtGen || 0) + 1);
     const statusEl = containerEl.querySelector("#mt-status");
     if (statusEl) statusEl.textContent = `Translating ${releaseId}…`;
     let data;
     try {
       data = await _fetchData(releaseId, surprise, portfolio);
     } catch (e) {
+      if (containerEl._mtGen !== gen) return; // superseded by a newer run
       const bodyEl = containerEl.querySelector("#mt-body");
       if (bodyEl) bodyEl.innerHTML = _emptyCard("Network error: " + e);
       return;
     }
+    if (containerEl._mtGen !== gen) return; // superseded by a newer run
     _renderResult(containerEl, data, portfolio);
   }
 

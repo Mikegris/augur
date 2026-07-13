@@ -314,14 +314,27 @@ def run_next(cfg: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
                                "queued", status="running", started_at=_now()):
             return {"ran": False, "reason": "claim lost"}
         try:
-            params = json.loads(exp.get("params_json") or "{}")
+            try:
+                params = json.loads(exp.get("params_json") or "{}")
+            except Exception:
+                params = {}
+            changes = (params.get("set") or {})
+            verdict, evidence = _judge(cfg, changes)
+            aj_db.update("aj_lab_experiments", exp["id"], status="done",
+                         finished_at=_now(), verdict=verdict,
+                         evidence_json=json.dumps(evidence, default=str))
         except Exception:
-            params = {}
-        changes = (params.get("set") or {})
-        verdict, evidence = _judge(cfg, changes)
-        aj_db.update("aj_lab_experiments", exp["id"], status="done",
-                     finished_at=_now(), verdict=verdict,
-                     evidence_json=json.dumps(evidence, default=str))
+            # Release the claim: an exception between the CAS-claim and the
+            # 'done' update would otherwise orphan the row as a phantom
+            # 'running' forever (run_next only pops 'queued'; the dedup
+            # 'seen' set would also block re-proposing that value). A crash
+            # (process death) is handled by the reaper in run_due.
+            try:
+                aj_db.update_if("aj_lab_experiments", exp["id"], "status",
+                                "running", status="queued")
+            except Exception:
+                pass
+            raise
         aj_db.audit("lab", {"experiment_id": exp["id"],
                             "hypothesis": exp.get("hypothesis"),
                             "verdict": verdict,
@@ -459,12 +472,33 @@ def check_promotions(cfg: Optional[Dict[str, Any]] = None,
             base_sharpe = exp.get("baseline_sharpe_mean")
             if base_sharpe is None:
                 continue
+            # aj_equity.equity_usd is CUMULATIVE P&L written once per CYCLE
+            # (N rows/day under auto-run), NOT an account-equity daily series.
+            # Judge on one point per DISTINCT trading date (latest row per
+            # date, mirroring aj_analytics.equity_curve) so min_days means
+            # days, not cycles — and convert P&L to equity with a capital
+            # base (same recipe as aj_alpha.current_drawdown_pct), since
+            # %-returns over raw cumulative P&L are meaningless (they made
+            # live_sharpe essentially random, and negative P&L rows were
+            # silently dropped by the >0 filter, hiding bad promotions).
             rows = aj_db.query(
-                "SELECT equity_usd FROM aj_equity WHERE ts >= ? "
-                "ORDER BY id ASC", (p["promoted_at"],))
-            vals = [float(r["equity_usd"]) for r in rows
+                "SELECT date, equity_usd FROM aj_equity WHERE ts >= ? AND id IN "
+                "(SELECT MAX(id) FROM aj_equity GROUP BY date) ORDER BY date ASC",
+                (p["promoted_at"],))
+            try:
+                base_cap = float(cfg.get("compound_base_equity_usd") or 0)
+            except (TypeError, ValueError):
+                base_cap = 0.0
+            if base_cap <= 0:
+                try:
+                    base_cap = float(cfg.get("paper_cash") or 0)
+                except (TypeError, ValueError):
+                    base_cap = 0.0
+            if base_cap <= 0:
+                continue    # no capital base -> % returns undefined; fail open
+            vals = [base_cap + float(r["equity_usd"]) for r in rows
                     if r.get("equity_usd") is not None]
-            if len(vals) < min_days:
+            if len(vals) < min_days:    # < min_days DISTINCT live dates
                 continue
             rets = [vals[i] / vals[i - 1] - 1.0 for i in range(1, len(vals))
                     if vals[i - 1] > 0]
@@ -501,6 +535,24 @@ def run_due(cfg: Optional[Dict[str, Any]] = None, budget: int = 1) -> Dict[str, 
         cfg = cfg or aj_config.get_config()
         if not cfg.get("lab_enabled"):
             return {"ran": False, "reason": "lab disabled"}
+        # Reaper: a process killed mid-experiment leaves its row 'running'
+        # forever (the in-process requeue in run_next can't fire). Requeue
+        # anything claimed >12h ago — a legitimate run is bounded well under
+        # that (folds subprocess-timeout at 1h each). CAS so we never race a
+        # runner that finishes while we look.
+        try:
+            cutoff = (aj_db.utc_now() - timedelta(hours=12)).replace(
+                microsecond=0).isoformat()
+            for r in aj_db.query("SELECT id, started_at FROM aj_lab_experiments "
+                                 "WHERE status='running'"):
+                if (r.get("started_at") or "") < cutoff:
+                    if aj_db.update_if("aj_lab_experiments", r["id"], "status",
+                                       "running", status="queued"):
+                        log.warning("lab reaped stale running experiment #%s "
+                                    "(claimed %s) back to queued",
+                                    r["id"], r.get("started_at"))
+        except Exception:
+            log.debug("lab reaper failed", exc_info=True)
         watch = check_promotions(cfg)
         q = aj_db.query("SELECT COUNT(*) AS n FROM aj_lab_experiments "
                         "WHERE status='queued'")

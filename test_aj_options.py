@@ -15,6 +15,11 @@ import aj_db                    # noqa: E402
 import aj_options as O          # noqa: E402
 
 aj_db.aj_init()
+# Deterministic session: the routing tests run full proposals through the risk
+# gate, which correctly blocks on weekends/holidays via the real calendar —
+# stub it so the suite passes regardless of the day it runs (same fix as
+# test_aj_cycle after the July-4 observed holiday).
+aj_db.market_session = lambda dt=None: "regular"
 
 
 def _future(days):

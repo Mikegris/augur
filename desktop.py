@@ -215,15 +215,30 @@ def _wait_for_port(port: int, timeout: float = 30.0) -> bool:
     return False
 
 
-def _start_flask(port: int) -> None:
+def _start_flask(port: int, ready: threading.Event, failed: threading.Event) -> None:
     # Import lazily so the missing-pywebview error (below) fires before the
     # heavy app.py import cost.
     from app import app, _start_idea_warmer
-
+    # Bind the socket OURSELVES via make_server (it binds in the constructor)
+    # instead of app.run(): a bind failure inside this daemon thread was
+    # previously swallowed, and _wait_for_port would then see ANOTHER
+    # instance's server on the port and happily attach our window to it —
+    # which goes dead the moment that instance quits (TOCTOU with the
+    # _port_in_use pre-check in main()). `ready`/`failed` let main() wait for
+    # OUR server specifically, not just "something listening on the port".
+    # No reloader here either — make_server never forks the reloader child
+    # that fights pywebview for the main thread (why app.run used
+    # debug=False/use_reloader=False).
+    from werkzeug.serving import make_server
+    try:
+        server = make_server("127.0.0.1", port, app, threaded=True)
+    except OSError as e:
+        log.error("Flask could not bind 127.0.0.1:%d: %s", port, e)
+        failed.set()
+        return
     _start_idea_warmer()
-    # debug=False + use_reloader=False is critical: Flask's reloader forks a
-    # child, which fights pywebview for the main thread.
-    app.run(host="127.0.0.1", port=port, debug=False, use_reloader=False, threaded=True)
+    ready.set()  # socket is bound and listening; connections queue until serve_forever
+    server.serve_forever()
 
 
 def main() -> int:
@@ -239,7 +254,15 @@ def main() -> int:
         )
         return 1
 
-    port = int(os.environ.get("PORT", 5001))
+    # A bad PORT ("auto", "", "5001 ") must not crash the launcher with a raw
+    # ValueError — in the frozen .app stderr goes nowhere and it just looks
+    # like the app doesn't open. Fall back to the default with a warning.
+    port_raw = os.environ.get("PORT", "5001")
+    try:
+        port = int(port_raw)
+    except ValueError:
+        log.warning("PORT=%r is not a number — falling back to 5001", port_raw)
+        port = 5001
     if _port_in_use(port):
         sys.stderr.write(
             f"✗ Port {port} is already in use. Set PORT=<free-port> and try again,\n"
@@ -247,10 +270,25 @@ def main() -> int:
         )
         return 1
 
-    flask_thread = threading.Thread(target=_start_flask, args=(port,), daemon=True)
+    flask_ready = threading.Event()
+    flask_failed = threading.Event()
+    flask_thread = threading.Thread(
+        target=_start_flask, args=(port, flask_ready, flask_failed), daemon=True)
     flask_thread.start()
 
-    if not _wait_for_port(port):
+    # Wait for OUR Flask's bind, not merely for the port to answer: a second
+    # instance racing past the _port_in_use pre-check would otherwise attach
+    # its window to the first instance's server (see _start_flask).
+    deadline = time.monotonic() + 30.0
+    while time.monotonic() < deadline and not flask_ready.is_set():
+        if flask_failed.is_set() or not flask_thread.is_alive():
+            sys.stderr.write(
+                f"✗ Port {port} was grabbed before Flask could bind — is another\n"
+                f"  AUGUR instance already running? Set PORT=<free-port> to run both.\n"
+            )
+            return 1
+        time.sleep(0.1)
+    if not flask_ready.is_set():
         sys.stderr.write(f"✗ Flask didn't start on port {port} within 30s. Aborting.\n")
         return 1
     log.info("Flask is up on http://127.0.0.1:%d", port)
@@ -282,7 +320,10 @@ def main() -> int:
 
     # pywebview's start() blocks the main thread until the window closes.
     # The Flask thread is a daemon, so it terminates with us.
-    webview.start(debug=bool(os.environ.get("AUGUR_WEBVIEW_DEBUG")))
+    # Truthy-string check, not bool(): bool("0")/bool("false") are True, so an
+    # explicit AUGUR_WEBVIEW_DEBUG=0 would ENABLE the inspector it disables.
+    webview.start(debug=os.environ.get("AUGUR_WEBVIEW_DEBUG", "").strip().lower()
+                  in ("1", "true", "yes"))
     log.info("[desktop] webview.start() returned — exiting")
     return 0
 

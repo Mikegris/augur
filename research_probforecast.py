@@ -170,6 +170,12 @@ def compare_to_point(symbol: str, horizon_days: int = 20) -> Dict[str, Any]:
         }
     """
     symbol = (symbol or "").strip().upper()
+    # WHY (#251): prob_forecast clamps its horizon to 252 internally. Clamp
+    # ONCE here (same expression) and use the clamped value everywhere below —
+    # the reported horizon_days AND the ×h/30 point-scaling factor — so a
+    # request like horizon=500 can't pair a 500-day-scaled point estimate
+    # against a 252-day bootstrap median and report a meaningless spread.
+    horizon_days = int(max(1, min(int(horizon_days or 20), 252)))
     prob = prob_forecast(symbol, horizon_days=horizon_days)
 
     point: Dict[str, Any] = {

@@ -505,7 +505,8 @@ def _current_signals(symbol: str,
                      event_date: datetime.date,
                      signal_cache: Dict[str, Dict[str, Any]],
                      skew_symbol: Optional[str] = None,
-                     rnd_cache: Optional[Dict[Tuple[str, Optional[str]], Any]] = None) -> Dict[str, Any]:
+                     rnd_cache: Optional[Dict[Tuple[str, Optional[str]], Any]] = None,
+                     skip_skew: bool = False) -> Dict[str, Any]:
     """Memoized per-symbol bundle of current signal stack. Each symbol
     appears multiple times across event types (earnings + FOMC + OPEX),
     so this is cached at the request scope.
@@ -514,13 +515,18 @@ def _current_signals(symbol: str,
     drives iv_skew (defaults to `symbol`). Previously the caller would let this
     compute _implied_skew(symbol) and then immediately overwrite it for FOMC,
     paying for the chain pull twice. Passing the right symbol in computes it
-    once."""
+    once.
+
+    `skip_skew=True` sets iv_skew to None WITHOUT touching the chain — the
+    caller uses it when it already decided to skip the RND pull (market-wide
+    event with no historical overlay); computing the skew here anyway would
+    silently pay the exact chain-pull cost that skip exists to avoid."""
     skew_symbol = skew_symbol or symbol
     cached = signal_cache.get(symbol)
     if cached is not None:
         # Re-derive iv_skew from the event date (skew varies by expiry).
         out = dict(cached)
-        skew = _implied_skew(skew_symbol, event_date, rnd_cache)
+        skew = None if skip_skew else _implied_skew(skew_symbol, event_date, rnd_cache)
         out["iv_skew"] = _format_skew(skew)
         return out
 
@@ -570,7 +576,8 @@ def _current_signals(symbol: str,
     signal_cache[symbol] = bundle
 
     out = dict(bundle)
-    out["iv_skew"] = _format_skew(_implied_skew(skew_symbol, event_date, rnd_cache))
+    out["iv_skew"] = None if skip_skew else _format_skew(
+        _implied_skew(skew_symbol, event_date, rnd_cache))
     return out
 
 
@@ -698,8 +705,14 @@ def _make_event(symbol: str, event_type: str, event_date: datetime.date,
     is_market_wide = event_type in ("fed_fomc", "opex")
     if is_market_wide and historical is None:
         implied = None
+        # The skew comes from the SAME RND payload — letting _current_signals
+        # pull it anyway would pay the full chain-pull cost this branch
+        # exists to skip (rnd_cache only dedupes, it doesn't make the first
+        # pull free across 20 symbols × 4 FOMC/OPEX dates).
+        skip_skew = True
     else:
         implied = _implied_move_pct(symbol, event_date, rnd_cache)
+        skip_skew = False
 
     # WHY (S11): pass the skew underlying straight into _current_signals so it
     # computes _implied_skew once on the correct symbol. The old code computed
@@ -708,7 +721,8 @@ def _make_event(symbol: str, event_type: str, event_date: datetime.date,
     # symbol per FOMC date. With skew_sym == symbol for every event type now,
     # there's nothing to override.
     signals = _current_signals(symbol, event_date, signal_cache,
-                               skew_symbol=skew_sym, rnd_cache=rnd_cache)
+                               skew_symbol=skew_sym, rnd_cache=rnd_cache,
+                               skip_skew=skip_skew)
 
     return {
         "date": event_date.isoformat(),

@@ -200,7 +200,9 @@ def cmd_chart(args):
     if not data:
         print(_c("No chart data", RED))
         return
-    closes = [d["close"] for d in data if d.get("close")]
+    # NaN is truthy, so `if d.get("close")` alone lets NaN closes through and
+    # min/max/int() blow up downstream. NaN != NaN, so the self-compare drops it.
+    closes = [d["close"] for d in data if d.get("close") and d["close"] == d["close"]]
     if not closes:
         print(_c("No close prices", RED))
         return
@@ -349,7 +351,11 @@ def cmd_portfolio(args):
             shares = h["shares"]
             avg = h["avg_cost"]
             q = prices.get(sym.upper(), {})
-            price = q.get("price", avg)
+            # get_quote can return a full-shape dict with an explicit
+            # price=None (prev_close-only path); .get(key, default) only
+            # defaults on a MISSING key, so `or` is required to avoid a
+            # TypeError on shares * None (mirrors cmd_quote / cmd_ai).
+            price = q.get("price") or avg
             val = shares * price
             cost = shares * avg
             pnl = val - cost
@@ -451,7 +457,11 @@ def cmd_transactions(args):
     sub = args.txn_sub
 
     if sub == "list" or sub is None:
-        txns = db.get_transactions(symbol=args.symbol, limit=args.limit or 50)
+        # Bare `transactions` (no subcommand) lands here too, and only the
+        # 'list' subparser defines symbol/limit — use getattr so the default
+        # path doesn't AttributeError (same pattern as cmd_alerts).
+        txns = db.get_transactions(symbol=getattr(args, "symbol", None),
+                                   limit=getattr(args, "limit", None) or 50)
         if not txns:
             print(_c("No transactions found", DIM))
             return
@@ -461,9 +471,11 @@ def cmd_transactions(args):
             action = t["action"]
             col = GREEN if action.upper() == "BUY" else RED
             rows.append((
-                t.get("date", "")[:10], t["symbol"], _c(action.upper(), col),
+                # date/notes columns are nullable: a present-but-NULL key makes
+                # .get(key, "") return None, and None[:n] raises — coalesce.
+                (t.get("date") or "")[:10], t["symbol"], _c(action.upper(), col),
                 f"{t['shares']:.2f}", fmt_price(t["price"]),
-                fmt_price(t.get("fees", 0)), t.get("notes", "")[:20]
+                fmt_price(t.get("fees", 0)), (t.get("notes") or "")[:20]
             ))
         table(rows, ["Date", "Symbol", "Action", "Shares", "Price", "Fees", "Notes"],
               [12, 8, 8, 10, 12, 10, 22])
@@ -611,6 +623,13 @@ def cmd_analytics(args):
             ret = (last / first - 1) * 100 if first else 0
             print(f"  Return: {_c(fmt_pct(ret), _pnl_color(ret))}")
 
+    else:
+        # No subcommand: print usage instead of silently exiting 0
+        # (matches cmd_scanner / cmd_synthetic_insider).
+        banner("ANALYTICS")
+        print(_c("  Subcommands: risk [symbols...], correlation [symbols...], "
+                 "stress, benchmark [--benchmark SPY]", DIM))
+
 
 # ── Options ───────────────────────────────────────────────────────────────────
 
@@ -693,6 +712,12 @@ def cmd_options(args):
             ))
         table(rows, ["Sym", "Type", "Strike", "Expiry", "Vol", "OI", "V/OI", "IV"],
               [7, 6, 8, 12, 10, 10, 7, 7])
+
+    else:
+        # No subcommand: print usage instead of silently exiting 0.
+        banner("OPTIONS")
+        print(_c("  Subcommands: dates <symbol>, chain <symbol> <expiry>, "
+                 "flow [symbol]", DIM))
 
 
 # ── Dividends ─────────────────────────────────────────────────────────────────
@@ -804,21 +829,31 @@ def cmd_earnings(args):
             rows = []
             for h in history[:8]:
                 # surprise_pct can be present-but-None (_safe_float returns
-                # None on a NaN quarter); .get(...,0) only defaults on a MISSING
-                # key, so coalesce explicitly or `surprise > 0` is a TypeError.
+                # None on a NaN quarter). Don't coalesce None to 0 for the
+                # label: an unknown quarter is 'N/A', exactly-met estimates
+                # are 'MET' — only a negative surprise is a genuine 'MISS'.
                 surprise = h.get("surprise_pct")
-                surprise = surprise if surprise is not None else 0
-                col = _pnl_color(surprise)
+                col = _pnl_color(surprise)  # _pnl_color(None) -> DIM
+                if surprise is None:
+                    surprise_txt, label = "N/A", "N/A"
+                else:
+                    surprise_txt = fmt_pct(surprise)
+                    label = "BEAT" if surprise > 0 else ("MISS" if surprise < 0 else "MET")
                 rows.append((
                     h.get("date", ""), str(h.get("estimate", "")),
                     str(h.get("actual", "")),
-                    _c(fmt_pct(surprise), col),
-                    _c("BEAT" if surprise > 0 else "MISS", col)
+                    _c(surprise_txt, col),
+                    _c(label, col)
                 ))
             table(rows, ["Quarter", "Est", "Actual", "Surprise", ""], [12, 10, 10, 10, 8])
         # Options implied move
         if data.get("implied_move_pct"):
             print(f"\n  Options Implied Move: {_c(fmt_pct(data['implied_move_pct']), CYAN)}")
+
+    else:
+        # No subcommand: print usage instead of silently exiting 0.
+        banner("EARNINGS")
+        print(_c("  Subcommands: calendar [symbols...], dossier <symbol>", DIM))
 
 
 # ── SEC Intelligence ──────────────────────────────────────────────────────────
@@ -893,6 +928,11 @@ def cmd_intel(args):
                     f"{h.get('pct_of_portfolio', 0):.1f}%"
                 ))
             table(rows, ["Company", "Shares", "Value", "% Port"], [32, 14, 14, 8])
+
+    else:
+        # No subcommand: print usage instead of silently exiting 0.
+        banner("SEC INTEL")
+        print(_c("  Subcommands: filings <symbol>, insiders <symbol>, institutional", DIM))
 
 
 # ── Smart Money Score ─────────────────────────────────────────────────────────
@@ -973,6 +1013,11 @@ def cmd_smart_money(args):
                 fmt_price(r.get("price")), ml_s
             ))
         table(rows, ["Symbol", "Score", "Signal", "Price", "ML"], [10, 8, 14, 14, 8])
+
+    else:
+        # No subcommand: print usage instead of silently exiting 0.
+        banner("SMART MONEY")
+        print(_c("  Subcommands: score <symbol>, scan [symbols...]", DIM))
 
 
 # ── ML Forecast ───────────────────────────────────────────────────────────────
@@ -1212,6 +1257,11 @@ def cmd_crypto(args):
             print(f"  ETH Dominance:      {(d.get('market_cap_percentage') or {}).get('eth') or 0:.1f}%")
             print(f"  Active Coins:       {d.get('active_cryptocurrencies', 0):,}")
 
+    else:
+        # No subcommand: print usage instead of silently exiting 0.
+        banner("CRYPTO")
+        print(_c("  Subcommands: market [--limit N], quote <coin_id>, global", DIM))
+
 
 # ── Settings ──────────────────────────────────────────────────────────────────
 
@@ -1261,7 +1311,17 @@ def cmd_ai(args):
         # the caller then read result["analysis"] (a key NEITHER path emits),
         # printing nothing. Build the full shape and read the real output keys.
         stock_syms = [h["symbol"] for h in holdings if h["asset_type"] != "crypto"]
+        crypto_syms = [h["symbol"] for h in holdings if h["asset_type"] == "crypto"]
         prices = fetcher.get_quotes_batch(stock_syms) if stock_syms else {}
+        # Crypto quotes need the yfinance '-USD' suffix (mirrors cmd_portfolio);
+        # without this every crypto position is valued at avg_cost with pnl=0
+        # and the AI analyzes materially wrong money numbers.
+        if crypto_syms:
+            cp = fetcher.get_quotes_batch([s + "-USD" for s in crypto_syms])
+            for s in crypto_syms:
+                key = (s + "-USD").upper()
+                if key in cp:
+                    prices[s.upper()] = cp[key]
         total_val = 0.0
         total_cost = 0.0
         positions = []
@@ -1346,6 +1406,11 @@ def cmd_ai(args):
                     if points:
                         for p in points:
                             print(f"    • {p}")
+
+    else:
+        # No subcommand: print usage instead of silently exiting 0.
+        banner("AI ANALYSIS")
+        print(_c("  Subcommands: portfolio [--model MODEL], filing <symbol>", DIM))
 
 
 # ── Opportunity Scanner ─────────────────────────────────────────────────────
@@ -1440,7 +1505,10 @@ def cmd_gex(args):
     flip = data.get("gamma_flip_price")
     print(f"  Gamma Flip:      {fmt_price(flip) if flip else 'N/A'}")
     print(f"  Spot Price:      {fmt_price(data.get('spot_price'))}")
-    print(f"  P/C OI Ratio:    {data.get('put_call_oi_ratio', 0):.2f}")
+    # put_call_oi_ratio is None (undefined) when no call OI survived the
+    # filter — formatting None with :.2f raises, so render N/A.
+    pc = data.get("put_call_oi_ratio")
+    print(f"  P/C OI Ratio:    {f'{pc:.2f}' if pc is not None else 'N/A'}")
     print(f"  Max Pain:        {fmt_price(data.get('max_pain'))}")
     walls = data.get("top_gamma_walls", [])
     if walls:
@@ -1581,8 +1649,15 @@ def cmd_synthetic_insider(args):
             print(_c("  No symbols to scan", YELLOW))
             return
         banner("SYNTHETIC INSIDER SCAN")
-        print(_c(f"  Scanning {len(symbols)} symbols...", DIM))
-        results = synthetic_insider.scan_composite_bulk(symbols[:15])
+        # The scan is network-heavy, so cap at 15 — but SAY so, or a firing
+        # signal on symbol #16 silently never appears in the table.
+        scan_syms = symbols[:15]
+        if len(symbols) > len(scan_syms):
+            print(_c(f"  Scanning first {len(scan_syms)} of {len(symbols)} symbols "
+                     f"(pass explicit symbols to scan others)...", DIM))
+        else:
+            print(_c(f"  Scanning {len(scan_syms)} symbols...", DIM))
+        results = synthetic_insider.scan_composite_bulk(scan_syms)
         rows = []
         for r in results:
             s = r.get("composite_score", 0)
@@ -1704,8 +1779,15 @@ def cmd_alt_data(args):
             print(_c("  No symbols to scan", YELLOW))
             return
         banner("ALT-DATA SCAN")
-        print(_c(f"  Nowcasting {len(symbols)} symbols...", DIM))
-        results = alt_data_engine.nowcast_bulk(symbols[:15])
+        # Same truncation honesty as synthetic-insider scan: cap at 15 for
+        # network cost, but tell the user which slice actually ran.
+        scan_syms = symbols[:15]
+        if len(symbols) > len(scan_syms):
+            print(_c(f"  Nowcasting first {len(scan_syms)} of {len(symbols)} symbols "
+                     f"(pass explicit symbols to scan others)...", DIM))
+        else:
+            print(_c(f"  Nowcasting {len(scan_syms)} symbols...", DIM))
+        results = alt_data_engine.nowcast_bulk(scan_syms)
         rows = []
         for r in results:
             s = r.get("nowcast_score", 0)
@@ -2150,13 +2232,26 @@ def main():
             func(args)
         except KeyboardInterrupt:
             print(_c("\n  Interrupted.", DIM))
+            return 130  # conventional SIGINT exit code
         except Exception as e:
             print(_c(f"\n  Error: {e}", RED))
             if os.environ.get("DEBUG"):
                 import traceback
                 traceback.print_exc()
+            # Propagate failure to the shell: scripts wrapping the CLI
+            # (`cli.py export && upload`) must not treat errors as success.
+            return 1
     else:
         parser.print_help()
+    return 0
+
+
+# contextlib.redirect_stdout swaps the PROCESS-GLOBAL sys.stdout — on the
+# multi-threaded web terminal (desktop.py runs Flask threaded=True) two
+# concurrent /api/terminal requests would capture each other's output and
+# restore the wrong stdout on exit. Same class of bug as the sys.argv
+# mutation removed below; serialize the whole capture region.
+_RUN_COMMAND_LOCK = None  # created lazily so `import cli` stays cheap
 
 
 def run_command(command_str):
@@ -2164,87 +2259,117 @@ def run_command(command_str):
     Used by the web terminal API. Returns (output_text, exit_code)."""
     import io
     import contextlib
+    import shlex
+    import threading
+
+    global _RUN_COMMAND_LOCK
+    if _RUN_COMMAND_LOCK is None:
+        _RUN_COMMAND_LOCK = threading.Lock()
 
     buf = io.StringIO()
     try:
-        parts = command_str.strip().split()
-        # Handle 'help' as a special case (not an argparse command)
-        if parts and parts[0] == "help":
-            with contextlib.redirect_stdout(buf):
-                parser = build_parser()
-                parser.print_help()
-            return buf.getvalue(), 0
+        # shlex, not str.split(): `ask "what should I sell"` must reach
+        # argparse as ONE positional, and quoted --notes/--name values must
+        # survive. ValueError = unbalanced quotes in the user's input.
+        try:
+            parts = shlex.split(command_str.strip())
+        except ValueError as e:
+            return f"\033[31m  Error: {e} (check your quoting)\033[0m\n", 1
 
-        # Parse `parts` directly. Do NOT mutate the process-global sys.argv —
-        # this runs on the multi-threaded web terminal where a concurrent
-        # request would see/clobber a half-written sys.argv (argparse reads
-        # `parts` here, not sys.argv, so the assignment was both unnecessary
-        # and unsafe).
-        parser = build_parser()
-
-        with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
-            args = parser.parse_args(parts)
-
-        if not args.command:
-            with contextlib.redirect_stdout(buf):
-                banner("AUGUR // WEALTH INTELLIGENCE SYSTEM")
-                print("  Type a command. Use 'help' for the command list.\n")
-                parser.print_help()
-            return buf.getvalue(), 0
-
-        dispatch = {
-            "quote":        cmd_quote,
-            "fundamentals": cmd_fundamentals,
-            "chart":        cmd_chart,
-            "news":         cmd_news,
-            "search":       cmd_search,
-            "market":       cmd_market,
-            "portfolio":    cmd_portfolio,
-            "watchlist":    cmd_watchlist,
-            "transactions": cmd_transactions,
-            "alerts":       cmd_alerts,
-            "analytics":    cmd_analytics,
-            "options":      cmd_options,
-            "dividends":    cmd_dividends,
-            "macro":        cmd_macro,
-            "earnings":     cmd_earnings,
-            "intel":        cmd_intel,
-            "smart-money":  cmd_smart_money,
-            "ml-forecast":  cmd_ml_forecast,
-            "congress":     cmd_congress,
-            "crypto":       cmd_crypto,
-            "ai":           cmd_ai,
-            "scanner":      cmd_scanner,
-            "gex":              cmd_gex,
-            "contagion":        cmd_contagion,
-            "narrative":        cmd_narrative,
-            "synthetic-insider": cmd_synthetic_insider,
-            "reflexivity":      cmd_reflexivity,
-            "liquidity":        cmd_liquidity,
-            "alt-data":         cmd_alt_data,
-            # Jarvis read-only commands (mirror main()): ask is persist=False
-            # (no portfolio mutation), briefing/health are pure snapshots.
-            "ask":          cmd_ask,
-            "briefing":     cmd_briefing,
-            "health":       cmd_health,
-            "settings":     cmd_settings,
-            "serve":        cmd_serve,
-        }
-
-        func = dispatch.get(args.command)
-        if func:
-            with contextlib.redirect_stdout(buf):
-                func(args)
-        else:
-            with contextlib.redirect_stdout(buf):
-                parser.print_help()
-
-        return buf.getvalue(), 0
-    except SystemExit:
-        return buf.getvalue(), 1
+        with _RUN_COMMAND_LOCK:
+            return _run_command_locked(parts, buf)
+    except SystemExit as e:
+        # argparse raises SystemExit(0) for successful -h/--help and 2 for
+        # parse errors — preserve the real code instead of flattening every
+        # exit to failure (e.g. `quote -h` is a SUCCESS, not exit 1).
+        code = e.code
+        if code is None:
+            code = 0
+        elif not isinstance(code, int):
+            code = 1
+        return buf.getvalue(), code
     except Exception as e:
         return buf.getvalue() + f"\033[31m  Error: {e}\033[0m\n", 1
 
 
+def _run_command_locked(parts, buf):
+    """Body of run_command, entered with _RUN_COMMAND_LOCK held (stdout is
+    globally swapped in here, so only one command may run at a time)."""
+    import contextlib
+
+    # Handle 'help' as a special case (not an argparse command)
+    if parts and parts[0] == "help":
+        with contextlib.redirect_stdout(buf):
+            parser = build_parser()
+            parser.print_help()
+        return buf.getvalue(), 0
+
+    # Parse `parts` directly. Do NOT mutate the process-global sys.argv —
+    # this runs on the multi-threaded web terminal where a concurrent
+    # request would see/clobber a half-written sys.argv (argparse reads
+    # `parts` here, not sys.argv, so the assignment was both unnecessary
+    # and unsafe).
+    parser = build_parser()
+
+    with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
+        args = parser.parse_args(parts)
+
+    if not args.command:
+        with contextlib.redirect_stdout(buf):
+            banner("AUGUR // WEALTH INTELLIGENCE SYSTEM")
+            print("  Type a command. Use 'help' for the command list.\n")
+            parser.print_help()
+        return buf.getvalue(), 0
+
+    dispatch = {
+        "quote":        cmd_quote,
+        "fundamentals": cmd_fundamentals,
+        "chart":        cmd_chart,
+        "news":         cmd_news,
+        "search":       cmd_search,
+        "market":       cmd_market,
+        "portfolio":    cmd_portfolio,
+        "watchlist":    cmd_watchlist,
+        "transactions": cmd_transactions,
+        "alerts":       cmd_alerts,
+        "analytics":    cmd_analytics,
+        "options":      cmd_options,
+        "dividends":    cmd_dividends,
+        "macro":        cmd_macro,
+        "earnings":     cmd_earnings,
+        "intel":        cmd_intel,
+        "smart-money":  cmd_smart_money,
+        "ml-forecast":  cmd_ml_forecast,
+        "congress":     cmd_congress,
+        "crypto":       cmd_crypto,
+        "ai":           cmd_ai,
+        "scanner":      cmd_scanner,
+        "gex":              cmd_gex,
+        "contagion":        cmd_contagion,
+        "narrative":        cmd_narrative,
+        "synthetic-insider": cmd_synthetic_insider,
+        "reflexivity":      cmd_reflexivity,
+        "liquidity":        cmd_liquidity,
+        "alt-data":         cmd_alt_data,
+        # Jarvis read-only commands (mirror main()): ask is persist=False
+        # (no portfolio mutation), briefing/health are pure snapshots.
+        "ask":          cmd_ask,
+        "briefing":     cmd_briefing,
+        "health":       cmd_health,
+        "settings":     cmd_settings,
+        "serve":        cmd_serve,
+    }
+
+    func = dispatch.get(args.command)
+    if func:
+        with contextlib.redirect_stdout(buf):
+            func(args)
+    else:
+        with contextlib.redirect_stdout(buf):
+            parser.print_help()
+
+    return buf.getvalue(), 0
+
+
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

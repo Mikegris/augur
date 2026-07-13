@@ -336,7 +336,14 @@
       _setStatus(sl, `Signal: ${data.signal || signalName} · Window: ${start} → ${end}`
                      + (data.signals_truncated_to ? ` · signals truncated to ${data.signals_truncated_to}` : ''));
     }).catch(err => {
-      _renderError(containerEl, symbol, (err && err.message) || String(err));
+      // Keep the skeleton (controls + RUN button) alive on transient network
+      // failures — wiping containerEl with _renderError would strand the user
+      // with no way to retry from the panel. Mirror the API-error branch above.
+      _setStatus(sl, 'Network error: ' + ((err && err.message) || String(err)), 'pnl-neg');
+      _renderMetrics(sl, {});
+      _drawChart(containerEl, sl, { equity_curve: [] });
+      _renderTable(`bt-best-${sl}`, []);
+      _renderTable(`bt-worst-${sl}`, []);
     });
   }
 

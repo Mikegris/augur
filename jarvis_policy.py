@@ -29,11 +29,18 @@ import json
 import logging
 import math
 import re
+import threading
 from typing import Any, Dict, List, Optional, Union
 
 log = logging.getLogger("augur.jarvis_policy")
 
 _SETTINGS_KEY = "jarvis_policy_rules"
+
+# Serializes the load-modify-save sequence in set_rule/remove_rule. The DB
+# layer's write lock only guards the final set_setting, so two concurrent
+# mutations would otherwise each edit the same stale snapshot and the second
+# save would silently drop the first one's rule.
+_RULES_LOCK = threading.Lock()
 
 # Public whitelist — jarvis_tools introspects this constant to tighten its
 # own argument validation, so keep the name KINDS and the order stable
@@ -81,11 +88,15 @@ def _load_rules() -> List[Dict[str, Any]]:
             continue
         kind, value = r.get("kind"), r.get("value")
         # bool is an int subclass — reject it explicitly so a stray `true`
-        # in hand-edited JSON doesn't become a cap of 1.
+        # in hand-edited JSON doesn't become a cap of 1. Out-of-range values
+        # (e.g. a hand-edited max_weight_pct of -5, which would flag every
+        # holding) are junk too: _RANGES is enforced on the write path, so
+        # anything outside it can only be hand-edited and is dropped here.
         if (kind in KINDS and kind not in seen
                 and isinstance(value, (int, float))
                 and not isinstance(value, bool)
-                and math.isfinite(float(value))):
+                and math.isfinite(float(value))
+                and _RANGES[kind][0] <= float(value) <= _RANGES[kind][1]):
             out.append({"kind": kind, "value": value})
             seen.add(kind)
     return out
@@ -141,12 +152,16 @@ def set_rule(kind: str, value: Any) -> Dict[str, Any]:
             lo, hi = _RANGES[kind]
             return {"error": "value for {} must be a number between {} and {}".format(
                 kind, lo, hi)}
-        rules = [r for r in _load_rules() if r["kind"] != kind]
-        rules.append({"kind": kind, "value": v})
-        # Keep declaration order canonical (KINDS order) so describe_rules()
-        # and the settings JSON stay stable across re-sets.
-        rules.sort(key=lambda r: KINDS.index(r["kind"]))
-        _save_rules(rules)
+        # Locked read-modify-write: two concurrent mutations (settings UI +
+        # a confirmed Jarvis set_policy_rule) must not race on the same
+        # snapshot, or the second save silently drops the first's rule.
+        with _RULES_LOCK:
+            rules = [r for r in _load_rules() if r["kind"] != kind]
+            rules.append({"kind": kind, "value": v})
+            # Keep declaration order canonical (KINDS order) so describe_rules()
+            # and the settings JSON stay stable across re-sets.
+            rules.sort(key=lambda r: KINDS.index(r["kind"]))
+            _save_rules(rules)
         return {"ok": True, "rules": rules}
     except Exception as e:
         log.exception("set_rule failed")
@@ -162,11 +177,13 @@ def remove_rule(kind: str) -> Union[Dict[str, Any], bool]:
         kind = str(kind or "").strip()
         if kind not in KINDS:
             return False
-        rules = _load_rules()
-        kept = [r for r in rules if r["kind"] != kind]
-        if len(kept) == len(rules):
-            return False
-        _save_rules(kept)
+        # Same locked read-modify-write as set_rule — see _RULES_LOCK.
+        with _RULES_LOCK:
+            rules = _load_rules()
+            kept = [r for r in rules if r["kind"] != kind]
+            if len(kept) == len(rules):
+                return False
+            _save_rules(kept)
         return {"ok": True, "rules": kept}
     except Exception:
         log.exception("remove_rule failed")
@@ -176,9 +193,11 @@ def remove_rule(kind: str) -> Union[Dict[str, Any], bool]:
 # ─── natural-language parsing ────────────────────────────────────────────────
 
 # One number token: optional $, digits (with optional thousands commas and
-# decimals), then an optional k / % / "percent" suffix.
+# decimals), then an optional k / m / mm / million / % / "percent" suffix.
+# Longer alternatives first so "million"/"mm" aren't half-eaten by "m".
 _NUM_RE = re.compile(
-    r"(\$)?\s*(\d{1,3}(?:,\d{3})+(?:\.\d+)?|\d+(?:\.\d+)?)\s*(k\b|%|percent\b|pct\b)?",
+    r"(\$)?\s*(\d{1,3}(?:,\d{3})+(?:\.\d+)?|\d+(?:\.\d+)?)\s*"
+    r"(million\b|mm\b|m\b|k\b|%|percent\b|pct\b)?",
     re.IGNORECASE)
 
 _CRYPTO_WORDS = ("crypto", "coins", "coin ", "bitcoin", "btc")
@@ -206,9 +225,13 @@ def _numbers(text: str) -> List[Dict[str, Any]]:
         suffix = suffix.lower()
         if suffix == "k":
             v *= 1000
+        elif suffix in ("m", "mm", "million"):
+            # Without this, "15 million" parsed as a bare 15 — a confident
+            # mis-parse of a buy cap into single-digit dollars.
+            v *= 1_000_000
         out.append({"value": v,
                     "pct": suffix in ("%", "percent", "pct"),
-                    "usd": bool(dollar) or suffix == "k"})
+                    "usd": bool(dollar) or suffix in ("k", "m", "mm", "million")})
     return out
 
 
@@ -382,7 +405,10 @@ def check_portfolio(pulse: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
 
 
 # Proposal args fields that carry a dollar amount, in trust order.
-_AMOUNT_FIELDS = ("amount", "value", "usd", "market_value")
+# Deliberately NOT "value": that name is overloaded — set_policy_rule (and
+# any future tool) uses it for a rule threshold, not a trade notional, and
+# treating it as one flagged bogus policy breaches on rule updates.
+_AMOUNT_FIELDS = ("amount", "usd", "market_value")
 
 
 def check_proposal(tool: Any, args: Any) -> Optional[str]:
@@ -394,6 +420,11 @@ def check_proposal(tool: Any, args: Any) -> Optional[str]:
         cap = next((float(r["value"]) for r in get_rules()
                     if r.get("kind") == "max_single_buy_usd"), None)
         if cap is None or not isinstance(args, dict):
+            return None
+        # max_single_buy_usd is a BUY-only cap. A proposal explicitly marked
+        # SELL (record_trade side, or a future action field) reduces exposure
+        # and must never trip it, whatever the notional.
+        if str(args.get("side") or args.get("action") or "").strip().upper() == "SELL":
             return None
         def _coerce(v):
             if v is None or isinstance(v, bool):

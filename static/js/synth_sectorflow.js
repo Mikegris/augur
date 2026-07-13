@@ -396,7 +396,12 @@
     const tableHost = host.querySelector("[data-sectorflow-table]");
     if (tableHost) {
       tableHost.innerHTML = _buildTable(sorted, sortKey, sortDesc);
-      _bindSorting(tableHost, data);
+      // Bind against the OUTER host, not tableHost: the click handler calls
+      // _paint(host) again, and querySelector doesn't match the element
+      // itself — passing tableHost made the repaint a no-op (dead sorting).
+      // Sort state (host._sortKey/_sortDesc) also lives on the container so
+      // it survives repaints of the inner table.
+      _bindSorting(host, data);
     }
   }
 

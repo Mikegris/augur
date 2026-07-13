@@ -989,9 +989,14 @@ def _portfolio_pulse() -> Optional[Dict[str, Any]]:
 
     stock_syms = [h["symbol"] for h in holdings if h.get("asset_type") != "crypto"]
     crypto_syms = [h["symbol"] for h in holdings if h.get("asset_type") == "crypto"]
-    prices: Dict[str, Dict[str, Any]] = {}
+    # Key by (SYMBOL, asset_type), not bare symbol: positions are stored per
+    # (symbol, asset_type), so the same ticker can be held as BOTH a stock and
+    # a crypto token (AMP, COMP, SAND). A bare-symbol map let the crypto sweep
+    # clobber the stock quote and misprice the stock lots at the token price.
+    prices: Dict[Any, Dict[str, Any]] = {}
     if stock_syms:
-        prices.update(fetcher.get_quotes_batch(stock_syms))
+        for sym, q in (fetcher.get_quotes_batch(stock_syms) or {}).items():
+            prices[(sym.upper(), "stock")] = q
     if crypto_syms:
         cq = fetcher.get_quotes_batch([s + "-USD" for s in crypto_syms])
         for sym in crypto_syms:
@@ -1000,7 +1005,7 @@ def _portfolio_pulse() -> Optional[Dict[str, Any]]:
                 # Key UPPERCASE so the per-holding lookup below (which also
                 # uppercases) finds mixed-case crypto holdings — get_quotes_batch
                 # keys stocks UPPERCASE, so the whole prices map is uppercased.
-                prices[sym.upper()] = q
+                prices[(sym.upper(), "crypto")] = q
 
     total_value = 0.0
     total_cost = 0.0
@@ -1012,7 +1017,9 @@ def _portfolio_pulse() -> Optional[Dict[str, Any]]:
         # get_quotes_batch keys UPPERCASE and the crypto map above is uppercased
         # too; look up uppercased so mixed-case holdings ("Nvda", "btc") aren't
         # silently dropped from value / P&L / weights.
-        q = prices.get(h["symbol"].upper(), {})
+        q = prices.get(
+            (h["symbol"].upper(),
+             "crypto" if h.get("asset_type") == "crypto" else "stock"), {})
         price = q.get("price")
         if not price:
             continue
@@ -1088,6 +1095,16 @@ def _market_regime() -> Optional[Dict[str, Any]]:
             if _vix_finite <= bound:
                 regime_label, regime_note = label, note
                 break
+    # During a feed outage get_market_indices still returns per-symbol ERROR
+    # envelopes (its internal fallback catches everything), so `indices` is
+    # non-empty while every field here is None/NaN. Returning that truthy
+    # all-None dict made downstream text builders render a bare "." instead
+    # of engaging their unavailable-data fallbacks — so report "no regime"
+    # honestly when nothing usable came back.
+    if (_finite(spx.get("change_pct")) is None
+            and _finite(ndx.get("change_pct")) is None
+            and _vix_finite is None):
+        return None
     return {
         "spx_pct": spx.get("change_pct"),
         "ndx_pct": ndx.get("change_pct"),
@@ -1618,7 +1635,19 @@ def away_digest(mark_seen: bool = True) -> Dict[str, Any]:
     if not rows:
         return out
     out["insights"] = rows
-    out["count"] = len(rows)
+    # True total, not the page size: the row query is capped at limit=10, so
+    # a busy week reported "10 events logged" when 25 accrued. Count the whole
+    # window; fail-open to the page size if the count read errors.
+    total = len(rows)
+    try:
+        r = db.get_conn().execute(
+            "SELECT COUNT(*) FROM jarvis_insights WHERE created_at > ?",
+            (str(last_seen)[:32],)).fetchone()
+        if r is not None:
+            total = max(total, int(r[0]))
+    except Exception as e:
+        log.debug("away_digest: count failed: %s", e)
+    out["count"] = total
     # Per-kind tally so a UI can summarize ("2 alerts, 1 mover") without
     # re-walking the insight list.
     kc: Dict[str, int] = {}
@@ -1638,7 +1667,7 @@ def away_digest(mark_seen: bool = True) -> Dict[str, Any]:
     titles = [r["title"] for r in rows[:3]]
     out["line"] = "While you were out ({}): {}{}".format(
         away, "; ".join(titles),
-        " — and {} more.".format(len(rows) - 3) if len(rows) > 3 else ".")
+        " — and {} more.".format(total - 3) if total > 3 else ".")
     return out
 
 
@@ -1715,8 +1744,14 @@ def _regime_line() -> Optional[Dict[str, Any]]:
     bits = []
     if regime.get("spx_pct") is not None:
         bits.append("S&P {}".format(_fmt_pct(regime["spx_pct"])))
-    if regime.get("vix") is not None:
-        bits.append("VIX {:.1f} ({})".format(regime["vix"], regime.get("regime") or "—"))
+    # _finite, not a bare None-check: a NaN VIX print must not render "nan".
+    _vix = _finite(regime.get("vix"))
+    if _vix is not None:
+        bits.append("VIX {:.1f} ({})".format(_vix, regime.get("regime") or "—"))
+    if not bits:
+        # Nothing usable to say — return None so the static _VIEW_LINES
+        # fallback engages instead of caching a bare "." for 120s.
+        return None
     tone = "warn" if regime.get("regime") in ("ELEVATED", "STRESSED") else "info"
     note = " {}".format(regime.get("regime_note")) if regime.get("regime_note") else ""
     return {"line": ", ".join(bits) + ".{}".format(note), "tone": tone, "action": None}
@@ -2049,6 +2084,12 @@ _STOPWORDS = {
     "KEY", "REAL", "CAR", "GOOD", "LOVE", "FUN", "WORK", "PLAY", "NICE",
     "OPEN", "NEXT", "BEST", "SAFE", "WELL", "FAST", "HUGE", "RISE", "FALL",
     "ID", "TV", "BY",
+    # Common finance/macro abbreviations that are ALSO listed tickers or
+    # ticker-shaped — "how are US markets", "will GDP slow", "a good P/E"
+    # must stay macro questions, not quotes of US/GDP/P. Same rationale as
+    # ETF/USD/CEO/AI/PE/EPS above; explicit $SYM still resolves any of them.
+    "US", "USA", "GDP", "CPI", "PCE", "FED", "IPO", "P", "E", "IRA", "ROI",
+    "APR",
 }
 
 
@@ -2177,7 +2218,10 @@ def _answer_quote(symbol: str) -> Dict[str, Any]:
         parts.append("{} on the day".format(_fmt_pct(q["change_pct"])))
     hi, lo = q.get("fifty_two_week_high"), q.get("fifty_two_week_low")
     if hi and lo and hi > lo:  # hi > lo, not just truthy — guards inverted data
-        pos = (q["price"] - lo) / (hi - lo) * 100
+        # Clamp to [0,100] — a live print can gap outside a stale cached range
+        # intraday, and "110% of its 52-week range" is an impossible claim.
+        # Mirrors the identical clamps in _debate_ask and _symbol_line.
+        pos = max(0.0, min(100.0, (q["price"] - lo) / (hi - lo) * 100))
         parts.append("sitting at {:.0f}% of its 52-week range".format(pos))
     cap = _fmt_cap(q.get("market_cap"))
     if cap:
@@ -2322,17 +2366,37 @@ def _answer_biggest() -> Dict[str, Any]:
 def _answer_holding_period(symbol: str) -> Dict[str, Any]:
     """'When did I buy X / how long have I held X' — from the transaction log,
     earliest BUY is the position's birthday."""
-    txns = db.get_transactions(symbol=symbol, limit=500) or []
-    buys = [t for t in txns
-            if str(t.get("action") or "").upper() == "BUY" and t.get("date")]
-    if not buys:
-        return {"answer": "I have no recorded buys for {} — if you hold it, the "
-                          "fills predate the transaction log.".format(symbol),
-                "action": {"view": "transactions"}}
-    first = min(buys, key=lambda t: str(t["date"]))
+    # Aggregate over ALL fills, not a recency-limited page: get_transactions
+    # orders DESC with a LIMIT, so for a heavily traded symbol (600+ fills —
+    # DCA, imported agent logs) min() over the page reported the oldest of the
+    # RECENT fills as "first bought" and undercounted the fill total.
+    first_date: Optional[str] = None
+    n_buys = 0
+    try:
+        r = db.get_conn().execute(
+            "SELECT MIN(date) AS d, COUNT(*) AS n FROM transactions "
+            "WHERE symbol=? AND upper(COALESCE(action,''))='BUY' "
+            "AND date IS NOT NULL AND date != ''",
+            (symbol.upper(),)).fetchone()
+        if r is not None and r["d"]:
+            first_date, n_buys = str(r["d"]), int(r["n"])
+    except Exception as e:
+        log.debug("holding_period aggregate failed for %s: %s", symbol, e)
+    if not first_date:
+        # Fallback (schema drift / read error): the old paged scan — possibly
+        # truncated, but an approximate answer beats a crash.
+        txns = db.get_transactions(symbol=symbol, limit=500) or []
+        buys = [t for t in txns
+                if str(t.get("action") or "").upper() == "BUY" and t.get("date")]
+        if not buys:
+            return {"answer": "I have no recorded buys for {} — if you hold it, the "
+                              "fills predate the transaction log.".format(symbol),
+                    "action": {"view": "transactions"}}
+        first_date = min(str(t["date"]) for t in buys)
+        n_buys = len(buys)
     held = ""
     try:
-        d0 = datetime.strptime(str(first["date"])[:10], "%Y-%m-%d")
+        d0 = datetime.strptime(first_date[:10], "%Y-%m-%d")
         days = max(0, (datetime.now().date() - d0.date()).days)
         if days < 1:
             held = " — bought today"
@@ -2345,8 +2409,8 @@ def _answer_holding_period(symbol: str) -> Dict[str, Any]:
     except Exception:
         pass
     return {"answer": "You first bought {} on {}{}, across {} fill{}.".format(
-                symbol, str(first["date"])[:10], held,
-                len(buys), "s" if len(buys) != 1 else ""),
+                symbol, first_date[:10], held,
+                n_buys, "s" if n_buys != 1 else ""),
             "action": {"view": "transactions"}}
 
 
@@ -2358,32 +2422,46 @@ def _answer_basis(symbol: str) -> Dict[str, Any]:
     if not rows:
         return {"answer": "You don't hold {} — no cost basis to report.".format(symbol),
                 "action": {"view": "portfolio"}}
-    shares = sum(h["shares"] for h in rows)
-    cost = sum(h["shares"] * h["avg_cost"] for h in rows)
-    # Guard against a near-zero (float-dust) net denominator, not just exact 0 —
-    # a residual like 1e-12 from offsetting lots would otherwise produce an
-    # astronomical per-share basis and explode mv/pnl/% downstream.
-    _has_shares = abs(shares) > 1e-9
-    avg = cost / shares if _has_shares else 0
-    is_crypto = any(h.get("asset_type") == "crypto" for h in rows)
-    unit = "unit" if is_crypto else "share"
-    tail = ""
-    try:
-        q = fetcher.get_quote(symbol + "-USD" if is_crypto else symbol) or {}
-        price = _finite(q.get("price"))
-        if price and _has_shares:
-            mv = price * shares
-            pnl = mv - cost
-            tail = " Worth {} now at ${:,.2f} — {} {} ({}).".format(
-                _fmt_usd(mv), price, "up" if pnl >= 0 else "down",
-                _fmt_usd(abs(pnl)),
-                _fmt_pct(pnl / cost * 100) if cost > 0 else "—")
-    except Exception:
-        pass
-    return {"answer": "Your basis in {}: {:g} {}{} at ${:,.2f} average — {} in.{}".format(
-                symbol, shares, unit, "s" if shares != 1 else "", avg,
-                _fmt_usd(cost), tail),
-            "action": {"view": "portfolio"}}
+
+    # Positions are stored per (symbol, asset_type), so the same ticker can be
+    # held as BOTH a stock and a crypto token (AMP, COMP, SAND). Summing the
+    # lots across asset types mixed the bases AND — via any(is_crypto) — marked
+    # the combined position at the crypto price. Report each group separately.
+    def _basis_line(grp: List[Dict[str, Any]], is_crypto: bool, label: str) -> str:
+        shares = sum(h["shares"] for h in grp)
+        cost = sum(h["shares"] * h["avg_cost"] for h in grp)
+        # Guard against a near-zero (float-dust) net denominator, not just exact
+        # 0 — a residual like 1e-12 from offsetting lots would otherwise produce
+        # an astronomical per-share basis and explode mv/pnl/% downstream.
+        _has_shares = abs(shares) > 1e-9
+        avg = cost / shares if _has_shares else 0
+        unit = "unit" if is_crypto else "share"
+        tail = ""
+        try:
+            q = fetcher.get_quote(symbol + "-USD" if is_crypto else symbol) or {}
+            price = _finite(q.get("price"))
+            if price and _has_shares:
+                mv = price * shares
+                pnl = mv - cost
+                tail = " Worth {} now at ${:,.2f} — {} {} ({}).".format(
+                    _fmt_usd(mv), price, "up" if pnl >= 0 else "down",
+                    _fmt_usd(abs(pnl)),
+                    _fmt_pct(pnl / cost * 100) if cost > 0 else "—")
+        except Exception:
+            pass
+        return "Your basis in {}{}: {:g} {}{} at ${:,.2f} average — {} in.{}".format(
+            symbol, label, shares, unit, "s" if shares != 1 else "", avg,
+            _fmt_usd(cost), tail)
+
+    stock_rows = [h for h in rows if h.get("asset_type") != "crypto"]
+    crypto_rows = [h for h in rows if h.get("asset_type") == "crypto"]
+    both = bool(stock_rows) and bool(crypto_rows)
+    lines: List[str] = []
+    if stock_rows:
+        lines.append(_basis_line(stock_rows, False, " (stock)" if both else ""))
+    if crypto_rows:
+        lines.append(_basis_line(crypto_rows, True, " (crypto)" if both else ""))
+    return {"answer": " ".join(lines), "action": {"view": "portfolio"}}
 
 
 def _fmt_minutes(m: int) -> str:
@@ -2667,8 +2745,13 @@ def _answer_market() -> Dict[str, Any]:
         bits.append("S&P 500 {}".format(_fmt_pct(regime["spx_pct"])))
     if regime.get("ndx_pct") is not None:
         bits.append("Nasdaq-100 {}".format(_fmt_pct(regime["ndx_pct"])))
-    if regime.get("vix") is not None:
-        bits.append("VIX at {:.1f} ({})".format(regime["vix"], regime.get("regime") or "—"))
+    # _finite, not a bare None-check: a NaN VIX print (a case _market_regime
+    # explicitly anticipates) must not render "VIX at nan (—)".
+    _vix = _finite(regime.get("vix"))
+    if _vix is not None:
+        bits.append("VIX at {:.1f} ({})".format(_vix, regime.get("regime") or "—"))
+    if not bits:
+        return {"answer": "Market data is unavailable right now."}
     note = " {}".format(regime.get("regime_note")) if regime.get("regime_note") else ""
     # Sector color from the cached ETF map (60s TTL) — guarded so a dead or
     # empty feed leaves the answer exactly as before.
@@ -2812,8 +2895,10 @@ def _answer_day_summary() -> Dict[str, Any]:
         regime = None
     if regime and regime.get("spx_pct") is not None:
         vix_bit = ""
-        if regime.get("vix") is not None:
-            vix_bit = ", VIX {:.1f} ({})".format(regime["vix"], regime.get("regime") or "—")
+        # _finite, not a bare None-check: a NaN VIX must not render "nan".
+        _vix = _finite(regime.get("vix"))
+        if _vix is not None:
+            vix_bit = ", VIX {:.1f} ({})".format(_vix, regime.get("regime") or "—")
         bits.append("Market: S&P {}{}.".format(_fmt_pct(regime["spx_pct"]), vix_bit))
     try:
         trig = [x for x in db.get_price_alerts(include_triggered=True) if x.get("triggered")]
@@ -2942,7 +3027,11 @@ def _answer_compare_quotes(s1: str, s2: str) -> Dict[str, Any]:
     l1, l2 = _line(s1, q1), _line(s2, q2)
     if not l1 or not l2:
         missing = s1 if not l1 else s2
-        return {"answer": "I couldn't price {} right now — try again in a moment.".format(missing)}
+        # "unpriced" marks a failed leg so the ask() chain can fall through to
+        # the debate/agent/LLM paths — "cash vs bonds" resolves pseudo-tickers
+        # that will never quote, and dead-ending here buried real answers.
+        return {"answer": "I couldn't price {} right now — try again in a moment.".format(missing),
+                "unpriced": missing}
     tail = ""
     winner = s1
     c1, c2 = _finite((q1 or {}).get("change_pct")), _finite((q2 or {}).get("change_pct"))
@@ -3158,9 +3247,11 @@ def _answer_explain(ql: str) -> Optional[Dict[str, Any]]:
     if canon == "vix":
         try:
             regime = _market_regime()
-            if regime and regime.get("vix") is not None:
+            # _finite, not a bare None-check: a NaN print must not render "nan".
+            _vix = _finite((regime or {}).get("vix"))
+            if _vix is not None:
                 out["answer"] += " Right now it's at {:.1f} ({}).".format(
-                    regime["vix"], regime.get("regime") or "—")
+                    _vix, regime.get("regime") or "—")
         except Exception:
             pass
     # Concentration gets the user's own number — knowledge lands harder
@@ -3315,7 +3406,9 @@ _ACTIONISH_RE = re.compile(
 _TRADE_RE = re.compile(
     r"\b(?P<verb>buy|bought|buying|add|added|sell|sold|selling)\b"
     r"(?:\s+\w+){0,3}?"
-    r"\s+(?P<shares>\d+(?:\.\d+)?)\s*"
+    # Shares accept thousands separators just like the price group below —
+    # "buy 1,000 NVDA at 800" must capture the same as "buy 10 NVDA at 1,800".
+    r"\s+(?P<shares>\d+(?:,\d{3})*(?:\.\d+)?)\s*"
     r"(?:shares?|units?|shrs?)?\s*(?:of\s+)?"
     r"\$?(?P<sym>[A-Za-z][A-Za-z0-9.\-]{0,9})"
     r"(?:\s+at\s+|\s+for\s+|\s*@\s*|\s+price\s+of\s+|\s+each\s+at\s+)"
@@ -3326,6 +3419,19 @@ _TRADE_RE = re.compile(
 def _answer_trade(q: str) -> Optional[Dict[str, Any]]:
     m = _TRADE_RE.search(q or "")
     if not m:
+        return None
+    ql = (q or "").lower()
+    # Not every buy/sell sentence is a USER trade to record. (a) The trading
+    # agent's fills described in chat ("the trading bot bought 10 NVDA at 800")
+    # belong to the agent's paper book — proposing add_holding would write a
+    # position the user never took; let the _TRADING_AGENT_RE gate in ask()
+    # handle it. (b) Advice questions ("should I buy 10 NVDA at 800?") want
+    # analysis, not a records mutation. Fail-closed: don't propose.
+    if _TRADING_AGENT_RE.search(ql):
+        return None
+    if ql.rstrip().endswith("?") or re.match(
+            r"^\s*(?:should|could|would|can|if|do|does|is|are|was|were|"
+            r"what|why|when|how)\b", ql):
         return None
     import jarvis_tools
     verb = m.group("verb").lower()
@@ -3346,7 +3452,7 @@ def _answer_trade(q: str) -> Optional[Dict[str, Any]]:
         if (raw_sym.lower() in _NAME_SKIP_WORDS or not typed_caps) and sym not in known:
             return None
     try:
-        shares = float(m.group("shares"))
+        shares = float(m.group("shares").replace(",", ""))
         price = float(m.group("price").replace(",", ""))
     except (TypeError, ValueError):
         return None
@@ -3786,19 +3892,28 @@ _COUNCIL_RE = re.compile(
     r"\b(council|analyst council|analysts? (?:think|say|said|view|verdict|"
     r"rating|call)|why (?:did|didn'?t|wasn'?t|hasn'?t|was|has)\b.*\b"
     r"(?:agent|council|it)\b.*\btrade\b|"
-    r"why (?:did|didn'?t|wasn'?t|hasn'?t)\b.*\b(?:buy|bought|sell|sold|"
+    # The buy/sell alternative needs the same agent/council/it/bot referent
+    # as the trade alternative above — without it, ordinary stock questions
+    # ("why did NVDA sell off today", "why did I buy TSLA") were hijacked
+    # into the council read instead of attribution/signal/agent paths.
+    r"why (?:did|didn'?t|wasn'?t|hasn'?t)\b.*\b(?:agent|council|it|bot)\b.*"
+    r"\b(?:buy|bought|sell|sold|"
     r"trade|traded|pass|skip|avoid)\b)\b", re.IGNORECASE)
 
 
 def _priced_weights():
-    """[(symbol, weight_pct)] sorted desc, plus total $ value. Best-effort."""
+    """([(symbol, weight_pct)] sorted desc, total $ value, [unpriced symbols]).
+    Best-effort — but callers making a CONCENTRATION claim must look at the
+    unpriced list: weights are renormalized over the priced subset, so a
+    missing quote (negative-cache hit, 429-limited batch) silently inflates
+    every other weight and can hide/invent a >guardrail position."""
     try:
         holdings = db.get_portfolio() or []
     except Exception:
         holdings = []
     eq = [h for h in holdings if h.get("symbol")]
     if not eq:
-        return [], 0.0
+        return [], 0.0, []
     syms = list({h["symbol"].upper() for h in eq})
     try:
         import fetcher
@@ -3806,6 +3921,7 @@ def _priced_weights():
     except Exception:
         quotes = {}
     vals: Dict[str, float] = {}
+    unpriced: List[str] = []
     total = 0.0
     for h in eq:
         s = h["symbol"].upper()
@@ -3814,10 +3930,12 @@ def _priced_weights():
             v = float(h.get("shares") or 0) * float(px)
             vals[s] = vals.get(s, 0.0) + v
             total += v
+        elif s not in unpriced:
+            unpriced.append(s)
     if total <= 0:
-        return [], 0.0
+        return [], 0.0, unpriced
     return sorted(((s, v / total * 100.0) for s, v in vals.items()),
-                  key=lambda x: -x[1]), total
+                  key=lambda x: -x[1]), total, unpriced
 
 
 def _answer_movers():
@@ -3855,22 +3973,33 @@ def _answer_movers():
 
 def _answer_rebalance():
     """Flag single-name concentration above the guardrail; suggest trims."""
-    weights, total = _priced_weights()
+    weights, total, unpriced = _priced_weights()
     if not weights:
         return {"answer": "Couldn't price the book just now — try again in a "
                           "moment.", "action": {"view": "portfolio"}}
+    # Disclose holdings the quote feed missed: their weight is unknown and the
+    # remaining weights are inflated by the shrunken denominator, so any
+    # concentration verdict below is provisional, not authoritative.
+    caveat = ""
+    if unpriced:
+        caveat = " (Caveat: I couldn't price {} just now, so these weights " \
+                 "exclude {} — the verdict may shift once {} quote{}.)".format(
+                     ", ".join(unpriced[:5]),
+                     "it" if len(unpriced) == 1 else "them",
+                     "it" if len(unpriced) == 1 else "they",
+                     "s" if len(unpriced) == 1 else "")
     heavy = [(s, w) for s, w in weights if w > _CONC_GUARDRAIL_PCT]
     if heavy:
         body = ", ".join("{} at {:.0f}%".format(s, w) for s, w in heavy)
         return {"answer": "Consider trimming — {} {} above the {:.0f}% "
-                          "single-name guardrail.".format(
+                          "single-name guardrail.{}".format(
                               body, "is" if len(heavy) == 1 else "are",
-                              _CONC_GUARDRAIL_PCT),
+                              _CONC_GUARDRAIL_PCT, caveat),
                 "tone": "warn", "action": {"view": "analytics"}}
     top_s, top_w = weights[0]
     return {"answer": "Allocation looks balanced — your largest position is {} "
-                      "at {:.0f}%, under the {:.0f}% single-name guardrail.".format(
-                          top_s, top_w, _CONC_GUARDRAIL_PCT),
+                      "at {:.0f}%, under the {:.0f}% single-name guardrail.{}".format(
+                          top_s, top_w, _CONC_GUARDRAIL_PCT, caveat),
             "action": {"view": "analytics"}}
 
 
@@ -4023,6 +4152,16 @@ def _answer_trading_agent_action(ql: str) -> Optional[Dict[str, Any]]:
     the phrasing is a question rather than a command. Caller has already gated on
     _TRADING_AGENT_RE so we know the agent is the subject."""
     import jarvis_tools
+    # Question-shaped queries are READS, not commands — "did the trading agent
+    # run today?" must not propose running a cycle, and "why did the agent
+    # stop?" must not propose the kill switch. Return None so the caller falls
+    # through to the _answer_trading_agent read path. (Fail-closed: when in
+    # doubt about intent, don't propose an action.)
+    _stripped = ql.strip()
+    if _stripped.endswith("?") or re.match(
+            r"^\s*(?:did|does|do|is|are|was|were|has|have|had|why|when|what|"
+            r"which|who|how)\b", _stripped):
+        return None
     tool: Optional[str] = None
     args: Dict[str, Any] = {}
     # Risk preset — "make the agent more aggressive", "set it to conservative".
@@ -4548,9 +4687,20 @@ def ask(query: str, history: Any = None, conversation_id: Any = None,
     # is an ANSWER to that question, not a routing correction — stripping the
     # negation would mangle it. Skip the correction path entirely when a
     # clarify is pending so the original text passes through unchanged.
+    import time as _t
     with _PENDING_CLARIFY_LOCK:
-        _clarify_pending = (conv_id is not None
-                            and _PENDING_CLARIFY.get(conv_id) is not None)
+        _pend_entry = (_PENDING_CLARIFY.get(conv_id)
+                       if conv_id is not None else None)
+        # Honor the TTL here too (same freshness test as the clarify-resume
+        # path below) and drop expired entries: pop only happens on a
+        # successful resume and GC only above 64 entries, so one unanswered
+        # clarify would otherwise disable correction handling for this
+        # conversation for the life of the process.
+        if (_pend_entry is not None
+                and _t.time() - _pend_entry.get("ts", 0) >= _CLARIFY_TTL):
+            _PENDING_CLARIFY.pop(conv_id, None)
+            _pend_entry = None
+        _clarify_pending = _pend_entry is not None
     if _depth < 2 and turns and not _clarify_pending:
         m_corr = _CORRECTION_RE.match(q)
         if m_corr:
@@ -4743,7 +4893,13 @@ def ask(query: str, history: Any = None, conversation_id: Any = None,
                 return None
             s1, s2 = _vs_resolve(m_vs.group(1)), _vs_resolve(m_vs.group(2))
             if s1 and s2 and s1 != s2:
-                return done("compare", _answer_compare_quotes(s1, s2))
+                _cmpq = _answer_compare_quotes(s1, s2)
+                # A leg that won't price is usually a concept, not a ticker
+                # ("cash vs bonds", "fear vs greed") — fall THROUGH to the
+                # debate/agent/LLM paths that can actually answer, instead of
+                # dead-ending the chain with a couldn't-price error.
+                if not _cmpq.get("unpriced"):
+                    return done("compare", _cmpq)
         # Per-symbol technical read — "momentum on NVDA", "is AAPL overbought?",
         # "TSLA drawdown". Before forecast/quote so the signal words aren't
         # swallowed by the generic quote fallback.
@@ -5019,25 +5175,34 @@ def ask_stream(query: str, history: Any = None, conversation_id: Any = None):
 
     deadline = _time.time() + _ASK_STREAM_DEADLINE
     last_emit = _time.time()
-    while True:
-        try:
-            ev = events.get(timeout=1.0)
-        except _queue.Empty:
-            if _time.time() > deadline:
-                # Abandon the worker — and signal it NOT to persist whatever it
-                # eventually produces, since the user has already moved on.
-                _cancel.set()
-                yield {"type": "answer",
-                       "payload": {"intent": "error",
-                                   "answer": "That one ran long and I cut it "
-                                             "off — ask again and I'll take a "
-                                             "faster route."}}
+    try:
+        while True:
+            try:
+                ev = events.get(timeout=1.0)
+            except _queue.Empty:
+                if _time.time() > deadline:
+                    # Abandon the worker — the finally below signals it NOT to
+                    # persist whatever it eventually produces, since the user
+                    # has already moved on.
+                    yield {"type": "answer",
+                           "payload": {"intent": "error",
+                                       "answer": "That one ran long and I cut it "
+                                                 "off — ask again and I'll take a "
+                                                 "faster route."}}
+                    return
+                if _time.time() - last_emit >= 10:
+                    last_emit = _time.time()
+                    yield {"type": "hb"}
+                continue
+            last_emit = _time.time()
+            yield ev
+            if ev.get("type") == "answer":
                 return
-            if _time.time() - last_emit >= 10:
-                last_emit = _time.time()
-                yield {"type": "hb"}
-            continue
-        last_emit = _time.time()
-        yield ev
-        if ev.get("type") == "answer":
-            return
+    finally:
+        # ANY generator teardown — client disconnect (GeneratorExit raised at a
+        # yield), deadline, exception, or normal completion — must signal the
+        # worker to skip persistence: an abandoned answer written to the
+        # conversation log is exactly the history corruption the cancelled-flag
+        # contract forbids. On normal completion ask() has already returned, so
+        # setting the flag then is a harmless no-op.
+        _cancel.set()

@@ -38,7 +38,7 @@ from __future__ import annotations
 
 import logging
 import math
-from datetime import datetime, timezone, date as _date
+from datetime import datetime, timedelta, timezone, date as _date
 from typing import Optional
 
 log = logging.getLogger("augur.rnd")
@@ -82,13 +82,29 @@ def _today_utc() -> _date:
     return datetime.now(timezone.utc).date()
 
 
+def _today_market() -> _date:
+    """US-market (ET) calendar date. Option expiries are ET dates, so
+    computing DTE against the UTC date makes every expiry lose a day between
+    8 PM ET and midnight ET (01:00-05:00 UTC): a Thursday expiry requested on
+    Wednesday evening reads as dte=0 and gets rejected as 'in the past', and
+    the auto-picker's '>7 days' cut skips one expiry too many. Prefer the
+    real America/New_York zone; fall back to a fixed UTC-5 offset (an hour
+    off during DST, still strictly better than raw UTC) when tzdata is
+    unavailable (e.g. frozen 3.9 builds)."""
+    try:
+        from zoneinfo import ZoneInfo
+        return datetime.now(ZoneInfo("America/New_York")).date()
+    except Exception:
+        return (datetime.now(timezone.utc) - timedelta(hours=5)).date()
+
+
 def _days_to(expiry: str) -> int:
-    """Calendar days from today (UTC) to ISO-formatted expiry string."""
+    """Calendar days from today (US-market/ET date) to ISO expiry string."""
     try:
         exp = datetime.strptime(expiry, "%Y-%m-%d").date()
     except Exception:
         return -1
-    return (exp - _today_utc()).days
+    return (exp - _today_market()).days
 
 
 def _risk_free_rate() -> float:
@@ -397,20 +413,23 @@ def _density_from_calls(strikes: list, mids: list, T: float, r: float,
     return grid, density, cdf
 
 
-def _prob_above(grid: "np.ndarray", cdf: "np.ndarray", x: float) -> float:
-    """P[K_T > x] interpolated from the CDF. Returns 0 if x exceeds support
-    (we observe no probability mass beyond the highest strike)."""
-    if x <= float(grid[0]):
-        return 1.0
-    if x >= float(grid[-1]):
-        return 0.0
+def _prob_above(grid: "np.ndarray", cdf: "np.ndarray", x: float) -> Optional[float]:
+    """P[K_T > x] interpolated from the CDF. Returns None when x lies OUTSIDE
+    the observed strike support: the chain carries no strikes there and the
+    renormalization step has reassigned the truncated tail mass inward, so a
+    hard 0/1 would be fabricated. (E.g. a ~10-DTE chain whose deep-ITM
+    strikes were removed by the time-value filter would otherwise report a
+    literal 0% chance of a 10% crash.) Consumers render None as 'unknown'."""
+    if x < float(grid[0]) or x > float(grid[-1]):
+        return None
     # np.interp linearly interpolates the CDF at x.
     cdf_x = float(np.interp(x, grid, cdf))
     return max(0.0, min(1.0, 1.0 - cdf_x))
 
 
-def _prob_below(grid: "np.ndarray", cdf: "np.ndarray", x: float) -> float:
-    return 1.0 - _prob_above(grid, cdf, x)
+def _prob_below(grid: "np.ndarray", cdf: "np.ndarray", x: float) -> Optional[float]:
+    p = _prob_above(grid, cdf, x)
+    return None if p is None else 1.0 - p
 
 
 def _moments(grid: "np.ndarray", density: "np.ndarray") -> dict:
@@ -613,14 +632,18 @@ def _compute(symbol: str, expiry: Optional[str], smooth: bool) -> dict:
                       expiry=chosen_expiry, days_to_expiry=dte, spot=spot,
                       n_strikes=len(clean))
 
-    # Tail probabilities relative to spot.
+    # Tail probabilities relative to spot. _prob_above/_prob_below return
+    # None when the query point falls outside the observed strike support
+    # (no fabricated 0/1 tails) — preserve that None through rounding.
+    def _r4(v):
+        return round(v, 4) if v is not None else None
     probs = {
-        "p_above_spot_5pct":  round(_prob_above(grid, cdf, spot * 1.05), 4),
-        "p_above_spot_10pct": round(_prob_above(grid, cdf, spot * 1.10), 4),
-        "p_above_spot_20pct": round(_prob_above(grid, cdf, spot * 1.20), 4),
-        "p_below_spot_5pct":  round(_prob_below(grid, cdf, spot * 0.95), 4),
-        "p_below_spot_10pct": round(_prob_below(grid, cdf, spot * 0.90), 4),
-        "p_below_spot_20pct": round(_prob_below(grid, cdf, spot * 0.80), 4),
+        "p_above_spot_5pct":  _r4(_prob_above(grid, cdf, spot * 1.05)),
+        "p_above_spot_10pct": _r4(_prob_above(grid, cdf, spot * 1.10)),
+        "p_above_spot_20pct": _r4(_prob_above(grid, cdf, spot * 1.20)),
+        "p_below_spot_5pct":  _r4(_prob_below(grid, cdf, spot * 0.95)),
+        "p_below_spot_10pct": _r4(_prob_below(grid, cdf, spot * 0.90)),
+        "p_below_spot_20pct": _r4(_prob_below(grid, cdf, spot * 0.80)),
     }
 
     moments = _moments(grid, density)
@@ -648,6 +671,10 @@ def _compute(symbol: str, expiry: Optional[str], smooth: bool) -> dict:
         "probabilities": probs,
         "implied_moments": moments,
         "diagnostics": {
+            # Strike support the density lives on — probabilities for query
+            # points outside this range are None (mass there is unobserved).
+            "support_min": round(float(grid[0]), 4),
+            "support_max": round(float(grid[-1]), 4),
             "density_integral": round(integral, 4),
             "median_liquidity": int(median_liq),
             "illiquid_flag": illiquid_flag,

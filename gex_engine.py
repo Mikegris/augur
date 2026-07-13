@@ -455,6 +455,7 @@ def compute_gex(symbol):
     total_call_oi = 0
     total_put_oi = 0
     expirations_scanned = 0
+    any_positive_gamma = False  # did ANY row carry usable gamma?
 
     for exp_date in dates_to_scan:
         tte = _tte_from_expiry(exp_date)
@@ -517,10 +518,33 @@ def compute_gex(symbol):
                 except (TypeError, ValueError):
                     pass
 
-            # Drop non-positive gammas.
+            # Book open interest BEFORE the gamma filter. Max pain, the OI
+            # totals and the put/call ratio do NOT depend on gamma — Yahoo
+            # routinely ships NaN/0 impliedVolatility on deep-ITM strikes
+            # that carry large OI, and dropping those rows from the OI books
+            # truncated the max-pain strike set (wrong max-pain strike) and
+            # understated real positioning. Only the GEX sums below are
+            # restricted to positive-gamma rows.
+            for strike_f, oi_v in zip(k_arr.tolist(), oi_arr.tolist()):
+                if strike_f not in strike_map:
+                    strike_map[strike_f] = {
+                        "call_gex": 0.0,
+                        "put_gex": 0.0,
+                        "call_oi": 0,
+                        "put_oi": 0,
+                    }
+                if is_call:
+                    strike_map[strike_f]["call_oi"] += oi_v
+                    total_call_oi += oi_v
+                else:
+                    strike_map[strike_f]["put_oi"] += oi_v
+                    total_put_oi += oi_v
+
+            # Drop non-positive gammas (GEX contribution only).
             pos = gamma_arr > 0
             if not pos.any():
                 continue
+            any_positive_gamma = True
             k_arr = k_arr[pos]
             oi_arr = oi_arr[pos]
             gamma_arr = gamma_arr[pos]
@@ -540,26 +564,20 @@ def compute_gex(symbol):
             if not is_call:
                 gex_arr = -gex_arr
 
-            for strike_f, oi_v, signed_gex in zip(
-                k_arr.tolist(), oi_arr.tolist(), gex_arr.tolist()
-            ):
-                if strike_f not in strike_map:
-                    strike_map[strike_f] = {
-                        "call_gex": 0.0,
-                        "put_gex": 0.0,
-                        "call_oi": 0,
-                        "put_oi": 0,
-                    }
+            # OI was already booked above for every keep-row; here we only
+            # add the GEX contribution of the positive-gamma rows (their
+            # strike_map entries are guaranteed to exist from the OI pass).
+            for strike_f, signed_gex in zip(k_arr.tolist(), gex_arr.tolist()):
                 if is_call:
                     strike_map[strike_f]["call_gex"] += signed_gex
-                    strike_map[strike_f]["call_oi"] += oi_v
-                    total_call_oi += oi_v
                 else:
                     strike_map[strike_f]["put_gex"] += signed_gex
-                    strike_map[strike_f]["put_oi"] += oi_v
-                    total_put_oi += oi_v
 
-    if not strike_map:
+    # Preserve the original failure semantics: error out when no row survived
+    # the liquidity filter OR no row anywhere had usable (positive) gamma —
+    # a strike_map with OI but zero gamma everywhere would emit a misleading
+    # all-zero GEX profile.
+    if not strike_map or not any_positive_gamma:
         return {"error": "No valid options data after filtering for {}".format(symbol)}
 
     # Build per-strike list sorted by strike
@@ -669,8 +687,11 @@ def compute_gex(symbol):
         }
     max_pain = _compute_max_pain(mp_data)
 
-    # Put/call ratio
-    put_call_ratio = round(total_put_oi / total_call_oi, 3) if total_call_oi > 0 else 0.0
+    # Put/call ratio. When no call OI survived the filter, 0.0 would read as
+    # extreme CALL dominance for a chain that may actually be all puts —
+    # inverting the true positioning. Emit None ("unknown/undefined"); the UI
+    # renders None as '—' and downstream scorers skip missing fields.
+    put_call_ratio = round(total_put_oi / total_call_oi, 3) if total_call_oi > 0 else None
 
     result = {
         "symbol": symbol,

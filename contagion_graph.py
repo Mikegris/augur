@@ -366,9 +366,14 @@ def _parse_company_mentions(text):
     """
     Extract company/ticker mentions from SEC filing text.
 
-    Returns list of dicts:
+    Returns list of dicts (sorted by significance weight, descending):
         [{"ticker": str, "name": str, "relationship": str,
-          "revenue_pct": float or None, "mention_count": int, "context": str}]
+          "revenue_pct": float or None, "mention_count": int,
+          "weight": float, "context": str}]
+
+    "weight" is the section-significance score: each mention counts 1.0
+    (2.0 inside a high-weight section) plus 5.0 for an attributed revenue
+    concentration — so weight >= mention_count.
     """
     if not text or len(text.strip()) < 100:
         return []
@@ -399,8 +404,14 @@ def _parse_company_mentions(text):
 
             entry = mentions[ticker]
             entry["mention_count"] += 1
-            # Upgrade relationship if we find a more specific one
-            if relationship in ("supplier", "customer") and entry["relationship"] == "mentioned":
+            # Upgrade relationship if we find a more specific one.
+            # supplier/customer may override "peer" too, not just "mentioned":
+            # partner keywords ("agreement" etc.) are extremely common in
+            # filings, so a first hit classified peer used to permanently
+            # block a later, more specific supplier/customer classification —
+            # the cross-filing merge in build_graph already allows exactly
+            # this upgrade, so keep the two passes consistent.
+            if relationship in ("supplier", "customer") and entry["relationship"] in ("mentioned", "peer"):
                 entry["relationship"] = relationship
             elif relationship == "peer" and entry["relationship"] == "mentioned":
                 entry["relationship"] = relationship
@@ -443,7 +454,9 @@ def _parse_company_mentions(text):
 
         entry = mentions[candidate]
         entry["mention_count"] += 1
-        if relationship in ("supplier", "customer") and entry["relationship"] == "mentioned":
+        # Same upgrade rule as the name-detection loop above: supplier/customer
+        # overrides both "mentioned" and the easily-triggered "peer".
+        if relationship in ("supplier", "customer") and entry["relationship"] in ("mentioned", "peer"):
             entry["relationship"] = relationship
         elif relationship == "peer" and entry["relationship"] == "mentioned":
             entry["relationship"] = relationship
@@ -489,15 +502,19 @@ def _parse_company_mentions(text):
             best_entry["revenue_pct"] = pct
             best_entry["_weight"] += 5.0  # Revenue concentration is very significant
 
-    # Clean up and sort by weight
+    # Clean up and sort by weight. The section/revenue-concentration weight
+    # used to be popped and DISCARDED here, which made the whole significance
+    # scheme (2x for high-weight sections, +5 for revenue concentration) dead
+    # code — ordering and edge weights fell back to raw mention_count. Keep it
+    # on the entry (public "weight" key) so it drives the sort and build_graph
+    # can fold it into edge weight.
     result = []
     for ticker, entry in mentions.items():
-        # Remove internal weight key
-        weight = entry.pop("_weight", 0)
+        entry["weight"] = entry.pop("_weight", 0.0)
         if entry["mention_count"] >= 1:
             result.append(entry)
 
-    result.sort(key=lambda x: x["mention_count"], reverse=True)
+    result.sort(key=lambda x: (x["weight"], x["mention_count"]), reverse=True)
     return result
 
 
@@ -674,7 +691,12 @@ def build_graph(symbol):
                     if ticker in merged:
                         existing = merged[ticker]
                         existing["mention_count"] += m["mention_count"]
-                        if m["revenue_pct"] is not None:
+                        existing["weight"] = existing.get("weight", 0.0) + m.get("weight", 0.0)
+                        # First-write-wins for revenue_pct: filings iterate
+                        # newest-first, so only fill when missing — otherwise
+                        # the OLDER 10-K's (stale) concentration figure
+                        # unconditionally overwrote the latest disclosure.
+                        if m["revenue_pct"] is not None and existing["revenue_pct"] is None:
                             existing["revenue_pct"] = m["revenue_pct"]
                         if m["relationship"] in ("supplier", "customer"):
                             existing["relationship"] = m["relationship"]
@@ -737,8 +759,15 @@ def build_graph(symbol):
                 if fund.get("name"):
                     target_name = fund["name"]
 
-            # Calculate edge weight based on mention count and relationship
-            weight = min(mention["mention_count"] / 10.0, 1.0)
+            # Calculate edge weight from the parse's significance weight
+            # (mentions in high-weight sections count 2x, attributed revenue
+            # concentration adds +5) so the documented section boost actually
+            # moves edge weight — it used to be discarded and only raw
+            # mention_count counted. Curated-fallback entries carry no
+            # "weight" key; fall back to mention_count (same /10 scale, and
+            # weight >= mention_count for parsed entries).
+            sig = mention.get("weight") or mention["mention_count"]
+            weight = min(sig / 10.0, 1.0)
             if mention["revenue_pct"] is not None:
                 weight = max(weight, mention["revenue_pct"] / 100.0)
             if mention["relationship"] in ("supplier", "customer"):

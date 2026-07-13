@@ -192,7 +192,25 @@ def _yahoo_chart_direct(symbol: str) -> dict:
     meta = results[0].get("meta") or {}
 
     price = meta.get("regularMarketPrice")
-    prev = meta.get("chartPreviousClose") or meta.get("previousClose")
+    # WHY: meta.chartPreviousClose is the close before the ENTIRE 5d range
+    # (~a week ago), so using it as prev_close reported the ~1-week move as
+    # the daily move (live-verified: AAPL +7.42% instead of +0.90%). The
+    # true previous close is the second-to-last non-null daily close in the
+    # range — the last bar is the current/most recent session. Fall back to
+    # meta.previousClose (often None on this endpoint), and only use
+    # chartPreviousClose as a last resort (better a stale anchor than none).
+    prev = None
+    try:
+        _q = ((results[0].get("indicators") or {}).get("quote") or [{}])[0] or {}
+        _closes = [c for c in (_q.get("close") or []) if c is not None]
+        if len(_closes) >= 2:
+            prev = float(_closes[-2])
+    except Exception:
+        prev = None
+    if prev is None:
+        prev = meta.get("previousClose")
+    if prev is None:
+        prev = meta.get("chartPreviousClose")
     # Guard change on None explicitly (don't drop a valid 0.0 prev via
     # truthiness); only the division needs a non-zero prev.
     chg = round(price - prev, 4) if (price is not None and prev is not None) else None
@@ -233,6 +251,12 @@ _INDEX_TO_FINVIZ_PROXY = {
     "^FTSE": "EWU",       # FTSE 100 → EWU (UK ETF)
     "^N225": "EWJ",       # Nikkei → EWJ (Japan ETF)
 }
+
+# Proxies whose PRICE moves OPPOSITE the proxied series. IEF is a bond-price
+# ETF: on a day yields fall, IEF rises — so serving its change% raw would
+# paint the 10Y YIELD tile green/up on a yields-down day. The change% must
+# be sign-flipped for these before it reaches the UI.
+_INVERSE_FINVIZ_PROXIES = {"^TNX"}
 
 
 def _finviz_quote_fallback(symbol: str) -> dict:
@@ -283,6 +307,27 @@ def _finviz_quote_fallback(symbol: str) -> dict:
     # `prev` is a non-zero float when present; explicit None check keeps a
     # flat-day quote (price == prev_close) from being silently dropped to None.
     chg = round(price - prev, 4) if (price is not None and prev is not None and prev != 0) else None
+
+    # Yield-to-price proxies (^TNX→IEF) move in the OPPOSITE direction to the
+    # series they stand in for — negate the move so the macro tile shows the
+    # yield's direction, not the bond ETF's. (Price/prev remain the proxy's
+    # scale; the UI relies on the change%, which must at least point the
+    # right way.)
+    if proxy_used and sym in _INVERSE_FINVIZ_PROXIES:
+        chg = -chg if chg is not None else None
+        chg_pct = -chg_pct if chg_pct is not None else None
+
+    # Finviz's '52W High'/'52W Low' fields are PERCENT DISTANCE from the
+    # extreme (e.g. "-5.20%"), not prices — parsing them as absolute prices
+    # returned a negative "high" (-5.2) and nonsense low. Reconstruct the
+    # actual price: extreme = price / (1 + pct/100).
+    def _52w_price(field):
+        pct = _num(((fund.get(field) or "").split() or [None])[0])
+        if pct is None or price is None:
+            return None
+        denom = 1 + pct / 100
+        return round(price / denom, 4) if denom > 0 else None
+
     return {
         "symbol": sym,
         "price": price,
@@ -295,8 +340,8 @@ def _finviz_quote_fallback(symbol: str) -> dict:
         "exchange": fund.get("Exchange", ""),
         "day_high": None,
         "day_low": None,
-        "fifty_two_week_high": _num(((fund.get("52W High") or "").split() or [None])[0]),
-        "fifty_two_week_low":  _num(((fund.get("52W Low")  or "").split() or [None])[0]),
+        "fifty_two_week_high": _52w_price("52W High"),
+        "fifty_two_week_low":  _52w_price("52W Low"),
         "source": f"finviz-via-{proxy_used}" if proxy_used else "finviz",
         "proxy_symbol": proxy_used,
         "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -391,6 +436,41 @@ def _finviz_fundamentals_fallback(symbol: str) -> dict:
         head = str(v).split()[0] if str(v).strip() else ""
         return _num(head)
 
+    # 'Dividend TTM' is shaped "rate (yield%)" e.g. "1.05 (0.35%)" — the FIRST
+    # token is the $ rate, so _first_num() returned dollars/share (1.05) as
+    # the "yield" (rendered as 105%). The yield is the parenthesized second
+    # token; a lone %-token is itself a yield (see _finviz_dividend_fallback,
+    # which parses the same field correctly). _num keeps fraction form here,
+    # matching this function's 'Dividend %' branch.
+    def _ttm_yield(v):
+        if v is None: return None
+        parts = str(v).replace("(", " ").replace(")", " ").split()
+        if len(parts) >= 2:
+            return _num(parts[1])
+        if len(parts) == 1 and "%" in parts[0]:
+            return _num(parts[0])
+        return None
+
+    price = _num(fund.get("Price"))
+
+    # '52W High'/'52W Low' are PERCENT DISTANCE from the extreme ("-5.20%"),
+    # not prices; _first_num turned them into a negative "high" of -0.052.
+    # Reconstruct the price: extreme = price / (1 + frac). (_num already
+    # divided the %-value by 100 → fraction form.)
+    def _52w_price(field):
+        frac = _first_num(fund.get(field))
+        if frac is None or price is None:
+            return None
+        denom = 1 + frac
+        return round(price / denom, 4) if denom > 0 else None
+
+    # yfinance's debtToEquity is a PERCENT (e.g. 176.3) while Finviz's
+    # 'Debt/Eq' is a plain ratio (1.76) — a silent 100x unit mismatch in the
+    # same field depending on which source served it. Normalize at the
+    # fallback boundary to the yfinance unit (percent), which is what every
+    # consumer (jarvis_lens, personas, screens) calibrates against.
+    _de = _num(fund.get("Debt/Eq"))
+
     target = _num(fund.get("Target Price"))
     result = {
         "symbol": sym,
@@ -409,7 +489,7 @@ def _finviz_fundamentals_fallback(symbol: str) -> dict:
         "ps_ratio":   _num(fund.get("P/S")),
         "pb_ratio":   _num(fund.get("P/B")),
         "ev_ebitda":  _num(fund.get("EV/EBITDA")),
-        "debt_equity":   _num(fund.get("Debt/Eq")),
+        "debt_equity":   (_de * 100 if _de is not None else None),
         "current_ratio": _num(fund.get("Current Ratio")),
         "return_on_equity": _num(fund.get("ROE")),
         "return_on_assets": _num(fund.get("ROA")),
@@ -420,7 +500,7 @@ def _finviz_fundamentals_fallback(symbol: str) -> dict:
         "revenue_growth":  _num(fund.get("Sales Q/Q")),
         "earnings_growth": _num(fund.get("EPS Q/Q")),
         "free_cashflow":   None,
-        "dividend_yield":  _num(fund.get("Dividend %")) or _first_num(fund.get("Dividend TTM")),
+        "dividend_yield":  _num(fund.get("Dividend %")) or _ttm_yield(fund.get("Dividend TTM")),
         "dividend_rate":   _first_num(fund.get("Dividend Est.")),
         "payout_ratio":    _num(fund.get("Payout")),
         "beta":            _num(fund.get("Beta")),
@@ -428,8 +508,8 @@ def _finviz_fundamentals_fallback(symbol: str) -> dict:
         "float_shares":       _num(fund.get("Shs Float")),
         "short_ratio":        _num(fund.get("Short Ratio")),
         "short_percent_float":_num(fund.get("Short Float")),
-        "52w_high":   _first_num(fund.get("52W High")),
-        "52w_low":    _first_num(fund.get("52W Low")),
+        "52w_high":   _52w_price("52W High"),
+        "52w_low":    _52w_price("52W Low"),
         "50d_avg":    None,
         "200d_avg":   None,
         "analyst_target": target,
@@ -563,7 +643,20 @@ def get_quote(symbol: str) -> dict:
         if "error" not in cg_quote and cg_quote.get("price"):
             _set_cache(ck, cg_quote, ttl=120)
             return cg_quote
-        # Fall through to yfinance if CoinGecko hiccups (rate-limit, etc.)
+        # CoinGecko hiccup (429 cool-down etc.): a recent-but-expired CG
+        # quote beats falling through to yfinance — the exact source that
+        # served UNI at $0.0002 and SUI at $0.0003 (see comment above) — and
+        # crypto barely moves in the minutes a CG cool-down lasts. Serve
+        # last-good (not re-cached, so the next call retries CG). Only when
+        # we have no CG history at all does the yfinance path below run.
+        try:
+            _stale = cache_store.cache_get_stale(("quote", symbol.upper()),
+                                                 max_age_seconds=3600)
+            if (isinstance(_stale, dict) and _stale.get("source") == "coingecko"
+                    and _stale.get("price") is not None):
+                return dict(_stale)
+        except Exception:
+            pass
 
     try:
         t = yf.Ticker(symbol)
@@ -766,6 +859,19 @@ def get_quotes_batch(symbols: list) -> dict:
             for cg_id, yf_sym in still_need.items():
                 d = batch.get(cg_id)
                 if not d or "usd" not in d:
+                    # CoinGecko failed for this coin — the slot still holds
+                    # the yfinance answer, which is untrustworthy for crypto
+                    # (UNI $0.0002 vs $3.74; see _coingecko_quote). Prefer a
+                    # recent-but-expired CG quote over Yahoo's number.
+                    try:
+                        _stale = cache_store.cache_get_stale(
+                            ("quote", yf_sym), max_age_seconds=3600)
+                        if (isinstance(_stale, dict)
+                                and _stale.get("source") == "coingecko"
+                                and _stale.get("price") is not None):
+                            results[yf_sym] = dict(_stale)
+                    except Exception:
+                        pass
                     continue
                 price = d["usd"]
                 change_pct = d.get("usd_24h_change")
@@ -897,6 +1003,7 @@ def get_fundamentals(symbol: str) -> dict:
             "beta", "profit_margin", "operating_margin", "return_on_equity",
         )
         present = sum(1 for k in _info_only if result.get(k) not in (None, ""))
+        _cache_ttl = 86400
         if present <= 2:
             fb = _finviz_fundamentals_fallback(symbol)
             if "error" not in fb:
@@ -906,7 +1013,14 @@ def get_fundamentals(symbol: str) -> dict:
                     if result.get(k) in (None, "") and v not in (None, ""):
                         result[k] = v
                 result["source"] = "yfinance+finviz"
-        _set_cache(ck, result, ttl=86400)
+            else:
+                # Thin yfinance payload AND the Finviz gap-fill errored — the
+                # mostly-empty dict still carries price-derived fields, so
+                # cache_store would happily freeze it for 24h ('Unknown'
+                # sector, null margins) even after both upstreams recover.
+                # Cache briefly so the next request retries.
+                _cache_ttl = 300
+        _set_cache(ck, result, ttl=_cache_ttl)
         return result
     except Exception as e:
         # Yahoo blew up — try Finviz before giving up.
@@ -944,13 +1058,23 @@ def get_chart_data(symbol: str, period: str = "6mo", interval: str = "1d") -> li
                 return _yahoo_chart_history(symbol, period, interval)
             result = []
             for ts, row in hist.iterrows():
+                # NaN guard (mirrors _yahoo_chart_history's null-bar skip):
+                # intraday histories around halts/partial responses carry NaN
+                # OHLC rows. round(float(nan)) would emit literal NaN into a
+                # payload cached up to 12h — invalid JSON for the chart panel
+                # and NaN-poison for compute_indicators' RSI/SMA/MACD sums.
+                if pd.isna(row["Close"]):
+                    continue
+                c = float(row["Close"])
                 ts_unix = int(ts.timestamp())
                 result.append({
                     "time": ts_unix,
-                    "open": round(float(row["Open"]), 4),
-                    "high": round(float(row["High"]), 4),
-                    "low": round(float(row["Low"]), 4),
-                    "close": round(float(row["Close"]), 4),
+                    # Coerce NaN open/high/low to the close, same as the
+                    # Yahoo-direct fallback does for null fields.
+                    "open": round(float(row["Open"]) if not pd.isna(row["Open"]) else c, 4),
+                    "high": round(float(row["High"]) if not pd.isna(row["High"]) else c, 4),
+                    "low": round(float(row["Low"]) if not pd.isna(row["Low"]) else c, 4),
+                    "close": round(c, 4),
                     "volume": int(row["Volume"]) if not pd.isna(row["Volume"]) else 0,
                 })
             return result
@@ -995,12 +1119,20 @@ def get_news(symbol: str, limit: int = 15) -> list:
     ck = ("news", symbol.upper())
     fetch_n = max(limit, _NEWS_MAX_KEEP)
     hit = _cached(ck, ttl=900)  # 15 min — news doesn't change minute-to-minute
-    # Only serve the cache when it actually holds enough headlines for this
-    # caller. A prior small-limit caller may have populated fewer items than a
-    # later large-limit (e.g. 50) caller needs; in that case fall through and
-    # refetch the wider window rather than silently truncating.
-    if hit is not None and (len(hit) >= limit or len(hit) >= fetch_n):
-        return hit[:limit]
+    # Entries record how wide a window they were FETCHED with ({'items',
+    # 'fetched_n'}). Serve the cache when the entry's fetch window covers this
+    # caller's limit — even if the upstream simply had fewer headlines than
+    # `limit` (Yahoo typically returns ~8-10). The old `len(hit) >= limit`
+    # test could never pass for those symbols, so every request re-walked
+    # Yahoo/Finviz and permanently defeated the 15-min TTL. A prior
+    # SMALLER-window entry (legacy bare-list shape) still falls through so a
+    # wide caller isn't silently truncated.
+    if isinstance(hit, list):  # legacy pre-'fetched_n' cache rows
+        hit = {"items": hit, "fetched_n": len(hit)}
+    if isinstance(hit, dict) and isinstance(hit.get("items"), list):
+        items = hit["items"]
+        if len(items) >= limit or (hit.get("fetched_n") or 0) >= limit:
+            return items[:limit]
     try:
         t = yf.Ticker(symbol)
         news = t.news or []
@@ -1024,12 +1156,15 @@ def get_news(symbol: str, limit: int = 15) -> list:
         if not result:
             result = _finviz_news_fallback(symbol, fetch_n)
         if result:
-            _set_cache(ck, result, ttl=900)
+            # Record the fetch window alongside the items so the cache-serve
+            # check above can distinguish "upstream only had 9 headlines"
+            # (serve it) from "we only asked for 5" (refetch wider).
+            _set_cache(ck, {"items": result, "fetched_n": fetch_n}, ttl=900)
         return result[:limit]
     except Exception:
         fb = _finviz_news_fallback(symbol, fetch_n)
         if fb:
-            _set_cache(ck, fb, ttl=900)
+            _set_cache(ck, {"items": fb, "fetched_n": fetch_n}, ttl=900)
         return fb[:limit] if fb else fb
 
 
@@ -2050,7 +2185,12 @@ def _dividend_data_uncached(symbol: str) -> dict:
                         # One malformed index entry shouldn't abort the whole CAGR.
                         continue
                     annual[yr] = annual.get(yr, 0) + float(val)
-                years = sorted(annual.keys())
+                # Exclude the current (incomplete) calendar year: mid-year its
+                # partial dividend sum (e.g. 2 of 4 quarterly payments) would
+                # become the CAGR endpoint and show a steady payer as a fake
+                # ~-13%/yr "cut". Only complete years are comparable.
+                _cur_yr = datetime.now(timezone.utc).year
+                years = sorted(y for y in annual.keys() if y < _cur_yr)
                 if len(years) >= 6:
                     old_yr, new_yr = years[-6], years[-1]
                     old_v, new_v = annual[old_yr], annual[new_yr]
@@ -2332,9 +2472,12 @@ def get_portfolio_stress_test(holdings: list, custom_drop_pct: float = None) -> 
                 entry["sector"] = info.get("sector") or "Unknown"
                 _bv = _safe(info.get("beta"))
                 entry["beta"] = _bv if _bv is not None else 1.0  # don't coerce a real 0.0 beta to 1.0
-                # Clamp beta to reasonable range
-                if entry["beta"]:
-                    entry["beta"] = max(0.1, min(3.0, entry["beta"]))
+                # Clamp beta to reasonable range — UNCONDITIONALLY. The old
+                # truthiness gate let a genuine 0.0 beta skip the clamp, and
+                # the `or 1.0` at scenario time then coerced it to 1.0,
+                # 10x-overstating the stress loss for cash-like holdings.
+                # 0.0 must clamp to the 0.1 floor like any other low beta.
+                entry["beta"] = max(0.1, min(3.0, entry["beta"]))
             except Exception:
                 entry["sector"] = "Unknown"
                 entry["beta"] = 1.0
@@ -2364,7 +2507,10 @@ def get_portfolio_stress_test(holdings: list, custom_drop_pct: float = None) -> 
             mv = h.get("market_value") or (h.get("shares", 0) * h.get("avg_cost", 0))
             asset_type = h.get("asset_type", "stock")
             sector = h.get("sector", "Unknown")
-            beta = h.get("beta", 1.0) or 1.0
+            # No `or 1.0`: enrichment above guarantees a clamped beta
+            # (>= 0.1) — re-coercing falsy values would silently turn the
+            # clamped floor's inputs back into 1.0. None-only default.
+            beta = h.get("beta") if h.get("beta") is not None else 1.0
 
             if asset_type == "crypto":
                 drop_pct = params.get("crypto_drop", params["market_drop"] * 1.5)
@@ -2412,7 +2558,9 @@ def get_portfolio_stress_test(holdings: list, custom_drop_pct: float = None) -> 
     total_new_value = 0
     for h in enriched:
         mv = h.get("market_value") or (h.get("shares", 0) * h.get("avg_cost", 0))
-        beta = h.get("beta", 1.0) or 1.0
+        # See the main-scenario loop: enrichment guarantees a clamped beta,
+        # so only a missing/None value defaults to 1.0 (no `or` re-coercion).
+        beta = h.get("beta") if h.get("beta") is not None else 1.0
         asset_type = h.get("asset_type", "stock")
         drop_pct = drop * (2.0 if asset_type == "crypto" else beta)
         new_value = mv * (1 + drop_pct / 100)
@@ -2501,9 +2649,11 @@ def _unusual_options_flow_uncached(symbol):
     scan_exps = exps[:6]
     unusual = []
 
-    # Anchor "today" to 16:00 America/New_York (options-expiry wall clock)
-    # and compare in UTC so 0/1DTE math doesn't drift by a calendar day.
-    now_utc = datetime.now(timezone.utc)
+    # Anchor "today" to the EXCHANGE calendar (America/New_York): comparing
+    # the NY-calendar expiry date against the UTC calendar date made every
+    # dte one day too low between 20:00 ET and midnight ET (UTC has already
+    # rolled over), mislabeling 1DTE contracts as 0DTE in the evening scan.
+    today_ny = datetime.now(_NY_TZ if _NY_TZ is not None else timezone.utc).date()
 
     for exp in scan_exps:
         try:
@@ -2513,14 +2663,10 @@ def _unusual_options_flow_uncached(symbol):
 
         try:
             exp_date = datetime.strptime(exp, "%Y-%m-%d")
-            if _NY_TZ is not None:
-                exp_dt = exp_date.replace(hour=16, minute=0, second=0, tzinfo=_NY_TZ)
-            else:
-                exp_dt = exp_date.replace(hour=16, minute=0, second=0, tzinfo=timezone.utc)
             # Calendar-day difference, not floor of fractional seconds: the old
             # `//86400` undercounted (23h to expiry → 0) and over-counted past
             # expiries to -1.
-            dte = (exp_dt.date() - now_utc.date()).days
+            dte = (exp_date.date() - today_ny).days
         except Exception:
             dte = 0
 

@@ -315,10 +315,20 @@ def _fetch_quotes(symbols: List[str], crypto: set) -> Dict[str, Dict[str, Any]]:
     """
     if not symbols:
         return {}
-    fetch_map = {}  # fetch symbol -> user symbol
+    # fetch symbol -> [user symbols]. A LIST, not a single symbol: two user
+    # symbols can resolve to the same fetch symbol (held crypto "BTC" →
+    # "BTC-USD" plus a watch written literally as "BTC-USD"); a plain dict
+    # silently dropped one of them and its watches could never fire.
+    fetch_map = {}
     for sym in symbols:
-        fetch_sym = sym + "-USD" if sym in crypto else sym
-        fetch_map[fetch_sym.upper()] = sym
+        # Don't append -USD to a symbol that already ends in it — a crypto
+        # holding stored as "BTC-USD" used to fetch "BTC-USD-USD" (no quote,
+        # and the -USD retry below skips it too, so its watches went dead).
+        if sym.upper().endswith("-USD"):
+            fetch_sym = sym
+        else:
+            fetch_sym = sym + "-USD" if sym in crypto else sym
+        fetch_map.setdefault(fetch_sym.upper(), []).append(sym)
     try:
         import fetcher  # lazy — keeps module import light and fail-open
         raw = fetcher.get_quotes_batch(list(fetch_map.keys())) or {}
@@ -326,17 +336,18 @@ def _fetch_quotes(symbols: List[str], crypto: set) -> Dict[str, Dict[str, Any]]:
         log.warning("watch quote fetch failed: %s", e)
         return {}
     out = {}
-    for fetch_sym, user_sym in fetch_map.items():
+    for fetch_sym, user_syms in fetch_map.items():
         q = raw.get(fetch_sym)
         if isinstance(q, dict):
-            out[user_sym] = q
+            for user_sym in user_syms:
+                out[user_sym] = q
 
     # -USD fallback for non-held coins. _crypto_symbols() only knows symbols
     # currently in the book, so a watch on a coin the user doesn't hold (DOGE)
     # quotes the bare ticker — often an unrelated equity/trust (the same
     # lesson as jarvis_counterfactual._price_now). For any symbol whose bare
     # quote came back missing or non-positive, retry it as SYM-USD.
-    retry = {}  # fetch symbol (SYM-USD) -> user symbol
+    retry = {}  # fetch symbol (SYM-USD) -> [user symbols]
     for sym in symbols:
         if sym in crypto or sym.upper().endswith("-USD"):
             continue
@@ -351,40 +362,56 @@ def _fetch_quotes(symbols: List[str], crypto: set) -> Dict[str, Dict[str, Any]]:
         # watches don't silently evaluate against the wrong asset.
         bad_chg = not isinstance(chg, (int, float)) or isinstance(chg, bool)
         if bad_price or bad_chg:
-            retry[(sym + "-USD").upper()] = sym
+            retry.setdefault((sym + "-USD").upper(), []).append(sym)
     if retry:
         try:
             raw2 = fetcher.get_quotes_batch(list(retry.keys())) or {}
         except Exception as e:
             log.warning("watch -USD fallback fetch failed: %s", e)
             raw2 = {}
-        for fetch_sym, user_sym in retry.items():
+        for fetch_sym, user_syms in retry.items():
             q = raw2.get(fetch_sym)
             qp = (q or {}).get("price") if isinstance(q, dict) else None
             if not (isinstance(qp, (int, float)) and not isinstance(qp, bool)
                     and qp > 0):
                 continue
-            existing = out.get(user_sym)
-            ep = (existing or {}).get("price") if isinstance(existing, dict) else None
-            existing_price_ok = (isinstance(ep, (int, float))
-                                 and not isinstance(ep, bool) and ep > 0)
-            if existing_price_ok:
-                # The bare quote already has a valid positive price — only the
-                # change_pct was missing. Don't overwrite a legitimate equity
-                # quote with a possibly-unrelated -USD instrument; just fill the
-                # missing change_pct field from the retry.
-                ec = existing.get("change_pct")
-                if not (isinstance(ec, (int, float)) and not isinstance(ec, bool)):
-                    rc = q.get("change_pct")
-                    if isinstance(rc, (int, float)) and not isinstance(rc, bool):
-                        existing["change_pct"] = rc
-            elif user_sym.upper() in _crypto_universe():
-                # Bare quote had no valid price. Only adopt the -USD substitute
-                # when the symbol is plausibly crypto — otherwise a real equity
-                # whose feed briefly returned 0 would be overwritten with an
-                # unrelated coin. A non-crypto symbol keeps its (price-less)
-                # equity quote rather than a wrong one.
-                out[user_sym] = q
+            for user_sym in user_syms:
+                existing = out.get(user_sym)
+                ep = (existing or {}).get("price") if isinstance(existing, dict) else None
+                existing_price_ok = (isinstance(ep, (int, float))
+                                     and not isinstance(ep, bool) and ep > 0)
+                if existing_price_ok:
+                    # The bare quote already has a valid positive price — only
+                    # the change_pct was missing. Only graft the -USD
+                    # change_pct when the symbol is plausibly crypto (same
+                    # gate as the price branch below): without it, an equity
+                    # like SAND (Sandstorm Gold) that returned
+                    # price-but-no-change_pct picked up the Sandbox coin's day
+                    # move and change_pct watches fired on the wrong asset.
+                    # Non-crypto symbols keep change_pct missing so their
+                    # conditions stay False (fail-closed for triggers).
+                    ec = existing.get("change_pct")
+                    if (not (isinstance(ec, (int, float)) and not isinstance(ec, bool))
+                            and user_sym.upper() in _crypto_universe()):
+                        rc = q.get("change_pct")
+                        if isinstance(rc, (int, float)) and not isinstance(rc, bool):
+                            # Copy before mutating: `existing` is the SAME
+                            # object fetcher's quote cache serves to every
+                            # other consumer (get_quotes_batch returns cache
+                            # hits by reference); writing into it in place
+                            # poisoned the cached quote for the portfolio
+                            # table / briefing / movers.
+                            existing = dict(existing)
+                            existing["change_pct"] = rc
+                            out[user_sym] = existing
+                elif user_sym.upper() in _crypto_universe():
+                    # Bare quote had no valid price. Only adopt the -USD
+                    # substitute when the symbol is plausibly crypto —
+                    # otherwise a real equity whose feed briefly returned 0
+                    # would be overwritten with an unrelated coin. A
+                    # non-crypto symbol keeps its (price-less) equity quote
+                    # rather than a wrong one.
+                    out[user_sym] = q
     return out
 
 

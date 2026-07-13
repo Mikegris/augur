@@ -260,7 +260,17 @@ def run_replay(args) -> Dict[str, Any]:
     import aj_metalabel
     full_hist = {b["date"]: float(b["close"])
                  for b in store.chart(bench, "max", "1d")}
-    aj_benchmark._index_closes = lambda sym, period, _h=full_hist: dict(_h)
+    # Patch PER SYMBOL: build_labels calls _index_closes for the benchmark,
+    # for ^VIX, and for each traded symbol. An earlier version returned the
+    # benchmark's closes for EVERY symbol, which poisoned the labels — the
+    # point-in-time "VIX" became an SPY price (~450 vs ~20, so finalize
+    # overwrote the real persisted vix on every row) and per-symbol
+    # technicals were computed off SPY's series. Models pool-trained on
+    # those labels carried a ~20x-off vix mean/std into live inference.
+    # store.chart is as-of-aware (set_asof above) and returns [] for symbols
+    # without cached history, which _index_closes callers treat as missing.
+    aj_benchmark._index_closes = lambda sym, period: {
+        b["date"]: float(b["close"]) for b in store.chart(sym, "max", "1d")}
     aj_features._spy_history = lambda _h=sorted(full_hist.items()): list(_h)
     labels = aj_features.build_labels(lookback_days=10 ** 5)
     if imported_model is not None:
@@ -331,7 +341,12 @@ def _metrics(daily, bench_closes, cash, args, symbols, halts,
         vals = [v for _, v in eq]
         rets = [vals[i] / vals[i - 1] - 1.0 for i in range(1, len(vals))
                 if vals[i - 1] and vals[i - 1] > 0]
-        out["total_return_pct"] = round((vals[-1] / vals[0] - 1.0) * 100.0, 2)
+        # Guard vals[0] exactly like the CAGR line below — a 0.0 day-1 equity
+        # (e.g. account_equity's fail-open 0.0 on a transient ledger error)
+        # must not ZeroDivisionError away a fully completed simulation at the
+        # very last (metrics) step.
+        out["total_return_pct"] = round((vals[-1] / vals[0] - 1.0) * 100.0, 2) \
+            if vals[0] > 0 else None
         years = max(1e-9, len(vals) / 252.0)
         out["cagr_pct"] = round(((vals[-1] / vals[0]) ** (1.0 / years) - 1.0) * 100.0, 2) \
             if vals[0] > 0 and vals[-1] > 0 else None
@@ -355,7 +370,8 @@ def _metrics(daily, bench_closes, cash, args, symbols, halts,
             b0, b1 = pairs[0][1], pairs[-1][1]
             out["benchmark_return_pct"] = round((b1 / b0 - 1.0) * 100.0, 2)
             out["alpha_pct"] = round(out["total_return_pct"]
-                                     - out["benchmark_return_pct"], 2)
+                                     - out["benchmark_return_pct"], 2) \
+                if out["total_return_pct"] is not None else None
             ex = []
             for i in range(1, len(pairs)):
                 a0, bb0 = pairs[i - 1]
@@ -643,8 +659,12 @@ def cmd_report(args) -> None:
     out_dir = args.out_dir
     run = args.run
     if not run:
+        # Guard like cmd_list: on a fresh checkout / desktop install the
+        # replays dir doesn't exist yet — surface the friendly SystemExit,
+        # not a raw FileNotFoundError traceback from os.listdir.
         runs = sorted(d for d in os.listdir(out_dir)
-                      if os.path.exists(os.path.join(out_dir, d, "result.json")))
+                      if os.path.exists(os.path.join(out_dir, d, "result.json"))) \
+            if os.path.isdir(out_dir) else []
         if not runs:
             raise SystemExit("no replay runs in {}".format(out_dir))
         run = runs[-1]
@@ -751,6 +771,11 @@ def main(argv=None) -> int:
     rp2.add_argument("--out-dir", default=None)
 
     args = ap.parse_args(argv)
+    # A non-positive bankroll makes every equity metric degenerate (and used
+    # to surface as a ZeroDivisionError at the metrics step AFTER the full
+    # day loop) — reject it up front, for run/grid/counterfactual alike.
+    if getattr(args, "cash", None) is not None and args.cash <= 0:
+        raise SystemExit("--cash must be > 0")
     if getattr(args, "out_dir", None) is None:
         args.out_dir = DEFAULT_OUT_DIR
     if getattr(args, "cache_dir", None) is None:

@@ -217,26 +217,47 @@ def _detect_equity_feedback(price_data, fundamentals):
         pct_3m = _pct_change_over(price_data, 63)
 
         debt_equity = fundamentals.get("debt_equity")
+        # yfinance's debtToEquity comes through fetcher.get_fundamentals RAW
+        # and PERCENT-scaled (145.0 == 1.45x), so comparing it to ratio
+        # thresholds (<1.0, >1.5, ...) misfires wildly: a healthy 0.4x book
+        # reads as "high debt" and the virtuous path (< 1.0) essentially
+        # never fires. Normalize exactly like jarvis_lens._debt_ratio: values
+        # above 3 are assumed percent-form (a genuine 3x+ D/E is rare; a
+        # percent-form value below 3 would mean D/E < 0.03).
+        de_ratio = None
+        if debt_equity is not None:
+            try:
+                de_ratio = float(debt_equity)
+                if de_ratio > 3:
+                    de_ratio = de_ratio / 100.0
+            except (TypeError, ValueError):
+                de_ratio = None
         revenue_growth = fundamentals.get("revenue_growth")
         profit_margin = fundamentals.get("profit_margin")
         price = fundamentals.get("price")
-        high_52w = fundamentals.get("fifty_two_week_high") or fundamentals.get("year_high")
-        low_52w = fundamentals.get("fifty_two_week_low") or fundamentals.get("year_low")
+        # fetcher.get_fundamentals emits "52w_high"/"52w_low"; the older key
+        # names are kept as fallbacks for any alternate fundamentals source.
+        high_52w = (fundamentals.get("52w_high")
+                    or fundamentals.get("fifty_two_week_high")
+                    or fundamentals.get("year_high"))
+        low_52w = (fundamentals.get("52w_low")
+                   or fundamentals.get("fifty_two_week_low")
+                   or fundamentals.get("year_low"))
 
         uptrend = slope_63 > 0
-        low_debt = debt_equity is not None and debt_equity < 1.0
+        low_debt = de_ratio is not None and de_ratio < 1.0
         growing = revenue_growth is not None and revenue_growth > 0
         profitable = profit_margin is not None and profit_margin > 0
 
         # Check for vicious reverse
         downtrend = slope_63 < 0
-        high_debt = debt_equity is not None and debt_equity > 1.5
+        high_debt = de_ratio is not None and de_ratio > 1.5
         shrinking = revenue_growth is not None and revenue_growth < 0
 
         metrics = {
             "slope_63d": round(slope_63, 4),
             "pct_change_3m": round(pct_3m, 2) if pct_3m is not None else None,
-            "debt_equity": debt_equity,
+            "debt_equity": round(de_ratio, 4) if de_ratio is not None else None,
             "revenue_growth": revenue_growth,
             "profit_margin": profit_margin,
         }
@@ -248,7 +269,7 @@ def _detect_equity_feedback(price_data, fundamentals):
                 strength += 20
             if revenue_growth is not None and revenue_growth > 0.15:
                 strength += 15
-            if debt_equity is not None and debt_equity < 0.5:
+            if de_ratio is not None and de_ratio < 0.5:
                 strength += 15
             if profit_margin is not None and profit_margin > 0.15:
                 strength += 10
@@ -273,7 +294,7 @@ def _detect_equity_feedback(price_data, fundamentals):
             detail = ("Virtuous equity feedback detected: rising price (%.1f%% 3m) "
                       "with low leverage (D/E %.2f) and revenue growth (%.1f%%) "
                       "creates favorable borrowing conditions that fund further growth."
-                      % (pct_3m or 0, debt_equity or 0,
+                      % (pct_3m or 0, de_ratio or 0,
                          (revenue_growth or 0) * 100))
 
             return _make_loop_result(loop_type, detected=True, strength=strength,
@@ -287,7 +308,7 @@ def _detect_equity_feedback(price_data, fundamentals):
                 strength += 20
             if revenue_growth is not None and revenue_growth < -0.15:
                 strength += 15
-            if debt_equity is not None and debt_equity > 2.0:
+            if de_ratio is not None and de_ratio > 2.0:
                 strength += 15
             if profit_margin is not None and profit_margin < 0:
                 strength += 10
@@ -308,7 +329,7 @@ def _detect_equity_feedback(price_data, fundamentals):
             detail = ("Vicious equity feedback detected: falling price (%.1f%% 3m) "
                       "with high leverage (D/E %.2f) and shrinking revenue (%.1f%%) "
                       "tightens borrowing conditions and accelerates decline."
-                      % (pct_3m or 0, debt_equity or 0,
+                      % (pct_3m or 0, de_ratio or 0,
                          (revenue_growth or 0) * 100))
 
             return _make_loop_result(loop_type, detected=True, strength=strength,

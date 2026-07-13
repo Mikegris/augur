@@ -1,0 +1,133 @@
+{
+ "kind": "grid",
+ "grid_id": "cf_20260706",
+ "params": {
+  "stop_loss_pct": [
+   "4",
+   "8",
+   "12"
+  ],
+  "buy_prob_threshold": [
+   "0.6",
+   "0.65"
+  ]
+ },
+ "start": "2026-05-15",
+ "end": "2026-07-07",
+ "symbols": "AAPL,MSFT,NVDA,AMZN,GOOGL,META,TSLA,JPM,XOM,UNH",
+ "train_frac": 0.7,
+ "cells": [
+  {
+   "run_id": "cf_20260706_c002",
+   "params": {
+    "stop_loss_pct": "8",
+    "buy_prob_threshold": "0.6"
+   },
+   "total_return_pct": -4.93,
+   "sharpe": -2.27,
+   "alpha_pct": -6.49,
+   "max_drawdown_pct": 9.25,
+   "trades": 11,
+   "train_sharpe": -5.82,
+   "test_sharpe": 5.04,
+   "test_return_pct": 3.67,
+   "split_date": "2026-06-18"
+  },
+  {
+   "run_id": "cf_20260706_c004",
+   "params": {
+    "stop_loss_pct": "12",
+    "buy_prob_threshold": "0.6"
+   },
+   "total_return_pct": -4.93,
+   "sharpe": -2.27,
+   "alpha_pct": -6.49,
+   "max_drawdown_pct": 9.25,
+   "trades": 11,
+   "train_sharpe": -5.82,
+   "test_sharpe": 5.04,
+   "test_return_pct": 3.67,
+   "split_date": "2026-06-18"
+  },
+  {
+   "run_id": "cf_20260706_c000",
+   "params": {
+    "stop_loss_pct": "4",
+    "buy_prob_threshold": "0.6"
+   },
+   "total_return_pct": -5.23,
+   "sharpe": -2.4,
+   "alpha_pct": -6.79,
+   "max_drawdown_pct": 9.55,
+   "trades": 13,
+   "train_sharpe": -6.02,
+   "test_sharpe": 5.04,
+   "test_return_pct": 3.67,
+   "split_date": "2026-06-18"
+  },
+  {
+   "run_id": "cf_20260706_c001",
+   "params": {
+    "stop_loss_pct": "4",
+    "buy_prob_threshold": "0.65"
+   },
+   "total_return_pct": -5.62,
+   "sharpe": -2.7,
+   "alpha_pct": -7.18,
+   "max_drawdown_pct": 9.44,
+   "trades": 11,
+   "train_sharpe": -6.07,
+   "test_sharpe": 5.07,
+   "test_return_pct": 3.33,
+   "split_date": "2026-06-18"
+  },
+  {
+   "run_id": "cf_20260706_c003",
+   "params": {
+    "stop_loss_pct": "8",
+    "buy_prob_threshold": "0.65"
+   },
+   "total_return_pct": -5.5,
+   "sharpe": -2.68,
+   "alpha_pct": -7.06,
+   "max_drawdown_pct": 9.34,
+   "trades": 10,
+   "train_sharpe": -6.19,
+   "test_sharpe": 5.08,
+   "test_return_pct": 3.36,
+   "split_date": "2026-06-18"
+  },
+  {
+   "run_id": "cf_20260706_c005",
+   "params": {
+    "stop_loss_pct": "12",
+    "buy_prob_threshold": "0.65"
+   },
+   "total_return_pct": -5.5,
+   "sharpe": -2.68,
+   "alpha_pct": -7.06,
+   "max_drawdown_pct": 9.34,
+   "trades": 10,
+   "train_sharpe": -6.19,
+   "test_sharpe": 5.08,
+   "test_return_pct": 3.36,
+   "split_date": "2026-06-18"
+  }
+ ],
+ "winner": {
+  "run_id": "cf_20260706_c002",
+  "params": {
+   "stop_loss_pct": "8",
+   "buy_prob_threshold": "0.6"
+  },
+  "total_return_pct": -4.93,
+  "sharpe": -2.27,
+  "alpha_pct": -6.49,
+  "max_drawdown_pct": 9.25,
+  "trades": 11,
+  "train_sharpe": -5.82,
+  "test_sharpe": 5.04,
+  "test_return_pct": 3.67,
+  "split_date": "2026-06-18"
+ }
+}

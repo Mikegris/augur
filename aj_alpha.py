@@ -70,6 +70,26 @@ _CYCLE_TTL_S = 90.0
 _memo_lock = _threading.Lock()
 _market_closes_memo: Dict[str, Any] = {}      # period -> (expires_at, closes)
 _returns_memo: Dict[str, Any] = {}            # (symbol, period) -> (expires_at, returns)
+_memo_day: List[str] = [""]                   # sim-aware date the memos belong to
+
+
+def _roll_memo_day_locked() -> None:
+    """Clear the memos when the (sim-aware) UTC date changes. MUST be called
+    with _memo_lock held. The wall-clock TTL alone is blind to aj_db's sim
+    clock: a replay advancing ~1 sim-day/second would reuse SPY closes and
+    per-symbol returns fetched up to ~90 sim-DAYS earlier, so regime one-hots,
+    edge_x_* interactions, the RS filter and correlation gates all evaluated
+    series that lagged the simulated market. Keying the memos to the sim date
+    keeps them aligned with the simulated 'today' (and is a no-op-per-day in
+    live use, where the TTL still governs intra-day reuse)."""
+    try:
+        day = aj_db.utc_now().strftime("%Y-%m-%d")
+    except Exception:
+        return
+    if day != _memo_day[0]:
+        _market_closes_memo.clear()
+        _returns_memo.clear()
+        _memo_day[0] = day
 
 
 def reset_cycle_cache() -> None:
@@ -87,6 +107,7 @@ def _market_closes(period: str = "1y") -> List[float]:
     try:
         now = _time.time()
         with _memo_lock:
+            _roll_memo_day_locked()
             hit = _market_closes_memo.get(period)
             if hit and hit[0] > now:
                 return hit[1]
@@ -108,6 +129,7 @@ def _symbol_returns_cached(symbol: str, period: str = "6mo") -> List[float]:
         key = "{}|{}".format(str(symbol).upper(), period)
         now = _time.time()
         with _memo_lock:
+            _roll_memo_day_locked()
             hit = _returns_memo.get(key)
             if hit and hit[0] > now:
                 return hit[1]

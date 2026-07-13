@@ -346,7 +346,16 @@ def holding_discipline() -> Dict[str, Any]:
     quick_flips = 0
 
     for sym, rows in by_symbol.items():
-        rows = sorted(rows, key=lambda t: str(t.get("date") or t.get("created_at") or ""))
+        # Sort on (day, full timestamp), not the day-granular `date` alone:
+        # get_transactions returns newest-first, so a same-day BUY→SELL pair
+        # would keep its SELL-before-BUY order under a stable sort keyed only
+        # on the identical date string — the SELL found no open lot and the
+        # day-trade round trip was silently dropped, excluding exactly the
+        # fastest flips this metric exists to catch (same fix jarvis_lens made).
+        rows = sorted(rows, key=lambda t: (
+            str(t.get("date") or t.get("created_at") or "")[:10],
+            str(t.get("created_at") or ""),
+        ))
         open_lots: List[Tuple[datetime, float]] = []  # (buy_day, shares remaining)
 
         for t in rows:

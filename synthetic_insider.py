@@ -62,6 +62,15 @@ def _clamp(value, lo=0, hi=100):
 def _score_options_flow(symbol):
     try:
         data = fetcher.get_unusual_options_flow(symbol)
+        if not isinstance(data, dict) or data.get("error"):
+            # Upstream signals rate-limit / no-data via an error ENVELOPE
+            # ({"error": ..., "unusual": []}) rather than raising. Scoring
+            # that as a genuine "0 unusual contracts" (score 10) drags the
+            # composite down and gets cached for 30 min — return the neutral
+            # dead-channel placeholder so the composite renormalizes over
+            # live channels instead.
+            return {"score": 50, "detail": "data unavailable", "firing": False,
+                    "weight": 0.20, "available": False}
         unusual = data.get("unusual", [])
         count = len(unusual)
 

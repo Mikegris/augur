@@ -114,10 +114,36 @@ def _num_arg(v: Any) -> Optional[float]:
 def _portfolio_stock_symbols(max_n: int = 15) -> List[str]:
     """Sorted, de-duplicated non-crypto holdings — the symbol universe the
     analytics tools (risk/correlation) operate on. Capped so condensed
-    outputs stay inside the result budget."""
+    outputs stay inside the result budget.
+
+    WHY: when the cap binds it must keep the max_n LARGEST positions by
+    market value (mirrors _t_factor_exposure), NOT the alphabetically-first —
+    an alphabetical cap silently dropped late-alphabet holdings (TSLA, WMT)
+    from portfolio_risk/correlation, so 'which holding is riskiest' could
+    miss the actual riskiest name. Fail-open: quote errors fall back to
+    avg_cost so a feed hiccup never empties the universe."""
     import database as db
-    return sorted({h["symbol"] for h in db.get_portfolio()
-                   if h.get("asset_type") != "crypto"})[:max_n]
+    holdings = [h for h in db.get_portfolio()
+                if h.get("asset_type") != "crypto"]
+    syms = sorted({h["symbol"] for h in holdings})
+    if len(syms) <= max_n:
+        return syms
+    prices: Dict[str, Any] = {}
+    try:
+        import fetcher
+        prices = fetcher.get_quotes_batch(syms) or {}
+    except Exception:
+        pass
+    mv: Dict[str, float] = {}
+    for h in holdings:
+        s = h["symbol"]
+        p = (prices.get(s) or {}).get("price")
+        try:
+            px = float(p) if p else float(h.get("avg_cost") or 0)
+            mv[s] = mv.get(s, 0.0) + px * float(h.get("shares") or 0)
+        except (TypeError, ValueError):
+            mv.setdefault(s, 0.0)
+    return sorted(sorted(syms, key=lambda s: -mv.get(s, 0.0))[:max_n])
 
 
 # ─── read-tool implementations (condensed outputs) ───────────────────────────
@@ -127,7 +153,12 @@ def _t_get_quote(args):
     q, sym = _resolve_quote(sym0)
     keep = ("symbol", "price", "change", "change_pct", "prev_close", "volume",
             "market_cap", "fifty_two_week_high", "fifty_two_week_low")
-    if not q.get("price"):
+    # Positive-price check, same predicate as _resolve_quote._good_price: a
+    # bad feed can return a NEGATIVE price for a mismapped ticker (the
+    # BTC-trust lesson) — negative is truthy, so a bare `not price` guard
+    # handed the model a negative price as live data.
+    p = q.get("price")
+    if not (isinstance(p, (int, float)) and not isinstance(p, bool) and p > 0):
         return {"note": "no quote available for {}".format(sym)}
     return {k: q.get(k) for k in keep}
 
@@ -221,8 +252,14 @@ def _t_earnings(args):
                 clean.append(_sym({"symbol": s}))
             except ValueError:
                 continue
-        syms = clean or [h["symbol"] for h in db.get_portfolio()
-                         if h.get("asset_type") != "crypto"][:25]
+        if not clean:
+            # WHY: the caller EXPLICITLY asked about specific symbols; if
+            # every one fails validation ('BRK/B', 'S&P'), silently swapping
+            # in the whole portfolio made the model answer about the wrong
+            # companies as if that were what was asked. Fail loudly instead.
+            return {"error": "no valid symbols in request",
+                    "rejected": [str(s)[:12] for s in syms[:10]]}
+        syms = clean
     else:
         syms = [h["symbol"] for h in db.get_portfolio()
                 if h.get("asset_type") != "crypto"][:25]
@@ -1724,7 +1761,12 @@ def valid_proposal_args(name: str, args: Dict[str, Any]) -> bool:
             return False
         return 0 < price < 10_000_000
     if name == "add_to_watchlist":
-        return bool(str(args.get("symbol") or "").strip())
+        # Mirror the executor (_t_add_watchlist -> _sym -> _SYM_RE) so a
+        # non-ticker string ('S&P 500', 'the market') is rejected BEFORE the
+        # confirm — a bare non-empty check let it pass the gate and then fail
+        # at execution, exactly the confirm-then-fail pattern the _WATCH_SYM_RE
+        # comment above says must not happen.
+        return bool(_SYM_RE.match(str(args.get("symbol") or "").strip().upper()))
     if name in ("add_holding", "record_trade"):
         sym = str(args.get("symbol") or "").strip().upper()
         if not _SYM_RE.match(sym):

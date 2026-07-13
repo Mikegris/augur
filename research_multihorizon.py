@@ -129,7 +129,21 @@ def _h5_short_mom(hist: pd.DataFrame) -> Dict[str, Any]:
     rs = gain / loss.replace(0, np.nan)
     rsi = float((100 - 100 / (1 + rs)).iloc[-1])
     if not math.isfinite(rsi):
-        rsi = 50.0
+        # Degenerate windows: a 14d avg loss of EXACTLY 0 (all up/flat closes
+        # — a parabolic run, precisely what this fader exists for) makes rs
+        # NaN. Defaulting that to a neutral 50 zeroed the stretch and let the
+        # +ROC momentum tilt push prob_up UP at the top of the run, inverting
+        # the mean-reversion signal into a momentum buy. All-gain is maximally
+        # overbought (RSI 100); the all-loss mirror is 0. Only truly-unknown
+        # NaNs (e.g. NaN inputs) stay neutral at 50.
+        _g = float(gain.iloc[-1])
+        _l = float(loss.iloc[-1])
+        if _l == 0 and _g > 0:
+            rsi = 100.0
+        elif _g == 0 and _l > 0:
+            rsi = 0.0
+        else:
+            rsi = 50.0
 
     # 5d ROC
     roc5 = float(close.iloc[-1] / close.iloc[-6] - 1) if len(close) > 6 else 0.0
@@ -557,11 +571,22 @@ def multi_horizon_forecast(symbol: str) -> Dict[str, Any]:
 
     try:
         import cache_store
-        return cache_store.coalesce(
+        result = cache_store.coalesce(
             ("multihorizon", symbol),
             _CACHE_TTL,
             lambda: _compute(symbol),
         )
+        # A transient fetch failure (one Yahoo 429 in _load_history) yields a
+        # 6-key "Insufficient history" envelope — big enough to slip past
+        # cache_store's small-error-envelope filter, so coalesce caches it
+        # for the full 6h TTL. Re-store errors with a short TTL (the writer's
+        # expiry wins in cache_store) so the next caller retries in minutes.
+        if isinstance(result, dict) and result.get("error"):
+            try:
+                cache_store.cache_set(("multihorizon", symbol), result, ttl=300)
+            except Exception:
+                pass
+        return result
     except Exception as e:
         # If cache machinery is wedged we still want a result for the UI.
         log.warning("cache_store unavailable for multihorizon %s: %s", symbol, e)

@@ -314,8 +314,12 @@ def _detect_phase(windows, velocity, total_count):
             "Narrative shifted from {} (14d) to {} (7d).".format(dom_14, dom_7),
         )
 
-    # CONSENSUS: dominant 7d bucket >55% of articles
-    is_consensus = pct_7 > 55
+    # CONSENSUS: dominant 7d bucket >55% of articles — and it must be a REAL
+    # narrative. NEUTRAL just means "matched no keyword bucket" (very common
+    # for generic coverage); without this exclusion a symbol with 70%
+    # unclassifiable headlines fired a bogus contrarian "crowded trade"
+    # warning. Same NEUTRAL filter the REVERSAL branch above applies.
+    is_consensus = pct_7 > 55 and dom_7 != "NEUTRAL"
 
     # EXHAUSTION: consensus + declining volume
     if is_consensus:

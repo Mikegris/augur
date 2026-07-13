@@ -195,6 +195,23 @@ def train(cfg: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         base_rate = (sum(y) / n) if n else None
 
         def _persist_stub(reason: str) -> Dict[str, Any]:
+            # GUARD: never overwrite a previously PROMOTED model with a
+            # non-promoted stub. aj_features.training_set fail-opens to an
+            # EMPTY matrix on a transient DB error ('database is locked'), so
+            # a retrain firing at the wrong moment would look like n=0 <
+            # min_samples and silently destroy the promoted coefficients —
+            # turning the live filter off with no error surfaced. Keep the
+            # promoted model; an honest demotion can still happen via a real
+            # retrain that reaches _fit_core with actual data.
+            existing = _load_model()
+            if existing and existing.get("promoted"):
+                log.warning("metalabel.train: refusing to overwrite promoted "
+                            "model with a stub (%s); keeping existing model",
+                            reason)
+                return {"trained": False, "n": n,
+                        "oos_auc": existing.get("oos_auc"), "promoted": True,
+                        "base_rate": base_rate, "target": target,
+                        "reason": "kept promoted model; stub skipped: " + reason}
             model = {
                 "feature_names": feature_names, "mean": [], "std": [],
                 "coef": [], "intercept": 0.0, "oos_auc": None,

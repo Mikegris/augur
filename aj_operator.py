@@ -592,7 +592,15 @@ def _process_exits(cycle_id: str, cfg: Dict[str, Any]) -> List[Dict[str, Any]]:
             exited = {r.get("symbol") for r in out if r.get("result") == "executed"
                       and float(r.get("exec", {}).get("qty", 0) or 0) >= 0}
             done_syms = {r.get("symbol") for r in out}   # any sell processed this cycle
-            marks = aj_risk._marks([s for s in book if s not in done_syms])
+            # Resolve quote-convention symbols first (crypto 'BTC' ->
+            # 'BTC-USD'), same as aj_rules.exit_signals / aj_alpha's extra
+            # exits — a bare crypto book key queried against the equity feed
+            # returns None, which silently disabled time-stop/profit-ladder
+            # for every crypto holding. Marks are re-keyed by book symbol.
+            qsyms = {s: aj_risk._quote_symbol(s, (book.get(s) or {}).get("asset_type") or "")
+                     for s in book if s not in done_syms}
+            marks_q = aj_risk._marks(list(qsyms.values()))
+            marks = {s: marks_q.get(q) for s, q in qsyms.items()}
             # Entry timestamps live in aj_position_state (stamped by
             # aj_rules.update_position_state), NOT in the paper book — without
             # this lookup pos.get("opened_at") is always None and the time-stop
@@ -1064,12 +1072,17 @@ def run_once(mode: str = "paper") -> Dict[str, Any]:
                                            cfg, instrument=instrument)
                 out["symbol"] = p_symbol
                 # 19: remember the conviction a long was opened on, to score the
-                # eventual close under the right bucket.
+                # eventual close under the right bucket. Keyed on p_symbol —
+                # the symbol actually BOOKED (an option buy books 'OPT:...',
+                # not the underlying): _process_exits pops the conviction by
+                # the book symbol at close, so recording under the underlying
+                # made every option round-trip land in the 'none' bucket and
+                # left a stale entry that could mislabel a later equity close.
                 if cfg.get("signal_scorecard") and out.get("result") == "executed" \
                         and decision["side"] == "buy":
                     try:
                         import aj_alpha
-                        aj_alpha.note_entry_conviction(symbol, decision.get("conviction"))
+                        aj_alpha.note_entry_conviction(p_symbol, decision.get("conviction"))
                     except Exception:
                         log.debug("scorecard note skipped", exc_info=True)
                 summary["proposals"].append(out)

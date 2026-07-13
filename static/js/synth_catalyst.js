@@ -291,8 +291,10 @@
   };
 
   function _getSortVal(e, k) {
-    if (k === 'smart_money') return (e.current_signals && e.current_signals.smart_money) || null;
-    if (k === 'ml_prob_up')  return (e.current_signals && e.current_signals.ml_prob_up) || null;
+    // ?? not || — a legit 0 score (neutral) must sort between negative and
+    // positive values, not be coerced to null and pinned to the bottom.
+    if (k === 'smart_money') return e.current_signals ? (e.current_signals.smart_money ?? null) : null;
+    if (k === 'ml_prob_up')  return e.current_signals ? (e.current_signals.ml_prob_up ?? null) : null;
     return e[k];
   }
 

@@ -44,6 +44,11 @@ import database as db
 import fetcher
 
 _REVIEW_TTL = 3600
+# Much shorter TTL for a review that came back no_data: that shape means the
+# quote/fundamentals upstreams failed transiently (429/timeout), and pinning
+# "I couldn't pull anything on X" for the full hour keeps serving the blank
+# verdict long after the feeds recover. 60s still absorbs a retry storm.
+_REVIEW_NO_DATA_TTL = 60
 _BRIEF_TTL = 1800
 _TEMPERAMENT_TTL = 900
 
@@ -374,8 +379,28 @@ def position_review(symbol: str) -> Dict[str, Any]:
         return {"error": "symbol required"}
     if cache_store is None:
         return _position_review_uncached(symbol)
-    return cache_store.coalesce(("lens_review", symbol), _REVIEW_TTL,
-                                lambda: _position_review_uncached(symbol))
+
+    fetched = []  # non-empty ⇔ the fetch ran in THIS call (not a cache hit)
+
+    def _fetch():
+        fetched.append(True)
+        return _position_review_uncached(symbol)
+
+    result = cache_store.coalesce(("lens_review", symbol), _REVIEW_TTL, _fetch)
+    if fetched and isinstance(result, dict) and result.get("no_data"):
+        # coalesce just cached the transient-failure shape under the full 1h
+        # TTL — overwrite the entry with a short negative TTL so a retry
+        # refetches once the feeds are back, instead of pinning "I couldn't
+        # pull anything on X" for an hour. Only on a FRESH fetch (`fetched`),
+        # otherwise every cached read would slide the 60s window forward and
+        # could pin no_data indefinitely under a polling UI. Memory-only: a
+        # "no data" verdict must not survive a restart either.
+        try:
+            cache_store.cache_set(("lens_review", symbol), result,
+                                  _REVIEW_NO_DATA_TTL, persist=False)
+        except Exception:  # advisory layer — never let cache upkeep raise
+            pass
+    return result
 
 
 # ─── 2. Temperament check (the behavioral guardrail) ─────────────────────────

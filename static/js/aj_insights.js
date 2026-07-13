@@ -97,7 +97,18 @@
     if (typeof Chart === "undefined") return null;
     return c.getContext ? c.getContext("2d") : null;
   }
-  function keepChart(id, chart) { if (chart) W._charts[id] = chart; }
+  function keepChart(id, chart) {
+    if (!chart) return;
+    // Destroy any instance already registered under this id before
+    // overwriting: charts created outside chartCtx() (e.g. loadReplay's
+    // poll-completion re-render) would otherwise leak the old instance in
+    // Chart.js's internal registry — detached canvas, contexts and
+    // ResizeObserver included — one per re-render.
+    if (W._charts[id] && W._charts[id] !== chart) {
+      try { W._charts[id].destroy(); } catch (e) {}
+    }
+    W._charts[id] = chart;
+  }
 
   // ── panel scaffold ───────────────────────────────────────────────────────
   function card(title, id, sub) {
@@ -880,6 +891,15 @@
       '</div>';
   }
 
+  // Last replay run_id whose completion we already rendered. The status
+  // endpoint keeps reporting {running:false, run_id, returncode:0} for the
+  // rest of the server session after a replay finishes, and wireReplayForm's
+  // wire-up poll() runs on every render — without this guard, a completed
+  // run triggers loadReplay → wireReplayForm → poll → loadReplay forever
+  // (unthrottled request/re-render loop). Module-level so it survives
+  // re-renders within this page life.
+  var _replayHandledRun = null;
+
   function wireReplayForm(body) {
     var go = document.getElementById("aj-replay-go");
     var st = document.getElementById("aj-replay-status");
@@ -895,7 +915,12 @@
           if (st) st.textContent = s.returncode === 0
             ? "done — " + s.run_id : "failed (see run.log)";
           if (go) go.disabled = false;
-          if (s.returncode === 0) loadReplay(body);   // re-render with the new run
+          // Re-render ONCE per completed run — mark it handled BEFORE the
+          // async loadReplay so the re-wired form's poll() can't re-enter.
+          if (s.returncode === 0 && s.run_id !== _replayHandledRun) {
+            _replayHandledRun = s.run_id;
+            loadReplay(body);   // re-render with the new run
+          }
         }
       }).catch(function () { if (go) go.disabled = false; });
     }

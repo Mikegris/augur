@@ -38,6 +38,12 @@ _PERIOD_BARS = {
     "5y": 1260, "10y": 2520, "max": 10 ** 6,
 }
 
+# A cache file whose LAST bar is older than this many calendar days no longer
+# covers a present-day counterfactual window — build_cache refetches it (see
+# #283). 7 days tolerates weekends/holidays while keeping same-week replays
+# repeatable on the frozen file.
+_CACHE_STALE_DAYS = 7
+
 
 class ReplayNetworkBlocked(RuntimeError):
     """Raised when replayed code attempts raw network I/O. Fail-open callers
@@ -92,8 +98,39 @@ def build_cache(symbols: List[str], period: str = "10y",
         if os.path.exists(path) and not refresh:
             try:
                 with open(path) as f:
-                    out[sym] = len(json.load(f).get("bars") or [])
-                continue
+                    meta = json.load(f)
+                cached = meta.get("bars") or []
+                # WHY (#283): reuse must check COVERAGE, not mere existence.
+                # A file built with a shorter period (nightly 2y build vs a
+                # 10y request) silently truncated the replayed window while
+                # the run artifact still reported the requested start date —
+                # so require the stored period to cover the requested one.
+                # Likewise refetch when the last cached bar has gone stale
+                # (> _CACHE_STALE_DAYS old): a weeks-old file cuts a
+                # present-day counterfactual window short.
+                # EXCEPTION: a stored period we don't recognize (e.g. the
+                # test suites' hand-built 'synthetic' datasets) marks a
+                # frozen dataset of record — coverage can't be compared, and
+                # refetching would DESTROY it with live data (the module
+                # docstring's repeatability contract), so reuse it as-is.
+                have = _PERIOD_BARS.get(str(meta.get("period") or "").lower())
+                if cached and have is None:
+                    out[sym] = len(cached)
+                    continue
+                want = _PERIOD_BARS.get(str(period).lower(), 0)
+                fresh = False
+                if cached:
+                    try:
+                        last = datetime.strptime(cached[-1]["date"],
+                                                 "%Y-%m-%d")
+                        fresh = ((datetime.now() - last).days
+                                 <= _CACHE_STALE_DAYS)
+                    except Exception:
+                        fresh = False
+                if cached and (have or 0) >= want and fresh:
+                    out[sym] = len(cached)
+                    continue
+                # insufficient coverage / stale / empty -> refetch below
             except Exception:
                 pass  # unreadable cache -> refetch
         try:
@@ -112,6 +149,24 @@ def build_cache(symbols: List[str], period: str = "10y",
                          "low": r.get("low"), "close": c,
                          "volume": r.get("volume")})
         bars.sort(key=lambda b: b["date"])
+        if not bars:
+            # WHY (#282): NEVER persist an empty bars file. A transient
+            # network failure/429 (e.g. during the nightly --refresh) would
+            # otherwise overwrite a symbol's good multi-year cache with
+            # {'bars': []}, and the existence check above would then skip
+            # refetching forever — permanently poisoning every offline
+            # replay/lab fold for that symbol. Keep the existing file as
+            # last-good (or leave nothing, so the next run refetches).
+            n_prev = 0
+            try:
+                with open(path) as f:
+                    n_prev = len(json.load(f).get("bars") or [])
+            except Exception:
+                pass
+            out[sym] = n_prev
+            log.warning("build_cache: %s fetched 0 bars — keeping last-good "
+                        "cache (%d bars), not writing", sym, n_prev)
+            continue
         with open(path, "w") as f:
             json.dump({"symbol": sym, "period": period,
                        "built_at": datetime.now(timezone.utc).isoformat(),
@@ -150,6 +205,14 @@ class PITStore:
                 log.warning("PITStore: no cache for %s (%s)", sym, path)
                 continue
             bars = [b for b in bars if b.get("date") and b.get("close") is not None]
+            if not bars:
+                # WHY (#284): a cache file with ZERO usable bars must count as
+                # NOT loaded — reporting it as loaded defeated run_replay's
+                # missing-symbol warning (the symbol silently never traded)
+                # and, for the BENCHMARK, let the run proceed without
+                # benchmark/alpha metrics instead of failing clearly.
+                log.warning("PITStore: empty cache for %s (%s)", sym, path)
+                continue
             bars.sort(key=lambda b: b["date"])
             self._bars[sym] = bars
             self._dates[sym] = [b["date"] for b in bars]

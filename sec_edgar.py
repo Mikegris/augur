@@ -334,7 +334,7 @@ def get_recent_filings(ticker, forms=None, limit=20):
         "2.01": "Completion of Acquisition",
         "2.02": "Results of Operations / Earnings",
         "2.03": "Creation of Direct Financial Obligation",
-        "2.05": "Departure of Directors / Officers",
+        "2.05": "Costs Associated with Exit or Disposal Activities",
         "2.06": "Material Impairments",
         "3.01": "Notice of Delisting",
         "4.01": "Changes in Registrant's Certifying Accountant",
@@ -795,17 +795,25 @@ def get_institutional_holdings(fund_cik, fund_name):
     report_dates = recent.get("reportDate", [])
 
     # Find most recent 13F-HR — but also accept amendments (13F-HR/A).
-    # SEC lists newest-first, so the first match is the freshest version of
-    # this period. Originally we only matched the bare "13F-HR" string,
-    # which meant funds that filed a corrected 13F-HR/A (to fix CUSIP or
-    # share-count errors) kept serving the pre-correction holdings — a
-    # silent stale-cache problem since our coalesce/file cache happily
-    # returned the stale submissions JSON for hours.
+    # Originally we only matched the bare "13F-HR" string, which meant funds
+    # that filed a corrected 13F-HR/A (to fix CUSIP or share-count errors)
+    # kept serving the pre-correction holdings. But "first match in the
+    # newest-first list" is ALSO wrong: an /A amending an OLDER quarter filed
+    # after a newer original sorts first and would silently serve the stale
+    # period. Select by newest reportDate (the quarter covered), breaking
+    # ties by filingDate so an /A within the same period wins over its
+    # original.
     filing_idx = None
+    best_key = None
     for i, ft in enumerate(form_types):
-        if ft in ("13F-HR", "13F-HR/A"):
+        if ft not in ("13F-HR", "13F-HR/A"):
+            continue
+        rd = report_dates[i] if i < len(report_dates) else ""
+        fd = filing_dates[i] if i < len(filing_dates) else ""
+        key = (rd or "", fd or "")
+        if best_key is None or key > best_key:
+            best_key = key
             filing_idx = i
-            break
 
     if filing_idx is None:
         return {"error": "No 13F-HR filing found", "fund_name": fund_name, "holdings": []}
@@ -923,46 +931,33 @@ def get_institutional_holdings(fund_cik, fund_name):
                 h_shares = 0.0
 
             try:
-                # SEC 13F spec (post-2023 amendments): the `value` field is in
-                # WHOLE DOLLARS as of the 2023-01-03 form revision; pre-2023
-                # filings reported in THOUSANDS. The old per-row "which scaling
-                # gives a plausible price" heuristic 1000x-misvalued any holding
-                # whose share price sat near a band edge (e.g. a $1.20 penny
-                # stock or a $40k Berkshire-A share), because BOTH scalings can
-                # look "plausible" or NEITHER does.
-                #
-                # Trust the spec: apply the ×1000 (thousands→dollars)
-                # convention, then SANITY-CHECK via the implied price-per-share
-                # using the reported share count. If the implied price is wildly
-                # implausible, LOG the anomaly (don't silently guess) and fall
-                # back to the unscaled value only when that yields a saner price.
+                # SEC 13F `value` units changed with the 2023-01-03 form
+                # amendment: filings BEFORE it report THOUSANDS of dollars,
+                # filings ON/AFTER it report WHOLE dollars. Pick the scaling
+                # from the FILING DATE — deterministic and per the spec. The
+                # old per-row plausibility heuristic defaulted to ×1000 and
+                # only reverted when 1000× the implied price exceeded
+                # $100k/sh, so every post-2023 holding priced ≤ $100/sh
+                # (i.e. most of them) was overstated 1000×, skewing
+                # total_value / pct_of_portfolio / the value sort.
                 raw_val = float(str(value_text).replace(",", ""))
-                value_usd = raw_val * 1000  # spec default: thousands → dollars
-                if h_shares > 0 and raw_val > 0:
-                    price_if_thousands = (raw_val * 1000) / h_shares
-                    price_if_dollars = raw_val / h_shares
-                    # Plausible US equity price band.
+                if filing_date and str(filing_date)[:10] < "2023-01-03":
+                    value_usd = raw_val * 1000  # pre-2023: thousands → dollars
+                else:
+                    # Post-amendment (all current filings) — and when the
+                    # filing date is unknown, assume modern whole dollars.
+                    value_usd = raw_val
+                # Implied-price sanity check: LOG ONLY, never re-scale —
+                # guessing units per-row is what caused the original bug.
+                if h_shares > 0 and value_usd > 0:
+                    implied_price = value_usd / h_shares
                     _LO, _HI = 0.50, 100000.0
-                    thousands_ok = _LO <= price_if_thousands <= _HI
-                    dollars_ok = _LO <= price_if_dollars <= _HI
-                    if not thousands_ok and dollars_ok:
-                        # Spec scaling is implausible but the as-filed dollars
-                        # are sane → almost certainly a whole-dollar (post-2023)
-                        # filing. Use it, but record the anomaly.
-                        logger.info(
-                            "13F value-unit anomaly for %s (%s): thousands→$%.2f/sh "
-                            "implausible, using whole-dollar→$%.2f/sh",
-                            fund_name, h_name, price_if_thousands, price_if_dollars,
-                        )
-                        value_usd = raw_val
-                    elif not thousands_ok and not dollars_ok:
-                        # Neither scaling is plausible — keep the spec default
-                        # but log so the anomaly is visible rather than guessed.
+                    if not (_LO <= implied_price <= _HI):
                         logger.warning(
-                            "13F value-unit anomaly for %s (%s): neither scaling "
-                            "yields a plausible price (shares=%.0f, raw_val=%.0f); "
-                            "keeping spec ×1000",
-                            fund_name, h_name, h_shares, raw_val,
+                            "13F implied-price anomaly for %s (%s): $%.4f/sh "
+                            "(shares=%.0f, value_usd=%.0f, filing_date=%s)",
+                            fund_name, h_name, implied_price, h_shares,
+                            value_usd, filing_date,
                         )
             except (ValueError, AttributeError):
                 value_usd = 0.0

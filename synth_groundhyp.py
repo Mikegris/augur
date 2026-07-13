@@ -120,10 +120,24 @@ FEATURE_NAMES: Tuple[str, ...] = (
 
 ANALOG_K = 5      # top-k closest historical analogs
 ANALOG_POOL = 200  # candidates we read from the DB before ranking
-_CACHE_TTL = 3 * 3600  # 3 hours
+_CACHE_TTL = 3 * 3600  # 3 hours (llm_status == "ok" payloads only)
+# Payloads whose LLM leg failed (no key, cap, timeout, unparseable) are still
+# useful (analog view) but must NOT be pinned for 3h — the user may add a key
+# or the API may recover a minute later. Cache them just long enough to
+# absorb UI re-polls.
+_FAIL_CACHE_TTL = 10 * 60
 
 # Analog-distance controls (standardized-Euclidean retrieval).
-_MIN_SHARED_DIMS = 3      # require ≥3 shared features before trusting a match
+# _MIN_SHARED_DIMS is the FULL-TRUST threshold, not a hard floor. Historical
+# rows without pattern_vector_json (i.e. all of them until pattern-aware
+# logging is wired in) reconstruct from metadata with at most ONE feature per
+# signal_name, so a hard ≥3 floor discarded every candidate and analog
+# retrieval always returned [] — the "grounded" hypothesis was grounded in
+# nothing. Sparse matches (1-2 shared dims) are now allowed but pay a
+# per-missing-dim distance penalty, so a sparse candidate only survives the
+# _MAX_ANALOG_RMS_Z ceiling when its shared features match very closely.
+_MIN_SHARED_DIMS = 3      # shared dims at/above this: no sparsity penalty
+_SPARSE_DIM_PENALTY = 0.5  # RMS-z penalty per shared dim below _MIN_SHARED_DIMS
 # Max per-shared-dimension RMS distance (in standard deviations) before an
 # "analog" is dropped as too far. ~1.5σ RMS per feature is already a loose
 # neighbourhood; beyond it the row isn't really analogous.
@@ -197,8 +211,15 @@ def _ensure_pattern_column() -> None:
                     c.execute("ALTER TABLE signal_forecasts ADD COLUMN pattern_vector_json TEXT")
                     c.commit()
                 except sqlite3.OperationalError as e:
-                    # Race with another process that just added it — fine.
-                    log.debug("ALTER TABLE benign failure: %s", e)
+                    # Could be a benign race (another process just added it) OR
+                    # a real failure ('database is locked'). Re-check instead of
+                    # assuming benign: latching True on a locked-DB failure
+                    # would leave the column missing for the whole process
+                    # lifetime, silently no-oping attach_pattern_to_forecast.
+                    log.debug("ALTER TABLE failed, re-checking column: %s", e)
+                    cols = {r["name"] for r in c.execute("PRAGMA table_info(signal_forecasts)")}
+                    if "pattern_vector_json" not in cols:
+                        return  # don't latch — retry on the next call
             _pattern_col_checked = True
     except Exception as e:  # pragma: no cover
         log.debug("_ensure_pattern_column failed: %s", e)
@@ -306,15 +327,15 @@ def _f_narrative(symbol: str, ctx: Dict[str, Any]) -> Optional[float]:
         return None
     p = str(phase).upper()
     ctx["_raw"]["narrative_phase"] = phase
-    n = _PHASE_MAP.get(p, 0.0)
-    velocity = res.get("velocity_score")
-    try:
-        if velocity is not None:
-            v = float(velocity)
-            n = n + max(-0.2, min(0.2, v / 100.0))
-    except Exception:
-        pass
-    return _clip(n, -1.0, 1.0)
+    # Phase scalar ONLY — no velocity adjustment. Historical vectors are
+    # reconstructed in _vec_from_metadata from the phase alone, so adding a
+    # velocity term here made the SAME narrative state encode differently on
+    # the two sides of the distance (a phantom gap), and the raw '+velocity'
+    # term wasn't sign-aligned (accelerating BAD news pushed bullish — the
+    # sign error synth_divmap's S7 fixes with copysign). Keep both recipes
+    # identical; if velocity is ever added it must use math.copysign and be
+    # mirrored in _vec_from_metadata.
+    return _clip(_PHASE_MAP.get(p, 0.0), -1.0, 1.0)
 
 
 def _f_insider_form4(symbol: str, ctx: Dict[str, Any]) -> Optional[float]:
@@ -568,9 +589,13 @@ def _std_euclidean_distance(
     squared-difference is accumulated, so no hand-tuned per-feature scalar is
     needed. Returns ``(rms_z_distance, shared)`` where ``rms_z_distance`` is
     the per-shared-dimension RMS (so the ceiling is dimension-count
-    independent), or ``None`` when fewer than ``_MIN_SHARED_DIMS`` features are
-    shared (caller drops the analog — fixes the old "one shared feature = a
-    perfect analog" bug).
+    independent), or ``None`` when NO features are shared. Sparse matches
+    (shared < ``_MIN_SHARED_DIMS``) are penalised by ``_SPARSE_DIM_PENALTY``
+    per missing dim rather than dropped outright — metadata-reconstructed
+    rows carry at most one feature, so a hard floor made retrieval return
+    nothing, ever (while still fixing the old "one shared feature = a
+    perfect analog" bug: a 1-dim candidate must match within ~0.5σ to
+    survive the 1.5σ ceiling).
     """
     ssq = 0.0
     shared = 0
@@ -590,9 +615,11 @@ def _std_euclidean_distance(
         d = za - zb
         ssq += d * d
         shared += 1
-    if shared < _MIN_SHARED_DIMS:
+    if shared < 1:
         return None
     rms = math.sqrt(ssq / shared)
+    if shared < _MIN_SHARED_DIMS:
+        rms += _SPARSE_DIM_PENALTY * (_MIN_SHARED_DIMS - shared)
     return rms, shared
 
 
@@ -659,8 +686,9 @@ def _find_analogs(current: Dict[str, Optional[float]], k: int) -> List[Dict[str,
     """Top-k analogs ranked by standardized-Euclidean distance to ``current``.
 
     Features are z-standardized across the candidate pool, analogs sharing
-    fewer than ``_MIN_SHARED_DIMS`` features are dropped, and analogs beyond
-    the ``_MAX_ANALOG_RMS_Z`` ceiling are discarded as too far.
+    fewer than ``_MIN_SHARED_DIMS`` features pay a per-missing-dim distance
+    penalty (zero shared dims are dropped), and analogs beyond the
+    ``_MAX_ANALOG_RMS_Z`` ceiling are discarded as too far.
 
     Each analog dict has: symbol, signal_name, issued_at, horizon_days,
     pattern_distance, shared_dims, outcome { direction, realized_return, hit }.
@@ -678,7 +706,7 @@ def _find_analogs(current: Dict[str, Optional[float]], k: int) -> List[Dict[str,
     for r, vec in cand_pairs:
         res = _std_euclidean_distance(current, vec, stats)
         if res is None:
-            continue  # <_MIN_SHARED_DIMS shared features → not a real analog
+            continue  # zero shared features → not comparable at all
         d, shared = res
         # Max-distance ceiling: drop rows that aren't actually close. A far
         # "analog" poisons every base-rate computed from it.
@@ -990,7 +1018,9 @@ def _compute(symbol: str) -> Dict[str, Any]:
 def grounded_hypothesis(symbol: str) -> Dict[str, Any]:
     """Top-level entry: pattern-grounded hypothesis for ``symbol``.
 
-    Cached via ``cache_store.coalesce`` for 3 hours.
+    Cached for 3 hours when the LLM leg succeeded (``llm_status == "ok"``);
+    transient-failure payloads (no key, daily cap, OpenAI error) get a short
+    TTL so the endpoint recovers promptly once the key/API/budget is back.
     """
     sym = (symbol or "").upper().strip()
     if not sym:
@@ -999,14 +1029,24 @@ def grounded_hypothesis(symbol: str) -> Dict[str, Any]:
     if cache_store is None:
         return _compute(sym)
 
+    # Manual get/compute/set instead of coalesce: coalesce would cache the
+    # failure-status payload (it has many non-error keys, so it isn't
+    # failure-shaped) under the full 3h TTL. TTL is chosen from the payload.
     try:
-        return cache_store.coalesce(
-            ("groundhyp", sym),
-            _CACHE_TTL,
-            lambda: _compute(sym),
-        )
+        key = ("groundhyp", sym)
+        cached = cache_store.cache_get(key)
+        if cached is not None:
+            return cached
+        result = _compute(sym)
+        try:
+            ttl = _CACHE_TTL if (isinstance(result, dict)
+                                 and result.get("llm_status") == "ok") else _FAIL_CACHE_TTL
+            cache_store.cache_set(key, result, ttl)
+        except Exception as e:
+            log.debug("groundhyp cache_set failed: %s", e)
+        return result
     except Exception as e:
-        log.debug("cache coalesce failed, computing directly: %s", e)
+        log.debug("cache path failed, computing directly: %s", e)
         return _compute(sym)
 
 

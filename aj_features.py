@@ -467,14 +467,28 @@ _LIVE_TECH_MEMO: Dict[str, Any] = {}
 def live_tech_features(symbol: str) -> Dict[str, float]:
     """v2 technicals from CURRENT history — the inference-time counterpart of
     the training-side point-in-time computation (same pure function). Memoized
-    10 min per symbol so the operator loop doesn't refetch. Fail-open to {}."""
+    10 min per symbol so the operator loop doesn't refetch. Fail-open to {}.
+
+    WHY (#280): the memo key includes the current TRADING date (via
+    aj_db.utc_now(), which follows the replay sim clock). A pure wall-clock
+    TTL spans hundreds of simulated days under replay (~1s/sim-day), so the
+    first sim-day's rsi14/vol14/sma20/rs_spy20 were frozen into every entry
+    proposal's features_json across the replay — and those persisted entry
+    features OVERRIDE the correct point-in-time reconstruction at label time,
+    silently corrupting the meta-label training corpus. Failed fetches ({} /
+    empty SPY bars) are NOT memoized, so a transient error doesn't blank the
+    features for 10 minutes."""
     import time as _time
     sym = (symbol or "").upper()
     if not sym or sym.startswith("OPT:"):
         return {}
     now = _time.time()
+    try:
+        today = _et_date_str(aj_db.utc_now()) or ""
+    except Exception:
+        today = ""
     hit = _LIVE_TECH_MEMO.get(sym)
-    if hit and now - hit[0] < 600:
+    if hit and now - hit[0] < 600 and hit[2] == today:
         return hit[1]
     feats: Dict[str, float] = {}
     try:
@@ -483,17 +497,19 @@ def live_tech_features(symbol: str) -> Dict[str, float]:
         closes = [b.get("close") for b in bars if isinstance(b, dict)]
         spy_bars = None
         spy_hit = _LIVE_TECH_MEMO.get("__SPY__")
-        if spy_hit and now - spy_hit[0] < 600:
+        if spy_hit and now - spy_hit[0] < 600 and spy_hit[2] == today:
             spy_bars = spy_hit[1]
         else:
             spy_bars = [b.get("close") for b in
                         (fetcher.get_chart_data("SPY", "6mo", "1d") or [])
                         if isinstance(b, dict)]
-            _LIVE_TECH_MEMO["__SPY__"] = (now, spy_bars)
+            if spy_bars:  # don't memoize a failed SPY fetch (#280)
+                _LIVE_TECH_MEMO["__SPY__"] = (now, spy_bars, today)
         feats = tech_features_from_closes(closes, spy_bars)
     except Exception:
         log.debug("live_tech_features failed for %s", sym, exc_info=True)
-    _LIVE_TECH_MEMO[sym] = (now, feats)
+    if feats:  # don't memoize empty/failed results (#280)
+        _LIVE_TECH_MEMO[sym] = (now, feats, today)
     return feats
 
 
@@ -667,6 +683,25 @@ def build_labels(lookback_days: int = 365) -> Dict[str, Any]:
                 except Exception:
                     sym_hist[s] = []
             return sym_hist[s]
+
+        # WHY (#287): _hist() is a NETWORK fetch (2y chart pull per symbol).
+        # It used to run lazily inside db._write_lock below, so with many
+        # distinct symbols and a slow/hung quote provider the GLOBAL write
+        # lock was held for tens of seconds to minutes — stalling the Flask
+        # UI, the scheduler and every settings write (an app-wide freeze).
+        # Prefetch each unique labeled symbol OUTSIDE the lock (like
+        # spy_hist/vix_hist/bench_closes already are); the loop's _hist()
+        # calls inside the lock then hit the sym_hist memo. Only symbols
+        # that survive the lookback filter are fetched.
+        for t in trades:
+            s = (t.get("symbol") or "").upper()
+            if not s or s.startswith("OPT:"):
+                continue
+            if cutoff is not None and t.get("closed_at") is not None:
+                cdt = aj_db.parse_iso(t.get("closed_at"))
+                if cdt is not None and cdt < cutoff:
+                    continue
+            _hist(s)
 
         with db._write_lock:
             conn = db.get_conn()

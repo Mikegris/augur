@@ -299,14 +299,20 @@ def init_db():
     # get_conn() could observe a half-migrated schema. _write_lock is reentrant,
     # so _migrate_settings's nested acquisition below is safe.
     with _write_lock:
+        # Only the idempotent re-run ("duplicate column name") is benign here.
+        # Swallowing every OperationalError would let a transient lock/IO
+        # failure silently skip the migration — leaving account_id missing and
+        # every p.account_id query raising "no such column" until restart.
         try:
             c.execute("ALTER TABLE portfolio ADD COLUMN account_id INTEGER REFERENCES accounts(id) ON DELETE SET NULL")
-        except sqlite3.OperationalError:
-            pass  # column already exists
+        except sqlite3.OperationalError as e:
+            if "duplicate column name" not in str(e).lower():
+                raise
         try:
             c.execute("ALTER TABLE transactions ADD COLUMN account_id INTEGER REFERENCES accounts(id) ON DELETE SET NULL")
-        except sqlite3.OperationalError:
-            pass  # column already exists
+        except sqlite3.OperationalError as e:
+            if "duplicate column name" not in str(e).lower():
+                raise
 
         c.execute("CREATE INDEX IF NOT EXISTS idx_portfolio_account ON portfolio(account_id)")
         c.execute("CREATE INDEX IF NOT EXISTS idx_transactions_account ON transactions(account_id)")
@@ -806,7 +812,19 @@ def jarvis_active_conversation():
         "ORDER BY id DESC LIMIT 1").fetchone()
     if row:
         return row["id"]
-    return jarvis_new_conversation()
+    # No active thread: create under _write_lock, RE-CHECKING inside it.
+    # Two concurrent first-callers would otherwise both create — the winner's
+    # jarvis_new_conversation() archives the loser's fresh thread, and the
+    # loser's exchange lands in a dead conversation the UI never shows.
+    # _write_lock is an RLock, so the nested acquisition inside
+    # jarvis_new_conversation() is safe.
+    with _write_lock:
+        row = conn.execute(
+            "SELECT id FROM jarvis_conversations WHERE archived=0 "
+            "ORDER BY id DESC LIMIT 1").fetchone()
+        if row:
+            return row["id"]
+        return jarvis_new_conversation()
 
 
 def jarvis_new_conversation():
@@ -998,7 +1016,7 @@ def jarvis_delete_memory(memory_id):
 # repoint the module at a different database never see stale rows.
 
 _SETTINGS_CACHE_TTL = 5.0
-_settings_cache = {"data": None, "ts": 0.0, "path": None}
+_settings_cache = {"data": None, "ts": 0.0, "path": None, "gen": 0}
 _settings_cache_lock = threading.Lock()
 
 
@@ -1007,6 +1025,11 @@ def _invalidate_settings_cache():
         _settings_cache["data"] = None
         _settings_cache["ts"] = 0.0
         _settings_cache["path"] = None
+        # Generation counter: a get_settings() that SELECTed BEFORE this
+        # invalidation must not re-prime the cache with its pre-write rows
+        # afterwards (that would serve stale settings for a full TTL after
+        # set_setting() already returned, breaking set-then-get coherence).
+        _settings_cache["gen"] += 1
 
 
 def get_settings():
@@ -1019,6 +1042,9 @@ def get_settings():
             # Shallow copy so callers mutating the dict (the /api/settings
             # masking pass, for instance) can't poison the shared snapshot.
             return dict(cached)
+        # Record the generation BEFORE the SELECT so a concurrent writer's
+        # invalidation (which bumps gen) is detectable below.
+        gen = _settings_cache["gen"]
     conn = get_conn()
     rows = conn.execute("SELECT key, value FROM settings").fetchall()
     # connection reused (thread-local pool)
@@ -1027,9 +1053,15 @@ def get_settings():
     # JS handler could clobber the schema version on save.
     data = {r["key"]: r["value"] for r in rows if not r["key"].startswith("__")}
     with _settings_cache_lock:
-        _settings_cache["data"] = dict(data)
-        _settings_cache["ts"] = now
-        _settings_cache["path"] = DB_PATH
+        # Install the snapshot only if no set_setting() invalidated while we
+        # were reading — otherwise these are pre-write rows and caching them
+        # would return the old value for up to _SETTINGS_CACHE_TTL. (Still
+        # return `data` to THIS caller: it's a consistent read, just not one
+        # that's allowed to shadow the newer write for other callers.)
+        if _settings_cache["gen"] == gen:
+            _settings_cache["data"] = dict(data)
+            _settings_cache["ts"] = now
+            _settings_cache["path"] = DB_PATH
     return data
 
 
