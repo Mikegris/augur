@@ -249,30 +249,96 @@ def _config_multiplier() -> int:
         return DEFAULT_MULTIPLIER
 
 
+# ── mark cache: TTL + last-good ───────────────────────────────────────────────
+# Option marks come from LIVE Yahoo option-chain fetches — throttled hard,
+# empty outside regular hours (options don't trade extended sessions), and
+# routinely missing bid/ask on illiquid strikes. Uncached, every UI render and
+# operator cycle re-rolled that dice, so held options flapped between a real
+# premium, a cost-basis fallback ($0.00 P&L), and '—'. A fresh mark is served
+# for _MARK_TTL_S; when a refetch FAILS we serve the last-good mark up to
+# _MARK_LAST_GOOD_S (one trading day + slack) and record it as 'stale' so the
+# API/UI can dim it — the same last-good discipline the universe screener uses.
+import time as _time
+
+_MARK_TTL_S = 900.0                 # fresh window (15 min)
+_MARK_LAST_GOOD_S = 26 * 3600.0     # serve stale up to ~1 trading day
+_MARK_CACHE: Dict[str, tuple] = {}  # key -> (fetched_at_epoch, per-contract mark)
+_MARK_STATUS: Dict[str, str] = {}   # key -> 'fresh' | 'stale' (last serve)
+
+
+def _now_s() -> float:
+    """Wall-clock seam (tests freeze it). Deliberately NOT the sim clock: the
+    cache bounds NETWORK staleness, which is a real-world property."""
+    return _time.time()
+
+
+def mark_status(option_symbol: str) -> Optional[str]:
+    """'fresh' | 'stale' for the last mark() serve of this symbol (any
+    multiplier), or None if never served from cache/fetch. The UI uses this
+    to dim stale premiums instead of rendering them as live."""
+    sym = str(option_symbol or "").upper()
+    for key, status in _MARK_STATUS.items():
+        if key.startswith(sym + "|"):
+            return status
+    return None
+
+
 def mark(option_symbol: str, *,
          multiplier: Optional[int] = None,
          chain_fn: Optional[Callable[[str, str], Dict]] = None) -> Optional[float]:
     """Per-contract mark for a held option position. None if unpriceable
-    (expired / no chain / no quote) — callers treat None as 'no mark'.
+    (expired / no chain / no quote AND no recent last-good) — callers treat
+    None as 'no mark'.
 
     The per-contract premium = per-share mid × multiplier. The multiplier MUST
     match the one pick_contract stored at entry (option_contract_multiplier),
     otherwise P&L is corrupted for any non-100 contract. Pass the held position's
     stored `contract_multiplier` when available; otherwise we read the configured
-    option_contract_multiplier (NOT the hardcoded 100)."""
+    option_contract_multiplier (NOT the hardcoded 100).
+
+    Caching: fresh marks are reused for _MARK_TTL_S; a failed refetch serves
+    the last-good mark (status 'stale') up to _MARK_LAST_GOOD_S. An injected
+    chain_fn (tests, custom feeds) BYPASSES the cache entirely so fixtures
+    stay deterministic."""
     meta = parse_symbol(option_symbol)
     if not meta:
         return None
     dte = _days_to(meta["expiry"])
     if dte is not None and dte < 0:
         return 0.0   # expired → worthless for marking (paper)
-    chain = (chain_fn or _default_chain)(meta["underlying"], meta["expiry"])
-    rows = (chain or {}).get("calls" if meta["option_type"] == "call" else "puts") or []
     mult = int(multiplier) if multiplier else _config_multiplier()
-    for row in rows:
-        try:
-            if abs(float(row.get("strike")) - meta["strike"]) < 1e-6:
-                return _row_premium_contract(row, mult)
-        except (TypeError, ValueError):
-            continue
+
+    def _price_from_chain(fn) -> Optional[float]:
+        chain = fn(meta["underlying"], meta["expiry"])
+        rows = (chain or {}).get(
+            "calls" if meta["option_type"] == "call" else "puts") or []
+        for row in rows:
+            try:
+                if abs(float(row.get("strike")) - meta["strike"]) < 1e-6:
+                    return _row_premium_contract(row, mult)
+            except (TypeError, ValueError):
+                continue
+        return None
+
+    if chain_fn is not None:
+        return _price_from_chain(chain_fn)
+
+    key = "{}|{}".format(str(option_symbol).upper(), mult)
+    now = _now_s()
+    hit = _MARK_CACHE.get(key)
+    if hit is not None and (now - hit[0]) < _MARK_TTL_S:
+        _MARK_STATUS[key] = "fresh"
+        return hit[1]
+    val = _price_from_chain(_default_chain)
+    if val is not None:
+        _MARK_CACHE[key] = (now, val)
+        _MARK_STATUS[key] = "fresh"
+        return val
+    # fetch failed / strike missing / empty bid+ask — last-good fallback
+    if hit is not None and (now - hit[0]) < _MARK_LAST_GOOD_S:
+        _MARK_STATUS[key] = "stale"
+        log.debug("mark %s: chain unavailable, serving last-good from %.0fs ago",
+                  option_symbol, now - hit[0])
+        return hit[1]
+    _MARK_STATUS.pop(key, None)
     return None

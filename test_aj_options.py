@@ -307,3 +307,41 @@ if __name__ == "__main__":
             print("  [XX] {}: unexpected {}: {}".format(fn.__name__, type(e).__name__, e))
     print("PASS" if failed == 0 else "{} FAILED".format(failed))
     sys.exit(1 if failed else 0)
+
+
+def test_mark_cache_ttl_and_last_good():
+    """Marks are cached (TTL), served last-good ('stale') when the chain feed
+    fails, expire past the horizon, and injected chain_fn bypasses the cache."""
+    calls = {"n": 0, "fail": False}
+
+    def fake_chain(und, exp):
+        calls["n"] += 1
+        if calls["fail"]:
+            return {"calls": [], "puts": []}
+        return {"calls": [{"strike": 150.0, "bid": 7.0, "ask": 7.4}], "puts": []}
+
+    orig_chain, orig_now = O._default_chain, O._now_s
+    t = [1000.0]
+    O._default_chain = fake_chain
+    O._now_s = lambda: t[0]
+    try:
+        sym = O.format_symbol("AAPL", _future(40), "call", 150.0)
+        m1 = O.mark(sym)
+        assert abs(m1 - 720.0) < 1e-6 and calls["n"] == 1
+        assert O.mark(sym) == m1 and calls["n"] == 1          # fresh cache hit
+        assert O.mark_status(sym) == "fresh"
+        t[0] += O._MARK_TTL_S + 1
+        calls["fail"] = True
+        assert O.mark(sym) == m1                               # last-good serve
+        assert O.mark_status(sym) == "stale"
+        t[0] += O._MARK_LAST_GOOD_S + 1
+        assert O.mark(sym) is None                             # horizon expired
+        assert O.mark_status(sym) is None
+        # injected chain_fn bypasses the cache (deterministic fixtures)
+        m = O.mark(sym, chain_fn=_chain([{"strike": 150.0, "bid": 1.0, "ask": 1.2}]))
+        assert abs(m - 110.0) < 1e-6
+    finally:
+        O._default_chain = orig_chain
+        O._now_s = orig_now
+        O._MARK_CACHE.clear()
+        O._MARK_STATUS.clear()

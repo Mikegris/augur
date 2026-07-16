@@ -5059,8 +5059,17 @@ async function loadTradingView() {
     const sumEl = document.getElementById('aj-pos-summary');
     if (sumEl) sumEl.textContent = posRows.length ? (posRows.length + ' positions · MV ' + _ajMoney(pd.total_market_value) + ' · unreal ' + _ajMoney(pd.total_unrealized)) : '';
     if (ppEl) {
+      // mark provenance: 'stale' = last-good option premium (chain feed
+      // throttled/closed); 'cost' = no mark at all, row shown AT COST — its
+      // $0.00 P&L means "unpriceable right now", not "flat". Dim those cells
+      // and say so in the tooltip instead of letting them read as live.
+      const _markCell = (p) => {
+        if (p.mark_src === 'cost') return `<span class="muted" title="no live quote — shown at cost basis; P&L unavailable">${_ajMoney(p.mark)}<sup>c</sup></span>`;
+        if (p.mark_src === 'stale') return `<span style="opacity:.65" title="last-good premium (options chain throttled or market closed)">${_ajMoney(p.mark)}<sup>~</sup></span>`;
+        return _ajMoney(p.mark);
+      };
       ppEl.innerHTML = posRows.length ? `<table class="data-table" style="width:100%"><thead><tr><th>Symbol</th><th>Qty</th><th>Avg cost</th><th>Price</th><th>Mkt value</th><th>Unreal P&L</th><th>%</th><th>Weight</th><th>Age</th></tr></thead><tbody>${posRows.map(p =>
-        `<tr><td><b>${_esc(_ajFmtSymbol(p.symbol))}</b></td><td>${_esc(String(p.qty))}</td><td>${_ajMoney(p.avg_cost)}</td><td>${_ajMoney(p.mark)}</td><td>${_ajMoney(p.market_value)}</td><td style="color:${(p.unrealized||0)>=0?'var(--green)':'var(--red)'}">${_ajMoney(p.unrealized)}</td><td style="color:${(p.unrealized_pct||0)>=0?'var(--green)':'var(--red)'}">${p.unrealized_pct==null?'—':(p.unrealized_pct>=0?'+':'')+_esc(String(p.unrealized_pct))+'%'}</td><td>${p.weight_pct==null?'—':_esc(String(p.weight_pct))+'%'}</td><td>${p.age_days==null?'—':_esc(String(p.age_days))+'d'}</td></tr>`).join('')}</tbody></table>` : '<div class="muted">No paper positions yet — the agent opens positions when it buys (run a cycle during market hours).</div>';
+        `<tr><td><b>${_esc(_ajFmtSymbol(p.symbol))}</b></td><td>${_esc(String(p.qty))}</td><td>${_ajMoney(p.avg_cost)}</td><td>${_markCell(p)}</td><td>${_ajMoney(p.market_value)}</td><td style="color:${(p.unrealized||0)>=0?'var(--green)':'var(--red)'}">${p.mark_src==='cost'?'<span class="muted" title="no live quote">—</span>':_ajMoney(p.unrealized)}</td><td style="color:${(p.unrealized_pct||0)>=0?'var(--green)':'var(--red)'}">${p.mark_src==='cost'?'<span class="muted">—</span>':(p.unrealized_pct==null?'—':(p.unrealized_pct>=0?'+':'')+_esc(String(p.unrealized_pct))+'%')}</td><td>${p.weight_pct==null?'—':_esc(String(p.weight_pct))+'%'}</td><td>${p.age_days==null?'—':_esc(String(p.age_days))+'d'}</td></tr>`).join('')}</tbody></table>` : '<div class="muted">No paper positions yet — the agent opens positions when it buys (run a cycle during market hours).</div>';
     }
     const aEl = document.getElementById('aj-analytics');
     if (aEl) {

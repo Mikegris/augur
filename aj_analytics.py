@@ -253,8 +253,21 @@ def positions_detail() -> Dict[str, Any]:
         qty = float(p.get("qty") or 0)
         avg = float(p.get("avg_cost") or 0)
         mark = marks.get(qsyms[sym])
+        # Mark provenance for the UI: 'cost' = no mark at all (row shown at
+        # cost basis, P&L $0 is NOT "flat" — it's "unpriceable right now");
+        # 'stale' = option served from the last-good mark cache (chain feed
+        # throttled/closed); absent = live.
+        mark_src = None
         if mark is None:
             mark = avg
+            mark_src = "cost"
+        elif sym.startswith("OPT:"):
+            try:
+                import aj_options
+                if aj_options.mark_status(sym) == "stale":
+                    mark_src = "stale"
+            except Exception:
+                pass
         mv = qty * mark
         total_mv += mv
         gross_mv += abs(mv)
@@ -270,6 +283,7 @@ def positions_detail() -> Dict[str, Any]:
             "unrealized_pct": (round(unreal / (abs(avg) * abs(qty)) * 100, 2)
                                if (avg > 0 and qty) else 0.0),
             "age_days": aj_rules.position_age_days(sym),
+            "mark_src": mark_src,
             "asset_type": p.get("asset_type") or "stock"})
     for r in rows:
         # Weight by gross exposure (sum of |market value|) so short legs and
