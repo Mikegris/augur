@@ -165,6 +165,24 @@ def _num(v: Any) -> float:
         return 0.0
 
 
+def _is_junk_ticker(symbol: str) -> bool:
+    """True for warrants / units / rights — structurally poor instruments
+    (illiquid, time-decaying, complex terms) the momentum agent should never
+    trade. Unambiguous suffix forms + the bare 5-char class-W/U pattern.
+    Distinct from _likely_optionable (which only nudges RANKING): this
+    HARD-excludes from the tradable shortlist."""
+    s = str(symbol or "").upper()
+    if not s:
+        return True
+    if any(tok in s for tok in (".WS", ".WT", "-WT", "-UN", ".RT", "-RT",
+                                "/WS", ".U ", "-U.")):
+        return True
+    # bare 5-char alpha ending W (warrant) or U (unit): CORZW, BODYW, BLUWW…
+    if len(s) == 5 and s[-1] in ("W", "U") and s.isalpha():
+        return True
+    return False
+
+
 def _likely_optionable(symbol: str) -> bool:
     """Cheap, network-free guess at whether a ticker carries listed options.
     Warrants / units / rights almost never do; everything else is assumed
@@ -287,6 +305,14 @@ def screen(cfg: Dict[str, Any] = None) -> List[str]:
             sym = q.get("symbol")
             if not sym or sym.endswith("-USD"):
                 continue
+            # HARD-exclude warrants / units / rights from the tradable
+            # shortlist. _likely_optionable already identifies them but only
+            # de-ranked them, so a warrant (e.g. CORZW) could still be BOUGHT
+            # as shares — an illiquid, decaying, structurally poor instrument
+            # the agent has no thesis for. Crypto and normal equities are
+            # unaffected; this filters only the unambiguous junk suffixes.
+            if _is_junk_ticker(sym):
+                continue
             px = _num(q.get("price"))
             if px < min_price:
                 continue
@@ -321,6 +347,11 @@ def screen(cfg: Dict[str, Any] = None) -> List[str]:
         # Surfaced through aj_metrics.status() -> dashboard / `aj status`.
         try:
             import json as _json
+            import aj_db          # module-local import: aj_db is NOT a module-
+            # level name here (every other user imports it inside its own
+            # function). Without this the telemetry write raised NameError
+            # every cycle, swallowed at debug — the 429-collapse visibility
+            # panel this block exists to feed NEVER wrote a single row.
             quoted = sum(1 for s in equities if s in quotes)
             aj_db.set_setting_raw("__aj_screen_telemetry", _json.dumps({
                 "ts": aj_db.utc_now_iso(),

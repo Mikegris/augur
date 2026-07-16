@@ -160,6 +160,39 @@ def test_open_universe_helper_agrees():
     aj_config.set_config({"universe_mode": "market_screen", "allow_any_symbol": False})
 
 
+def test_junk_tickers_excluded_and_telemetry_writes():
+    db.get_conn().execute("DELETE FROM aj_screen_cache"); db.get_conn().commit()
+    aj_db.set_setting_raw("__aj_crypto_lastgood", "")
+    aj_db.set_setting_raw("__aj_screen_telemetry", "")
+    _mock_population(["GOOD", "CORZW", "BODYW", "REAL"], cryptos=())
+    _mock_quotes({
+        "GOOD":  {"price": 40, "volume": 5e6, "market_cap": 2e9, "change_pct": 6.0},
+        "CORZW": {"price": 12, "volume": 5e6, "market_cap": 2e9, "change_pct": 9.0},  # warrant
+        "BODYW": {"price": 15, "volume": 5e6, "market_cap": 2e9, "change_pct": 8.0},  # warrant
+        "REAL":  {"price": 30, "volume": 5e6, "market_cap": 2e9, "change_pct": 4.0},
+    })
+    aj_config.set_config({"universe_mode": "market_screen", "screen_min_price": 1.0,
+                          "screen_min_dollar_volume": 1_000_000, "screen_max": 10,
+                          "include_crypto": False})
+    out = aj_universe.screen()
+    # warrants hard-excluded even though they were the strongest movers
+    assert "CORZW" not in out and "BODYW" not in out, out
+    assert "GOOD" in out and "REAL" in out, out
+    # telemetry actually persisted (the aj_db NameError regression)
+    import json
+    tel = aj_db.get_setting_raw("__aj_screen_telemetry")
+    assert tel, "screen telemetry never wrote"
+    t = json.loads(tel)
+    assert t["shortlist"] == len(out) and "quote_hit_rate" in t
+
+
+def test_is_junk_ticker_unit():
+    for j in ("CORZW", "BODYW", "BLUWW", "SPAC.WS", "FOO-WT", "BAR-UN"):
+        assert aj_universe._is_junk_ticker(j), j
+    for ok in ("AAPL", "NVDA", "BRK-B", "BTC-USD", "GOOGL", ""):
+        assert not aj_universe._is_junk_ticker(ok) or ok == "", ok
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     print("aj_universe — {} tests".format(len(fns)))
