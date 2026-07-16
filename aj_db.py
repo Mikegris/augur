@@ -32,7 +32,7 @@ import database as db
 log = logging.getLogger("augur.aj_db")
 
 # ── schema version target (bump when adding a numbered migration step) ────────
-AJ_SCHEMA_TARGET = 11
+AJ_SCHEMA_TARGET = 12
 _SCHEMA_KEY = "aj_schema_version"
 
 # ── DDL (§5). CREATE TABLE IF NOT EXISTS is safe to re-run; column ADDs go
@@ -550,6 +550,44 @@ def aj_migrate() -> int:
                          "ON aj_lab_promotions(status)")
             conn.commit()
             current = 11
+        if current < 12:
+            # v3.22 event-alpha engine (aj_events): point-in-time store of
+            # LLM-scored market events. published_at is the SOURCE timestamp
+            # (the no-look-ahead key the replay engine filters on); the
+            # UNIQUE(symbol, event_type, source_id) makes ingestion
+            # idempotent; price_at/outcome fields close the accountability
+            # loop (every scored event is graded against realized returns).
+            conn.execute("""CREATE TABLE IF NOT EXISTS aj_events (
+                id            INTEGER PRIMARY KEY,
+                symbol        TEXT NOT NULL,
+                event_type    TEXT NOT NULL,
+                source_id     TEXT NOT NULL,
+                published_at  TEXT NOT NULL,
+                ingested_at   TEXT NOT NULL,
+                title         TEXT,
+                summary       TEXT,
+                url           TEXT,
+                direction     REAL,
+                magnitude     TEXT,
+                confidence    REAL,
+                half_life_days REAL,
+                rationale     TEXT,
+                model         TEXT,
+                cost_usd      REAL,
+                scored_at     TEXT,
+                score_tries   INTEGER DEFAULT 0,
+                price_at      REAL,
+                realized_return_pct REAL,
+                hit           INTEGER,
+                outcome_at    TEXT,
+                UNIQUE(symbol, event_type, source_id)
+            )""")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_aj_events_sym_pub "
+                         "ON aj_events(symbol, published_at)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_aj_events_unscored "
+                         "ON aj_events(scored_at, published_at)")
+            conn.commit()
+            current = 12
         set_setting_raw(_SCHEMA_KEY, str(current))
         log.info("aj_migrate: schema at version %d", current)
         return current
@@ -1130,6 +1168,8 @@ _ALLOWED_TABLES = frozenset({
     "aj_journal", "aj_signal_scores",
     # Research Scientist experiment queue/ledger + promotions (step 11)
     "aj_lab_experiments", "aj_lab_promotions",
+    # event-alpha point-in-time store (step 12)
+    "aj_events",
 })
 _IDENT_RE = _re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 

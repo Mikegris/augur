@@ -828,6 +828,19 @@ def run_once(mode: str = "paper") -> Dict[str, Any]:
             scan = aj_alpha.rank_universe(scan, cfg)
         except Exception:
             log.debug("rank_universe skipped", exc_info=True)
+        # Event-alpha ingestion (opt-in): pull fresh headlines/filings for the
+        # cycle's candidates + held names and LLM-score the newest within the
+        # per-cycle budget. Runs BEFORE forecasting so this cycle's ensemble
+        # sees this cycle's events. Fail-open; a dead news source or LLM
+        # outage costs nothing but the signal's absence.
+        if cfg.get("event_alpha_enabled"):
+            try:
+                import aj_events
+                ev_syms = list(scan) + [s for s in held if held.get(s)]
+                summary["events"] = aj_events.ingest_and_score(ev_syms, cfg)
+            except Exception:
+                log.debug("event-alpha ingest skipped", exc_info=True)
+
         # Batch 2 — cross-sectional selection: narrow the scan to the top-N best
         # RELATIVE opportunities by realized forecast edge (not an absolute bar).
         # Forecasts are cached, so the per-symbol loop below reuses them. Exits
@@ -1113,6 +1126,15 @@ def run_once(mode: str = "paper") -> Dict[str, Any]:
                 summary["adapter_scored"] = aj_signals.score_due_adapter_signals()
             except Exception:
                 log.debug("adapter scorecard scoring skipped", exc_info=True)
+        # Event-alpha accountability: grade scored events whose half-life has
+        # elapsed against realized returns (the hit/miss ledger the IC gate
+        # and skill report read). Cheap, capped, fail-open.
+        if cfg.get("event_alpha_enabled"):
+            try:
+                import aj_events
+                summary["events_graded"] = aj_events.score_due_outcomes()
+            except Exception:
+                log.debug("event outcome grading skipped", exc_info=True)
 
         # Meta-label learning loop (Phase 4): label any newly-closed trades and
         # retrain P(profit) when enough new labels accumulate. Cheap no-op unless

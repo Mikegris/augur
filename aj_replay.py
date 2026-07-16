@@ -209,6 +209,30 @@ def run_replay(args) -> Dict[str, Any]:
             imported_model.get("oos_auc"), imported_model.get("promoted")),
             file=sys.stderr)
 
+    # 3c) optional EVENTS import: copy scored aj_events rows from another DB
+    # (normally the live one) into this run's isolated DB. The events adapter
+    # filters on published_at <= the SIM clock, so replayed cycles see only
+    # events that had already been published on the simulated day — the
+    # point-in-time discipline that makes event-alpha replay-validatable.
+    # (Meaningful with --forecaster ensemble + --set multi_factor_signals=true.)
+    if getattr(args, "import_events", None):
+        import sqlite3 as _sq
+        src = _sq.connect("file:{}?mode=ro".format(args.import_events), uri=True)
+        src.row_factory = _sq.Row
+        n_ev = 0
+        for r in src.execute("SELECT * FROM aj_events WHERE scored_at IS NOT NULL "
+                             "AND published_at <= ?", (args.end,)):
+            d = dict(r)
+            d.pop("id", None)
+            try:
+                aj_db.insert("aj_events", **d)
+                n_ev += 1
+            except Exception:
+                pass   # duplicate — idempotent
+        src.close()
+        print("imported {} scored events (published <= {})".format(n_ev, args.end),
+              file=sys.stderr)
+
     # 4) forecaster
     if args.forecaster == "pit":
         import forecast_ensemble
@@ -724,6 +748,9 @@ def main(argv=None) -> int:
     rp.add_argument("--progress", action="store_true", default=True)
     rp.add_argument("--import-model", default=None,
                     help="JSON model file to install (frozen) before the day loop")
+    rp.add_argument("--import-events", default=None,
+                    help="path to a DB whose scored aj_events rows to copy in "
+                         "(point-in-time filtered by the sim clock at read time)")
 
     gp = sub.add_parser("grid", help="config grid (spawns one process per cell)")
     _add_common(gp)

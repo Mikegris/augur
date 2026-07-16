@@ -215,6 +215,13 @@ DEFAULTS: Dict[str, Any] = {
     # Batch 1 — multi-factor alpha fusion (orthogonal signals into the ensemble)
     "multi_factor_signals":   False,   # fuse smart_money/insider/congress/social into prob_up
     "adapter_scorecard":      False,   # log per-adapter forecasts + decay weak sources
+    # Event alpha: LLM-scored news/SEC-filing events as a point-in-time,
+    # IC-gated ensemble signal. The model's opinions are stored with source
+    # timestamps, decay at their own half-life, and are graded against
+    # realized returns — it earns weight by skill, never by fiat.
+    "event_alpha_enabled":    False,
+    "event_max_llm_per_cycle": 8,      # LLM scoring budget per cycle
+    "event_symbols_per_cycle": 10,     # symbols swept for fresh events per cycle
     # Nightly counterfactual: after the evening session, replay the last ~30
     # sessions under the LIVE config and its neighbors (isolated subprocesses);
     # results land in the Replay Lab panel next morning. The rolling "are my
@@ -306,7 +313,7 @@ _BOOL_KEYS = {"trading_enabled", "live_trading_enabled", "robinhood_enabled",
               "opportunity_radar", "risk_based_sizing",
               "auto_run_enabled", "auto_run_align_to_clock", "health_autohalt",
               "auto_preset_escalation", "daily_reflection", "premarket_briefing",
-              "nightly_counterfactual", "lab_enabled",
+              "nightly_counterfactual", "lab_enabled", "event_alpha_enabled",
               # council layer
               "council_enabled", "council_analyst_fundamentals",
               "council_analyst_news", "council_analyst_sentiment",
@@ -386,6 +393,8 @@ _INT_KEYS = {"max_trades_per_day", "forecast_horizon_days", "scan_universe_max",
              "rg_alpha_decay_min_trades", "rg_lever_unlock_trades",
              # research scientist
              "lab_folds", "lab_fold_days",
+             # event alpha
+             "event_max_llm_per_cycle", "event_symbols_per_cycle",
              # options / screener knobs previously untyped: they loaded back as
              # raw strings and int("35.5")-style coercion at the call sites
              # raised, killing contract picking; negatives also bypassed the

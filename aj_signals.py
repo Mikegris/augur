@@ -301,6 +301,22 @@ def social_signal(symbol: str) -> Optional[dict]:
 
 
 # --------------------------------------------------------------------------- #
+# 4b. Event alpha (LLM-scored news/filings, point-in-time)
+# --------------------------------------------------------------------------- #
+
+def events_signal(symbol: str) -> Optional[dict]:
+    """Decay-weighted aggregate of LLM-scored market events (aj_events).
+    Sim-clock aware and published_at-filtered, so it is replay-safe. Like
+    every adapter it earns ensemble weight only through the IC promotion
+    gate + adapter scorecard — the LLM's opinion is measured, not trusted."""
+    try:
+        import aj_events
+        return aj_events.event_signal(symbol)
+    except Exception:
+        return None
+
+
+# --------------------------------------------------------------------------- #
 # 5. Aggregator
 # --------------------------------------------------------------------------- #
 
@@ -310,6 +326,7 @@ _ADAPTERS = (
     ("insider", insider_signal),
     ("congress", congress_signal),
     ("social", social_signal),
+    ("events", events_signal),
 )
 
 

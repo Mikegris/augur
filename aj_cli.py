@@ -67,6 +67,21 @@ def cmd_replay(argv):
     return p.returncode
 
 
+def cmd_events(argv):
+    """Event-alpha: status (default) | run (ingest+score now for the scan)."""
+    import aj_db, aj_events, aj_config
+    aj_db.aj_init()
+    sub = next((a for a in argv if not a.startswith("-")), "status")
+    if sub == "run":
+        import aj_operator
+        cfg = aj_config.get_config()
+        syms = aj_operator._scan_universe()[:int(cfg.get("event_symbols_per_cycle", 10))]
+        _print({"ingest": aj_events.ingest_and_score(syms, cfg),
+                "outcomes": aj_events.score_due_outcomes()})
+    else:
+        _print(aj_events.event_skill())
+
+
 def cmd_lab(argv):
     """Research Scientist: propose | run | watchdog | status (default)."""
     import aj_db, aj_lab
@@ -367,6 +382,7 @@ _CMDS = {
     "secret": cmd_secret, "verify-pass": cmd_verify_pass,
     "analytics": cmd_analytics, "journal": cmd_journal, "preset": cmd_preset,
     "explain": cmd_explain, "replay": cmd_replay, "lab": cmd_lab,
+    "events": cmd_events,
 }
 
 

@@ -215,7 +215,7 @@ def status() -> Dict[str, Any]:
         if cfg.get("multi_factor_signals"):
             import aj_ic
             eff["signal_promotion"] = aj_ic.promotion_status(
-                ["smart_money", "insider", "congress", "social"], cfg)
+                ["smart_money", "insider", "congress", "social", "events"], cfg)
         eff["metalabel_enabled"] = bool(cfg.get("metalabel_enabled"))
         try:
             import aj_metalabel

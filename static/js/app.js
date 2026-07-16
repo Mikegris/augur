@@ -4744,6 +4744,8 @@ async function loadTradingView() {
           f('Pyramid min gain', num('aj-cfg-pyramid_min_gain_pct', cfg.pyramid_min_gain_pct, '0.5', '%'), 'A position must be up this much before adding.') +
           f('Signal scorecard', yn('aj-cfg-signal_scorecard', cfg.signal_scorecard), 'Track realized win-rate by entry conviction.') +
           f('Adapter scorecard', yn('aj-cfg-adapter_scorecard', cfg.adapter_scorecard), 'Log every signal adapter’s forecasts, score them after the horizon, and decay the confidence of persistently uninformative sources.') +
+          f('Event alpha (AI-scored news/filings)', yn('aj-cfg-event_alpha_enabled', cfg.event_alpha_enabled), 'AI reads headlines and SEC filings for candidates/holdings, scores each event (direction, confidence, half-life), and feeds the decayed aggregate into the ensemble — IC-gated and graded against realized returns, so it earns weight by skill.') +
+          f('  ↳ LLM scores per cycle', num('aj-cfg-event_max_llm_per_cycle', cfg.event_max_llm_per_cycle, null, 'events'), 'Cost budget: at most this many events scored per cycle.') +
           f('Opportunity radar', yn('aj-cfg-opportunity_radar', cfg.opportunity_radar), 'Rank the universe each cycle and trade only the best setups.') +
           f('Radar top-K', num('aj-cfg-opportunity_radar_top_k', cfg.opportunity_radar_top_k, null, 'names'), 'How many top-ranked names the radar keeps.')
         )}
@@ -4948,6 +4950,8 @@ async function loadTradingView() {
       pyramid_min_gain_pct: vNum('aj-cfg-pyramid_min_gain_pct'),
       signal_scorecard: vBool('aj-cfg-signal_scorecard'),
       adapter_scorecard: vBool('aj-cfg-adapter_scorecard'),
+      event_alpha_enabled: vBool('aj-cfg-event_alpha_enabled'),
+      event_max_llm_per_cycle: vNum('aj-cfg-event_max_llm_per_cycle'),
       opportunity_radar: vBool('aj-cfg-opportunity_radar'),
       opportunity_radar_top_k: vNum('aj-cfg-opportunity_radar_top_k'),
       // analyst council (advisory)

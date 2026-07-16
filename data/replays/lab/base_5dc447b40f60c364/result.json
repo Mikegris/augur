@@ -1,0 +1,1542 @@
+{
+ "kind": "replay",
+ "start": "2025-01-18",
+ "end": "2025-07-16",
+ "symbols": [
+  "AAPL",
+  "MSFT",
+  "NVDA",
+  "AMZN",
+  "GOOGL",
+  "META",
+  "TSLA",
+  "JPM",
+  "XOM",
+  "UNH"
+ ],
+ "cash": 100000.0,
+ "forecaster": "pit",
+ "config_overrides": [
+  "buy_prob_threshold=0.55",
+  "cross_sectional_top_n=8",
+  "exit_cooldown_min=0",
+  "min_edge_pct_pts=0.1",
+  "sell_prob_threshold=0.45",
+  "stop_loss_pct=8.0",
+  "take_profit_pct=20.0",
+  "time_stop_days=0",
+  "trailing_stop_pct=10.0"
+ ],
+ "days": 122,
+ "halts": 0,
+ "daily": [
+  {
+   "date": "2025-01-21",
+   "equity": 99986.0,
+   "available": 64986.0,
+   "executed": 7,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-01-22",
+   "equity": 100211.09,
+   "available": 29972.0,
+   "executed": 7,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-01-23",
+   "equity": 100692.17,
+   "available": 0.0,
+   "executed": 6,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-01-24",
+   "equity": 100382.25,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-01-27",
+   "equity": 97641.54,
+   "available": 1750.8051999999943,
+   "executed": 6,
+   "exits": 1,
+   "ok": true
+  },
+  {
+   "date": "2025-01-28",
+   "equity": 98393.87,
+   "available": 9672.884875999993,
+   "executed": 3,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-01-29",
+   "equity": 98073.11,
+   "available": 0.0,
+   "executed": 2,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-01-30",
+   "equity": 97441.71,
+   "available": 0.0,
+   "executed": 5,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-01-31",
+   "equity": 97830.83,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-02-03",
+   "equity": 98171.02,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-02-04",
+   "equity": 99158.82,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-02-05",
+   "equity": 98098.04,
+   "available": 0.0,
+   "executed": 2,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-02-06",
+   "equity": 98988.88,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-02-07",
+   "equity": 97710.74,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-02-10",
+   "equity": 98153.72,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-02-11",
+   "equity": 98537.46,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-02-12",
+   "equity": 98155.33,
+   "available": 14727.873980000006,
+   "executed": 1,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-02-13",
+   "equity": 98544.11,
+   "available": 0.0,
+   "executed": 3,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-02-14",
+   "equity": 98845.02,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-02-18",
+   "equity": 97823.9,
+   "available": 18639.592784,
+   "executed": 3,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-02-19",
+   "equity": 96996.94,
+   "available": 0.0,
+   "executed": 4,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-02-20",
+   "equity": 94893.54,
+   "available": 28517.305843999995,
+   "executed": 2,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-02-21",
+   "equity": 93864.31,
+   "available": 18513.305843999995,
+   "executed": 2,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-02-24",
+   "equity": 92812.92,
+   "available": 57626.91,
+   "executed": 4,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-02-25",
+   "equity": 92598.5,
+   "available": 52624.91,
+   "executed": 1,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-02-26",
+   "equity": 91881.05,
+   "available": 52624.91,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-02-27",
+   "equity": 91652.36,
+   "available": 76809.67,
+   "executed": 1,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-02-28",
+   "equity": 91807.36,
+   "available": 66805.67,
+   "executed": 2,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-03-03",
+   "equity": 91079.47,
+   "available": 86158.24,
+   "executed": 1,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-03-04",
+   "equity": 91036.05,
+   "available": 86158.24,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-03-05",
+   "equity": 91032.12,
+   "available": 86158.24,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-03-06",
+   "equity": 91023.65,
+   "available": 86158.24,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-03-07",
+   "equity": 91100.97,
+   "available": 86158.24,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-03-10",
+   "equity": 90857.46,
+   "available": 85857.45999999999,
+   "executed": 2,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-03-11",
+   "equity": 90739.39,
+   "available": 85857.45999999999,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-03-12",
+   "equity": 90738.05,
+   "available": 85857.45999999999,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-03-13",
+   "equity": 90717.47,
+   "available": 85857.45999999999,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-03-14",
+   "equity": 90859.93,
+   "available": 80855.45999999999,
+   "executed": 1,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-03-17",
+   "equity": 91022.23,
+   "available": 70851.45999999999,
+   "executed": 2,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-03-18",
+   "equity": 91050.11,
+   "available": 60847.46,
+   "executed": 2,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-03-19",
+   "equity": 91348.07,
+   "available": 50843.46,
+   "executed": 2,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-03-20",
+   "equity": 91694.23,
+   "available": 40839.46,
+   "executed": 2,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-03-21",
+   "equity": 91804.81,
+   "available": 30835.46,
+   "executed": 2,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-03-24",
+   "equity": 91871.68,
+   "available": 10827.46,
+   "executed": 4,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-03-25",
+   "equity": 92199.9,
+   "available": 0.0,
+   "executed": 3,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-03-26",
+   "equity": 92570.96,
+   "available": 0.0,
+   "executed": 4,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-03-27",
+   "equity": 92268.89,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-03-28",
+   "equity": 91543.99,
+   "available": 273.7900000000009,
+   "executed": 4,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-03-31",
+   "equity": 92377.82,
+   "available": 0.0,
+   "executed": 2,
+   "exits": 1,
+   "ok": true
+  },
+  {
+   "date": "2025-04-01",
+   "equity": 92376.76,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-04-02",
+   "equity": 92222.1,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-04-03",
+   "equity": 90847.59,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-04-04",
+   "equity": 86114.91,
+   "available": 40345.045776,
+   "executed": 1,
+   "exits": 1,
+   "ok": true
+  },
+  {
+   "date": "2025-04-07",
+   "equity": 86082.4,
+   "available": 35343.045776,
+   "executed": 1,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-04-08",
+   "equity": 88824.8,
+   "available": 30341.045776000003,
+   "executed": 1,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-04-09",
+   "equity": 91506.76,
+   "available": 15335.045776000003,
+   "executed": 3,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-04-10",
+   "equity": 92842.74,
+   "available": 10333.045776000003,
+   "executed": 1,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-04-11",
+   "equity": 93550.44,
+   "available": 0.0,
+   "executed": 3,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-04-14",
+   "equity": 91998.86,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-04-15",
+   "equity": 91616.63,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-04-16",
+   "equity": 90839.4,
+   "available": 13998.345776000004,
+   "executed": 4,
+   "exits": 1,
+   "ok": true
+  },
+  {
+   "date": "2025-04-17",
+   "equity": 73618.77,
+   "available": 73618.77,
+   "executed": 0,
+   "exits": 1,
+   "ok": true
+  },
+  {
+   "date": "2025-04-21",
+   "equity": 73618.77,
+   "available": 73618.77,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-04-22",
+   "equity": 73618.77,
+   "available": 73618.77,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-04-23",
+   "equity": 73618.77,
+   "available": 73618.77,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-04-24",
+   "equity": 73612.77,
+   "available": 58612.770000000004,
+   "executed": 3,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-04-25",
+   "equity": 73719.36,
+   "available": 23598.77,
+   "executed": 7,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-04-28",
+   "equity": 73494.68,
+   "available": 0.0,
+   "executed": 5,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-04-29",
+   "equity": 73793.58,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-04-30",
+   "equity": 73446.94,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-05-01",
+   "equity": 75472.52,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-05-02",
+   "equity": 76302.4,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-05-05",
+   "equity": 75669.27,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-05-06",
+   "equity": 75139.85,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-05-07",
+   "equity": 74568.75,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-05-08",
+   "equity": 75565.84,
+   "available": 0.0,
+   "executed": 7,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-05-09",
+   "equity": 75958.16,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-05-12",
+   "equity": 79595.02,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-05-13",
+   "equity": 81471.55,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-05-14",
+   "equity": 82918.53,
+   "available": 0.0,
+   "executed": 6,
+   "exits": 2,
+   "ok": true
+  },
+  {
+   "date": "2025-05-15",
+   "equity": 82410.01,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-05-16",
+   "equity": 82523.28,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-05-19",
+   "equity": 82613.13,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-05-20",
+   "equity": 82290.24,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-05-21",
+   "equity": 81392.69,
+   "available": 0.0,
+   "executed": 2,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-05-22",
+   "equity": 81769.6,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-05-23",
+   "equity": 81051.28,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-05-27",
+   "equity": 82888.62,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-05-28",
+   "equity": 82427.84,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-05-29",
+   "equity": 82667.72,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-05-30",
+   "equity": 82744.11,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-06-02",
+   "equity": 83323.02,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-06-03",
+   "equity": 83284.62,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-06-04",
+   "equity": 83714.81,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-06-05",
+   "equity": 83831.88,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-06-06",
+   "equity": 85099.71,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-06-09",
+   "equity": 85623.42,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-06-10",
+   "equity": 85880.58,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-06-11",
+   "equity": 85461.99,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-06-12",
+   "equity": 85856.01,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-06-13",
+   "equity": 85059.2,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-06-16",
+   "equity": 86424.78,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-06-17",
+   "equity": 86085.85,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-06-18",
+   "equity": 86275.34,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-06-20",
+   "equity": 85507.34,
+   "available": 38.57585599999584,
+   "executed": 2,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-06-23",
+   "equity": 86635.07,
+   "available": 38.57585599999584,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-06-24",
+   "equity": 87787.9,
+   "available": 38.57585599999584,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-06-25",
+   "equity": 87997.14,
+   "available": 38.57585599999584,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-06-26",
+   "equity": 89496.81,
+   "available": 38.57585599999584,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-06-27",
+   "equity": 89924.27,
+   "available": 38.57585599999584,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-06-30",
+   "equity": 90029.35,
+   "available": 38.57585599999584,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-07-01",
+   "equity": 89323.99,
+   "available": 38.57585599999584,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-07-02",
+   "equity": 89193.96,
+   "available": 38.57585599999584,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-07-03",
+   "equity": 90524.34,
+   "available": 38.57585599999584,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-07-07",
+   "equity": 90149.04,
+   "available": 38.57585599999584,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-07-08",
+   "equity": 89159.8,
+   "available": 38.57585599999584,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-07-09",
+   "equity": 90179.43,
+   "available": 6023.817907999992,
+   "executed": 6,
+   "exits": 1,
+   "ok": true
+  },
+  {
+   "date": "2025-07-10",
+   "equity": 90543.42,
+   "available": 0.0,
+   "executed": 2,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-07-11",
+   "equity": 90399.17,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-07-14",
+   "equity": 90517.77,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-07-15",
+   "equity": 90264.59,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-07-16",
+   "equity": 89688.44,
+   "available": 11149.909180000004,
+   "executed": 3,
+   "exits": 0,
+   "ok": true
+  }
+ ],
+ "labels": {
+  "built": 32,
+  "total": 32,
+  "base_rate": 0.15625
+ },
+ "metalabel": {
+  "trained": true,
+  "n": 32,
+  "oos_auc": null,
+  "promoted": false,
+  "base_rate": 0.15625,
+  "target": "profit",
+  "reason": "insufficient samples: 32 < min 50"
+ },
+ "caveats": [
+  "survivorship_bias: universe is names fetchable today; delisted names are underrepresented \u2014 prefer RELATIVE config comparisons over absolute returns"
+ ],
+ "trades": {
+  "trades": 32,
+  "wins": 5,
+  "losses": 27,
+  "win_rate": 0.156,
+  "avg_win": 2518.87,
+  "avg_loss": 1028.26,
+  "gross_profit": 12594.36,
+  "gross_loss": 27762.93,
+  "profit_factor": 0.45,
+  "net": -15168.57
+ },
+ "gate": {
+  "pass": 157
+ },
+ "total_return_pct": -10.3,
+ "cagr_pct": -20.11,
+ "sharpe": -0.51,
+ "max_drawdown_pct": 27.06,
+ "benchmark_daily": [
+  {
+   "date": "2025-01-21",
+   "close": 603.05
+  },
+  {
+   "date": "2025-01-22",
+   "close": 606.44
+  },
+  {
+   "date": "2025-01-23",
+   "close": 609.75
+  },
+  {
+   "date": "2025-01-24",
+   "close": 607.97
+  },
+  {
+   "date": "2025-01-27",
+   "close": 599.37
+  },
+  {
+   "date": "2025-01-28",
+   "close": 604.52
+  },
+  {
+   "date": "2025-01-29",
+   "close": 601.81
+  },
+  {
+   "date": "2025-01-30",
+   "close": 605.04
+  },
+  {
+   "date": "2025-01-31",
+   "close": 601.82
+  },
+  {
+   "date": "2025-02-03",
+   "close": 597.77
+  },
+  {
+   "date": "2025-02-04",
+   "close": 601.78
+  },
+  {
+   "date": "2025-02-05",
+   "close": 604.22
+  },
+  {
+   "date": "2025-02-06",
+   "close": 606.32
+  },
+  {
+   "date": "2025-02-07",
+   "close": 600.77
+  },
+  {
+   "date": "2025-02-10",
+   "close": 604.85
+  },
+  {
+   "date": "2025-02-11",
+   "close": 605.31
+  },
+  {
+   "date": "2025-02-12",
+   "close": 603.36
+  },
+  {
+   "date": "2025-02-13",
+   "close": 609.73
+  },
+  {
+   "date": "2025-02-14",
+   "close": 609.7
+  },
+  {
+   "date": "2025-02-18",
+   "close": 611.49
+  },
+  {
+   "date": "2025-02-19",
+   "close": 612.93
+  },
+  {
+   "date": "2025-02-20",
+   "close": 610.38
+  },
+  {
+   "date": "2025-02-21",
+   "close": 599.94
+  },
+  {
+   "date": "2025-02-24",
+   "close": 597.21
+  },
+  {
+   "date": "2025-02-25",
+   "close": 594.24
+  },
+  {
+   "date": "2025-02-26",
+   "close": 594.54
+  },
+  {
+   "date": "2025-02-27",
+   "close": 585.05
+  },
+  {
+   "date": "2025-02-28",
+   "close": 594.18
+  },
+  {
+   "date": "2025-03-03",
+   "close": 583.77
+  },
+  {
+   "date": "2025-03-04",
+   "close": 576.86
+  },
+  {
+   "date": "2025-03-05",
+   "close": 583.06
+  },
+  {
+   "date": "2025-03-06",
+   "close": 572.71
+  },
+  {
+   "date": "2025-03-07",
+   "close": 575.92
+  },
+  {
+   "date": "2025-03-10",
+   "close": 560.58
+  },
+  {
+   "date": "2025-03-11",
+   "close": 555.92
+  },
+  {
+   "date": "2025-03-12",
+   "close": 558.87
+  },
+  {
+   "date": "2025-03-13",
+   "close": 551.42
+  },
+  {
+   "date": "2025-03-14",
+   "close": 562.81
+  },
+  {
+   "date": "2025-03-17",
+   "close": 567.15
+  },
+  {
+   "date": "2025-03-18",
+   "close": 561.02
+  },
+  {
+   "date": "2025-03-19",
+   "close": 567.13
+  },
+  {
+   "date": "2025-03-20",
+   "close": 565.49
+  },
+  {
+   "date": "2025-03-21",
+   "close": 563.98
+  },
+  {
+   "date": "2025-03-24",
+   "close": 574.08
+  },
+  {
+   "date": "2025-03-25",
+   "close": 575.46
+  },
+  {
+   "date": "2025-03-26",
+   "close": 568.59
+  },
+  {
+   "date": "2025-03-27",
+   "close": 567.08
+  },
+  {
+   "date": "2025-03-28",
+   "close": 555.66
+  },
+  {
+   "date": "2025-03-31",
+   "close": 559.39
+  },
+  {
+   "date": "2025-04-01",
+   "close": 560.97
+  },
+  {
+   "date": "2025-04-02",
+   "close": 564.52
+  },
+  {
+   "date": "2025-04-03",
+   "close": 536.7
+  },
+  {
+   "date": "2025-04-04",
+   "close": 505.28
+  },
+  {
+   "date": "2025-04-07",
+   "close": 504.38
+  },
+  {
+   "date": "2025-04-08",
+   "close": 496.48
+  },
+  {
+   "date": "2025-04-09",
+   "close": 548.62
+  },
+  {
+   "date": "2025-04-10",
+   "close": 524.58
+  },
+  {
+   "date": "2025-04-11",
+   "close": 533.94
+  },
+  {
+   "date": "2025-04-14",
+   "close": 539.12
+  },
+  {
+   "date": "2025-04-15",
+   "close": 537.61
+  },
+  {
+   "date": "2025-04-16",
+   "close": 525.66
+  },
+  {
+   "date": "2025-04-17",
+   "close": 526.41
+  },
+  {
+   "date": "2025-04-21",
+   "close": 513.88
+  },
+  {
+   "date": "2025-04-22",
+   "close": 527.25
+  },
+  {
+   "date": "2025-04-23",
+   "close": 535.42
+  },
+  {
+   "date": "2025-04-24",
+   "close": 546.69
+  },
+  {
+   "date": "2025-04-25",
+   "close": 550.64
+  },
+  {
+   "date": "2025-04-28",
+   "close": 550.85
+  },
+  {
+   "date": "2025-04-29",
+   "close": 554.32
+  },
+  {
+   "date": "2025-04-30",
+   "close": 554.54
+  },
+  {
+   "date": "2025-05-01",
+   "close": 558.47
+  },
+  {
+   "date": "2025-05-02",
+   "close": 566.76
+  },
+  {
+   "date": "2025-05-05",
+   "close": 563.51
+  },
+  {
+   "date": "2025-05-06",
+   "close": 558.8
+  },
+  {
+   "date": "2025-05-07",
+   "close": 561.15
+  },
+  {
+   "date": "2025-05-08",
+   "close": 565.06
+  },
+  {
+   "date": "2025-05-09",
+   "close": 564.34
+  },
+  {
+   "date": "2025-05-12",
+   "close": 582.99
+  },
+  {
+   "date": "2025-05-13",
+   "close": 586.84
+  },
+  {
+   "date": "2025-05-14",
+   "close": 587.59
+  },
+  {
+   "date": "2025-05-15",
+   "close": 590.46
+  },
+  {
+   "date": "2025-05-16",
+   "close": 594.2
+  },
+  {
+   "date": "2025-05-19",
+   "close": 594.85
+  },
+  {
+   "date": "2025-05-20",
+   "close": 592.85
+  },
+  {
+   "date": "2025-05-21",
+   "close": 582.86
+  },
+  {
+   "date": "2025-05-22",
+   "close": 583.09
+  },
+  {
+   "date": "2025-05-23",
+   "close": 579.11
+  },
+  {
+   "date": "2025-05-27",
+   "close": 591.15
+  },
+  {
+   "date": "2025-05-28",
+   "close": 587.73
+  },
+  {
+   "date": "2025-05-29",
+   "close": 590.05
+  },
+  {
+   "date": "2025-05-30",
+   "close": 589.39
+  },
+  {
+   "date": "2025-06-02",
+   "close": 592.71
+  },
+  {
+   "date": "2025-06-03",
+   "close": 596.09
+  },
+  {
+   "date": "2025-06-04",
+   "close": 595.93
+  },
+  {
+   "date": "2025-06-05",
+   "close": 593.05
+  },
+  {
+   "date": "2025-06-06",
+   "close": 599.14
+  },
+  {
+   "date": "2025-06-09",
+   "close": 599.68
+  },
+  {
+   "date": "2025-06-10",
+   "close": 603.08
+  },
+  {
+   "date": "2025-06-11",
+   "close": 601.36
+  },
+  {
+   "date": "2025-06-12",
+   "close": 603.75
+  },
+  {
+   "date": "2025-06-13",
+   "close": 597.0
+  },
+  {
+   "date": "2025-06-16",
+   "close": 602.68
+  },
+  {
+   "date": "2025-06-17",
+   "close": 597.53
+  },
+  {
+   "date": "2025-06-18",
+   "close": 597.44
+  },
+  {
+   "date": "2025-06-20",
+   "close": 594.28
+  },
+  {
+   "date": "2025-06-23",
+   "close": 600.15
+  },
+  {
+   "date": "2025-06-24",
+   "close": 606.78
+  },
+  {
+   "date": "2025-06-25",
+   "close": 607.12
+  },
+  {
+   "date": "2025-06-26",
+   "close": 611.87
+  },
+  {
+   "date": "2025-06-27",
+   "close": 614.91
+  },
+  {
+   "date": "2025-06-30",
+   "close": 617.85
+  },
+  {
+   "date": "2025-07-01",
+   "close": 617.65
+  },
+  {
+   "date": "2025-07-02",
+   "close": 620.45
+  },
+  {
+   "date": "2025-07-03",
+   "close": 625.34
+  },
+  {
+   "date": "2025-07-07",
+   "close": 620.68
+  },
+  {
+   "date": "2025-07-08",
+   "close": 620.34
+  },
+  {
+   "date": "2025-07-09",
+   "close": 624.06
+  },
+  {
+   "date": "2025-07-10",
+   "close": 625.82
+  },
+  {
+   "date": "2025-07-11",
+   "close": 623.62
+  },
+  {
+   "date": "2025-07-14",
+   "close": 624.81
+  },
+  {
+   "date": "2025-07-15",
+   "close": 622.14
+  },
+  {
+   "date": "2025-07-16",
+   "close": 624.22
+  }
+ ],
+ "benchmark_return_pct": 3.51,
+ "alpha_pct": -13.81,
+ "information_ratio": -0.77,
+ "tracking_error_pct": 35.25,
+ "run_id": "base_5dc447b40f60c364",
+ "db_path": "/Users/gm/stock-tracker/data/replays/lab/base_5dc447b40f60c364/replay.db"
+}
