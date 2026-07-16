@@ -264,6 +264,42 @@ _MARK_TTL_S = 900.0                 # fresh window (15 min)
 _MARK_LAST_GOOD_S = 26 * 3600.0     # serve stale up to ~1 trading day
 _MARK_CACHE: Dict[str, tuple] = {}  # key -> (fetched_at_epoch, per-contract mark)
 _MARK_STATUS: Dict[str, str] = {}   # key -> 'fresh' | 'stale' (last serve)
+# The cache is PERSISTED (settings JSON) and reloaded on process start:
+# in-memory-only last-good marks die with every app restart, and options
+# don't quote before 9:30 — so a restart + premarket cycle left every held
+# option unmarkable, and the gate's degraded-day-P&L rule (correctly)
+# blocked ALL new entries for hours ("no quote for OPT:..." x97).
+_MARK_PERSIST_KEY = "__aj_option_marks"
+_MARK_LOADED = [False]
+
+
+def _load_persisted_marks() -> None:
+    if _MARK_LOADED[0]:
+        return
+    _MARK_LOADED[0] = True
+    try:
+        import json as _json
+        import aj_db
+        raw = aj_db.get_setting_raw(_MARK_PERSIST_KEY)
+        if raw:
+            now = _now_s()
+            for k, (ts, val) in (_json.loads(raw) or {}).items():
+                if (now - float(ts)) < _MARK_LAST_GOOD_S:
+                    _MARK_CACHE.setdefault(k, (float(ts), float(val)))
+    except Exception:
+        log.debug("persisted mark cache load failed", exc_info=True)
+
+
+def _persist_marks() -> None:
+    try:
+        import json as _json
+        import aj_db
+        now = _now_s()
+        live = {k: v for k, v in _MARK_CACHE.items()
+                if (now - v[0]) < _MARK_LAST_GOOD_S}
+        aj_db.set_setting_raw(_MARK_PERSIST_KEY, _json.dumps(live))
+    except Exception:
+        log.debug("persisted mark cache save failed", exc_info=True)
 
 
 def _now_s() -> float:
@@ -323,6 +359,7 @@ def mark(option_symbol: str, *,
     if chain_fn is not None:
         return _price_from_chain(chain_fn)
 
+    _load_persisted_marks()
     key = "{}|{}".format(str(option_symbol).upper(), mult)
     now = _now_s()
     hit = _MARK_CACHE.get(key)
@@ -333,6 +370,7 @@ def mark(option_symbol: str, *,
     if val is not None:
         _MARK_CACHE[key] = (now, val)
         _MARK_STATUS[key] = "fresh"
+        _persist_marks()
         return val
     # fetch failed / strike missing / empty bid+ask — last-good fallback
     if hit is not None and (now - hit[0]) < _MARK_LAST_GOOD_S:

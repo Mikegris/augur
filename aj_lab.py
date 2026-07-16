@@ -239,15 +239,22 @@ def _run_replay_fold(sets: List[str], start: str, end: str, universe: str,
                         "--offline"]
         for s in sets:
             cmd += ["--set", s]
-        p = subprocess.run(cmd, env=env, capture_output=True, text=True,
-                           timeout=3600)
+        # encoding pinned to UTF-8: the child prints box-drawing characters
+        # in its summary, and a GUI app launched from Finder has NO LANG set
+        # (POSIX locale) — text=True then decodes with ASCII and raises
+        # UnicodeDecodeError, silently turning every successful fold into
+        # None (experiments #2-#4 went 'inconclusive' on exactly this).
+        p = subprocess.run(cmd, env=env, capture_output=True,
+                           encoding="utf-8", errors="replace", timeout=3600)
         if p.returncode != 0:
             log.warning("lab fold %s failed: %s", run_id, (p.stderr or "")[-400:])
             return None
         with open(os.path.join(lab_dir, run_id, "result.json")) as f:
             return json.load(f)
     except Exception:
-        log.debug("lab fold %s errored", run_id, exc_info=True)
+        # WARNING, not debug: a systemic fold failure silently degrades every
+        # nightly experiment to 'inconclusive' — that must be visible.
+        log.warning("lab fold %s errored", run_id, exc_info=True)
         return None
 
 
