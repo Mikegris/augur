@@ -246,6 +246,11 @@ DEFAULTS: Dict[str, Any] = {
     # Batch 2 — cross-sectional selection (trade the best relative opportunities)
     "cross_sectional_selection": False,
     "cross_sectional_top_n":  5,
+    # How many of the momentum-ranked scan names to actually FORECAST each
+    # cycle before cross-sectional ranking. Forecasting is seconds-per-name;
+    # forecasting the full ~250 screener output collapses under the cycle's
+    # parallel time budget, so bound it to the top movers.
+    "cross_sectional_scan_max": 40,
     # Batch 3 — execution alpha (better entries/exits + cost discipline)
     "limit_entry":            False,   # post a limit through the mid vs market-on-cycle
     "limit_entry_offset_bps": 10.0,    # how far through the mid to improve the fill
@@ -388,6 +393,7 @@ _INT_KEYS = {"max_trades_per_day", "forecast_horizon_days", "scan_universe_max",
              "crypto_universe_top", "screen_scan_batch", "screen_max",
              # effectiveness layer
              "ic_min_samples", "wf_min_signals", "cross_sectional_top_n",
+             "cross_sectional_scan_max",
              "time_stop_days", "event_blackout_days",
              "metalabel_min_samples", "metalabel_retrain_min_new",
              "rg_alpha_decay_min_trades", "rg_lever_unlock_trades",

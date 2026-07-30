@@ -850,7 +850,19 @@ def run_once(mode: str = "paper") -> Dict[str, Any]:
             try:
                 import aj_select
                 cands = []
-                for s in scan:
+                # Cap the forecast set to the top-K of the (momentum-ranked)
+                # scan. Forecasting is 4-19s PER name; the cycle's parallel
+                # budget only completes a handful, so forecasting all ~250
+                # names collapsed the candidate set to whatever returned
+                # fastest — the crypto tail (ANTFUN-USD/US-USD junk) — and
+                # nothing tradeable emerged. The screener already momentum-
+                # ranks `scan` (equities first, crypto appended), so scan[:K]
+                # is the top movers: faster AND higher quality. Held names are
+                # re-added below so exits still evaluate.
+                xs_max = max(5, int(cfg.get("cross_sectional_scan_max", 40) or 40))
+                held_now = [s for s, q in held.items() if float(q or 0) != 0]
+                forecast_set = list(dict.fromkeys(scan[:xs_max] + held_now))
+                for s in forecast_set:
                     fcx = _forecast(s, horizon)
                     if fcx and fcx.get("ensemble"):
                         cands.append((s, fcx))
