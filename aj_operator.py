@@ -1136,9 +1136,24 @@ def run_once(mode: str = "paper") -> Dict[str, Any]:
             except Exception:
                 log.debug("event outcome grading skipped", exc_info=True)
 
-        # Meta-label learning loop (Phase 4): label any newly-closed trades and
-        # retrain P(profit) when enough new labels accumulate. Cheap no-op unless
-        # metalabel_enabled; maybe_retrain self-gates on metalabel_retrain_min_new.
+        # Trade LABELING runs UNCONDITIONALLY every cycle — it is the agent's
+        # record of what actually happened, and Kelly sizing, the risk
+        # governor, the Research Scientist, and expectancy all read it. It was
+        # previously gated behind metalabel_enabled; turning the meta-label
+        # model OFF (2026-07-14) silently froze the trade record for 2 weeks,
+        # so the learning loops saw a stale, rosier-than-reality book (labeled
+        # -$215 while the FIFO book was -$1,393). Recording reality must never
+        # depend on whether the model that CONSUMES it is enabled. Cheap +
+        # idempotent (INSERT OR IGNORE on the round-trip key).
+        try:
+            import aj_features
+            summary["labels"] = aj_features.build_labels()
+        except Exception:
+            log.debug("trade labeling skipped", exc_info=True)
+
+        # Meta-label MODEL retrain (Phase 4): only when the model is actually
+        # in use. Labels above already exist; this just refits P(profit) when
+        # enough new ones accrue (maybe_retrain self-gates on min_new).
         if cfg.get("metalabel_enabled"):
             try:
                 import aj_metalabel
