@@ -160,7 +160,7 @@ def status() -> Dict[str, Any]:
         # AJTA agent version. v3.16 delivers the 20-enhancement batch (schema
         # v10, append-only audit, decision-feature persistence, v2 ML features,
         # adapter scorecard, journal, backoff, partial fills, key rotation).
-        "version": "3.22.4",
+        "version": "3.22.5",
         "trading_enabled": cfg.get("trading_enabled"),
         "live_trading_enabled": cfg.get("live_trading_enabled"),
         "session": aj_db.market_session(),
