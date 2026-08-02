@@ -221,3 +221,27 @@ if __name__ == "__main__":
                 fn.__name__, type(e).__name__, e))
     print("PASS" if failed == 0 else "{} FAILED".format(failed))
     sys.exit(1 if failed else 0)
+
+
+def test_meanrev_signal_module():
+    """aj_meanrev primitives: momentum vs mean-reversion diverge as designed,
+    and the blend switches on regime. Pure functions, no I/O."""
+    import aj_meanrev
+    # a steadily RISING series: momentum bullish, mean-reversion NOT (not oversold)
+    up = [100.0 * (1.02 ** i) for i in range(80)]
+    pm = aj_meanrev.momentum_prob(up)
+    assert pm is not None and pm > 0.6, pm
+    # a series that rose then DIPPED sharply while 60d trend still positive:
+    # mean-reversion should read it as a buyable dip
+    dip = [100.0 * (1.015 ** i) for i in range(70)] + [x for x in
+           (100.0 * (1.015 ** 69) * (1 - 0.03 * j) for j in range(1, 8))]
+    pmr = aj_meanrev.meanrev_prob(dip)
+    assert pmr is not None
+    # blend switches: chop -> meanrev value, trend -> momentum value
+    assert aj_meanrev.blended_prob(up, "chop") == aj_meanrev.meanrev_prob(up)
+    assert aj_meanrev.blended_prob(up, "bull") == aj_meanrev.momentum_prob(up)
+    # insufficient history -> None, and prob_to_ensemble handles None
+    assert aj_meanrev.momentum_prob([100.0] * 10) is None
+    assert aj_meanrev.prob_to_ensemble(None, "x")["ensemble"] is None
+    ens = aj_meanrev.prob_to_ensemble(0.7, "pit_test")["ensemble"]
+    assert ens["prob_up"] == 0.7 and ens["conviction"] in ("low", "medium", "high")

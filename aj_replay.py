@@ -119,6 +119,87 @@ def _pit_forecast_factory(store):
     return pit_forecast
 
 
+def _meanrev_forecast_factory(store):
+    """Mean-REVERSION signal, same output shape. Where the momentum forecaster
+    buys STRENGTH (rising price, high RSI, above SMA), this buys short-term
+    WEAKNESS in a name that is NOT broken — the classic 'buy the dip on
+    quality': oversold on the 14d RSI / below the 20d SMA, BUT still in a
+    positive 60d trend (so we're buying a pullback, not catching a falling
+    knife). Deterministic, zero network. Built to be twin-compared against
+    the momentum forecaster over the same folds — the honest test of whether
+    a mean-reversion sleeve would have profited where momentum bled."""
+    import math
+
+    def meanrev_forecast(symbol: str, horizon_days: int = 20) -> Dict[str, Any]:
+        bars = store.chart(symbol, "1y", "1d")
+        closes = [b.get("close") for b in bars if b.get("close")]
+        if len(closes) < 65:
+            return {"symbol": symbol, "ensemble": None, "signals": [],
+                    "n_signals": 0, "error": "insufficient history"}
+        px = [float(c) for c in closes]
+        r5 = px[-1] / px[-6] - 1.0            # short-term move (negative = dip)
+        r60 = px[-1] / px[-61] - 1.0          # longer trend (positive = healthy)
+        deltas = [px[i] - px[i - 1] for i in range(len(px) - 14, len(px))]
+        gains = sum(d for d in deltas if d > 0)
+        losses = sum(-d for d in deltas if d < 0)
+        rsi = 100.0 * gains / (gains + losses) if (gains + losses) > 0 else 50.0
+        sma20 = sum(px[-20:]) / 20.0
+        sma_dist = (px[-1] / sma20 - 1.0) if sma20 > 0 else 0.0   # negative = below SMA
+        rets = [px[i] / px[i - 1] - 1.0 for i in range(max(1, len(px) - 60), len(px))]
+        mu = sum(rets) / len(rets)
+        vol = (sum((r - mu) ** 2 for r in rets) / max(1, len(rets) - 1)) ** 0.5 or 0.01
+        # Reversion score: oversold (low RSI, below 20d SMA, recent short drop)
+        # pushes prob_up UP — but ONLY when the 60d trend is intact. A negative
+        # 60d trend zeroes the dip bonus (don't buy dips in downtrends).
+        oversold = (0.4 * ((50.0 - rsi) / 20.0)
+                    + 0.35 * (-sma_dist / (vol * (20 ** 0.5)))
+                    + 0.25 * (-r5 / (vol * (5 ** 0.5))))
+        trend_ok = 1.0 if r60 > 0 else 0.2      # gate the dip on a healthy uptrend
+        z = oversold * trend_ok
+        prob_up = 1.0 / (1.0 + math.exp(-1.2 * z))
+        prob_up = min(0.95, max(0.05, prob_up))
+        edge = (prob_up - 0.5) * 100.0
+        conviction = ("high" if abs(edge) >= 12 else
+                      "medium" if abs(edge) >= 6 else "low")
+        return {"symbol": symbol,
+                "ensemble": {"prob_up": round(prob_up, 4),
+                             "edge_pct_pts": round(edge, 3),
+                             "conviction": conviction},
+                "signals": [{"name": "pit_meanrev", "prob_up": prob_up}],
+                "n_signals": 1}
+
+    return meanrev_forecast
+
+
+def _blend_forecast_factory(store):
+    """Regime-SWITCHED forecaster: mean-reversion in 'chop', momentum
+    otherwise. Uses aj_meanrev's shared primitives (the same code a live
+    deployment would call) and classifies the regime from the benchmark's
+    own as-of closes via aj_alpha.regime_from_closes — so the switch is
+    point-in-time (no look-ahead) and byte-identical to the live logic. This
+    is the deployable dual-signal candidate the 6-fold comparison motivated."""
+    import aj_meanrev
+
+    def _bench_regime() -> str:
+        try:
+            import aj_alpha
+            bars = store.chart("SPY", "1y", "1d")
+            closes = [float(b.get("close")) for b in bars if b.get("close")]
+            return aj_alpha.regime_from_closes(closes) if closes else "chop"
+        except Exception:
+            return "chop"
+
+    def blend_forecast(symbol: str, horizon_days: int = 20) -> Dict[str, Any]:
+        bars = store.chart(symbol, "1y", "1d")
+        closes = [b.get("close") for b in bars if b.get("close")]
+        p = aj_meanrev.blended_prob(closes, _bench_regime())
+        out = {"symbol": symbol}
+        out.update(aj_meanrev.prob_to_ensemble(p, "pit_blend"))
+        return out
+
+    return blend_forecast
+
+
 # ── the replay run (executes with an ISOLATED DB) ─────────────────────────────
 
 def _sim_instant(date_str: str):
@@ -237,6 +318,12 @@ def run_replay(args) -> Dict[str, Any]:
     if args.forecaster == "pit":
         import forecast_ensemble
         forecast_ensemble.ensemble_forecast = _pit_forecast_factory(store)
+    elif args.forecaster == "meanrev":
+        import forecast_ensemble
+        forecast_ensemble.ensemble_forecast = _meanrev_forecast_factory(store)
+    elif args.forecaster == "blend":
+        import forecast_ensemble
+        forecast_ensemble.ensemble_forecast = _blend_forecast_factory(store)
     # 'ensemble' keeps the real forecast_ensemble (data layer already
     # patched + its result cache disabled by rd.patch)
 
@@ -727,7 +814,7 @@ def _add_common(sp):
     sp.add_argument("--start")
     sp.add_argument("--end")
     sp.add_argument("--cash", type=float, default=100000.0)
-    sp.add_argument("--forecaster", choices=["pit", "ensemble"], default="pit")
+    sp.add_argument("--forecaster", choices=["pit", "meanrev", "blend", "ensemble"], default="pit")
     sp.add_argument("--benchmark", default="SPY")
     sp.add_argument("--cache-dir", default=None)
     sp.add_argument("--cache-period", default="10y")
