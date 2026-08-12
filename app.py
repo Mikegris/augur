@@ -72,7 +72,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(me
 
 # Single source of truth for the app version — surfaced at /api/version and
 # in jarvis.health_snapshot().
-APP_VERSION = "3.22.5"
+APP_VERSION = "3.23.0"
 
 _TICKER_RE = re.compile(r"^[A-Z0-9][A-Z0-9.\-]{0,9}$")
 
@@ -4233,6 +4233,34 @@ def aj_analytics_route():
     try:
         import aj_analytics
         return jsonify(aj_analytics.summary())
+    except Exception as e:
+        return _err(e)
+
+
+@app.route("/api/aj/tax", methods=["GET"])
+def aj_tax_route():
+    """Realized-gain tax view: short/long-term split + estimated liability at the
+    configured flat rates, with a per-tax-year breakdown (Insights: Tax view)."""
+    try:
+        import aj_tax, aj_db
+        aj_db.aj_init()
+        mode = (request.args.get("mode") or "paper").strip() or "paper"
+        year = _safe_int(request.args.get("year"), 0) or None
+        return jsonify(aj_tax.tax_summary(mode, year))
+    except Exception as e:
+        return _err(e)
+
+
+@app.route("/api/aj/tax/lots.csv", methods=["GET"])
+def aj_tax_lots_route():
+    """Form-8949-style CSV of every closed lot for a tax preparer."""
+    try:
+        import aj_tax, aj_db
+        aj_db.aj_init()
+        mode = (request.args.get("mode") or "paper").strip() or "paper"
+        return Response(aj_tax.realized_lots_csv(mode), mimetype="text/csv",
+                        headers={"Content-Disposition": "attachment; filename=aj_tax_lots.csv",
+                                 "Cache-Control": "no-store"})
     except Exception as e:
         return _err(e)
 

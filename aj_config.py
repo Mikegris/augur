@@ -51,6 +51,12 @@ DEFAULTS: Dict[str, Any] = {
     # buy beyond it (live mode uses the broker's settled cash instead).
     # Stored as aj_paper_cash — the same setting aj_alpha has always read.
     "paper_cash":             0.0,
+    # Tax view (aj_tax): flat COMBINED (federal+state) marginal rates the tax
+    # estimator applies to realized short/long-term gains. 0 (default) keeps the
+    # estimator informational — it reports the ST/LT gain split but invents no
+    # liability until the operator sets their own rates. Fractions, e.g. 0.35.
+    "tax_short_term_rate":    0.0,
+    "tax_long_term_rate":     0.0,
     "fee_bps":                0.0,     # commission-free equities default
     "min_fee_usd":            0.0,
     "crypto_fee_bps":         10.0,    # exchange-typical for crypto venues
@@ -374,7 +380,9 @@ _FLOAT_KEYS = {"max_order_notional_usd", "max_daily_loss_usd",
                "rg_drawdown_breaker_pct", "rg_vix_derisk", "rg_alpha_decay_floor_pct",
                "rg_lever_min_expectancy_pct",
                # paper fill realism + cash account
-               "paper_fill_liquidity_usd", "paper_cash"}
+               "paper_fill_liquidity_usd", "paper_cash",
+               # tax view
+               "tax_short_term_rate", "tax_long_term_rate"}
 _INT_KEYS = {"max_trades_per_day", "forecast_horizon_days", "scan_universe_max",
              "order_ttl_cycles", "exit_cooldown_min", "max_open_positions",
              "max_trades_per_symbol_per_day", "trade_skip_open_min",
@@ -439,7 +447,9 @@ def _valid_brokers() -> set:
     return brokers
 # Config keys that are probabilities — clamped to [0,1] so a typo can't make
 # the agent buy/sell on every signal.
-_PROB_KEYS = ("buy_prob_threshold", "sell_prob_threshold")
+_PROB_KEYS = ("buy_prob_threshold", "sell_prob_threshold",
+              # tax rates are fractions in [0,1] — a >1.0 rate is a typo, clamp it
+              "tax_short_term_rate", "tax_long_term_rate")
 
 # ── declarative config schema (#5) ────────────────────────────────────────────
 # ONE schema entry per key {type, default, min, max, enum}, built from the

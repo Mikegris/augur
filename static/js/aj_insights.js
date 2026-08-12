@@ -1100,6 +1100,73 @@
     });
   }
 
+  // 16. TAX VIEW (realized-gain short/long-term split + estimated liability)
+  // /api/aj/tax -> {short_term_gain, long_term_gain, total_realized, rates,
+  //   rates_configured, estimate:{tax_total,...}, after_tax_realized,
+  //   wash_sale_flags, by_year:[{year, short_term_gain, long_term_gain,
+  //   total_realized, trades, wash_sale_losses, tax_total}], note}
+  async function loadTax(body) {
+    try {
+      var d = await API.get("/api/aj/tax");
+      if (!d || d.error) return placeholder(body, "tax view unavailable");
+      if (!d.closed_lots) {
+        return placeholder(body, "No closed trades yet — realized gains appear here once the agent sells a position.");
+      }
+      var st = num(d.short_term_gain, 0), lt = num(d.long_term_gain, 0),
+          tot = num(d.total_realized, 0);
+      function stat(label, val, col) {
+        return '<div style="display:flex;justify-content:space-between;font-size:12px;padding:3px 0;">' +
+          '<span class="muted">' + esc(label) + '</span>' +
+          '<span style="color:' + (col || "inherit") + ';font-variant-numeric:tabular-nums;">' + val + '</span></div>';
+      }
+      var totCol = tot >= 0 ? GREEN : RED;
+      var h = '<div style="font-size:20px;font-weight:600;color:' + totCol + ';margin-bottom:1px;">' +
+        money(tot) + ' <span style="font-size:12px;" class="muted">realized</span></div>' +
+        '<div class="muted" style="font-size:10px;margin-bottom:10px;">' +
+        num(d.closed_lots, 0) + ' closed lots' +
+        (d.wash_sale_flags ? ' · <span style="color:' + AMBER + ';">' + num(d.wash_sale_flags, 0) + ' wash-sale flag(s)</span>' : '') +
+        '</div>';
+      h += stat("short-term gain (≤1yr, ordinary)", money(st), st >= 0 ? GREEN : RED);
+      h += stat("long-term gain (>1yr, preferential)", money(lt), lt >= 0 ? GREEN : RED);
+      var r = d.rates || {};
+      if (d.rates_configured) {
+        var est = d.estimate || {};
+        h += '<div style="border-top:1px solid #222;margin:8px 0 4px;"></div>';
+        h += stat("est. tax — short (@" + fmtPct(num(r.short_term) * 100, 0) + ")", money(est.tax_short_term), RED);
+        h += stat("est. tax — long (@" + fmtPct(num(r.long_term) * 100, 0) + ")", money(est.tax_long_term), RED);
+        h += stat("estimated tax owed", money(est.tax_total), RED);
+        h += stat("after-tax realized", money(d.after_tax_realized), num(d.after_tax_realized, 0) >= 0 ? GREEN : RED);
+        if (num(est.loss_carryover, 0) < 0)
+          h += stat("loss carryover", money(est.loss_carryover), MUTED);
+      } else {
+        h += '<div class="muted" style="font-size:11px;margin:8px 0;padding:6px 8px;background:#161616;border-radius:4px;">' +
+          'Set <code>tax_short_term_rate</code> and <code>tax_long_term_rate</code> in Config to estimate the liability. ' +
+          'Showing the gain split only.</div>';
+      }
+      // per-year table
+      var yrs = d.by_year || [];
+      if (yrs.length) {
+        h += '<table class="data-table" style="width:100%;font-size:11px;margin-top:10px;"><thead><tr>' +
+          '<th>year</th><th>short-term</th><th>long-term</th><th>realized</th>' +
+          (d.rates_configured ? '<th>est. tax</th>' : '') + '<th>trades</th></tr></thead><tbody>';
+        yrs.forEach(function (y) {
+          var yt = num(y.total_realized, 0);
+          h += '<tr><td>' + esc(y.year) + '</td>' +
+            '<td style="color:' + (num(y.short_term_gain, 0) >= 0 ? GREEN : RED) + ';">' + money(y.short_term_gain) + '</td>' +
+            '<td style="color:' + (num(y.long_term_gain, 0) >= 0 ? GREEN : RED) + ';">' + money(y.long_term_gain) + '</td>' +
+            '<td style="color:' + (yt >= 0 ? GREEN : RED) + ';">' + money(yt) + '</td>' +
+            (d.rates_configured ? '<td style="color:' + RED + ';">' + money(y.tax_total) + '</td>' : '') +
+            '<td>' + num(y.trades, 0) + '</td></tr>';
+        });
+        h += '</tbody></table>';
+      }
+      h += '<div style="margin-top:10px;"><a href="/api/aj/tax/lots.csv" ' +
+        'style="font-size:11px;color:' + ACCENT + ';text-decoration:none;">↓ export closed lots (Form 8949 CSV)</a></div>';
+      h += '<div class="muted" style="font-size:10px;margin-top:8px;line-height:1.4;">' + esc(d.note || "") + '</div>';
+      body.innerHTML = h;
+    } catch (e) { placeholder(body, "tax view unavailable"); }
+  }
+
   // ──────────────────────────────────────────────────────────────────────────
   //  render
   // ──────────────────────────────────────────────────────────────────────────
@@ -1118,7 +1185,8 @@
     ["12 · Learned Edge",          "aj-ins-metalabel", "meta-label P(profit) model", loadMetalabel],
     ["13 · Risk Governor",         "aj-ins-governor",  "total exposure dial + circuit breaker", loadRiskGovernor],
     ["14 · Benchmark vs Indexes",  "aj-ins-benchmark", "agent return vs SPY/QQQ/DIA/IWM", loadBenchmark],
-    ["15 · Replay Lab",            "aj-ins-replay",    "historical replays + config grids (aj_replay)", loadReplay]
+    ["15 · Replay Lab",            "aj-ins-replay",    "historical replays + config grids (aj_replay)", loadReplay],
+    ["16 · Tax View",              "aj-ins-tax",       "realized gains: short/long-term + estimated tax", loadTax]
   ];
 
   function render(rootEl) {
