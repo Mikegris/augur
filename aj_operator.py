@@ -760,6 +760,116 @@ def _persist_cycle_stats(cycle_id: str, summary: Dict[str, Any],
         conn.commit()
 
 
+def _process_rotation(cycle_id: str, cfg: Dict[str, Any],
+                      held: Dict[str, float], fc_cache: Dict[str, Any],
+                      scan: List[str], horizon: int) -> Dict[str, Any]:
+    """Capital-rotation: when the book is capital-constrained (at the position
+    cap OR out of cash), sell the weakest holding(s) so the buy loop that follows
+    can fund clearly-better fresh candidates. Fail-open + off by default; the
+    swap decision lives in aj_rotation (pure). Mutates `held` (drops sold names)
+    so the downstream cap check sees the freed slot. Returns observability."""
+    if not cfg.get("rotation_enabled"):
+        return {"enabled": False, "swaps": []}
+    try:
+        import aj_rotation
+        import aj_alpha
+        import aj_rules
+        import aj_risk
+        held_syms = [s for s, q in held.items()
+                     if float(q or 0) > 0 and not str(s).startswith("OPT:")]
+        if not held_syms:
+            return {"enabled": True, "constrained": False, "swaps": []}
+        # capital-constrained? — at the position cap, or less than one order of cash.
+        cap = int(cfg.get("max_open_positions") or 0)
+        constrained = cap > 0 and len(held_syms) >= cap
+        min_order = float(cfg.get("min_order_notional_usd") or 0) or \
+            (float(cfg.get("order_notional_target_usd") or 0)
+             or float(cfg.get("max_order_notional_usd") or 0)) * 0.5
+        try:
+            bp = aj_alpha.buying_power(cfg)
+            if bp.get("enabled") and bp.get("available") is not None \
+                    and float(bp["available"]) < max(1.0, min_order):
+                constrained = True
+        except Exception:
+            log.debug("rotation: buying_power check failed", exc_info=True)
+        if not constrained:
+            return {"enabled": True, "constrained": False, "swaps": []}
+
+        # forward edge per name (reuse the cycle's forecast cache; forecast any
+        # miss once and store it back so the buy loop doesn't re-forecast and
+        # double-log the accountability ledger).
+        def _edge(sym: str) -> Optional[float]:
+            fc = fc_cache.get(sym)
+            if not fc:
+                fc = _forecast(sym, horizon)
+                if fc:
+                    fc_cache[sym] = fc
+            return ((fc or {}).get("ensemble") or {}).get("edge_pct_pts")
+
+        held_rows = []
+        for s in held_syms:
+            age = aj_rules.position_age_days(s)
+            held_rows.append({
+                "symbol": s, "edge": _edge(s), "age_days": age,
+                # holding-period proxy: current position age -> days left to the
+                # 1-year long-term mark (tax-guard input; None if age unknown).
+                "days_to_long_term": (365.0 - age) if age is not None else None})
+        held_set = set(held_syms)
+        cand_rows = []
+        for s in scan:                                   # scan is rank-ordered
+            if s in held_set or str(s).startswith("OPT:"):
+                continue
+            e = _edge(s)
+            if e is not None:
+                cand_rows.append({"symbol": s, "edge": e})
+
+        plan = aj_rotation.rotation_plan(held_rows, cand_rows, cfg, True)
+        executed, exit_rows = [], []
+        for swap in plan:
+            sym = swap["sell"]
+            pos = (aj_positions.paper_book().get("positions") or {}).get(sym) or {}
+            qty = float(pos.get("qty") or 0)
+            if qty <= 0:
+                continue
+            qsym = aj_risk._quote_symbol(sym, pos.get("asset_type") or "")
+            mk = (aj_risk._marks([qsym]) or {}).get(qsym)
+            if not mk or float(mk) <= 0:
+                continue
+            mk = float(mk)
+            pre_avg = float(pos.get("avg_cost") or 0)
+            decision = {"side": "sell", "thesis": swap["reason"], "edge_pts": 0.0}
+            sizing = {"qty": qty, "price": mk, "notional": aj_db.money(qty * mk),
+                      "order_type": "market", "limit_price": None}
+            r = _propose_and_execute(cycle_id, sym, decision, sizing, cfg)
+            r["symbol"] = sym
+            r["exit_reason"] = "rotation"
+            r["rotate_into"] = swap["buy"]
+            if r.get("result") == "executed":
+                held.pop(sym, None)                       # free the slot NOW
+                aj_db.audit("rotation", dict(swap, cycle_id=cycle_id),
+                            cycle_id=cycle_id)
+                # score the realized close under its entry conviction (parity
+                # with _process_exits so rotation closes aren't mislabeled).
+                if cfg.get("signal_scorecard"):
+                    try:
+                        import aj_alpha as _a
+                        ex = r.get("exec") or {}
+                        ex_qty = float(ex.get("filled_qty") or qty)
+                        ex_px = float(ex.get("avg_fill_price") or mk)
+                        fees = float(ex.get("fees_usd") or 0)
+                        realized = ((ex_px - pre_avg) * ex_qty - fees) if pre_avg > 0 else 0.0
+                        _a.scorecard_record(_a.pop_entry_conviction(sym), realized)
+                    except Exception:
+                        log.debug("rotation scorecard record skipped", exc_info=True)
+                executed.append(swap)
+            exit_rows.append(r)
+        return {"enabled": True, "constrained": True, "plan": plan,
+                "executed": executed, "exits": exit_rows}
+    except Exception:
+        log.exception("rotation failed (non-fatal)")
+        return {"enabled": True, "error": True, "swaps": []}
+
+
 # ── the cycle ─────────────────────────────────────────────────────────────────
 
 def run_once(mode: str = "paper") -> Dict[str, Any]:
@@ -905,6 +1015,18 @@ def run_once(mode: str = "paper") -> Dict[str, Any]:
                                          "method": cfg.get("alloc_method")}
             except Exception:
                 log.debug("allocation plan skipped", exc_info=True)
+        # Capital-rotation (opportunity-cost): if the book is at the position cap
+        # or out of cash, sell the weakest holding(s) here so the buy loop below
+        # can fund clearly-better candidates with the freed capital. Runs AFTER
+        # forecasts are cached (edges available) and BEFORE the buy loop. No-op
+        # unless rotation_enabled AND actually capital-constrained. Fail-open.
+        rot = _process_rotation(cycle_id, cfg, held, fc_cache, list(scan), horizon)
+        summary["rotation"] = rot
+        for r in (rot.get("exits") or []):
+            summary["proposals"].append(r)
+        # never re-open a name rotated OUT this cycle (mirror the exit guard)
+        _exited |= {s.get("sell") for s in (rot.get("executed") or []) if s.get("sell")}
+
         # Analyst-council advisory budget (Phase 3): consult the council for at
         # most council_topk BUY candidates per cycle (cost bound). No-op unless
         # council_active() (council_enabled + VERIFY-COUNCIL).

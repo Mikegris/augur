@@ -82,6 +82,18 @@ DEFAULTS: Dict[str, Any] = {
     "exit_cooldown_min":      0,       # no re-entry of a symbol for N min after exit
     # extra gates
     "max_open_positions":     0,       # cap simultaneous open paper positions
+    # Capital-rotation (opportunity-cost) engine (aj_rotation): when the book is
+    # capital-constrained (at the position cap OR out of cash), sell the weakest
+    # holding to fund a clearly-better fresh candidate instead of sitting idle.
+    # Off by default; only fires when constrained, only displaces weak holdings,
+    # and demands a hard edge margin so it can't churn the book.
+    "rotation_enabled":              False,
+    "rotation_min_edge_gain_pct_pts": 4.0,   # candidate edge must beat holding by this
+    "rotation_hold_edge_floor_pct_pts": 2.0, # only displace holdings weaker than this
+    "rotation_min_hold_days":        3,      # never rotate a name younger than this
+    "rotation_max_per_cycle":        2,      # cap swaps per cycle
+    "rotation_tax_bias_pct_pts":     3.0,    # extra edge to displace a near-long-term lot
+    "rotation_tax_bias_window_days": 45,     # "near long-term" = within N days of 1yr
     "max_symbol_weight_pct":  0.0,     # cap any one name's % of the paper book
     "max_trades_per_symbol_per_day": 0,
     "trade_skip_open_min":    0,       # skip first N min of the regular session
@@ -343,7 +355,9 @@ _BOOL_KEYS = {"trading_enabled", "live_trading_enabled", "robinhood_enabled",
               "limit_entry", "cost_gate", "profit_ladder", "gex_timing",
               "portfolio_construction", "correlation_cap",
               "metalabel_enabled", "metalabel_size_by_edge",
-              "risk_governor_enabled", "adapter_scorecard"}
+              "risk_governor_enabled", "adapter_scorecard",
+              # capital rotation
+              "rotation_enabled"}
 _LIST_KEYS = {"symbol_allowlist", "session_whitelist"}
 _FLOAT_KEYS = {"max_order_notional_usd", "max_daily_loss_usd",
                "paper_slippage_bps", "paper_spread_fraction", "fee_bps",
@@ -382,11 +396,17 @@ _FLOAT_KEYS = {"max_order_notional_usd", "max_daily_loss_usd",
                # paper fill realism + cash account
                "paper_fill_liquidity_usd", "paper_cash",
                # tax view
-               "tax_short_term_rate", "tax_long_term_rate"}
+               "tax_short_term_rate", "tax_long_term_rate",
+               # capital rotation
+               "rotation_min_edge_gain_pct_pts", "rotation_hold_edge_floor_pct_pts",
+               "rotation_tax_bias_pct_pts"}
 _INT_KEYS = {"max_trades_per_day", "forecast_horizon_days", "scan_universe_max",
              "order_ttl_cycles", "exit_cooldown_min", "max_open_positions",
              "max_trades_per_symbol_per_day", "trade_skip_open_min",
              "trade_skip_close_min",
+             # capital rotation
+             "rotation_min_hold_days", "rotation_max_per_cycle",
+             "rotation_tax_bias_window_days",
              # 100x layer
              "momentum_filter_days", "relative_strength_lookback_days",
              "earnings_blackout_days", "max_holding_days", "atr_period",
