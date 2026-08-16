@@ -317,6 +317,47 @@ def events_signal(symbol: str) -> Optional[dict]:
 
 
 # --------------------------------------------------------------------------- #
+# 4c. Mean reversion (buy quality dips)  — the validated complementary signal
+# --------------------------------------------------------------------------- #
+
+def meanrev_signal(symbol: str) -> Optional[dict]:
+    """Mean-reversion adapter: buy a short-term oversold name that is still in a
+    healthy longer-term uptrend (aj_meanrev.meanrev_prob). It reads the SAME
+    daily closes the live momentum forecaster uses (aj_alpha._closes ->
+    fetcher.get_chart_data), which aj_replay_data patches for point-in-time
+    serving — so the signal that trades live is byte-identical to the one the
+    Replay Lab validates, and it is replay-safe (no look-ahead) for free.
+
+    Complementary to momentum: the 6-fold walk-forward found mean-reversion the
+    single best standalone signal (0.95 Sharpe vs momentum 0.81), winning chop
+    with a far steadier hit rate. Like every adapter it earns ensemble weight
+    ONLY through the IC scorecard (adapter_weights) — a cold start is neutral,
+    chronic misses decay to silence. Gated by meanrev_adapter_enabled (default
+    OFF) pending its own live-ensemble replay validation. None on insufficient
+    history or when disabled."""
+    try:
+        import aj_config
+        if not aj_config.get_config().get("meanrev_adapter_enabled"):
+            return None
+        import aj_alpha
+        import aj_meanrev
+        closes = aj_alpha._closes(symbol, "1y")
+        p = aj_meanrev.meanrev_prob(closes)
+        if p is None:
+            return None
+        edge = (p - 0.5) * 100.0
+        return {
+            "prob_up": _clamp(p, 0.05, 0.95),
+            # edge ~±45pp; full confidence around a 25pp tilt (prob ~0.75)
+            "confidence": _clamp(abs(edge) / 25.0, 0.0, 1.0),
+            "detail": "mean-reversion prob_up {:.2f} (edge {:+.1f}pp)".format(p, edge),
+            "source": "meanrev",
+        }
+    except Exception:
+        return None
+
+
+# --------------------------------------------------------------------------- #
 # 5. Aggregator
 # --------------------------------------------------------------------------- #
 
@@ -327,6 +368,7 @@ _ADAPTERS = (
     ("congress", congress_signal),
     ("social", social_signal),
     ("events", events_signal),
+    ("meanrev", meanrev_signal),
 )
 
 

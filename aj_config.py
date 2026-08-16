@@ -57,6 +57,11 @@ DEFAULTS: Dict[str, Any] = {
     # liability until the operator sets their own rates. Fractions, e.g. 0.35.
     "tax_short_term_rate":    0.0,
     "tax_long_term_rate":     0.0,
+    # Mean-reversion signal adapter (aj_signals.meanrev_signal): buy quality
+    # dips as a complementary orthogonal signal to momentum. Off by default
+    # pending live-ensemble replay validation; once on, the IC scorecard governs
+    # its ensemble weight (cold start neutral, chronic misses decay to silence).
+    "meanrev_adapter_enabled": False,
     "fee_bps":                0.0,     # commission-free equities default
     "min_fee_usd":            0.0,
     "crypto_fee_bps":         10.0,    # exchange-typical for crypto venues
@@ -357,7 +362,9 @@ _BOOL_KEYS = {"trading_enabled", "live_trading_enabled", "robinhood_enabled",
               "metalabel_enabled", "metalabel_size_by_edge",
               "risk_governor_enabled", "adapter_scorecard",
               # capital rotation
-              "rotation_enabled"}
+              "rotation_enabled",
+              # mean-reversion signal adapter
+              "meanrev_adapter_enabled"}
 _LIST_KEYS = {"symbol_allowlist", "session_whitelist"}
 _FLOAT_KEYS = {"max_order_notional_usd", "max_daily_loss_usd",
                "paper_slippage_bps", "paper_spread_fraction", "fee_bps",

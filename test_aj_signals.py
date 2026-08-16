@@ -315,6 +315,66 @@ def test_all_signals_survives_one_raising():
 
 
 # --------------------------------------------------------------------------- #
+# 5b. Mean-reversion adapter (gated, IC-governed, replay-shared primitive)
+# --------------------------------------------------------------------------- #
+
+import aj_alpha  # noqa: E402
+import aj_config  # noqa: E402
+import aj_meanrev  # noqa: E402
+
+# a rising series that then DIPPED sharply while the 60d trend is still up ->
+# aj_meanrev.meanrev_prob reads it as a buyable quality dip (prob_up > 0.5).
+_DIP = ([100.0 * (1.015 ** i) for i in range(70)]
+        + [100.0 * (1.015 ** 69) * (1 - 0.03 * j) for j in range(1, 8)])
+
+
+def test_meanrev_adapter_gated_off_by_default():
+    with _Patch((aj_alpha, "_closes", lambda sym, period="1y": list(_DIP))):
+        # default config has meanrev_adapter_enabled=False
+        check(S.meanrev_signal("AAA") is None,
+              "meanrev adapter returns None when disabled (default)")
+
+
+def test_meanrev_adapter_on_produces_signal_and_parity():
+    with _Patch(
+        (aj_alpha, "_closes", lambda sym, period="1y": list(_DIP)),
+        (aj_config, "get_config", lambda: {"meanrev_adapter_enabled": True}),
+    ):
+        sig = S.meanrev_signal("AAA")
+        check(isinstance(sig, dict) and sig.get("source") == "meanrev",
+              "meanrev adapter emits a signal when enabled")
+        check(sig and _in_unit(sig["prob_up"]) and 0.0 <= sig["confidence"] <= 1.0,
+              "meanrev adapter: prob_up in [0,1], confidence in [0,1]")
+        # parity: the adapter's prob_up IS aj_meanrev.meanrev_prob (clamped) —
+        # the live signal is byte-identical to the replay-validated primitive.
+        expect = aj_meanrev.meanrev_prob(list(_DIP))
+        check(sig and abs(sig["prob_up"] - expect) < 1e-9,
+              "meanrev adapter parity with aj_meanrev.meanrev_prob")
+
+
+def test_meanrev_adapter_insufficient_history_none():
+    with _Patch(
+        (aj_alpha, "_closes", lambda sym, period="1y": [100.0] * 10),
+        (aj_config, "get_config", lambda: {"meanrev_adapter_enabled": True}),
+    ):
+        check(S.meanrev_signal("AAA") is None,
+              "meanrev adapter returns None on insufficient history")
+
+
+def test_meanrev_joins_all_signals_when_enabled():
+    with _Patch(
+        (smart_money, "compute_score", lambda sym: None),
+        (synthetic_insider, "compute_composite", lambda sym: {"error": "x"}),
+        (congress, "get_recent_trades", lambda **k: {"trades": []}),
+        (alt_signals, "stocktwits_symbol_sentiment", lambda sym: None),
+        (aj_alpha, "_closes", lambda sym, period="1y": list(_DIP)),
+        (aj_config, "get_config", lambda: {"meanrev_adapter_enabled": True}),
+    ):
+        out = S.all_signals("AAA", cfg={"meanrev_adapter_enabled": True})
+        check("meanrev" in out, "all_signals includes meanrev when enabled")
+
+
+# --------------------------------------------------------------------------- #
 # 6. Adapter scorecard — ledger, scoring, confidence decay
 # --------------------------------------------------------------------------- #
 
