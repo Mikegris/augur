@@ -82,12 +82,18 @@ _ORTHO_WEIGHTS = {
     "insider":         0.08,
     "congress":        0.05,
     "social":          0.03,
+    # mean-reversion earned the most weight of any orthogonal adapter: the
+    # 6-fold walk-forward found it the single best standalone signal (0.95
+    # Sharpe vs momentum 0.81). It still passes the IC promotion gate like the
+    # rest — this is only its base trust weight ONCE promoted.
+    "meanrev":         0.12,
 }
 _ORTHO_LABELS = {
     "smart_money":     "Smart-Money Convergence",
     "insider":         "Synthetic Insider",
     "congress":        "Congressional Flow",
     "social":          "Social Sentiment",
+    "meanrev":         "Mean Reversion",
 }
 
 # Disagreement (weighted std of per-signal prob_up) at which we trust ~none
