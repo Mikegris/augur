@@ -24,8 +24,9 @@ Python 3.9 compatible.
 from __future__ import annotations
 
 import logging
+import math
 import time
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import aj_config
 
@@ -58,9 +59,42 @@ def _f(cfg: Dict[str, Any], key: str, default: float) -> float:
         return float(default)
 
 
-def _realized_expectancy(window: int) -> Tuple[Optional[float], int]:
+def _winsorize(vals: List[float], pct: float) -> List[float]:
+    """Clamp both tails of `vals` to the [p, 100-p] percentiles (linear interp).
+    A robust-mean pre-step: a single catastrophic outlier is capped at the tail
+    percentile instead of dominating the average, while every trade still counts
+    (unlike a trimmed mean, which discards the fat winners). pct<=0 or fewer than
+    3 samples => returned unchanged. Never raises."""
+    try:
+        p = float(pct)
+        if p <= 0 or len(vals) < 3:
+            return vals
+        p = min(p, 49.0)
+        s = sorted(vals)
+        n = len(s)
+
+        def _q(frac: float) -> float:
+            k = (n - 1) * frac
+            lo = int(math.floor(k))
+            hi = int(math.ceil(k))
+            if lo == hi:
+                return s[lo]
+            return s[lo] * (hi - k) + s[hi] * (k - lo)
+
+        lo_v = _q(p / 100.0)
+        hi_v = _q(1.0 - p / 100.0)
+        return [min(hi_v, max(lo_v, x)) for x in vals]
+    except Exception:
+        return vals
+
+
+def _realized_expectancy(window: int, winsor_pct: float = 0.0) -> Tuple[Optional[float], int]:
     """Mean realized return % over the most recent `window` CLOSED trades from
-    the meta-label store (aj_trade_labels). (None, 0) if unavailable."""
+    the meta-label store (aj_trade_labels). (None, 0) if unavailable.
+
+    Fix C — when `winsor_pct` > 0, winsorize both tails at that percentile before
+    averaging so one catastrophic outlier can't dominate the breaker. 0 => plain
+    mean (legacy). `n` always reflects the raw sample count."""
     try:
         import aj_db
         rows = aj_db.query(
@@ -80,7 +114,9 @@ def _realized_expectancy(window: int) -> Tuple[Optional[float], int]:
                 vals.append(fv)
         if not vals:
             return (None, 0)
-        return (sum(vals) / len(vals), len(vals))
+        n = len(vals)
+        est = _winsorize(vals, winsor_pct)
+        return (sum(est) / len(est), n)
     except Exception:
         log.debug("realized expectancy read failed", exc_info=True)
         return (None, 0)
@@ -142,9 +178,12 @@ def _compute(cfg: Dict[str, Any]) -> Dict[str, Any]:
     unlock_tr = int(_f(cfg, "rg_lever_unlock_trades", 50))
     # The window must cover the LARGEST n any consumer needs: lever-up requires
     # n >= unlock_tr, so a window capped below it made the unlock unreachable.
-    exp, n = _realized_expectancy(max(min_tr, unlock_tr, 30))
+    winsor_pct = _f(cfg, "rg_expectancy_winsor_pct", 0.0)
+    exp, n = _realized_expectancy(max(min_tr, unlock_tr, 30), winsor_pct)
     comps["realized_expectancy_pct"] = round(exp, 3) if exp is not None else None
     comps["realized_n"] = n
+    if winsor_pct > 0:
+        comps["expectancy_winsor_pct"] = winsor_pct
     if exp is not None and n >= min_tr:
         if exp < 0:
             breaker = True

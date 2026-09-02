@@ -408,16 +408,41 @@ def _propose_and_execute(cycle_id: str, symbol: str, decision: Dict[str, Any],
 
 
 def _option_order(opt: Dict[str, Any], target_notional: float,
-                  base_thesis: str, cap_notional: float = 0.0) -> Optional[Dict[str, Any]]:
+                  base_thesis: str, cap_notional: float = 0.0,
+                  cfg: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, Any]]:
     """Build {symbol, sizing, decision, instrument} for a long option from a
     target notional (premium-sized, whole contracts). None if unaffordable.
 
     When the target can't cover a single contract but `cap_notional` (the hard
     per-order cap) can, size UP to one contract so the sleeve engages instead of
-    silently falling through — the risk gate still validates the result."""
+    silently falling through — the risk gate still validates the result.
+
+    Fix B — option sizing budget (opt-in via cfg). Option premium is 100%
+    at-risk (a weekly call can expire worthless), so sizing options to the same
+    dollar notional as an equity over-risks the book — an oversized ATEX weekly
+    call lost -$778 in one lot. When configured, size options to their own
+    (smaller) `option_notional_target_usd` and never exceed
+    `max_option_notional_usd`; a single contract that alone breaches the option
+    cap is refused (n_ct=0 → caller falls back to the equity leg) rather than
+    forced through. Both 0 => legacy behavior."""
     prem = float((opt or {}).get("premium_contract") or 0)
-    n_ct = int(target_notional // prem) if prem > 0 else 0
-    if opt and n_ct < 1 and prem > 0 and 0 < prem <= float(cap_notional or 0):
+    # Option-specific budget: a smaller target and a tighter hard cap.
+    opt_target = float(target_notional or 0)
+    opt_cap = float(cap_notional or 0)
+    if cfg:
+        ont = aj_db.money(cfg.get("option_notional_target_usd") or 0)
+        if ont > 0:
+            opt_target = min(opt_target, ont) if opt_target > 0 else ont
+        ocap = aj_db.money(cfg.get("max_option_notional_usd") or 0)
+        if ocap > 0:
+            opt_cap = min(opt_cap, ocap) if opt_cap > 0 else ocap
+            opt_target = min(opt_target, ocap) if opt_target > 0 else ocap
+    n_ct = int(opt_target // prem) if prem > 0 else 0
+    # Never let whole-contract rounding breach the (option) hard cap.
+    if opt_cap > 0 and prem > 0 and n_ct * prem > opt_cap:
+        n_ct = int(opt_cap // prem)
+    # Engage at least one contract only if a single contract fits UNDER the cap.
+    if opt and n_ct < 1 and prem > 0 and 0 < prem <= opt_cap:
         n_ct = 1
     if not opt or n_ct < 1:
         return None
@@ -467,7 +492,7 @@ def _bearish_put_entry(cycle_id: str, symbol: str, fc: Dict[str, Any],
     target = aj_db.money(cfg.get("order_notional_target_usd") or 0) or aj_db.money(max_notional * 0.5)
     target = min(target, max_notional)
     oo = _option_order(opt, target, "rule: bearish prob_up={:.2f} -> long put".format(float(prob)),
-                       cap_notional=max_notional)
+                       cap_notional=max_notional, cfg=cfg)
     if not oo:
         return None
     out = _propose_and_execute(cycle_id, oo["symbol"], oo["decision"], oo["sizing"],
@@ -1182,37 +1207,25 @@ def run_once(mode: str = "paper") -> Dict[str, Any]:
                     try:
                         import aj_options
                         opt = aj_options.pick_contract(symbol, "buy", cfg)
-                        prem = float((opt or {}).get("premium_contract") or 0)
-                        target = float(sizing.get("notional") or 0)
-                        n_ct = int(target // prem) if prem > 0 else 0
-                        # The per-trade equity target is often smaller than a
-                        # single contract (premium x100), which silently floored
-                        # n_ct to 0 and forced the equity fallback every time —
-                        # the options sleeve never engaged. When a contract is
-                        # chosen but unaffordable at the equity size, size UP to
-                        # exactly one contract, bounded by the hard per-order
-                        # notional cap. The risk gate still validates the result
-                        # (exposure/buying-power) and may block it; this only
-                        # removes the silent 0-contract dead end.
-                        if opt and n_ct < 1 and prem > 0:
-                            cap = float(cfg.get("max_order_notional_usd") or 0)
-                            if 0 < prem <= cap:
-                                n_ct = 1
-                        if opt and n_ct >= 1:
-                            p_symbol = opt["symbol"]
-                            p_sizing = {"qty": n_ct, "price": prem,
-                                        "notional": aj_db.money(n_ct * prem),
-                                        "order_type": "limit", "limit_price": prem}
-                            p_decision = dict(decision)
-                            p_decision["thesis"] = (str(decision.get("thesis", "")) +
-                                " | opt {} {:.0f}C {} x{} @${:.0f}".format(
-                                    opt["underlying"], opt["strike"], opt["expiry"],
-                                    n_ct, prem))[:480]
-                            instrument = {"instrument_type": "option",
-                                          "underlying": opt["underlying"],
-                                          "option_type": opt["option_type"],
-                                          "strike": opt["strike"], "expiry": opt["expiry"],
-                                          "contract_multiplier": opt["contract_multiplier"]}
+                        # Route through _option_order so the bullish CALL sleeve
+                        # shares one sizing path with the bearish PUT sleeve —
+                        # including Fix B's option notional budget/cap. The
+                        # equity target notional is the starting budget; the
+                        # sleeve sizes DOWN to the option budget and refuses a
+                        # single contract that alone breaches the option cap
+                        # (falling back to the equity leg). Legacy 0-cap config
+                        # keeps the old "size up to one contract" behavior.
+                        oo = _option_order(
+                            opt, float(sizing.get("notional") or 0),
+                            str(decision.get("thesis", "")),
+                            cap_notional=float(cfg.get("max_order_notional_usd") or 0),
+                            cfg=cfg) if opt else None
+                        if oo:
+                            p_symbol = oo["symbol"]
+                            p_sizing = oo["sizing"]
+                            p_decision = dict(decision)   # preserve edge/prob/features
+                            p_decision["thesis"] = oo["decision"]["thesis"]
+                            instrument = oo["instrument"]
                     except Exception:
                         log.exception("option routing failed; equity fallback")
                 out = _propose_and_execute(cycle_id, p_symbol, p_decision, p_sizing,

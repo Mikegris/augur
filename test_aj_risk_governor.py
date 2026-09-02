@@ -25,7 +25,7 @@ def _inject(dd=0.0, vix=15.0, regime="bull", exp=None, n=0):
     aj_alpha.current_drawdown_pct = lambda: dd
     aj_rules.current_vix = lambda: vix
     aj_alpha.detect_regime = lambda: regime
-    RG._realized_expectancy = lambda window: (exp, n)
+    RG._realized_expectancy = lambda window, winsor_pct=0.0: (exp, n)
     RG.reset_memo()
 
 

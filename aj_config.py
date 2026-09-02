@@ -71,6 +71,16 @@ DEFAULTS: Dict[str, Any] = {
     "sell_prob_threshold":    0.45,    # prob_up at/below => sell held name
     "min_edge_pct_pts":       3.0,     # |edge| floor; below => no trade
     "order_notional_target_usd": 0.0,  # 0 => half of max_order_notional_usd
+    # Per-asset-class notional caps (opt-in, 0 = disabled). An option or crypto
+    # position risks a far larger fraction of its notional than an equity — a
+    # weekly call can go to zero, and crypto routinely swings 50%+ — so sizing
+    # them to the SAME dollar notional as a stock over-risks the book. These cap
+    # the per-order notional for that asset class BELOW the global cap. See the
+    # v3.25 expectancy post-mortem (one -73.8% crypto lot + oversized weekly
+    # calls single-handedly tripped the governor's negative-expectancy breaker).
+    "max_crypto_notional_usd": 0.0,    # A: cap any single crypto buy's notional
+    "max_option_notional_usd": 0.0,    # B: cap any single option order's premium
+    "option_notional_target_usd": 0.0, # B: size options to this budget (0 => reuse the equity target)
     "use_llm_synthesis":      False,   # off => deterministic rule-based thesis
     "scan_universe_max":      25,      # cap symbols/cycle in open-universe mode
     # ── 25 enhancements (all opt-in; 0/false = disabled) ─────────────────────
@@ -324,6 +334,14 @@ DEFAULTS: Dict[str, Any] = {
     "risk_governor_min":      0.0,     # floor on G when not in a breaker
     "rg_drawdown_derisk_pct": 10.0,    # start shrinking above this portfolio drawdown
     "rg_drawdown_breaker_pct": 20.0,   # circuit breaker: go flat at/above this drawdown
+    # C: robust realized-expectancy estimator. 0 (default) = plain mean (legacy).
+    # When >0, winsorize BOTH tails of the trailing-return window at this
+    # percentile before averaging, so a single catastrophic outlier can't
+    # dominate the breaker (a -73.8% lot dragged a +0.3% book to -0.7% and
+    # froze all entries). Winsorizing keeps every trade as a data point — a big
+    # loss still counts, just capped at the p{winsor} value — unlike a trimmed
+    # mean, which discards the fat winners this strategy depends on.
+    "rg_expectancy_winsor_pct": 0.0,
     "rg_vix_derisk":          30.0,    # halve exposure when VIX at/above this
     "rg_alpha_decay_min_trades": 20,   # min realized closed trades before the alpha arm engages
     "rg_alpha_decay_floor_pct": 0.1,   # weak-but-positive realized expectancy (%) -> halve
@@ -371,6 +389,8 @@ _FLOAT_KEYS = {"max_order_notional_usd", "max_daily_loss_usd",
                "min_fee_usd", "crypto_fee_bps", "buy_prob_threshold",
                "sell_prob_threshold", "min_edge_pct_pts",
                "order_notional_target_usd",
+               "max_crypto_notional_usd", "max_option_notional_usd",
+               "option_notional_target_usd",
                "min_order_notional_usd", "entry_limit_offset_bps",
                "take_profit_pct", "stop_loss_pct", "trailing_stop_pct",
                "max_symbol_weight_pct", "max_slippage_bps", "risk_off_vix",
@@ -399,7 +419,7 @@ _FLOAT_KEYS = {"max_order_notional_usd", "max_daily_loss_usd",
                "metalabel_min_auc", "metalabel_prob_threshold",
                "risk_governor_max", "risk_governor_min", "rg_drawdown_derisk_pct",
                "rg_drawdown_breaker_pct", "rg_vix_derisk", "rg_alpha_decay_floor_pct",
-               "rg_lever_min_expectancy_pct",
+               "rg_lever_min_expectancy_pct", "rg_expectancy_winsor_pct",
                # paper fill realism + cash account
                "paper_fill_liquidity_usd", "paper_cash",
                # tax view

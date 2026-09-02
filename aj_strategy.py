@@ -102,6 +102,15 @@ def size_order(symbol: str, side: str, cfg: Dict[str, Any], held_qty: float,
             log.debug("risk governor skipped", exc_info=True)
 
     target = min(target, max_notional)
+    # Fix A — per-asset-class notional cap (opt-in). A crypto position risks a
+    # far larger fraction of its notional than an equity (routine 50%+ swings; a
+    # -73.8% lot is what tripped the governor breaker), so cap crypto ENTRIES
+    # below the global per-order cap when configured. Sells are exits — never
+    # capped here (see below). 0 => disabled (legacy behavior).
+    if side == "buy" and atype == "crypto":
+        crypto_cap = aj_db.money(cfg.get("max_crypto_notional_usd") or 0)
+        if crypto_cap > 0:
+            target = min(target, crypto_cap)
     # A zero/negative sizing budget vetoes ENTRIES only (max_order_notional_usd
     # defaults to 0.0). A sell is an EXIT sized from the held position, not from
     # `target` — vetoing it here would strand risk a sell signal meant to remove.
