@@ -35,6 +35,7 @@ Python 3.9 compatible.
 from __future__ import annotations
 
 import logging
+import os
 import threading
 import time
 from typing import Optional
@@ -116,6 +117,15 @@ VACUUM_INTERVAL = 7 * 24 * 3600
 # boot, so a long-running session let api_cache balloon (observed ~90 MB of a
 # 97 MB wealth.db). A 30-min cadence keeps it bounded between restarts.
 CACHE_PRUNE_INTERVAL = 30 * 60
+# WAL watchdog: the main wealth.db WAL can only checkpoint past the OLDEST open
+# read snapshot, so a single hung worker thread (one that never returns, so its
+# _safe finally never runs close_thread_conn) pins the WAL and it grows without
+# bound — observed at 7.5 GB after ~8 days, entirely silently. This guard runs a
+# TRUNCATE checkpoint every WAL_GUARD_INTERVAL and, if the WAL is still over
+# WAL_WARN_BYTES afterward (i.e. a reader is pinning it), surfaces the condition
+# LOUDLY (log.error + audit) instead of letting it balloon unseen. Env-tunable.
+WAL_GUARD_INTERVAL = 10 * 60
+WAL_WARN_BYTES = int(float(os.environ.get("AUGUR_WAL_WARN_MB", "512")) * 1024 * 1024)
 INTER_REQUEST_DELAY = 1.2          # spacing between requests within a cycle
 
 # Cap how many portfolio symbols we warm per cycle so an unusually large
@@ -292,6 +302,51 @@ def _watchlist_symbols():
         return eq[:PORTFOLIO_WARM_CAP], crypto[:PORTFOLIO_WARM_CAP]
     except Exception:
         return [], []
+
+
+def _wal_guard() -> None:
+    """Keep the main wealth.db WAL bounded and ALARM if a reader pins it.
+
+    Runs a TRUNCATE checkpoint (cheap when the WAL is small; a no-op reclaim
+    when a reader holds an old snapshot), then measures the WAL file. If it is
+    still over WAL_WARN_BYTES a hung reader is pinning it — the exact failure
+    that grew the WAL to 7.5 GB silently — so we surface it via log.error and a
+    best-effort audit alert instead of letting it balloon unseen. Never raises."""
+    import database as _db
+    wal_path = _db.DB_PATH + "-wal"
+
+    def _wal_mb() -> float:
+        try:
+            return os.path.getsize(wal_path) / (1024 * 1024)
+        except OSError:
+            return 0.0
+
+    before = _wal_mb()
+    ckpt = None
+    try:
+        # TRUNCATE folds the WAL back into the main DB and shrinks the file to 0
+        # when no reader pins it. Uses the warmer thread's own connection.
+        row = _db.get_conn().execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+        ckpt = tuple(row) if row is not None else None
+    except Exception as e:
+        log.debug("wal_guard checkpoint failed: %s", e)
+
+    after = _wal_mb()
+    if after * 1024 * 1024 >= WAL_WARN_BYTES:
+        # busy=1 in the checkpoint result confirms a reader blocked the reclaim.
+        log.error(
+            "WAL GUARD: wealth.db WAL is %.0f MB after checkpoint (was %.0f MB); "
+            "a hung reader is pinning it (checkpoint=%s). A worker thread likely "
+            "never returned — restart to clear, and investigate the hung task.",
+            after, before, ckpt)
+        try:
+            import aj_db
+            aj_db.audit("alert", {"kind": "wal_bloat", "wal_mb": round(after),
+                                  "checkpoint": list(ckpt) if ckpt else None})
+        except Exception:
+            log.debug("wal_guard audit failed", exc_info=True)
+    elif before - after > 1.0:
+        log.info("wal_guard: reclaimed WAL %.0f MB -> %.0f MB", before, after)
 
 
 def _loop():
@@ -535,6 +590,11 @@ def _loop():
                 _safe("cache_prune", _cs.prune_disk)
             except Exception as e:
                 log.debug("cache_prune skipped: %s", e)
+            time.sleep(INTER_REQUEST_DELAY)
+
+        # ── WAL watchdog: bound the main WAL + alarm on a pinned reader ──────
+        if _due("wal_guard", WAL_GUARD_INTERVAL, now):
+            _safe("wal_guard", _wal_guard)
             time.sleep(INTER_REQUEST_DELAY)
 
         # ── daily Jarvis digest delivery (opt-in, OFF by default) ───────
