@@ -230,6 +230,66 @@ def test_C_breaker_clears_under_winsor():
 
 
 # ════════════════════════════════════════════════════════════════════════════
+#  Fix D — regime-aware entry sizing (bull downsize/skip)
+# ════════════════════════════════════════════════════════════════════════════
+
+def _with_regime(r):
+    orig = aj_alpha.detect_regime
+    aj_alpha.detect_regime = lambda: r
+    return orig
+
+
+def test_D_default_is_off_and_skips_regime_read():
+    # Default 1.0 must be a no-op AND must not even consult detect_regime.
+    aj_alpha.detect_regime = lambda: (_ for _ in ()).throw(AssertionError("read!"))
+    try:
+        check(aj_alpha._regime_entry_factor({}) == 1.0,
+              "D: default (no key) => 1.0 without reading regime")
+        check(aj_alpha._regime_entry_factor({"bull_entry_size_factor": 1.0}) == 1.0,
+              "D: factor 1.0 => 1.0 without reading regime")
+    finally:
+        pass
+
+
+def test_D_downsizes_bull_only():
+    orig = _with_regime("bull")
+    try:
+        check(aj_alpha._regime_entry_factor({"bull_entry_size_factor": 0.5}) == 0.5,
+              "D: 0.5 in bull => 0.5")
+    finally:
+        aj_alpha.detect_regime = orig
+    orig = _with_regime("chop")
+    try:
+        check(aj_alpha._regime_entry_factor({"bull_entry_size_factor": 0.5}) == 1.0,
+              "D: 0.5 in chop => 1.0 (chop/bear unchanged)")
+    finally:
+        aj_alpha.detect_regime = orig
+
+
+def test_D_zero_skips_bull_not_falsy_reset():
+    # REGRESSION: `cfg.get(...) or 1.0` would map a deliberate 0.0 back to 1.0.
+    orig = _with_regime("bull")
+    try:
+        check(aj_alpha._regime_entry_factor({"bull_entry_size_factor": 0.0}) == 0.0,
+              "D: 0.0 in bull => 0.0 (skip), not reset to 1.0 by falsy-or")
+        check(aj_alpha.sizing_multiplier("X", "buy",
+              {"bull_entry_size_factor": 0.0}, {"edge_pts": 5}) == 0.0,
+              "D: sizing_multiplier vetoes a bull buy when factor=0")
+    finally:
+        aj_alpha.detect_regime = orig
+
+
+def test_D_sell_unaffected():
+    orig = _with_regime("bull")
+    try:
+        check(aj_alpha.sizing_multiplier("X", "sell",
+              {"bull_entry_size_factor": 0.0}, {"edge_pts": 5}) == 1.0,
+              "D: sells are never regime-downsized")
+    finally:
+        aj_alpha.detect_regime = orig
+
+
+# ════════════════════════════════════════════════════════════════════════════
 
 def main():
     tests = [v for k, v in sorted(globals().items())

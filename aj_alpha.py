@@ -762,6 +762,25 @@ def _correlation_budget_factor(symbol: str, cfg: Dict[str, Any]) -> float:
         return 1.0
 
 
+def _regime_entry_factor(cfg: Dict[str, Any]) -> float:
+    """Downsize (or skip) NEW entries in the regime the book structurally loses
+    in. Data-driven (v3.26 slice report): -$1,873 in bull vs +$1,504 in chop.
+    bull_entry_size_factor in [0,1]: 1.0 (default) = off, 0.5 = half-size bull
+    entries, 0.0 = skip them (returned 0.0 vetoes the order upstream). chop/bear
+    unchanged. detect_regime() is only consulted when the knob is active, so the
+    default path costs nothing. Fail-open to 1.0."""
+    try:
+        # NB: `cfg.get(...) or 1.0` would map a deliberate 0.0 (skip bull
+        # entries) back to 1.0 — 0.0 is falsy. Handle None explicitly.
+        v = cfg.get("bull_entry_size_factor", 1.0)
+        f = float(1.0 if v is None else v)
+        if f >= 1.0:
+            return 1.0                       # off — never upsize, no regime read
+        return max(0.0, f) if detect_regime() == "bull" else 1.0
+    except Exception:
+        return 1.0
+
+
 def sizing_multiplier(symbol: str, side: str, cfg: Dict[str, Any],
                       decision: Optional[Dict[str, Any]] = None) -> float:
     """Combined 1-5 multiplier on the base order target. 1.0 when all off.
@@ -777,6 +796,7 @@ def sizing_multiplier(symbol: str, side: str, cfg: Dict[str, Any],
             _symbol_perf_factor(symbol, cfg),
             _drawdown_factor(cfg),
             _correlation_budget_factor(symbol, cfg),
+            _regime_entry_factor(cfg),
         ]
         if any(f <= 0 for f in factors):
             return 0.0

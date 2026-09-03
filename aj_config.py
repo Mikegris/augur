@@ -126,6 +126,15 @@ DEFAULTS: Dict[str, Any] = {
     "compound_base_equity_usd": 10000.0,  #  equity baseline for compounding ratio
     "symbol_performance_weighting": False,  # 4: up/down-size by per-symbol realized record
     "drawdown_throttle_pct":  0.0,     # 5: equity-drawdown % at which size is fully throttled; 0=off
+    # Regime-aware ENTRY sizing (data-driven, v3.26 slice report): the paper book
+    # was -$1,873 in bull regimes vs +$1,504 in chop — a mean-reversion-natured
+    # strategy that fades trends and gets run over in them. Downsize (or skip) new
+    # entries in bull. bull_entry_size_factor in [0,1]: 1.0 (default) = off,
+    # 0.5 = half-size bull entries, 0.0 = skip them. chop/bear unchanged. This is
+    # the UNCONFOUNDED lever — regime is an entry property, unlike holding-period
+    # (an exit-machinery artifact: 48% of exits are stops, so a min-hold would
+    # just enlarge stop-losses).
+    "bull_entry_size_factor": 1.0,
     # entry alpha (6-11)
     "momentum_filter_days":   0,       # 6: only buy if price > N-day SMA; 0=off
     "mean_reversion_rsi_max": 0.0,     # 7: only buy if RSI(14) <= this; 0=off
@@ -397,7 +406,8 @@ _FLOAT_KEYS = {"max_order_notional_usd", "max_daily_loss_usd",
                # 100x layer
                "kelly_fraction", "volatility_target_pct",
                "compound_base_equity_usd", "drawdown_throttle_pct",
-               "mean_reversion_rsi_max", "max_book_correlation",
+               "mean_reversion_rsi_max", "bull_entry_size_factor",
+               "max_book_correlation",
                "correlation_size_budget", "correlation_size_floor",
                "max_sector_weight_pct", "profit_ratchet_pct",
                "profit_ratchet_lock_pct", "atr_stop_mult",
