@@ -4096,6 +4096,20 @@ def aj_orders_route():
         return _err(e)
 
 
+@app.route("/api/aj/performance/slices", methods=["GET"])
+def aj_performance_slices_route():
+    """Conditional win-rate + expectancy of realized paper trades, sliced by
+    regime / instrument / conviction / holding-period / edge. Surfaces WHERE the
+    losses come from (slices below their own payoff-implied breakeven). Optional
+    ?window=N limits to the most recent N closed trades."""
+    try:
+        import aj_analytics
+        window = _safe_int(request.args.get("window"), 0) or None
+        return jsonify(aj_analytics.performance_slices(window))
+    except Exception as e:
+        return _err(e)
+
+
 @app.route("/api/aj/audit", methods=["GET"])
 def aj_audit_route():
     try:
