@@ -1,8 +1,9 @@
 """Offline tests for aj_features — the meta-labeling feature/label store.
 
 Fully isolated: fresh temp DB, aj_positions.realized_trades monkeypatched with
-canned closed trades, a couple of seeded aj_cycle_stats scan snapshots, regime
-detection stubbed. No network, no LLM. Standalone runner: PASS/FAILED + exit().
+canned closed trades, a couple of seeded aj_cycle_stats scan snapshots, SPY
+history stubbed (build_labels reconstructs each trade's POINT-IN-TIME regime
+from it). No network, no LLM. Standalone runner: PASS/FAILED + exit().
 """
 import os
 import sys
@@ -76,9 +77,21 @@ _CANNED = [
 ]
 
 
+def _bull_spy_history():
+    """330 rising SPY closes (2025-08 → 2026-06) covering the canned trades'
+    open dates: price > 50d SMA >= 200d SMA as of every open, so the
+    point-in-time regime reconstruction reads 'bull' for each trade. (The old
+    fixture stubbed detect_regime() — the exact look-ahead bug that stamped
+    TODAY'S regime on historical trades; build_labels no longer calls it.)"""
+    import datetime as _dt
+    start = _dt.date(2025, 8, 1)
+    return [((start + _dt.timedelta(days=i)).isoformat(), 400.0 + i)
+            for i in range(330)]
+
+
 def _install_fixtures():
     aj_positions.realized_trades = lambda mode="paper": list(_CANNED)
-    aj_alpha.detect_regime = lambda: "bull"
+    F._spy_history = lambda: _bull_spy_history()
     # AAA: an earlier (stale) and a nearer snapshot before the open — nearest
     # prior must win (edge=0.9, conviction=high). BBB has one prior snapshot.
     _seed_scan("AAA", "2026-06-01T15:00:00+00:00", 0.1, "low", 0.4)

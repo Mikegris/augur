@@ -117,7 +117,10 @@ def parse_action(v: Any, default: Action = Action.HOLD) -> Action:
     return default
 
 
-def parse_band(v: Any, default: SentimentBand = SentimentBand.SLIGHTLY_BULLISH) -> SentimentBand:
+def parse_band(v: Any, default: Optional[SentimentBand] = None) -> Optional[SentimentBand]:
+    """None (the default) for unrecognized input: a garbage band must score as
+    NEUTRAL (5.0), not lean bullish — the old SLIGHTLY_BULLISH default tilted
+    consensus bullish exactly when model output was worst."""
     if isinstance(v, SentimentBand):
         return v
     s = str(v or "").strip().upper().replace(" ", "_").replace("-", "_")
@@ -183,7 +186,12 @@ def extract_json(text: Any) -> Dict[str, Any]:
     s = re.sub(r"^\s*```(?:json)?\s*", "", s)
     s = re.sub(r"\s*```\s*$", "", s)
     try:
-        return json.loads(s)
+        obj = json.loads(s)
+        # A bare array/string/null parses fine but violates the Dict contract —
+        # every caller immediately .get()s the result. Fall through to the
+        # brace scan (which may find an object inside a top-level array).
+        if isinstance(obj, dict):
+            return obj
     except Exception:
         pass
     # Walk brace-matched candidates (first valid object wins); tolerant of
@@ -227,13 +235,18 @@ class AnalystReport:
         # Keep rating vocabulary out of the band field: only genuine band/
         # sentiment keys feed the (SentimentBand-typed) band column.
         band_raw = d.get("band") or d.get("sentiment") or ""
-        band = parse_band(band_raw).value if band_is_sentiment else str(band_raw)
+        pb = parse_band(band_raw)
+        band = ((pb.value if pb else "") if band_is_sentiment else str(band_raw))
         score = d.get("score")
         if score is None and band_is_sentiment:
-            score = _BAND_SCORE.get(parse_band(band_raw), 5.0)
+            score = _BAND_SCORE.get(pb, 5.0)
+        # A completely unparseable response must not carry the weight of a
+        # genuinely half-confident analyst — weight it near-zero (0.1, matching
+        # the model-unavailable neutral path) so garbage can't drag consensus.
+        default_conf = 0.5 if d else 0.1
         return cls(
             analyst=analyst, band=band, score=score if score is not None else 5.0,
-            confidence=d.get("confidence", 0.5),
+            confidence=d.get("confidence", default_conf),
             key_points=d.get("key_points") or d.get("points") or [],
             evidence_refs=evidence_refs or d.get("evidence") or [],
             narrative=d.get("narrative") or d.get("summary") or str(text)[:1200],

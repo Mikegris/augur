@@ -68,12 +68,28 @@ def _resolve_light_model(model):
 # never billed-against, so a stale number can only over/under-estimate the
 # council's self-imposed cost cap, never move real money.
 _MODEL_PRICE_PER_M = {
+    # Keep in sync with the verified pricing in the model-selection comment
+    # above ($0.75/$4.50 per 1M for gpt-5.4-mini).
     "gpt-5.5":      (1.25, 10.0),
-    "gpt-5.4-mini": (0.25,  2.0),
+    "gpt-5.4-mini": (0.75,  4.50),
     "gpt-4o":       (2.5,  10.0),
     "gpt-4o-mini":  (0.15,  0.6),
 }
 _DEFAULT_PRICE_PER_M = (1.0, 4.0)
+
+
+def _price_for_model(model):
+    """Pricing lookup tolerant of snapshot IDs: the API reports `resp.model`
+    as a dated snapshot (e.g. 'gpt-5.5-2026-04-23'), which would never
+    exact-match the table. Match by LONGEST prefix so 'gpt-4o-mini-…' picks
+    the mini price, not 'gpt-4o'; fall back to the blended default only when
+    nothing matches."""
+    m = str(model or "").lower()
+    best_key = None
+    for key in _MODEL_PRICE_PER_M:
+        if m.startswith(key) and (best_key is None or len(key) > len(best_key)):
+            best_key = key
+    return _MODEL_PRICE_PER_M[best_key] if best_key else _DEFAULT_PRICE_PER_M
 
 
 def _estimate_cost_usd(model, usage):
@@ -85,8 +101,7 @@ def _estimate_cost_usd(model, usage):
             return 0.0
         pin = int(getattr(usage, "prompt_tokens", 0) or 0)
         pout = int(getattr(usage, "completion_tokens", 0) or 0)
-        rin, rout = _MODEL_PRICE_PER_M.get(str(model or "").lower(),
-                                           _DEFAULT_PRICE_PER_M)
+        rin, rout = _price_for_model(model)
         return (pin / 1_000_000.0) * rin + (pout / 1_000_000.0) * rout
     except Exception:
         return 0.0
@@ -693,7 +708,14 @@ def _openai_summarize(text, form_type, ticker, description, api_key):
 
     def _call():
         if _cap_exceeded():
-            return _cap_error_envelope("summarize_filing")
+            # Cap reached: return the schema-complete rule-based summary, NOT
+            # the bare cap envelope. Callers (app.py's intel feed) persist this
+            # result into sec_filings_cache keyed on the immutable accession —
+            # a {error,...} envelope would be stored as a permanently blank
+            # NEUTRAL row that survives the midnight cap reset.
+            res = _rule_based_summarize(text, form_type, ticker, description)
+            res["note"] = "Daily AI request cap reached — rule-based summary."
+            return res
         try:
             from openai import OpenAI
             # Bound request time — the SDK's default is 10 min, which is too
@@ -755,11 +777,18 @@ Return JSON only."""
             # systematic JSON/refusal/None-content problem is observable rather
             # than silently degrading to the rule-based path.
             log.debug("summarize_filing AI path failed, using rule-based: %s", e)
-            return _rule_based_summarize(text, form_type, ticker, description)
+            # Re-raise so coalesce does NOT cache the degraded fallback for the
+            # full 7-day TTL after a transient OpenAI error (timeout, 429):
+            # the outer handler below serves the rule-based summary uncached,
+            # so the next call retries the AI path once the API recovers.
+            raise
 
-    if cache_store is None:
-        return _call()
-    return cache_store.coalesce(cache_key, _FILING_SUMMARY_TTL, _call)
+    try:
+        if cache_store is None:
+            return _call()
+        return cache_store.coalesce(cache_key, _FILING_SUMMARY_TTL, _call)
+    except Exception:
+        return _rule_based_summarize(text, form_type, ticker, description)
 
 
 def _rule_based_summarize(text, form_type, ticker, description):
@@ -848,9 +877,18 @@ def analyze_portfolio(holdings, summary, model=None):
             return _cap_error_envelope("analyze_portfolio")
         return _analyze_portfolio_uncached(holdings, summary, model, key)
 
-    if cache_store is not None:
-        return cache_store.coalesce(cache_key, _PORTFOLIO_TTL, _do_call)
-    return _do_call()
+    # Transient OpenAI failures propagate as exceptions out of the uncached
+    # builder so coalesce never caches the rule-based fallback for the full
+    # 24h TTL — the fallback is built HERE, outside the cache, and the next
+    # call retries the AI path once the API recovers.
+    try:
+        if cache_store is not None:
+            return cache_store.coalesce(cache_key, _PORTFOLIO_TTL, _do_call)
+        return _do_call()
+    except Exception as e:
+        fallback = _rule_based_portfolio_analysis(holdings, summary)
+        fallback["error_detail"] = str(e)
+        return fallback
 
 
 def _analyze_portfolio_uncached(holdings, summary, model, key):
@@ -935,9 +973,11 @@ Return this exact JSON structure:
         result["model_used"] = getattr(resp, "model", None) or model
         return result
     except Exception as e:
-        fallback = _rule_based_portfolio_analysis(holdings, summary)
-        fallback["error_detail"] = str(e)
-        return fallback
+        # Propagate: the caller (analyze_portfolio) builds the rule-based
+        # fallback OUTSIDE the cache so a transient error isn't frozen in
+        # place for the 24h TTL.
+        log.debug("analyze_portfolio AI path failed, using rule-based: %s", e)
+        raise
 
 
 def _rule_based_portfolio_analysis(holdings, summary):
@@ -1051,9 +1091,16 @@ def generate_earnings_brief(dossier, model=None):
             return _cap_error_envelope("generate_earnings_brief")
         return _earnings_brief_uncached(dossier, model, key)
 
-    if cache_store is not None:
-        return cache_store.coalesce(cache_key, _EARNINGS_BRIEF_TTL, _do_call)
-    return _do_call()
+    # Same pattern as analyze_portfolio: build the rule-based fallback OUTSIDE
+    # the cache so coalesce never pins a transient-failure fallback for 6h.
+    try:
+        if cache_store is not None:
+            return cache_store.coalesce(cache_key, _EARNINGS_BRIEF_TTL, _do_call)
+        return _do_call()
+    except Exception as e:
+        fallback = _rule_based_earnings_brief(dossier)
+        fallback["error_detail"] = str(e)
+        return fallback
 
 
 def _earnings_brief_uncached(dossier, model, key):
@@ -1171,9 +1218,10 @@ Return this exact JSON:
         result["model_used"] = getattr(resp, "model", None) or model
         return result
     except Exception as e:
-        fallback = _rule_based_earnings_brief(dossier)
-        fallback["error_detail"] = str(e)
-        return fallback
+        # Propagate: generate_earnings_brief builds the fallback outside the
+        # cache so a transient error isn't frozen for the 6h TTL.
+        log.debug("generate_earnings_brief AI path failed, using rule-based: %s", e)
+        raise
 
 
 def _rule_based_earnings_brief(dossier):
@@ -1270,9 +1318,16 @@ def generate_idea_thesis(idea, model=None):
             return _cap_error_envelope("generate_idea_thesis")
         return _generate_idea_thesis_uncached(idea, model, key)
 
-    if cache_store is not None:
-        return cache_store.coalesce(cache_key, _IDEA_THESIS_TTL, _do_call)
-    return _do_call()
+    # Same pattern as analyze_portfolio: build the rule-based fallback OUTSIDE
+    # the cache so coalesce never pins a transient-failure fallback for 12h.
+    try:
+        if cache_store is not None:
+            return cache_store.coalesce(cache_key, _IDEA_THESIS_TTL, _do_call)
+        return _do_call()
+    except Exception as e:
+        fallback = _rule_based_idea_thesis(idea)
+        fallback["error_detail"] = str(e)
+        return fallback
 
 
 def _generate_idea_thesis_uncached(idea, model, key):
@@ -1429,9 +1484,10 @@ Return this exact JSON:
         result["model_used"] = getattr(resp, "model", None) or model
         return result
     except Exception as e:
-        fallback = _rule_based_idea_thesis(idea)
-        fallback["error_detail"] = str(e)
-        return fallback
+        # Propagate: generate_idea_thesis builds the fallback outside the
+        # cache so a transient error isn't frozen for the 12h TTL.
+        log.debug("generate_idea_thesis AI path failed, using rule-based: %s", e)
+        raise
 
 
 def _rule_based_idea_thesis(idea):
@@ -1615,6 +1671,13 @@ Transactions: {txn_summary}""",
     # being cached for 6h — outliving the midnight cap reset and returning
     # "cap reached" for hours after the budget refreshed.
     if _cap_exceeded():
+        # Serve an already-paid cache HIT even while capped (same rationale
+        # as tts_speech): replaying a cached analysis costs nothing — only
+        # NEW synthesis is gated by the cap.
+        if cache_store is not None:
+            cached = cache_store.cache_get(cache_key)
+            if cached is not None:
+                return cached
         return _do_call()
     if cache_store is not None:
         return cache_store.coalesce(cache_key, _INSIDER_PATTERN_TTL, _do_call)

@@ -35,6 +35,7 @@ Python 3.9 compatible.
 from __future__ import annotations
 
 import logging
+import os
 import threading
 import time
 from typing import Optional
@@ -116,6 +117,15 @@ VACUUM_INTERVAL = 7 * 24 * 3600
 # boot, so a long-running session let api_cache balloon (observed ~90 MB of a
 # 97 MB wealth.db). A 30-min cadence keeps it bounded between restarts.
 CACHE_PRUNE_INTERVAL = 30 * 60
+# WAL watchdog: the main wealth.db WAL can only checkpoint past the OLDEST open
+# read snapshot, so a single hung worker thread (one that never returns, so its
+# _safe finally never runs close_thread_conn) pins the WAL and it grows without
+# bound — observed at 7.5 GB after ~8 days, entirely silently. This guard runs a
+# TRUNCATE checkpoint every WAL_GUARD_INTERVAL and, if the WAL is still over
+# WAL_WARN_BYTES afterward (i.e. a reader is pinning it), surfaces the condition
+# LOUDLY (log.error + audit) instead of letting it balloon unseen. Env-tunable.
+WAL_GUARD_INTERVAL = 10 * 60
+WAL_WARN_BYTES = int(float(os.environ.get("AUGUR_WAL_WARN_MB", "512")) * 1024 * 1024)
 INTER_REQUEST_DELAY = 1.2          # spacing between requests within a cycle
 
 # Cap how many portfolio symbols we warm per cycle so an unusually large
@@ -160,24 +170,34 @@ _inflight_lock = threading.Lock()
 WARM_CALL_TIMEOUT = 45.0
 
 
-def _safe(label: str, fn, *args, **kwargs):
+def _safe(label: str, fn, *args, inflight_label: Optional[str] = None, **kwargs):
     """Wrap a warm call so a single endpoint failure doesn't kill the thread.
     Records the timestamp on success for the status endpoint.
 
     Bounded by WARM_CALL_TIMEOUT — if the call doesn't return in time we log
     and move on, otherwise one slow upstream (yfinance 60s timeout, SEC
-    EDGAR 90s response) can starve all the other cadences."""
+    EDGAR 90s response) can starve all the other cadences.
+
+    `inflight_label` (WHY, #136): per-symbol sweeps (fundamentals/news/chart)
+    share one cadence/backoff label across every symbol. Using that shared
+    label for the orphan guard meant ONE symbol blowing the soft timeout
+    caused every remaining symbol in the sweep to be skipped — and each skip
+    bumped the failure count, rocketing a single slow upstream call to max
+    backoff. Sweeps pass a per-symbol inflight label (e.g. "fundamentals:IBM")
+    so only the actually-hung symbol is refused a second worker, while
+    success/failure accounting stays on the aggregate `label`."""
+    ilabel = inflight_label or label
     # Refuse to spawn a second worker for a label whose prior (timed-out) worker
     # is still running — caps concurrent orphans at one per label instead of one
     # per cadence under a persistently-slow upstream.
     with _inflight_lock:
-        prev = _inflight.get(label)
+        prev = _inflight.get(ilabel)
         if prev is not None and prev.is_alive():
-            log.warning("warmer %s still running from a prior tick; skipping", label)
+            log.warning("warmer %s still running from a prior tick; skipping", ilabel)
             _record_failure(label)
             return False
         if prev is not None:
-            _inflight.pop(label, None)
+            _inflight.pop(ilabel, None)
 
     holder = {"err": None, "done": False}
 
@@ -210,7 +230,7 @@ def _safe(label: str, fn, *args, **kwargs):
                     label, WARM_CALL_TIMEOUT)
         # Remember the still-running orphan so the next tick won't pile on.
         with _inflight_lock:
-            _inflight[label] = t
+            _inflight[ilabel] = t
         _record_failure(label)
         return False
     if holder["err"] is not None:
@@ -284,6 +304,51 @@ def _watchlist_symbols():
         return [], []
 
 
+def _wal_guard() -> None:
+    """Keep the main wealth.db WAL bounded and ALARM if a reader pins it.
+
+    Runs a TRUNCATE checkpoint (cheap when the WAL is small; a no-op reclaim
+    when a reader holds an old snapshot), then measures the WAL file. If it is
+    still over WAL_WARN_BYTES a hung reader is pinning it — the exact failure
+    that grew the WAL to 7.5 GB silently — so we surface it via log.error and a
+    best-effort audit alert instead of letting it balloon unseen. Never raises."""
+    import database as _db
+    wal_path = _db.DB_PATH + "-wal"
+
+    def _wal_mb() -> float:
+        try:
+            return os.path.getsize(wal_path) / (1024 * 1024)
+        except OSError:
+            return 0.0
+
+    before = _wal_mb()
+    ckpt = None
+    try:
+        # TRUNCATE folds the WAL back into the main DB and shrinks the file to 0
+        # when no reader pins it. Uses the warmer thread's own connection.
+        row = _db.get_conn().execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+        ckpt = tuple(row) if row is not None else None
+    except Exception as e:
+        log.debug("wal_guard checkpoint failed: %s", e)
+
+    after = _wal_mb()
+    if after * 1024 * 1024 >= WAL_WARN_BYTES:
+        # busy=1 in the checkpoint result confirms a reader blocked the reclaim.
+        log.error(
+            "WAL GUARD: wealth.db WAL is %.0f MB after checkpoint (was %.0f MB); "
+            "a hung reader is pinning it (checkpoint=%s). A worker thread likely "
+            "never returned — restart to clear, and investigate the hung task.",
+            after, before, ckpt)
+        try:
+            import aj_db
+            aj_db.audit("alert", {"kind": "wal_bloat", "wal_mb": round(after),
+                                  "checkpoint": list(ckpt) if ckpt else None})
+        except Exception:
+            log.debug("wal_guard audit failed", exc_info=True)
+    elif before - after > 1.0:
+        log.info("wal_guard: reclaimed WAL %.0f MB -> %.0f MB", before, after)
+
+
 def _loop():
     log.info("cache warmer thread starting — boot delay %ds", BOOT_DELAY_SECONDS)
     time.sleep(BOOT_DELAY_SECONDS)
@@ -345,11 +410,20 @@ def _loop():
             wl_eq, wl_crypto = _watchlist_symbols()
         else:
             eq = crypto = wl_eq = wl_crypto = []
+        # WHY (#135): stamp the cadence even when a leg has NO symbols to warm
+        # (mirrors the fundamentals/news/chart "any_ok or not eq" pattern).
+        # Without the stamp, a fresh install (empty portfolio + watchlist)
+        # left both legs perpetually "due", re-running the 2 portfolio/
+        # watchlist SELECTs above on EVERY 15s tick — the exact per-tick DB
+        # polling the quotes_due/quotes_crypto_due gate exists to avoid.
         if quotes_due:
             all_eq = list(dict.fromkeys(eq + wl_eq))  # dedupe, keep order
             if all_eq:
                 _safe("quotes", fetcher.get_quotes_batch, all_eq)
                 time.sleep(INTER_REQUEST_DELAY)
+            else:
+                with _book_lock:
+                    _last_cycle["quotes"] = time.time()
         if quotes_crypto_due:
             all_crypto = list(dict.fromkeys(crypto + wl_crypto))
             if all_crypto:
@@ -360,13 +434,19 @@ def _loop():
                              for s in all_crypto]
                 _safe("quotes_crypto", fetcher.get_quotes_batch, yf_crypto)
                 time.sleep(INTER_REQUEST_DELAY)
+            else:
+                with _book_lock:
+                    _last_cycle["quotes_crypto"] = time.time()
 
         # ── slow cadence: fundamentals + news + benchmark ────────────
         if _due("fundamentals", FUNDAMENTALS_INTERVAL, now):
             eq, _ = _portfolio_symbols()
             any_ok = False
             for sym in eq:
-                any_ok = _safe("fundamentals", fetcher.get_fundamentals, sym) or any_ok
+                # Per-symbol inflight label (#136): a hung symbol must not
+                # block the rest of the sweep or inflate the failure count.
+                any_ok = _safe("fundamentals", fetcher.get_fundamentals, sym,
+                               inflight_label="fundamentals:" + sym) or any_ok
                 time.sleep(INTER_REQUEST_DELAY)
             # Only advance the cadence if SOMETHING succeeded — an all-failed
             # sweep must stay in backoff, not be stamped done for 12h.
@@ -378,7 +458,8 @@ def _loop():
             eq, _ = _portfolio_symbols()
             any_ok = False
             for sym in eq:
-                any_ok = _safe("news", fetcher.get_news, sym) or any_ok
+                any_ok = _safe("news", fetcher.get_news, sym,
+                               inflight_label="news:" + sym) or any_ok
                 time.sleep(INTER_REQUEST_DELAY)
             if any_ok or not eq:
                 with _book_lock:
@@ -405,7 +486,8 @@ def _loop():
             symbols = list(dict.fromkeys(eq + wl_eq))[:PORTFOLIO_WARM_CAP]
             any_ok = False
             for sym in symbols:
-                any_ok = _safe("chart", fetcher.get_chart_data, sym, "6mo", "1d") or any_ok
+                any_ok = _safe("chart", fetcher.get_chart_data, sym, "6mo", "1d",
+                               inflight_label="chart:" + sym) or any_ok
                 time.sleep(INTER_REQUEST_DELAY)
             if any_ok or not symbols:
                 with _book_lock:
@@ -510,6 +592,11 @@ def _loop():
                 log.debug("cache_prune skipped: %s", e)
             time.sleep(INTER_REQUEST_DELAY)
 
+        # ── WAL watchdog: bound the main WAL + alarm on a pinned reader ──────
+        if _due("wal_guard", WAL_GUARD_INTERVAL, now):
+            _safe("wal_guard", _wal_guard)
+            time.sleep(INTER_REQUEST_DELAY)
+
         # ── daily Jarvis digest delivery (opt-in, OFF by default) ───────
         # When the `digest_enabled` setting is on, deliver the briefing once
         # per day at/after the configured local hour (default 8). A date
@@ -527,13 +614,27 @@ def _loop():
                 except (TypeError, ValueError):
                     _hour = 8
                 _today = _local.date().isoformat()
-                if _local.hour >= _hour and _settings.get("digest_last_sent") != _today:
+                # WHY (#131): only stamp the watermark when delivery actually
+                # succeeded. Stamping unconditionally meant one SMTP/network
+                # failure (or a 45s soft timeout) silently blocked every retry
+                # until tomorrow — the user never got that day's digest. Since
+                # the watermark no longer masks failures, this gate must now
+                # honor _record_failure's backoff schedule (it never used
+                # _due), or a persistent failure would be retried on every
+                # 15s tick. Tradeoff: a delivery that succeeds upstream but
+                # blows the soft timeout may double-send on the retry — a
+                # duplicate email beats a silently-missing one.
+                with _book_lock:
+                    _digest_retry = _next_retry.get("digest", 0)
+                if (_local.hour >= _hour
+                        and _settings.get("digest_last_sent") != _today
+                        and time.time() >= _digest_retry):
                     import jarvis_delivery
-                    _safe("digest", jarvis_delivery.deliver_digest)
-                    try:
-                        _db.set_setting("digest_last_sent", _today)
-                    except Exception:
-                        pass
+                    if _safe("digest", jarvis_delivery.deliver_digest):
+                        try:
+                            _db.set_setting("digest_last_sent", _today)
+                        except Exception:
+                            pass
         except Exception as e:
             log.debug("digest schedule skipped: %s", e)
 

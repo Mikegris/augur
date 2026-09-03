@@ -25,7 +25,7 @@ def _inject(dd=0.0, vix=15.0, regime="bull", exp=None, n=0):
     aj_alpha.current_drawdown_pct = lambda: dd
     aj_rules.current_vix = lambda: vix
     aj_alpha.detect_regime = lambda: regime
-    RG._realized_expectancy = lambda window: (exp, n)
+    RG._realized_expectancy = lambda window, winsor_pct=0.0: (exp, n)
     RG.reset_memo()
 
 
@@ -145,6 +145,54 @@ def test_size_order_buy_shrinks_sell_unaffected():
     assert aj_strategy.size_order("AAA", "buy", aj_config.get_config(), 0.0, {"edge_pts": 5.0}) is None
     sell2 = aj_strategy.size_order("AAA", "sell", aj_config.get_config(), 50.0, {"edge_pts": 0.0})
     assert sell2 is not None and abs(sell2["qty"] - 50.0) < 1e-9, sell2
+    _restore()
+
+
+def test_memo_invalidated_by_rg_config_change():
+    # A governor-config change must take effect IMMEDIATELY, not after the
+    # memo TTL: the fingerprint of rg_*/risk_governor_* values keys the memo.
+    _inject(dd=15.0, vix=14.0, regime="bull")   # inside the 10..20 derisk band
+    r1 = RG.exposure_multiplier(_cfg())
+    assert 0.25 <= r1["G"] < 1.0, r1
+    # memo hit with UNCHANGED config (no reset_memo — same fingerprint)
+    assert RG.exposure_multiplier(_cfg()) is r1
+    # widen the derisk band so dd=15 no longer shrinks — WITHOUT reset_memo;
+    # the stale memoized G must not be served
+    r2 = RG.exposure_multiplier(_cfg(rg_drawdown_derisk_pct=16.0))
+    assert abs(r2["G"] - 1.0) < 1e-9, r2
+    # and a risk_governor_* change invalidates too (max>1 alters the snapshot)
+    _inject(dd=15.0, vix=14.0, regime="bull", exp=1.0, n=80)
+    RG.exposure_multiplier(_cfg())
+    r3 = RG.exposure_multiplier(_cfg(risk_governor_max=1.5,
+                                     rg_drawdown_derisk_pct=16.0))
+    assert r3["G"] > 1.0, r3
+    _restore()
+
+
+def test_snapshot_persisted_only_on_G_change():
+    # Fresh computes persist ONE aj_risk_events decision='governor' row per
+    # G change — steady state must not grow the table every cycle.
+    def _n_rows():
+        rows = aj_db.query(
+            "SELECT COUNT(*) AS n FROM aj_risk_events WHERE decision='governor'")
+        return int(rows[0]["n"])
+    base = _n_rows()
+    _inject(dd=0.0, vix=14.0, regime="bull")
+    r = RG.exposure_multiplier(_cfg())          # G=1.0 -> new row
+    assert _n_rows() == base + 1
+    _inject(dd=0.0, vix=14.0, regime="bull")    # reset memo; SAME G recomputed
+    RG.exposure_multiplier(_cfg())
+    assert _n_rows() == base + 1                # unchanged G -> no new row
+    _inject(dd=0.0, vix=35.0, regime="bull")    # high VIX -> G=0.5 -> new row
+    r = RG.exposure_multiplier(_cfg())
+    assert abs(r["G"] - 0.5) < 1e-9
+    assert _n_rows() == base + 2
+    # the persisted snapshot carries the components + first reason
+    row = aj_db.query("SELECT reason, caps_json FROM aj_risk_events "
+                      "WHERE decision='governor' ORDER BY id DESC LIMIT 1")[0]
+    import json
+    comps = json.loads(row["caps_json"])
+    assert comps["G"] == 0.5 and comps["vix"] == 35.0 and "VIX" in row["reason"], row
     _restore()
 
 

@@ -352,13 +352,20 @@
     var runBtn    = root.querySelector('[data-mc-run]');
 
     var currentSim = null;
+    var runSeq = 0; // generation token: only the LATEST run may paint results
 
     function setBusy(b) {
       overlay.style.display = b ? 'flex' : 'none';
       runBtn.disabled = b;
+      // Horizon/method 'change' events also fire run(): leaving them enabled
+      // mid-flight let a slower stale simulation race the newer one and
+      // repaint the cone with mislabeled numbers. Disable them too.
+      horizonEl.disabled = b;
+      methodEl.disabled = b;
     }
 
     async function run() {
+      var seq = ++runSeq;
       var horizon = parseInt(horizonEl.value, 10) || 90;
       var method  = methodEl.value || 'historical_bootstrap';
       setBusy(true);
@@ -368,10 +375,12 @@
           method: method,
           n_paths: opts.n_paths,
         });
+        if (seq !== runSeq) return; // superseded by a newer run — drop result
         currentSim = sim;
         _renderChart(canvas, sim);
         _renderSide(sideEl, sim);
       } catch (e) {
+        if (seq !== runSeq) return; // stale failure — a newer run owns the UI
         if (global.Toast) global.Toast.error('Monte Carlo failed: ' + e.message);
         sideEl.innerHTML = '<div class="text-red" style="font-size:11px">' + _esc(e.message) + '</div>';
         // Tear down any prior chart so the user doesn't see a stale cone
@@ -385,7 +394,7 @@
         }
         currentSim = null;
       } finally {
-        setBusy(false);
+        if (seq === runSeq) setBusy(false);
       }
     }
 

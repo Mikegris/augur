@@ -355,8 +355,15 @@ def ask_claude(query: str,
             except Exception:
                 pass
 
+    saw_result = False   # a 'result' event arrived → answer is definitive
+    timed_out = False    # loop exited via deadline, not EOF
+
     while True:
-        if is_cancelled() or time.time() > deadline:
+        if is_cancelled():
+            _terminate()
+            break
+        if time.time() > deadline:
+            timed_out = True
             _terminate()
             break
         try:
@@ -389,11 +396,19 @@ def ask_claude(query: str,
                     if txt:
                         answer = txt  # last assistant text; result event confirms
         elif etype == "result":
-            res = ev.get("result")
-            if isinstance(res, str) and res.strip():
-                answer = res.strip()
             if ev.get("is_error"):
+                # A failed run's `result` is the CLI's error text (auth,
+                # credits, error_max_turns…) — NEVER adopt it as the answer.
+                # Clear any interim narration too, so the empty-answer path
+                # below returns None and the caller falls back to the normal
+                # OpenAI/rule routing, as the docstring promises.
                 log.warning("claude result error: %s", ev.get("subtype"))
+                answer = ""
+            else:
+                res = ev.get("result")
+                if isinstance(res, str) and res.strip():
+                    answer = res.strip()
+                saw_result = True
 
     # Drain the process so it can't linger.
     try:
@@ -422,6 +437,16 @@ def ask_claude(query: str,
         except Exception:
             pass
         return None
+
+    # Deadline expiry with no 'result' event means `answer` is the LAST
+    # streamed interim narration (often "Let me check X next…"), not a
+    # conclusion. Better to surface it flagged as partial than to discard
+    # ~10 minutes of investigation, but never present it as definitive.
+    if timed_out and not saw_result:
+        log.warning("claude run hit deadline; returning partial answer")
+        answer = answer.rstrip() + \
+            "\n\n⚠ (timed out — partial: the investigation hit its time " \
+            "limit before reaching a conclusion)"
 
     # Deduplicate tool names while preserving order, for the reasoning trace.
     seen = set()

@@ -70,6 +70,24 @@ def test_days_beaten_counts_daily_wins():
     assert v["days_total"] == 2 and v["days_beaten"] == 1, v
 
 
+def test_days_beaten_uses_true_daily_returns_after_drift():
+    # Once the agent NAV has drifted far from its base, differencing the
+    # cumulative-% series overstated its daily move (a +1% day on a doubled NAV
+    # showed as +2 cumulative points). The beat test must use TRUE daily
+    # returns off consecutive raw values.
+    aj_analytics.equity_curve = lambda days=90: [
+        {"date": "2026-06-26", "equity_usd": 0.0},       # NAV 10000
+        {"date": "2026-06-29", "equity_usd": 10000.0},   # NAV 20000: +100% day
+        {"date": "2026-06-30", "equity_usd": 10200.0}]   # NAV 20200: +1% day
+    _patch_indexes({"SPY": {"2026-06-26": 100.0, "2026-06-29": 100.0,
+                            "2026-06-30": 101.5}})       # day2: +1.5%
+    r = BM.benchmark(_cfg())
+    v = r["vs"]["SPY"]
+    # day1: +100% vs 0% -> win. day2: +1% vs +1.5% -> LOSS (the old cum-diff
+    # math scored it +2.0 vs +1.5 points and wrongly counted a win).
+    assert v["days_total"] == 2 and v["days_beaten"] == 1, v
+
+
 def test_fail_open_on_bad_index_data():
     aj_analytics.equity_curve = lambda days=90: [
         {"date": "2026-06-29", "equity_usd": 100.0},

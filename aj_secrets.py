@@ -207,6 +207,139 @@ def delete(scope: str) -> None:
         log.exception("aj_secrets.delete failed for %s", scope)
 
 
+def _persist_key_file(key: bytes) -> str:
+    """Atomically (re)write the master-key file with 0600 perms. Unlike the
+    first-generation path in _load_master_key (os.link — must FAIL if a key
+    already exists), rotation must REPLACE the existing file, so publish with
+    os.replace: atomic, and any concurrent reader sees either the complete old
+    key or the complete new one, never a truncated file."""
+    import uuid as _uuid
+    path = _key_file()
+    old_umask = os.umask(0o077)
+    tmp = "{}.{}.{}.tmp".format(path, os.getpid(), _uuid.uuid4().hex)
+    try:
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        try:
+            os.fchmod(fd, 0o600)
+            os.write(fd, key)
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        os.replace(tmp, path)
+    finally:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        os.umask(old_umask)
+    return path
+
+
+def rotate_master_key(new_key: Optional[Any] = None) -> Dict[str, Any]:
+    """Rotate the Fernet master key: decrypt every stored `__aj_sec_*` blob
+    with the CURRENT key, re-encrypt all under the new one (generated when not
+    supplied), persist the blobs + the new key. Returns counts ONLY — never key
+    material or secret values (callers print the dict).
+
+    Atomic-ish: nothing is written until EVERY blob decrypts under the current
+    key (any failure aborts with the store untouched); the re-encrypted blobs
+    then land in ONE transaction, and if persisting the new key subsequently
+    fails the old ciphertexts are restored from memory (also one transaction).
+
+    Key persistence follows the module's load convention (env > file): the
+    `.aj_secret_key` file is always rewritten, and when AUGUR_SECRETS_KEY is
+    the active source this process's env is updated too — but an EXTERNAL env
+    source (launchd/shell profile) cannot be reached from here, so the result
+    flags env_key_active=True and the operator must update it (else a restart
+    resolves the OLD key and every rotated blob becomes undecryptable)."""
+    from cryptography.fernet import Fernet
+    try:
+        old_f = _fernet()
+    except Exception as e:
+        return {"ok": False, "error": "current master key unavailable: {}".format(e)}
+    # Resolve + validate the new key BEFORE touching anything.
+    try:
+        if new_key is None:
+            new_kb = Fernet.generate_key()
+        else:
+            new_kb = new_key.encode() if isinstance(new_key, str) else bytes(new_key)
+        new_f = Fernet(new_kb)   # malformed supplied key fails loudly here
+    except Exception as e:
+        return {"ok": False, "error": "invalid new key: {}".format(e)}
+
+    # Snapshot every secret blob. ESCAPE the LIKE pattern: '_' is a LIKE
+    # wildcard, so a bare '__aj_sec_%' could also match unrelated keys.
+    try:
+        cur = db.get_conn().execute(
+            "SELECT key, value FROM settings WHERE key LIKE '@_@_aj@_sec@_%' ESCAPE '@'")
+        try:
+            rows = [(r["key"], r["value"]) for r in cur.fetchall()]
+        finally:
+            cur.close()
+    except Exception as e:
+        return {"ok": False, "error": "could not read secret store: {}".format(e)}
+
+    # Phase 1 — decrypt ALL under the current key; any failure aborts with the
+    # store untouched (a blob the old key can't open would be silently
+    # destroyed by re-encryption, so rotation must not proceed past it).
+    old_blobs: Dict[str, str] = {}
+    new_blobs: Dict[str, str] = {}
+    for key, val in rows:
+        scope = key[len(_PREFIX):]
+        try:
+            plain = old_f.decrypt(base64.b64decode(val))
+        except Exception as e:                    # InvalidToken, bad base64, …
+            return {"ok": False, "rotated": 0,
+                    "error": "decrypt failed for scope '{}' — rotation aborted, "
+                             "nothing changed ({})".format(scope, type(e).__name__)}
+        old_blobs[key] = val
+        new_blobs[key] = base64.b64encode(new_f.encrypt(plain)).decode("ascii")
+        del plain
+
+    def _write_blobs(blobs: Dict[str, str]) -> None:
+        with db._write_lock:
+            conn = db.get_conn()
+            for k, v in blobs.items():
+                conn.execute(
+                    "INSERT OR REPLACE INTO settings (key, value) VALUES (?,?)", (k, v))
+            conn.commit()
+        try:
+            db._invalidate_settings_cache()
+        except Exception:
+            pass
+
+    # Phase 2 — publish the re-encrypted blobs (one transaction), then the key.
+    env_active = bool(os.environ.get("AUGUR_SECRETS_KEY"))
+    try:
+        _write_blobs(new_blobs)
+        key_file = _persist_key_file(new_kb)
+        if env_active:
+            # env beats file at load time — keep THIS process consistent; the
+            # external source is the operator's to update (flagged in result).
+            os.environ["AUGUR_SECRETS_KEY"] = new_kb.decode("ascii")
+    except Exception as e:
+        # Key persistence failed after the blobs landed: restore the old
+        # ciphertexts so the store matches the key that IS loadable.
+        try:
+            _write_blobs(old_blobs)
+        except Exception:
+            log.critical("rotate_master_key: could not restore old blobs after "
+                         "key-persist failure — secret store may be inconsistent")
+        return {"ok": False, "rotated": 0,
+                "error": "could not persist new key — rotation rolled back ({})".format(e)}
+
+    _log_access("rotate_key", "*", actor="human")
+    try:
+        import aj_db
+        aj_db.audit("secret_rotate_key", {"rotated": len(new_blobs),
+                                          "env_key_active": env_active},
+                    actor="human")
+    except Exception:
+        log.debug("rotation audit failed", exc_info=True)
+    return {"ok": True, "rotated": len(new_blobs), "key_file": key_file,
+            "env_key_active": env_active}
+
+
 def _log_access(action: str, scope: str, caller: str = "", actor: str = "system") -> None:
     # Audit the ACCESS, never the secret value.
     try:

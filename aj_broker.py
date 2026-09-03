@@ -87,6 +87,9 @@ class PaperBroker(BrokerClient):
     """Deterministic paper fills against live quotes with modeled slippage and
     fees. Market orders fill immediately; marketable limit orders fill at the
     limit or better; non-marketable limits rest (state 'accepted', 0 filled).
+    With `paper_partial_fills` on, a marketable order larger than the
+    `paper_fill_liquidity_usd` budget fills only partially at submit and
+    completes on a later get_order() poll (see submit()).
 
     Paper is its own source of truth, so reconciliation against it always
     matches — the recon machinery is still exercised for shape parity.
@@ -185,14 +188,63 @@ class PaperBroker(BrokerClient):
             # else: not marketable -> rest
 
         if fill_price is None:
-            # resting limit order
+            # resting limit order — persist the order params in raw so the
+            # get_order() poll can re-check marketability and actually fill it
+            # later (a resting paper limit that can never fill would strand
+            # every limit_entry buy until TTL expiry).
             res = {"broker_order_id": boid, "state": "accepted", "filled_qty": 0.0,
                    "avg_fill_price": None, "fees_usd": 0.0, "fills": [],
-                   "raw": {"resting": True, "quote": quote, "limit": limit_price}}
+                   "raw": {"resting": True, "quote": quote, "limit": limit_price,
+                           "symbol": symbol, "side": side, "qty": qty,
+                           "asset_type": asset_type}}
             self._orders[boid] = res
             return res
 
-        fill_price = aj_db.money(fill_price)
+        # Round the PER-UNIT price to 8dp (matching _recompute_order), NOT to
+        # cents: money() rounding zeroed sub-cent prices (SHIB/PEPE fill at
+        # $0.00 => cost basis 0, infinite fake gain) and destroyed the modeled
+        # adverse slippage on any low-priced asset. Cents apply to notional/fees.
+        fill_price = round(float(fill_price), 8)
+
+        # Liquidity-bounded PARTIAL FILLS (paper_partial_fills, default OFF —
+        # OFF is byte-identical to the instant-full-fill behavior below). A
+        # real venue never hands a large order the whole book in one print;
+        # model that by capping the instant fill at what a nominal per-cycle
+        # liquidity budget (paper_fill_liquidity_usd) can absorb. The cap is a
+        # pure function of price/qty/config — DETERMINISTIC, no randomness.
+        # The remainder rests as 'partially_filled' and completes on a later
+        # get_order() poll (same adverse-slippage model, second fill appended).
+        cfg = aj_config.get_config()
+        if cfg.get("paper_partial_fills"):
+            budget = float(cfg.get("paper_fill_liquidity_usd", 25000) or 0)
+            if budget > 0 and fill_price * qty > budget:
+                cap = budget / fill_price          # max qty this cycle absorbs
+                if asset_type == "option":
+                    # contracts are indivisible — floor, but never 0: a 0-qty
+                    # "partial" would just be a resting order in disguise.
+                    cap = max(1.0, float(int(cap)))
+                fill_qty = min(qty, cap)
+                if fill_qty < qty:
+                    fees = self._fees(fill_price * fill_qty, asset_type, qty=fill_qty)
+                    fill = {"qty": fill_qty, "price": fill_price, "fees_usd": fees,
+                            "broker_fill_id": "pf_" + uuid.uuid4().hex[:12],
+                            "filled_at": aj_db.utc_now_iso()}
+                    res = {"broker_order_id": boid, "state": "partially_filled",
+                           "filled_qty": fill_qty, "avg_fill_price": fill_price,
+                           "fees_usd": fees, "fills": [fill],
+                           # persist the order params so get_order() can fill
+                           # the remainder at the then-current quote later —
+                           # a limit remainder must ALSO stay inside its limit.
+                           "raw": {"partial": True, "quote": quote,
+                                   "adverse_bps": self._adverse_bps(),
+                                   "symbol": symbol, "side": side, "qty": qty,
+                                   "remaining": qty - fill_qty,
+                                   "limit": (float(limit_price)
+                                             if otype == "limit" else None),
+                                   "asset_type": asset_type}}
+                    self._orders[boid] = res
+                    return res
+
         notional = fill_price * qty
         fees = self._fees(notional, asset_type, qty=qty)
         fill = {"qty": qty, "price": fill_price, "fees_usd": fees,
@@ -214,8 +266,88 @@ class PaperBroker(BrokerClient):
         return {"broker_order_id": broker_order_id, "state": "canceled"}
 
     def get_order(self, broker_order_id: str) -> Dict[str, Any]:
-        return self._orders.get(broker_order_id,
-                                {"broker_order_id": broker_order_id, "state": "unknown"})
+        o = self._orders.get(broker_order_id)
+        if o is None:
+            # Paper orders live in process memory only: after a restart a
+            # resting/parked paper id is unresolvable forever. There is no real
+            # exposure behind a paper id, and any fill it DID produce was
+            # recorded synchronously at submit — so report it terminally
+            # expired rather than stranding it 'unknown' for every reconcile.
+            if str(broker_order_id or "").startswith("paper_"):
+                return {"broker_order_id": broker_order_id, "state": "expired"}
+            return {"broker_order_id": broker_order_id, "state": "unknown"}
+        # Re-check a resting limit against the CURRENT quote so paper resting
+        # orders can fill when the market comes to them (mirrors a real venue).
+        raw = o.get("raw") or {}
+        if o.get("state") == "accepted" and raw.get("resting") and raw.get("symbol"):
+            quote = self._quote(raw["symbol"], str(raw.get("asset_type") or "stock"))
+            lp = float(raw.get("limit") or 0)
+            side, qty = raw.get("side"), float(raw.get("qty") or 0)
+            fill_price = None
+            if quote is not None and lp > 0 and qty > 0:
+                adverse = self._adverse_bps() / 1e4
+                if side == "buy" and quote <= lp:
+                    fill_price = min(lp, quote * (1 + adverse))
+                elif side == "sell" and quote >= lp:
+                    fill_price = max(lp, quote * (1 - adverse))
+            if fill_price is not None:
+                fill_price = round(float(fill_price), 8)
+                fees = self._fees(fill_price * qty, str(raw.get("asset_type") or "stock"), qty=qty)
+                o.update({"state": "filled", "filled_qty": qty,
+                          "avg_fill_price": fill_price, "fees_usd": fees,
+                          "fills": [{"qty": qty, "price": fill_price,
+                                     "fees_usd": fees,
+                                     "broker_fill_id": "pf_" + uuid.uuid4().hex[:12],
+                                     "filled_at": aj_db.utc_now_iso()}]})
+        # Complete a liquidity-capped PARTIAL fill (paper_partial_fills) on
+        # poll: fill the remainder at the CURRENT quote with the same adverse-
+        # slippage model, APPENDING a second fill. Aggregates (filled_qty /
+        # avg_fill_price / fees_usd) are recomputed from the fills list so
+        # they stay consistent — downstream _apply_broker_result /
+        # _recompute_order trusts them verbatim. Not gated on the flag here:
+        # raw['partial'] only exists if the flag was on at submit, and a
+        # partial in flight must complete even if the flag is flipped off.
+        elif (o.get("state") == "partially_filled" and raw.get("partial")
+                and raw.get("symbol")):
+            rem = float(raw.get("remaining") or 0)
+            quote = self._quote(raw["symbol"], str(raw.get("asset_type") or "stock"))
+            if rem > 0 and quote is not None:
+                side = str(raw.get("side") or "")
+                adverse = self._adverse_bps() / 1e4
+                lp = raw.get("limit")
+                fill_price = None
+                if lp:
+                    # parent was a LIMIT order — the remainder only completes
+                    # while the market is still inside the limit (marketable).
+                    lp = float(lp)
+                    if side == "buy" and quote <= lp:
+                        fill_price = min(lp, quote * (1 + adverse))
+                    elif side == "sell" and quote >= lp:
+                        fill_price = max(lp, quote * (1 - adverse))
+                else:  # market remainder: current quote + adverse slippage
+                    fill_price = (quote * (1 + adverse) if side == "buy"
+                                  else quote * (1 - adverse))
+            else:
+                fill_price = None
+            if fill_price is not None:
+                fill_price = round(float(fill_price), 8)
+                at = str(raw.get("asset_type") or "stock")
+                fees2 = self._fees(fill_price * rem, at, qty=rem)
+                fills = list(o.get("fills") or [])
+                fills.append({"qty": rem, "price": fill_price, "fees_usd": fees2,
+                              "broker_fill_id": "pf_" + uuid.uuid4().hex[:12],
+                              "filled_at": aj_db.utc_now_iso()})
+                tot_qty = sum(float(f["qty"]) for f in fills)
+                avg = (sum(float(f["qty"]) * float(f["price"]) for f in fills)
+                       / tot_qty) if tot_qty > 0 else None
+                o.update({"state": "filled", "filled_qty": tot_qty,
+                          "avg_fill_price": (round(avg, 8) if avg is not None
+                                             else None),
+                          "fees_usd": aj_db.money(
+                              sum(float(f["fees_usd"]) for f in fills)),
+                          "fills": fills})
+                raw["remaining"] = 0.0
+        return o
 
     def positions(self) -> List[Dict[str, Any]]:
         # Paper truth = the agent's FIFO paper book (ADR-001), NOT the user's
@@ -228,10 +360,14 @@ class PaperBroker(BrokerClient):
             return []
 
     def cash(self) -> float:
+        # DERIVED available cash, not the raw aj_paper_cash setting: the static
+        # setting is never debited by buys, so reporting it raw overstates
+        # buying power once anything is invested. aj_alpha derives
+        # base − open cost basis + realized P&L (net of fees), floored at 0;
+        # with no base configured it returns 0.0 — same as the old raw read.
         try:
-            import database as db
-            raw = db.get_settings().get("aj_paper_cash")
-            return aj_db.money(raw) if raw is not None else 0.0
+            import aj_alpha
+            return aj_db.money(aj_alpha.available_paper_cash())
         except Exception:
             return 0.0
 

@@ -63,7 +63,10 @@ def _now_et_naive() -> datetime:
 # can pass an override list via the `universe` arg.
 # ---------------------------------------------------------------------------
 SP500_TOP100: List[str] = [
-    "AAPL", "MSFT", "NVDA", "AMZN", "GOOGL", "GOOG", "META", "BRK.B", "LLY", "TSM",
+    # NB: share-class tickers use Yahoo's DASH form ("BRK-B", not "BRK.B") —
+    # every upstream here is Yahoo-backed and the dot form returns empty
+    # quotes/chains/fundamentals silently.
+    "AAPL", "MSFT", "NVDA", "AMZN", "GOOGL", "GOOG", "META", "BRK-B", "LLY", "TSM",
     "AVGO", "TSLA", "JPM", "WMT", "V", "XOM", "UNH", "MA", "PG", "JNJ",
     "ORCL", "HD", "COST", "ABBV", "BAC", "NFLX", "KO", "CVX", "MRK", "AMD",
     "TMO", "ADBE", "CRM", "PEP", "ACN", "LIN", "MCD", "CSCO", "ABT", "WFC",
@@ -336,12 +339,25 @@ def _component_13f_institutional(symbol: str, direction: str) -> Tuple[bool, str
         # just adds another 429 to the budget without producing data.
         return (False, "no data", "fundamentals unavailable from fetcher chain")
 
-    inst = (
-        info.get("heldPercentInstitutions")
-        or info.get("institutionPercentHeld")
-        or info.get("inst_pct")
-    )
-    short_pct = info.get("shortPercentOfFloat") or info.get("short_pct")
+    # fetcher.get_fundamentals emits normalized snake_case keys — shorts live
+    # under "short_percent_float" (both the yfinance and Finviz paths). The
+    # raw-yfinance camelCase names never appear in its payload, so reading
+    # only those left this component permanently at "no data". Try the
+    # normalized key FIRST, keep the raw names as fallbacks in case a caller
+    # ever hands us an unnormalized info dict. `inst_pct` is not emitted by
+    # fetcher today (adding it there is a fetcher-side change); we keep the
+    # institutional keys so the leg lights up the moment fetcher surfaces one.
+    def _first_present(keys):
+        for k in keys:
+            v = info.get(k)
+            if v is not None:
+                return v
+        return None
+
+    inst = _first_present(
+        ("inst_pct", "heldPercentInstitutions", "institutionPercentHeld"))
+    short_pct = _first_present(
+        ("short_percent_float", "shortPercentOfFloat", "short_pct"))
     try:
         inst_f = float(inst) if inst is not None else None
         short_f = float(short_pct) if short_pct is not None else None
@@ -427,12 +443,20 @@ def _component_narrative(symbol: str, direction: str) -> Tuple[bool, str, str]:
         velocity = 0.0
     in_active = phase in ACTIVE_PHASES
 
+    # velocity_score is news-VOLUME acceleration and is direction-agnostic
+    # (same convention as synth_divmap's S7 fix): +60 can mean scandal
+    # coverage exploding just as easily as growth coverage. So the velocity
+    # branch must be gated on the dominant bucket's direction — accelerating
+    # coverage of a BEARISH story is never bullish confirmation (and drying
+    # coverage of a BULLISH story is never bearish confirmation).
     if direction == "bullish":
         # Bullish: dominant bucket is bullish AND phase is breakout/building,
-        # or velocity strongly positive
-        fired = (in_active and dom in BULLISH_BUCKETS) or velocity >= 40
+        # or velocity strongly positive on a not-bearish story
+        fired = (in_active and dom in BULLISH_BUCKETS) or \
+                (velocity >= 40 and dom not in BEARISH_BUCKETS)
     else:
-        fired = (in_active and dom in BEARISH_BUCKETS) or velocity <= -40
+        fired = (in_active and dom in BEARISH_BUCKETS) or \
+                (velocity <= -40 and dom not in BULLISH_BUCKETS)
 
     return (fired, f"{phase}/{dom}", f"velocity {velocity}")
 
@@ -593,9 +617,12 @@ def _component_reflexivity(symbol: str, direction: str) -> Tuple[bool, str, str]
     if not detected:
         return (False, "no loop", result.get("overall_risk", "NONE"))
 
-    # Map loop direction to bull/bear
-    bullish_loops = [lp for lp in detected if (lp.get("direction") or "").upper() in ("UP", "BULLISH", "POSITIVE")]
-    bearish_loops = [lp for lp in detected if (lp.get("direction") or "").upper() in ("DOWN", "BEARISH", "NEGATIVE")]
+    # Map loop direction to bull/bear. reflexivity_detector emits
+    # VIRTUOUS (self-reinforcing up) / VICIOUS (self-reinforcing down) /
+    # NEUTRAL — those are the values that must match. The UP/DOWN-style
+    # synonyms are kept for robustness against future detector variants.
+    bullish_loops = [lp for lp in detected if (lp.get("direction") or "").upper() in ("VIRTUOUS", "UP", "BULLISH", "POSITIVE")]
+    bearish_loops = [lp for lp in detected if (lp.get("direction") or "").upper() in ("VICIOUS", "DOWN", "BEARISH", "NEGATIVE")]
 
     if direction == "bullish":
         fired = bool(bullish_loops)
@@ -648,6 +675,14 @@ _CHEAP_IDX: List[int] = [i for i, (n, _) in enumerate(COMPONENTS)
                          if n not in _EXPENSIVE_COMPONENT_NAMES]
 _EXPENSIVE_IDX: List[int] = [i for i, (n, _) in enumerate(COMPONENTS)
                              if n in _EXPENSIVE_COMPONENT_NAMES]
+# How many expensive components can actually move n_sources_firing. The
+# min_sources filter downstream counts only breadth-ELIGIBLE sources, so the
+# early-exit "could this symbol still reach min_sources?" budget must exclude
+# breadth-excluded components (smart_money) — counting them made the budget
+# len(expensive)=3 when only 2 can ever add to the breadth count, letting
+# mathematically-hopeless symbols pay the full expensive phase anyway.
+_EXPENSIVE_BREADTH_ELIGIBLE: int = len(
+    [i for i in _EXPENSIVE_IDX if COMPONENTS[i][0] not in _BREADTH_EXCLUDED])
 
 
 # ---------------------------------------------------------------------------
@@ -750,9 +785,11 @@ def _scan_symbol(symbol: str, direction: str,
         sources[i] = res
     cheap_fired = sum(1 for r in cheap_results if r and r.get("fired"))
 
-    # Early exit: even if EVERY expensive component fired, the symbol still
-    # couldn't reach min_sources — don't pay for ml/smart-money/reflexivity.
-    if min_sources is not None and cheap_fired + len(_EXPENSIVE_IDX) < min_sources:
+    # Early exit: even if EVERY breadth-eligible expensive component fired,
+    # the symbol still couldn't reach min_sources — don't pay for
+    # ml/smart-money/reflexivity. (smart_money is breadth-excluded, so it can
+    # never lift n_sources_firing — see _EXPENSIVE_BREADTH_ELIGIBLE.)
+    if min_sources is not None and cheap_fired + _EXPENSIVE_BREADTH_ELIGIBLE < min_sources:
         for i in _EXPENSIVE_IDX:
             sources[i] = {"name": COMPONENTS[i][0], "fired": False,
                           "value": "skipped",

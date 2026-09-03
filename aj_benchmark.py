@@ -34,7 +34,12 @@ def _period_for(days: int) -> str:
 
 
 def _agent_nav_series(cfg: Dict[str, Any], days: int) -> List[Tuple[str, float]]:
-    """[(date, NAV)] ascending. NAV = funded base + cumulative P&L (equity_usd)."""
+    """[(date, NAV)] ascending. NAV = funded base + cumulative P&L (equity_usd).
+
+    Dates are as stored by aj_analytics.snapshot_equity — keyed in
+    America/New_York so they line up with `_index_closes` (also ET). Rows
+    stamped before the ET fix keep their old UTC dates; the on-or-before
+    `price_on` lookup in benchmark() keeps those joins sane."""
     try:
         import aj_analytics
         base = float(cfg.get("compound_base_equity_usd") or 10000.0) or 10000.0
@@ -167,19 +172,40 @@ def benchmark(cfg: Optional[Dict[str, Any]] = None, days: int = 90) -> Dict[str,
                 continue
             benchmarks[sym] = {"name": name, "cumulative_return_pct": round(idx_cum, 2),
                                "series": _round_series(idx_series)}
-            # per-day: did the agent's daily move beat the index's?
+            # per-day: did the agent's daily move beat the index's? Computed
+            # from TRUE daily returns off consecutive raw NAV/price values —
+            # differencing the cumulative-% series compares moves measured off
+            # each series' own day-0 base, which biases the beat count once
+            # the two series drift apart.
             beaten = total = 0
+            excess: List[float] = []   # daily agent-minus-index returns
             for i in range(1, len(dates)):
-                a0, a1 = agent_series[i - 1], agent_series[i]
-                b0, b1 = idx_series[i - 1], idx_series[i]
-                if None in (a0, a1, b0, b1):
+                a0, a1 = navmap.get(dates[i - 1]), navmap.get(dates[i])
+                b0, b1 = price_on(dates[i - 1]), price_on(dates[i])
+                if None in (a0, a1, b0, b1) or a0 <= 0 or b0 <= 0:
                     continue
                 total += 1
-                if (a1 - a0) > (b1 - b0):
+                da, db_ = (a1 / a0 - 1.0), (b1 / b0 - 1.0)
+                excess.append(da - db_)
+                if da > db_:
                     beaten += 1
+            # Information ratio / tracking error from the SAME inner-joined
+            # daily-return series as the beat-rate: TE = stdev(excess) x
+            # sqrt(252) (% annualized); IR = mean/stdev x sqrt(252). Fewer
+            # than 10 joined days is too thin to report honestly -> None.
+            ir = te = None
+            if len(excess) >= 10:
+                m = sum(excess) / len(excess)
+                var = sum((x - m) ** 2 for x in excess) / (len(excess) - 1)
+                sd = var ** 0.5
+                if sd > 0:
+                    te = round(sd * (252 ** 0.5) * 100.0, 2)
+                    ir = round(m / sd * (252 ** 0.5), 2)
             vs[sym] = {"name": name, "alpha_pct": round(agent_cum - idx_cum, 2),
                        "days_beaten": beaten, "days_total": total,
-                       "beat_rate": round(beaten / total, 3) if total else None}
+                       "beat_rate": round(beaten / total, 3) if total else None,
+                       "information_ratio": ir,
+                       "tracking_error_pct": te}
 
         spy_alpha = (vs.get("SPY") or {}).get("alpha_pct")
         verdict = ("outperforming" if (spy_alpha or 0) > 0 else "underperforming") \

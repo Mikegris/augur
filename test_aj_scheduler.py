@@ -30,9 +30,11 @@ def _cfg(**over):
 
 def _reset():
     aj_db.set_setting_raw(A._LAST_RUN_KEY, "")
+    aj_db.set_setting_raw(A._BACKOFF_KEY, "")
     with A._sched_state_lock:
         A._sched_state.update({"last_tick": None, "last_fire": None,
-                               "last_reason": None, "ticks": 0, "fires": 0, "errors": 0})
+                               "last_reason": None, "ticks": 0, "fires": 0, "errors": 0,
+                               "consec_failures": 0, "backoff_until": None})
     # default: a tradable session + a successful cycle
     aj_db.market_session = lambda: "regular"
     aj_operator.run_once = lambda mode="paper": {"ok": True, "cycle_id": "cyc_test",
@@ -162,6 +164,88 @@ def test_legacy_interval_mode_still_works():
     aj_db.set_setting_raw(A._LAST_RUN_KEY, aj_db.utc_now_iso())
     g = A.due_to_run()
     assert g["due"] is False and "since last run" in g["reason"] and g["aligned"] is False
+
+
+def _backoff_snap():
+    with A._sched_state_lock:
+        return (int(A._sched_state.get("consec_failures") or 0),
+                A._sched_state.get("backoff_until"))
+
+
+def _crash_run_once(mode="paper"):
+    # a REAL crashed cycle: it ran (has a cycle_id) but did not complete ok
+    return {"ok": False, "cycle_id": "cyc_crash", "reason": "forecast exploded"}
+
+
+def test_backoff_cap_at_six_hours():
+    _reset(); _cfg(auto_run_interval_min=30)
+    aj_operator.run_once = _crash_run_once
+    with A._sched_state_lock:
+        A._sched_state["consec_failures"] = 9      # next crash -> 10 (uncapped: 30*2^10 min)
+    out = A.run_scheduled()
+    assert out["ran"] is False, out
+    n, until = _backoff_snap()
+    assert n == 10, n
+    delta_min = (aj_db.parse_iso(until) - aj_db.utc_now()).total_seconds() / 60.0
+    assert 300.0 < delta_min <= 360.0, delta_min   # capped at 6h, not 30*2^10
+
+
+def test_backoff_escalates_on_crashed_cycle():
+    _reset(); _cfg(auto_run_interval_min=10)
+    aj_operator.run_once = _crash_run_once
+    # 1st crashed cycle -> 1 consecutive failure, next retry ~ 10*2^1 = 20m out
+    out = A.run_scheduled()
+    assert out["ran"] is False, out
+    n, until = _backoff_snap()
+    assert n == 1 and until, (n, until)
+    delta_min = (aj_db.parse_iso(until) - aj_db.utc_now()).total_seconds() / 60.0
+    assert 18.0 < delta_min <= 20.1, delta_min
+    # surfaced for the UI/health systems: settings JSON with count + retry ISO
+    import json
+    surf = json.loads(aj_db.get_setting_raw(A._BACKOFF_KEY))
+    assert surf["consecutive_failures"] == 1 and surf["next_retry"] == until, surf
+    # while backed off, the very next tick is suppressed (before due/claim)
+    out2 = A.run_scheduled()
+    assert out2["ran"] is False and "backoff" in out2["reason"], out2
+    # 2nd crashed cycle escalates: expire the window + free the interval slot
+    with A._sched_state_lock:
+        A._sched_state["backoff_until"] = aj_db.utc_now().isoformat()  # expired
+    aj_db.set_setting_raw(A._LAST_RUN_KEY, "")
+    out3 = A.run_scheduled()
+    assert out3["ran"] is False, out3
+    n2, until2 = _backoff_snap()
+    assert n2 == 2, n2
+    delta_min2 = (aj_db.parse_iso(until2) - aj_db.utc_now()).total_seconds() / 60.0
+    assert 38.0 < delta_min2 <= 40.1, delta_min2   # 10*2^2 = 40m — exponential
+
+
+def test_backoff_not_triggered_by_lock_contention():
+    _reset(); _cfg()
+    # ok=False WITHOUT a cycle_id == lock contention, not a crashed cycle
+    aj_operator.run_once = lambda mode="paper": {"ok": False,
+                                                 "reason": "another cycle is running"}
+    out = A.run_scheduled()
+    assert out["ran"] is False, out
+    n, until = _backoff_snap()
+    assert n == 0 and until is None, (n, until)
+    assert not aj_db.get_setting_raw(A._BACKOFF_KEY)
+
+
+def test_backoff_resets_on_success():
+    _reset(); _cfg()
+    # pretend we crashed 3 times and the window has expired -> next run allowed
+    with A._sched_state_lock:
+        A._sched_state["consec_failures"] = 3
+        A._sched_state["backoff_until"] = aj_db.utc_now().isoformat()  # expired
+    aj_db.set_setting_raw(A._BACKOFF_KEY, '{"consecutive_failures": 3}')
+    out = A.run_scheduled()                      # default mock: successful cycle
+    assert out["ran"] is True, out
+    n, until = _backoff_snap()
+    assert n == 0 and until is None, (n, until)  # state reset...
+    assert not aj_db.get_setting_raw(A._BACKOFF_KEY)  # ...and surfacing cleared
+    # status surfaces the (now clean) backoff counters
+    st = A.scheduler_status()
+    assert st["consec_failures"] == 0 and st["backoff_until"] is None, st
 
 
 def test_start_scheduler_idempotent():

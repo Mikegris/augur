@@ -310,7 +310,11 @@ def get_earnings_dossier(symbol):
             ed2 = t.earnings_dates
             if ed2 is not None and not ed2.empty:
                 past_dates = ed2[ed2["Reported EPS"].notna()].index.tolist()
-                for dt in past_dates[:8]:
+                # yfinance's earnings_dates ordering is NOT guaranteed (same
+                # assumption already fixed for history_rows above with
+                # sort_index) — sort newest-first so we measure the most
+                # recent 8 reactions, not an arbitrary/oldest 8.
+                for dt in sorted(past_dates, reverse=True)[:8]:
                     try:
                         # Convert to tz-naive for comparison
                         dt_naive = dt.tz_localize(None) if dt.tzinfo else dt

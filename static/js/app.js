@@ -46,6 +46,10 @@ const fmt = {
   date: (s) => {
     if (!s) return '—';
     try {
+      // Date-only strings ('YYYY-MM-DD') are parsed by `new Date()` as UTC
+      // midnight, so toLocaleDateString renders them a day early for anyone
+      // west of UTC. Append a local-midnight time to parse in local time.
+      if (typeof s === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(s)) s += 'T00:00:00';
       const d = new Date(s);
       // `new Date()` silently returns "Invalid Date" rather than throwing for
       // bad strings like "—" or "None"; the original try/catch was dead code.
@@ -847,7 +851,13 @@ async function loadOverview() {
   // Upcoming events overlay (earnings/IPOs/dividends/splits)
   DataPanels.appendCalendarOverlay(document.getElementById('ov-calendar-section'));
 
-  // Fire all requests in parallel, render each section as it arrives
+  // Fire all requests in parallel, render each section as it arrives.
+  // WHY: a swallowed rejection used to leave the section's spinner spinning
+  // forever — surface an inline failure state so "failed" ≠ "still loading".
+  const _ovFail = (...ids) => () => ids.forEach(id => {
+    const n = document.getElementById(id);
+    if (n) n.innerHTML = '<div class="empty-state"><span class="text-red">Failed to load</span></div>';
+  });
   const indicesP = API.get('/api/market/indices').then(indices => {
     State.indices = indices;
     renderTicker(indices);
@@ -869,7 +879,7 @@ async function loadOverview() {
     </tr>`).join('');
     if (el('ov-indices')) el('ov-indices').innerHTML = `<table class="data-table w-full" style="padding:0"><thead><tr><th>INDEX</th><th>PRICE</th><th style="text-align:right">CHANGE</th><th style="text-align:right">%</th></tr></thead><tbody>${tbody}</tbody></table>`;
     Progress.show(40);
-  }).catch(() => {});
+  }).catch(_ovFail('ov-indices'));
 
   const cryptoP = API.get('/api/crypto/global').then(cryptoGlobal => {
     State.cryptoGlobal = cryptoGlobal;
@@ -881,7 +891,7 @@ async function loadOverview() {
   const sectorsP = API.get('/api/market/sectors').then(sectors => {
     const el = document.getElementById('ov-sectors');
     if (el) el.innerHTML = renderSectors(sectors);
-  }).catch(() => {});
+  }).catch(_ovFail('ov-sectors'));
 
   const moversP = API.get('/api/market/movers').then(movers => {
     const el = id => document.getElementById(id);
@@ -894,11 +904,13 @@ async function loadOverview() {
     if (el('ov-gainers')) el('ov-gainers').innerHTML = `<table class="data-table"><thead><tr><th>SYMBOL</th><th>PRICE</th><th style="text-align:right">%</th><th>MKT CAP</th></tr></thead><tbody>${moverRows(movers.gainers, 'col-positive')}</tbody></table>`;
     if (el('ov-losers'))  el('ov-losers').innerHTML  = `<table class="data-table"><thead><tr><th>SYMBOL</th><th>PRICE</th><th style="text-align:right">%</th><th>MKT CAP</th></tr></thead><tbody>${moverRows(movers.losers, 'col-negative')}</tbody></table>`;
     Progress.show(70);
-  }).catch(() => {});
+  }).catch(_ovFail('ov-gainers', 'ov-losers'));
 
   const portfolioP = API.get('/api/portfolio').then(portfolio => {
     State.portfolio = portfolio;
-    const summary = portfolio.summary || {};
+    // Empty portfolios return summary:{} — default the numbers so we render
+    // "$0" / "0 POSITIONS" instead of "undefined" / "-$—".
+    const summary = { total_value: 0, total_cost: 0, total_pnl: 0, total_pnl_pct: 0, num_positions: 0, ...(portfolio.summary || {}) };
     const pnlClass = col.kpi(summary.total_pnl);
     const el = id => document.getElementById(id);
     if (el('ov-kpi-value')) el('ov-kpi-value').innerHTML = `<div class="kpi-label">PORTFOLIO VALUE</div><div class="kpi-value">$${fmt.compact(summary.total_value)}</div><div class="kpi-sub">$${fmt.currency(summary.total_value)}</div>`;
@@ -928,14 +940,14 @@ async function loadOverview() {
     } else if (sect) {
       sect.innerHTML = `<div class="panel" style="margin-top:8px"><div class="panel-body"><div class="empty-state"><span class="empty-icon">◈</span><span>No portfolio positions. <a href="#" class="text-green" onclick="navigate('portfolio')">Add your first holding →</a></span></div></div></div>`;
     }
-  }).catch(() => {});
+  }).catch(_ovFail('ov-portfolio-section'));
 
   const allocP = API.get('/api/analytics/portfolio').then(a => {
     const sect = document.getElementById('ov-allocation-section');
     if (!sect) return;
     if (!a || !a.allocation_by_sector) { sect.innerHTML = ''; return; }
     sect.innerHTML = renderAllocationPanel(a);
-  }).catch(() => {});
+  }).catch(_ovFail('ov-allocation-section'));
 
   // Wait for all to finish, then mark done
   try {
@@ -1097,7 +1109,10 @@ async function loadPortfolio() {
     if (_portfolioAccountFilter) url += '?account_id=' + _portfolioAccountFilter;
     const data = await API.get(url);
     State.portfolio = data;
-    const { holdings, summary } = data;
+    const holdings = data.holdings || [];
+    // Empty portfolios return summary:{} — default the numbers so we render
+    // "0 POSITIONS" / "$0.00" instead of "undefined POSITIONS" / "-$—".
+    const summary = { total_value: 0, total_cost: 0, total_pnl: 0, total_pnl_pct: 0, num_positions: 0, ...(data.summary || {}) };
 
     // Load accounts for filter dropdown
     var accounts = State.accounts || [];
@@ -1683,9 +1698,19 @@ async function loadMarkets() {
 }
 
 // ── Research View ─────────────────────────────────────────────────────────────
+// WHY: navigate('research') unconditionally fires loadResearchDefault(). When
+// openResearch/openCryptoResearch drive the load themselves, the default
+// loader must stand down or it races the explicit request and can overwrite
+// the symbol the user actually clicked (its generation token is newer).
+let _suppressResearchDefault = false;
+
 async function openResearch(symbol) {
-  navigate('research');
+  // Set the symbol BEFORE navigating so any code observing State during
+  // navigation sees the user's choice, and suppress the default loader for
+  // the synchronous navigate() call — we load the symbol ourselves below.
   State.researchSymbol = symbol;
+  _suppressResearchDefault = true;
+  try { navigate('research'); } finally { _suppressResearchDefault = false; }
   loadResearchFor(symbol);
 }
 
@@ -1694,10 +1719,12 @@ async function openResearch(symbol) {
 // or fall back to AAPL. Without this the user would see the empty splash
 // every time they navigated to the tab from elsewhere.
 async function loadResearchDefault() {
+  if (_suppressResearchDefault) return;
   if (State.researchSymbol) {
     loadResearchFor(State.researchSymbol);
     return;
   }
+  const genAtStart = _researchGen;
   let sym = null;
   try {
     const p = await API.get('/api/portfolio');
@@ -1705,6 +1732,9 @@ async function loadResearchDefault() {
     const first = holdings.find(h => h.asset_type !== 'crypto');
     if (first) sym = first.symbol;
   } catch (e) {}
+  // A newer explicit research request (stock or crypto) started while we were
+  // awaiting the portfolio — don't stomp it with the default symbol.
+  if (_researchGen !== genAtStart || State.researchSymbol) return;
   if (sym) {
     State.researchSymbol = sym;
     loadResearchFor(sym);
@@ -1960,12 +1990,40 @@ async function loadResearchFor(symbol) {
   }
 }
 
+// ── Fundamentals percent-unit normalization ──────────────────────────────────
+// The backend delivers percent-ish fields in two unit systems: yfinance emits
+// fractions (0.055 == 5.5%) while the Finviz fallback emits percent numbers
+// ('5.50%' parsed to 5.5), and Yahoo's dividendYield itself flips between the
+// two forms. A blanket ×100 therefore renders Finviz values 100x too large
+// (e.g. 'ROE 1520.00%'). Proper fix is server-side normalization; until then,
+// return the value in PERCENT units (ready for fmt.pct), or null:
+//  - fund.source mentions 'finviz'  → already percent, use as-is
+//  - dividend_yield                 → mirror gex_engine._get_dividend_yield:
+//    validate fraction-vs-percent against dividend_rate/price when possible
+//  - otherwise treat as a fraction (×100), unless the magnitude is
+//    implausible as a fraction (>3 == >300%), meaning a percent leaked through
+function _fundPct(fund, key) {
+  let v = fund ? fund[key] : null;
+  if (v == null || isNaN(parseFloat(v))) return null;
+  v = parseFloat(v);
+  if (String(fund.source || '').indexOf('finviz') !== -1) return v;
+  if (key === 'dividend_yield') {
+    const price = fund['50d_avg'] || fund['200d_avg'];
+    const rate = fund.dividend_rate;
+    if (rate > 0 && price > 0) {
+      const ref = (rate / price) * 100; // independent yield estimate, in %
+      return (Math.abs(v * 100 - ref) <= Math.abs(v - ref)) ? v * 100 : v;
+    }
+  }
+  return Math.abs(v) > 3 ? v : v * 100;
+}
+
 function renderFundamentalsStrip(fund) {
   const cells = [
     ['P/E',     fmt.num(fund.pe_ratio)],
     ['P/B',     fmt.num(fund.pb_ratio)],
-    ['DIV YLD', fund.dividend_yield != null ? fmt.pct(fund.dividend_yield * 100, false) : '—'],
-    ['ROE',     fund.return_on_equity != null ? fmt.pct(fund.return_on_equity * 100, false) : '—'],
+    ['DIV YLD', fmt.pct(_fundPct(fund, 'dividend_yield'), false)],
+    ['ROE',     fmt.pct(_fundPct(fund, 'return_on_equity'), false)],
     ['BETA',    fmt.num(fund.beta)],
     ['MKT CAP', '$' + fmt.compact(fund.market_cap)],
   ];
@@ -1992,19 +2050,19 @@ function renderFundamentals(fund) {
     ['EV/EBITDA', fmt.num(fund.ev_ebitda)],
     ['Beta', fmt.num(fund.beta)],
     ['Revenue', '$' + fmt.compact(fund.revenue)],
-    ['Revenue Growth', fmt.pct(fund.revenue_growth != null ? fund.revenue_growth * 100 : null)],
-    ['Earnings Growth', fmt.pct(fund.earnings_growth != null ? fund.earnings_growth * 100 : null)],
-    ['Profit Margin', fmt.pct(fund.profit_margin != null ? fund.profit_margin * 100 : null)],
-    ['Gross Margin', fmt.pct(fund.gross_margin != null ? fund.gross_margin * 100 : null)],
-    ['Operating Margin', fmt.pct(fund.operating_margin != null ? fund.operating_margin * 100 : null)],
-    ['ROE', fmt.pct(fund.return_on_equity != null ? fund.return_on_equity * 100 : null)],
-    ['ROA', fmt.pct(fund.return_on_assets != null ? fund.return_on_assets * 100 : null)],
+    ['Revenue Growth', fmt.pct(_fundPct(fund, 'revenue_growth'))],
+    ['Earnings Growth', fmt.pct(_fundPct(fund, 'earnings_growth'))],
+    ['Profit Margin', fmt.pct(_fundPct(fund, 'profit_margin'))],
+    ['Gross Margin', fmt.pct(_fundPct(fund, 'gross_margin'))],
+    ['Operating Margin', fmt.pct(_fundPct(fund, 'operating_margin'))],
+    ['ROE', fmt.pct(_fundPct(fund, 'return_on_equity'))],
+    ['ROA', fmt.pct(_fundPct(fund, 'return_on_assets'))],
     ['Debt/Equity', fmt.num(fund.debt_equity)],
     ['Current Ratio', fmt.num(fund.current_ratio)],
     ['Free Cash Flow', '$' + fmt.compact(fund.free_cashflow)],
-    ['Dividend Yield', fmt.pct(fund.dividend_yield != null ? fund.dividend_yield * 100 : null)],
-    ['Payout Ratio', fmt.pct(fund.payout_ratio != null ? fund.payout_ratio * 100 : null)],
-    ['Short % Float', fmt.pct(fund.short_percent_float != null ? fund.short_percent_float * 100 : null)],
+    ['Dividend Yield', fmt.pct(_fundPct(fund, 'dividend_yield'))],
+    ['Payout Ratio', fmt.pct(_fundPct(fund, 'payout_ratio'))],
+    ['Short % Float', fmt.pct(_fundPct(fund, 'short_percent_float'))],
     ['Short Ratio', fmt.num(fund.short_ratio)],
     ['Shares Out', fmt.compact(fund.shares_outstanding)],
     ['Float', fmt.compact(fund.float_shares)],
@@ -2267,8 +2325,13 @@ async function openCryptoResearch(coinId, symbol) {
   // Same entry sanitization as loadResearchFor — symbol reaches innerHTML.
   symbol = String(symbol || '').replace(/[^A-Za-z0-9.\-]/g, '').toUpperCase().slice(0, 12);
   coinId = String(coinId || '').replace(/[^a-z0-9\-]/g, '');
+  // Suppress the default loader that navigate('research') fires, and only
+  // take our generation AFTER navigating — otherwise loadResearchDefault's
+  // loadResearchFor(previous symbol) grabs a newer gen and our crypto render
+  // is discarded in favor of the previously viewed stock.
+  _suppressResearchDefault = true;
+  try { navigate('research'); } finally { _suppressResearchDefault = false; }
   const gen = ++_researchGen;
-  navigate('research');
   const view = document.getElementById('view-research');
   view.innerHTML = `<div class="loading"><div class="spinner"></div> FETCHING ${_esc(symbol)}...</div>`;
 
@@ -2350,12 +2413,17 @@ async function openCryptoResearch(coinId, symbol) {
   }
 }
 
+let _cryptoChartGen = 0;
 async function loadCryptoChart(coinId, days) {
   document.querySelectorAll('#crypto-period-btns .chart-btn').forEach(b => {
     b.classList.toggle('active', b.textContent === `${days}D`);
   });
+  // Same generation race-guard as loadPriceChart: rapid period clicks must
+  // not let an older (slower) response overwrite the newer selection.
+  const gen = ++_cryptoChartGen;
   try {
     const data = await API.get(`/api/crypto/chart/${coinId}?days=${days}`);
+    if (gen !== _cryptoChartGen) return;
     ChartEngine.createPriceChart('crypto-chart-container', data, { type: 'line', height: 380, showVolume: false });
   } catch(e) {}
 }
@@ -2390,8 +2458,11 @@ async function loadWatchlistView() {
             </tr></thead>
             <tbody>
               ${items.map(i => {
-                const alertHigh = i.alert_high && i.price >= i.alert_high;
-                const alertLow  = i.alert_low  && i.price <= i.alert_low;
+                // Require a real price: a missing quote (price:null) coerces
+                // to 0 in `<=`, which would falsely trip every low alert
+                // during a transient quote outage.
+                const alertHigh = i.alert_high != null && i.price != null && i.price >= i.alert_high;
+                const alertLow  = i.alert_low  != null && i.price != null && i.price <= i.alert_low;
                 return `<tr ${alertHigh || alertLow ? 'style="background:rgba(255,170,0,0.05)"' : ''}>
                   <td>
                     <span class="col-symbol" onclick="openResearch('${_jesc(i.symbol)}')">${_esc(i.symbol)}</span>
@@ -2526,7 +2597,9 @@ async function submitAddTxn() {
   const fees   = parseFloat(document.getElementById('txn-fees').value) || 0;
   const date   = document.getElementById('txn-date').value;
   const notes  = document.getElementById('txn-notes').value;
-  if (!symbol || !shares || !price) { Toast.warn('Symbol, shares, price required'); return; }
+  // `shares > 0` (not just truthy) — a typo like '-5' must not pass, or the
+  // backend records a negative trade that silently corrupts BUY/SELL totals.
+  if (!symbol || !(shares > 0) || !(price > 0) || fees < 0) { Toast.warn('Symbol, positive shares/price (and non-negative fees) required'); return; }
   try {
     await API.post('/api/transactions/add', { symbol, action, shares, price, fees, date, notes });
     Toast.success(`${action} ${symbol} logged`);
@@ -2554,7 +2627,9 @@ async function loadGlobalNews() {
         .map(h => h.symbol);
       if (equitySyms.length) tickers = equitySyms;
     } catch(e) {}
-    const newsMap = await Promise.all(tickers.map(t => API.get(`/api/news/${t}?limit=8`)));
+    // Per-ticker tolerance: one failed/rate-limited feed must not reject the
+    // whole Promise.all and wipe the view — degrade to fewer items instead.
+    const newsMap = await Promise.all(tickers.map(t => API.get(`/api/news/${t}?limit=8`).catch(() => [])));
     const all = [];
     const seen = new Set();
     newsMap.flat().forEach(n => {
@@ -3581,8 +3656,8 @@ function renderEarningsGrid(events) {
           </div>
           <div class="earnings-stat">
             <div class="earnings-stat-label">AVG SURP</div>
-            <div class="earnings-stat-val" style="color:var(--green)">
-              ${e.avg_surprise_pct != null ? '+' + e.avg_surprise_pct.toFixed(1) + '%' : '—'}
+            <div class="earnings-stat-val" style="color:${e.avg_surprise_pct == null ? 'var(--text-dim)' : e.avg_surprise_pct >= 0 ? 'var(--green)' : 'var(--red)'}">
+              ${e.avg_surprise_pct != null ? (e.avg_surprise_pct >= 0 ? '+' : '') + e.avg_surprise_pct.toFixed(1) + '%' : '—'}
             </div>
           </div>
         </div>
@@ -3728,7 +3803,7 @@ function renderEarningsDossier(panel, d) {
               ${d.avg_surprise_pct != null ? `
               <div>
                 <div style="font-size:10px;color:var(--text-dim)">AVG SURPRISE</div>
-                <div style="font-size:16px;font-weight:bold;color:var(--green)">+${d.avg_surprise_pct.toFixed(1)}%</div>
+                <div style="font-size:16px;font-weight:bold;color:${d.avg_surprise_pct >= 0 ? 'var(--green)' : 'var(--red)'}">${(d.avg_surprise_pct >= 0 ? '+' : '') + d.avg_surprise_pct.toFixed(1)}%</div>
               </div>` : ''}
             </div>
           </div>
@@ -4109,7 +4184,11 @@ async function saveSettings() {
     Toast.success('Settings saved');
     // Reload to refresh key status indicator
     loadSettings();
-  } catch(e) { Toast.error('Failed to save'); }
+  } catch(e) {
+    // Surface the server's reason (e.g. key-format rejection) — a generic
+    // 'Failed to save' leaves the user retrying blindly.
+    Toast.error('Failed to save: ' + (e.message || e));
+  }
 }
 
 // ── Quick helpers ─────────────────────────────────────────────────────────────
@@ -4133,7 +4212,9 @@ function updateStatusBar() {
   if (el) el.textContent = State.lastRefresh ? State.lastRefresh.toLocaleTimeString('en-US') : '—';
 
   const portEl = document.getElementById('status-portfolio-value');
-  if (portEl && State.portfolio?.summary?.total_value) {
+  // Presence check, not truthiness: a fully-liquidated portfolio has
+  // total_value === 0 and must still replace the stale on-screen value.
+  if (portEl && State.portfolio?.summary?.total_value != null) {
     portEl.textContent = '$' + fmt.currency(State.portfolio.summary.total_value);
   }
 }
@@ -4235,6 +4316,92 @@ function _ajMoney(v) {
   if (v === null || v === undefined || isNaN(v)) return '—';
   const n = Number(v);
   return (n < 0 ? '-$' : '$') + Math.abs(n).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
+// Agent timestamps are UTC ISO (aj_db.utc_now_iso, usually without a 'Z')
+// — render them in the operator's local timezone. Slicing the raw string
+// displayed UTC times that read as local, so fills looked hours off
+// ("the agent traded after hours").
+function _ajLocalTime(ts) {
+  if (!ts) return '—';
+  ts = String(ts);
+  const d = new Date(/Z$|[+-]\d{2}:?\d{2}$/.test(ts) ? ts : ts + 'Z');
+  if (isNaN(d.getTime())) return ts.replace('T', ' ').slice(0, 16);
+  return d.toLocaleString();
+}
+// Per-symbol trade-history drill-down: every fill + FIFO round-trips + the
+// current position, in an overlay. Opened by clicking a symbol in the
+// proposals/orders tables — answers "did it actually buy this?" without
+// scrolling table history.
+async function _ajTradeDrilldown(sym) {
+  if (!sym) return;
+  const old = document.getElementById('aj-drill-overlay');
+  if (old) old.remove();
+  const ov = document.createElement('div');
+  ov.id = 'aj-drill-overlay';
+  ov.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.65);z-index:9999;' +
+    'display:flex;align-items:center;justify-content:center;padding:24px;';
+  ov.innerHTML = '<div class="panel" style="max-width:860px;width:100%;max-height:85vh;' +
+    'overflow:auto;padding:16px;" id="aj-drill-box"><div class="muted">loading ' +
+    _esc(_ajFmtSymbol(sym)) + ' history…</div></div>';
+  // Detach the document-level Escape handler on EVERY close path (backdrop
+  // click, close button, Escape) — detaching only on Escape leaked one
+  // handler per drill-down open for the page lifetime.
+  const close = () => { ov.remove(); document.removeEventListener('keydown', esc); };
+  const esc = (e) => { if (e.key === 'Escape') close(); };
+  ov.addEventListener('click', (e) => { if (e.target === ov) close(); });
+  document.addEventListener('keydown', esc);
+  document.body.appendChild(ov);
+  let d;
+  try { d = await API.get('/api/aj/trades/' + encodeURIComponent(sym)); }
+  catch (e) {
+    document.getElementById('aj-drill-box').innerHTML =
+      '<div class="muted">could not load history: ' + _esc(e.message || 'error') + '</div>';
+    return;
+  }
+  const pos = d.position;
+  const fills = d.fills || [];
+  const trips = d.round_trips || [];
+  const dt = _ajLocalTime; // UTC ISO → local display (see _ajLocalTime)
+  const pnlCell = (v) => {
+    const n = Number(v);
+    if (!isFinite(n)) return '—';
+    return '<span style="color:' + (n >= 0 ? '#2ecc71' : '#e74c3c') + ';font-weight:600;">' +
+      _ajMoney(n) + '</span>';
+  };
+  let html = '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">' +
+    '<span class="panel-title">' + _esc(_ajFmtSymbol(sym)) + ' — trade history</span>' +
+    '<button class="btn" id="aj-drill-close" style="font-size:11px;padding:2px 10px;">close</button></div>';
+  html += '<div style="font-size:12px;margin-bottom:10px;">current position: ' +
+    (pos ? ('<b>' + _esc(String(pos.qty)) + '</b> @ avg ' + _ajMoney(pos.avg_cost))
+         : '<b>FLAT</b>') + '</div>';
+  html += '<div class="muted" style="font-size:11px;margin:6px 0 2px;">closed round-trips (FIFO)</div>';
+  html += trips.length ? '<table class="data-table" style="width:100%;font-size:11px;"><thead><tr>' +
+    '<th>opened</th><th>closed</th><th>qty</th><th>entry</th><th>exit</th><th>gain</th><th>P&L (net)</th>' +
+    '</tr></thead><tbody>' + trips.map(t =>
+      '<tr><td>' + dt(t.opened_at) + '</td><td>' + dt(t.closed_at) + '</td>' +
+      '<td>' + _esc(String(t.qty ?? '—')) + '</td>' +
+      '<td>' + _ajMoney(t.entry_price) + '</td><td>' + _ajMoney(t.exit_price) + '</td>' +
+      '<td>' + (t.gain_pct === null || t.gain_pct === undefined ? '—' :
+        ('<span style="color:' + (t.gain_pct >= 0 ? '#2ecc71' : '#e74c3c') + ';">' +
+          t.gain_pct + '%</span>')) + '</td>' +
+      '<td>' + pnlCell(t.realized_pnl_usd) + '</td></tr>').join('') +
+    '</tbody></table>' :
+    '<div class="muted" style="font-size:11px;">none yet (position still open or never traded)</div>';
+  html += '<div class="muted" style="font-size:11px;margin:12px 0 2px;">all fills</div>';
+  html += fills.length ? '<table class="data-table" style="width:100%;font-size:11px;"><thead><tr>' +
+    '<th>time</th><th>side</th><th>qty</th><th>price</th><th>fees</th><th>order</th><th>thesis</th>' +
+    '</tr></thead><tbody>' + fills.map(f =>
+      '<tr><td>' + dt(f.filled_at) + '</td>' +
+      '<td style="color:' + (String(f.side) === 'buy' ? '#2ecc71' : '#e74c3c') + ';">' + _esc(f.side) + '</td>' +
+      '<td>' + _esc(String(f.qty ?? '')) + '</td><td>' + _ajMoney(f.price) + '</td>' +
+      '<td>' + _ajMoney(f.fees_usd) + '</td><td>#' + _esc(String(f.order_id)) + '</td>' +
+      '<td class="muted" style="font-size:10px;">' + _esc((f.thesis || '').slice(0, 90)) + '</td></tr>').join('') +
+    '</tbody></table>' :
+    '<div class="muted" style="font-size:11px;">no fills recorded for this symbol</div>';
+  const box = document.getElementById('aj-drill-box');
+  box.innerHTML = html;
+  const cb = document.getElementById('aj-drill-close');
+  if (cb) cb.addEventListener('click', close);
 }
 // Render an option ticker like "OPT:AAPL:20260717:C:150.0" as a human label
 // "AAPL $150 CALL 07/17/26". Non-option symbols pass through unchanged.
@@ -4346,7 +4513,7 @@ async function loadTradingView() {
         <div class="aj-hero-title">◉ TRADING AGENT <span class="aj-hero-ver">AJTA v${_esc(s.version || '3.0.0')}</span></div>
         <div class="aj-hero-pills">
           ${_ajPill(enabled ? 'TRADING ON' : 'TRADING OFF', enabled, enabled ? 'green' : 'amber')}
-          ${_ajPill(live ? 'LIVE ENABLED' : 'PAPER ONLY', !live, live ? 'red' : 'green')}
+          ${_ajPill(live ? 'LIVE ENABLED' : 'PAPER ONLY', true, live ? 'red' : 'green')}
           ${_ajPill('session: ' + _esc(s.session || '—'), true, 'blue')}
           ${halted ? _ajPill('HALTED', true, 'red') : ''}
           ${_ajPill('chain ' + ((s.audit_chain || {}).ok ? 'OK' : 'BROKEN'), (s.audit_chain || {}).ok, (s.audit_chain || {}).ok ? 'green' : 'red')}
@@ -4470,7 +4637,8 @@ async function loadTradingView() {
           f('Trade options (long calls/puts, paper)', yn('aj-cfg-trade_options', cfg.trade_options), 'When on, the agent may express a signal as a long call or put instead of stock. Paper only.') +
           f('Option target DTE', num('aj-cfg-option_target_dte', cfg.option_target_dte, null, 'days'), 'Aim for a contract roughly this many days to expiration.') +
           f('Option moneyness (0=ATM)', num('aj-cfg-option_moneyness', cfg.option_moneyness, '0.01'), 'Strike offset from spot: 0=at-the-money, positive=out-of-the-money.') +
-          f('Contract multiplier', num('aj-cfg-option_contract_multiplier', cfg.option_contract_multiplier, null, '×'), 'Shares per contract (standard US equity options = 100).')
+          f('Contract multiplier', num('aj-cfg-option_contract_multiplier', cfg.option_contract_multiplier, null, '×'), 'Shares per contract (standard US equity options = 100).') +
+          f('Allow illiquid fallback', yn('aj-cfg-option_allow_illiquid_fallback', cfg.option_allow_illiquid_fallback), 'When nothing passes the open-interest/spread screen, still pick the best unscreened contract. OFF = screened-only (fail-closed).')
         )}
 
         ${group('🧠 Analyst Council (advisory)', 'A panel of analysts that debate a name — advisory only, never trades, double-gated', false,
@@ -4528,7 +4696,10 @@ async function loadTradingView() {
           f('Limit offset', num('aj-cfg-entry_limit_offset_bps', cfg.entry_limit_offset_bps, '1', 'bps'), 'How far from the quote to place a limit order, in basis points.') +
           f('Order time-to-live', num('aj-cfg-order_ttl_cycles', cfg.order_ttl_cycles, null, 'cycles'), 'Cancel an unfilled order after this many cycles.') +
           f('Max slippage', num('aj-cfg-max_slippage_bps', cfg.max_slippage_bps, '0.5', 'bps'), 'Reject a fill if slippage exceeds this (basis points).') +
+          f('Account cash $', num('aj-cfg-paper_cash', cfg.paper_cash, null, '$'), 'The capital base the agent trades WITHIN: entries are sized to and gated by available cash (base − open positions + realized P&L). 0 = legacy unfunded book (no cash limit). Live mode uses the broker’s settled cash instead.') +
           f('Paper slippage', num('aj-cfg-paper_slippage_bps', cfg.paper_slippage_bps, '0.5', 'bps'), 'Simulated slippage added to paper fills, for realism.') +
+          f('Paper partial fills', yn('aj-cfg-paper_partial_fills', cfg.paper_partial_fills), 'Simulate liquidity-bounded partial fills (remainder completes on later polls) so partial-fill handling is exercised in paper as it would be live.') +
+          f('  ↳ fill liquidity $', num('aj-cfg-paper_fill_liquidity_usd', cfg.paper_fill_liquidity_usd, null, '$'), 'Nominal per-order liquidity budget; orders larger than this fill partially.') +
           f('Paper spread crossed', num('aj-cfg-paper_spread_fraction', cfg.paper_spread_fraction, '0.1'), 'Fraction of the bid/ask spread paid on a paper fill (0–1).') +
           f('Skip after open', num('aj-cfg-trade_skip_open_min', cfg.trade_skip_open_min, null, 'min'), 'Avoid the volatile first N minutes after the open.') +
           f('Skip before close', num('aj-cfg-trade_skip_close_min', cfg.trade_skip_close_min, null, 'min'), 'Avoid the last N minutes before the close.') +
@@ -4572,6 +4743,9 @@ async function loadTradingView() {
           f('Pyramid max adds', num('aj-cfg-pyramid_max_adds', cfg.pyramid_max_adds, null, 'adds'), 'How many times you can add to one position.') +
           f('Pyramid min gain', num('aj-cfg-pyramid_min_gain_pct', cfg.pyramid_min_gain_pct, '0.5', '%'), 'A position must be up this much before adding.') +
           f('Signal scorecard', yn('aj-cfg-signal_scorecard', cfg.signal_scorecard), 'Track realized win-rate by entry conviction.') +
+          f('Adapter scorecard', yn('aj-cfg-adapter_scorecard', cfg.adapter_scorecard), 'Log every signal adapter’s forecasts, score them after the horizon, and decay the confidence of persistently uninformative sources.') +
+          f('Event alpha (AI-scored news/filings)', yn('aj-cfg-event_alpha_enabled', cfg.event_alpha_enabled), 'AI reads headlines and SEC filings for candidates/holdings, scores each event (direction, confidence, half-life), and feeds the decayed aggregate into the ensemble — IC-gated and graded against realized returns, so it earns weight by skill.') +
+          f('  ↳ LLM scores per cycle', num('aj-cfg-event_max_llm_per_cycle', cfg.event_max_llm_per_cycle, null, 'events'), 'Cost budget: at most this many events scored per cycle.') +
           f('Opportunity radar', yn('aj-cfg-opportunity_radar', cfg.opportunity_radar), 'Rank the universe each cycle and trade only the best setups.') +
           f('Radar top-K', num('aj-cfg-opportunity_radar_top_k', cfg.opportunity_radar_top_k, null, 'names'), 'How many top-ranked names the radar keeps.')
         )}
@@ -4583,7 +4757,9 @@ async function loadTradingView() {
           f('Health auto-halt', yn('aj-cfg-health_autohalt', cfg.health_autohalt), 'Self-halt on fill-rate collapse, divergence, or a broken audit chain.') +
           f('Preset escalation', yn('aj-cfg-auto_preset_escalation', cfg.auto_preset_escalation), 'Earn your way up conservative→moderate→aggressive; step down on drawdown.') +
           f('Daily reflection', yn('aj-cfg-daily_reflection', cfg.daily_reflection), 'Write an end-of-day self-review of what worked.') +
-          f('Pre-market briefing', yn('aj-cfg-premarket_briefing', cfg.premarket_briefing), 'Build a ranked “what to watch” list before the open.')
+          f('Pre-market briefing', yn('aj-cfg-premarket_briefing', cfg.premarket_briefing), 'Build a ranked “what to watch” list before the open.') +
+          f('Nightly counterfactual', yn('aj-cfg-nightly_counterfactual', cfg.nightly_counterfactual), 'Each evening, replay the last ~30 sessions under your live config and its neighbors (isolated; never touches the live book). Results appear in the Replay Lab panel next morning.') +
+          f('Research Scientist', yn('aj-cfg-lab_enabled', cfg.lab_enabled), 'Nightly: propose a config hypothesis, test it as walk-forward twin replays (isolated), and promote it ONLY if it beats your live settings under a rising evidence bar. Whitelisted strategy keys only; every change is audited and auto-reverts if live results fall short.')
         )}
 
         ${group('🎯 Effectiveness — better buys & sells', 'Richer signals, pick the best names, trade smarter (all opt-in)', false,
@@ -4701,6 +4877,7 @@ async function loadTradingView() {
       screen_min_market_cap: vNum('aj-cfg-screen_min_market_cap'),
       // options (paper)
       trade_options: vBool('aj-cfg-trade_options'),
+      option_allow_illiquid_fallback: vBool('aj-cfg-option_allow_illiquid_fallback'),
       option_target_dte: vNum('aj-cfg-option_target_dte'),
       option_moneyness: vNum('aj-cfg-option_moneyness'),
       option_contract_multiplier: vNum('aj-cfg-option_contract_multiplier'),
@@ -4718,7 +4895,10 @@ async function loadTradingView() {
       use_llm_synthesis: vBool('aj-cfg-use_llm_synthesis'),
       default_broker: vStr('aj-cfg-default_broker') || 'paper',
       auto_approve_paper: vBool('aj-cfg-auto_approve_paper'),
+      paper_cash: vNum('aj-cfg-paper_cash'),
       paper_slippage_bps: vNum('aj-cfg-paper_slippage_bps'),
+      paper_partial_fills: vBool('aj-cfg-paper_partial_fills'),
+      paper_fill_liquidity_usd: vNum('aj-cfg-paper_fill_liquidity_usd'),
       paper_spread_fraction: vNum('aj-cfg-paper_spread_fraction'),
       // enhancements
       conviction_sizing: vBool('aj-cfg-conviction_sizing'),
@@ -4769,6 +4949,9 @@ async function loadTradingView() {
       pyramid_max_adds: vNum('aj-cfg-pyramid_max_adds'),
       pyramid_min_gain_pct: vNum('aj-cfg-pyramid_min_gain_pct'),
       signal_scorecard: vBool('aj-cfg-signal_scorecard'),
+      adapter_scorecard: vBool('aj-cfg-adapter_scorecard'),
+      event_alpha_enabled: vBool('aj-cfg-event_alpha_enabled'),
+      event_max_llm_per_cycle: vNum('aj-cfg-event_max_llm_per_cycle'),
       opportunity_radar: vBool('aj-cfg-opportunity_radar'),
       opportunity_radar_top_k: vNum('aj-cfg-opportunity_radar_top_k'),
       // analyst council (advisory)
@@ -4791,6 +4974,8 @@ async function loadTradingView() {
       auto_preset_escalation: vBool('aj-cfg-auto_preset_escalation'),
       daily_reflection: vBool('aj-cfg-daily_reflection'),
       premarket_briefing: vBool('aj-cfg-premarket_briefing'),
+      nightly_counterfactual: vBool('aj-cfg-nightly_counterfactual'),
+      lab_enabled: vBool('aj-cfg-lab_enabled'),
       // effectiveness layer
       multi_factor_signals: vBool('aj-cfg-multi_factor_signals'),
       signal_ic_gate: vBool('aj-cfg-signal_ic_gate'),
@@ -4819,24 +5004,30 @@ async function loadTradingView() {
     catch (e) { _ajToast('Save failed: ' + e.message, false); }
   });
 
-  // tables (best-effort)
+  // tables (best-effort) — symbols are clickable: per-symbol trade history
+  const _drillCell = (sym) =>
+    `<a href="#" class="aj-drill" data-s="${_esc(sym || '')}" style="color:inherit;text-decoration:underline dotted;">${_esc(_ajFmtSymbol(sym))}</a>`;
   try {
     const [pr, od] = await Promise.all([
-      API.get('/api/aj/proposals?limit=10').catch(() => ({ proposals: [] })),
-      API.get('/api/aj/orders?limit=10').catch(() => ({ orders: [] })),
+      API.get('/api/aj/proposals?limit=25').catch(() => ({ proposals: [] })),
+      API.get('/api/aj/orders?limit=25').catch(() => ({ orders: [] })),
     ]);
     const pEl = document.getElementById('aj-proposals');
     if (pEl) {
       const rows = (pr.proposals || []);
       pEl.innerHTML = rows.length ? `<table class="data-table" style="width:100%"><thead><tr><th>Symbol</th><th>Side</th><th>Qty</th><th>Status</th><th>Thesis</th></tr></thead><tbody>${rows.map(p =>
-        `<tr><td>${_esc(_ajFmtSymbol(p.symbol))}</td><td>${_esc(p.side)}</td><td>${_esc(String(p.qty || ''))}</td><td>${_esc(p.status)}</td><td class="muted" style="font-size:11px">${_esc((p.thesis || p.risk_reason || '').slice(0, 80))}</td></tr>`).join('')}</tbody></table>` : '<div class="muted">No proposals yet — run a cycle.</div>';
+        `<tr><td>${_drillCell(p.symbol)}</td><td>${_esc(p.side)}</td><td>${_esc(String(p.qty || ''))}</td><td>${_esc(p.status)}</td><td class="muted" style="font-size:11px">${_esc((p.thesis || p.risk_reason || '').slice(0, 80))}</td></tr>`).join('')}</tbody></table>` : '<div class="muted">No proposals yet — run a cycle.</div>';
     }
     const oEl = document.getElementById('aj-orders');
     if (oEl) {
       const rows = (od.orders || []);
       oEl.innerHTML = rows.length ? `<table class="data-table" style="width:100%"><thead><tr><th>Symbol</th><th>Side</th><th>Qty</th><th>State</th><th>Avg fill</th><th>Mode</th></tr></thead><tbody>${rows.map(o =>
-        `<tr><td>${_esc(_ajFmtSymbol(o.symbol))}</td><td>${_esc(o.side)}</td><td>${_esc(String(o.qty || ''))}</td><td>${_esc(o.state)}</td><td>${o.avg_fill_price ? _ajMoney(o.avg_fill_price) : '—'}</td><td>${_esc(o.mode)}</td></tr>`).join('')}</tbody></table>` : '<div class="muted">No orders yet.</div>';
+        `<tr><td>${_drillCell(o.symbol)}</td><td>${_esc(o.side)}</td><td>${_esc(String(o.qty || ''))}</td><td>${_esc(o.state)}</td><td>${o.avg_fill_price ? _ajMoney(o.avg_fill_price) : '—'}</td><td>${_esc(o.mode)}</td></tr>`).join('')}</tbody></table>` : '<div class="muted">No orders yet.</div>';
     }
+    el.querySelectorAll('.aj-drill').forEach(a => a.addEventListener('click', (ev) => {
+      ev.preventDefault();
+      _ajTradeDrilldown(a.getAttribute('data-s'));
+    }));
   } catch (e) {}
 
   // preset buttons
@@ -4868,8 +5059,17 @@ async function loadTradingView() {
     const sumEl = document.getElementById('aj-pos-summary');
     if (sumEl) sumEl.textContent = posRows.length ? (posRows.length + ' positions · MV ' + _ajMoney(pd.total_market_value) + ' · unreal ' + _ajMoney(pd.total_unrealized)) : '';
     if (ppEl) {
+      // mark provenance: 'stale' = last-good option premium (chain feed
+      // throttled/closed); 'cost' = no mark at all, row shown AT COST — its
+      // $0.00 P&L means "unpriceable right now", not "flat". Dim those cells
+      // and say so in the tooltip instead of letting them read as live.
+      const _markCell = (p) => {
+        if (p.mark_src === 'cost') return `<span class="muted" title="no live quote — shown at cost basis; P&L unavailable">${_ajMoney(p.mark)}<sup>c</sup></span>`;
+        if (p.mark_src === 'stale') return `<span style="opacity:.65" title="last-good premium (options chain throttled or market closed)">${_ajMoney(p.mark)}<sup>~</sup></span>`;
+        return _ajMoney(p.mark);
+      };
       ppEl.innerHTML = posRows.length ? `<table class="data-table" style="width:100%"><thead><tr><th>Symbol</th><th>Qty</th><th>Avg cost</th><th>Price</th><th>Mkt value</th><th>Unreal P&L</th><th>%</th><th>Weight</th><th>Age</th></tr></thead><tbody>${posRows.map(p =>
-        `<tr><td><b>${_esc(_ajFmtSymbol(p.symbol))}</b></td><td>${_esc(String(p.qty))}</td><td>${_ajMoney(p.avg_cost)}</td><td>${_ajMoney(p.mark)}</td><td>${_ajMoney(p.market_value)}</td><td style="color:${(p.unrealized||0)>=0?'var(--green)':'var(--red)'}">${_ajMoney(p.unrealized)}</td><td style="color:${(p.unrealized_pct||0)>=0?'var(--green)':'var(--red)'}">${p.unrealized_pct==null?'—':(p.unrealized_pct>=0?'+':'')+_esc(String(p.unrealized_pct))+'%'}</td><td>${p.weight_pct==null?'—':_esc(String(p.weight_pct))+'%'}</td><td>${p.age_days==null?'—':_esc(String(p.age_days))+'d'}</td></tr>`).join('')}</tbody></table>` : '<div class="muted">No paper positions yet — the agent opens positions when it buys (run a cycle during market hours).</div>';
+        `<tr><td><b>${_esc(_ajFmtSymbol(p.symbol))}</b></td><td>${_esc(String(p.qty))}</td><td>${_ajMoney(p.avg_cost)}</td><td>${_markCell(p)}</td><td>${_ajMoney(p.market_value)}</td><td style="color:${(p.unrealized||0)>=0?'var(--green)':'var(--red)'}">${p.mark_src==='cost'?'<span class="muted" title="no live quote">—</span>':_ajMoney(p.unrealized)}</td><td style="color:${(p.unrealized_pct||0)>=0?'var(--green)':'var(--red)'}">${p.mark_src==='cost'?'<span class="muted">—</span>':(p.unrealized_pct==null?'—':(p.unrealized_pct>=0?'+':'')+_esc(String(p.unrealized_pct))+'%')}</td><td>${p.weight_pct==null?'—':_esc(String(p.weight_pct))+'%'}</td><td>${p.age_days==null?'—':_esc(String(p.age_days))+'d'}</td></tr>`).join('')}</tbody></table>` : '<div class="muted">No paper positions yet — the agent opens positions when it buys (run a cycle during market hours).</div>';
     }
     const aEl = document.getElementById('aj-analytics');
     if (aEl) {
@@ -4890,7 +5090,14 @@ async function loadTradingView() {
       aEl.innerHTML = statline + attrTable + '<div style="margin-top:8px"><a href="/api/aj/journal.csv" class="btn btn-sm">⬇ Export trade journal (CSV)</a></div>';
     }
   } catch (e) {
+    // Mark EVERY panel this request feeds as unavailable — leaving the
+    // positions panel on 'loading…' and the KPIs on '—' looked like an
+    // in-flight request rather than a failure.
     const aEl = document.getElementById('aj-analytics'); if (aEl) aEl.innerHTML = '<div class="muted">Analytics unavailable.</div>';
+    const ppEl = document.getElementById('aj-positions-panel'); if (ppEl) ppEl.innerHTML = '<div class="muted">Positions unavailable.</div>';
+    const sumEl = document.getElementById('aj-pos-summary'); if (sumEl) sumEl.textContent = '';
+    const cc = document.getElementById('aj-equity-chart');
+    if (cc && cc.parentNode) cc.parentNode.innerHTML = '<div class="muted" style="padding:20px;text-align:center">Equity history unavailable.</div>';
   }
 
   // ── Analyst Council (advisory) ──
@@ -4962,7 +5169,7 @@ async function loadTradingView() {
           + `<div class="muted" style="font-size:11px;margin-top:6px">cycle ${_esc(String(r.cycle_id || '—'))} · ${r.n_calls == null ? '?' : _esc(String(r.n_calls))} LLM call(s)</div>`
           + `</td></tr>`;
         return `<tr class="aj-cr-row" data-idx="${i}" style="cursor:${hasMore ? 'pointer' : 'default'}">`
-          + `<td class="muted" style="font-size:11px">${_esc(String(r.ts || '').slice(0, 19))}</td>`
+          + `<td class="muted" style="font-size:11px">${_esc(_ajLocalTime(r.ts))}</td>`
           + `<td><b>${_esc(r.symbol || '')}</b></td>`
           + `<td>${decisionCell}</td>`
           + `<td>${_ajPct(r.conviction)}</td>`
@@ -5034,7 +5241,9 @@ const VIEW_LOADERS = {
 
 function startAutoRefresh() {
   if (State.refreshInterval) clearInterval(State.refreshInterval);
-  const intervalSec = parseInt(State.settings.refresh_interval || 60);
+  // Clamp: a saved 0 or a typo ('6o' → NaN) would otherwise reach
+  // setInterval as ~0ms and fire the loaders hundreds of times per second.
+  const intervalSec = Math.max(10, parseInt(State.settings.refresh_interval, 10) || 60);
   const interval = intervalSec * 1000;
   // Keep the status-bar indicator honest about what "AUTO" means.
   const nodeEl = document.getElementById('status-node-live');
@@ -5516,20 +5725,26 @@ async function loadAnalyticsView() {
       value: s.total_value,
     }));
 
-    // Compute stats
+    // Compute stats. Guard against a zero first snapshot (fresh installs
+    // snapshot the empty portfolio) — dividing by 0 rendered '+Infinity%' /
+    // 'NaN%'. Baseline on the first POSITIVE value instead.
     let totalReturn = null, maxDrawdown = null;
     if (hist.length >= 2) {
-      const first = hist[0].total_value;
+      const first = hist.map(s => s.total_value).find(v => v > 0);
       const last  = hist[hist.length - 1].total_value;
-      totalReturn = ((last - first) / first) * 100;
-      let peak = first;
-      let dd = 0;
-      hist.forEach(s => {
-        if (s.total_value > peak) peak = s.total_value;
-        const d = (s.total_value - peak) / peak * 100;
-        if (d < dd) dd = d;
-      });
-      maxDrawdown = dd;
+      if (first > 0) {
+        totalReturn = ((last - first) / first) * 100;
+        let peak = first;
+        let dd = 0;
+        hist.forEach(s => {
+          if (s.total_value > peak) peak = s.total_value;
+          if (peak > 0) {
+            const d = (s.total_value - peak) / peak * 100;
+            if (d < dd) dd = d;
+          }
+        });
+        maxDrawdown = dd;
+      }
     }
 
     view.innerHTML = '<div class="panel mb-8" id="analytics-equity-panel">' +
@@ -5876,7 +6091,9 @@ function renderRiskTable(data) {
     return '<div class="empty-state"><span>No risk data. Add stocks to portfolio first.</span></div>';
   }
   if (data.error) {
-    return '<div class="empty-state"><span class="text-red">' + data.error + '</span></div>';
+    // _esc like every sibling error path — backend error strings can contain
+    // markup-significant characters (exception reprs, symbol names).
+    return '<div class="empty-state"><span class="text-red">' + _esc(data.error) + '</span></div>';
   }
   const symbols = Object.keys(data).filter(k => k !== 'error');
   if (!symbols.length) return '<div class="empty-state"><span>No data available</span></div>';
@@ -6484,6 +6701,10 @@ function _loadingStages(containerId, stages, intervalMs = 2500) {
 // ══════════════════════════════════════════════════════════════════════════════
 
 let _signalsCache = [];
+// Symbols the user added via '+ ADD' — a full rescan replaces _signalsCache
+// wholesale with portfolio-only scores, so these must be re-sent explicitly
+// or they silently vanish from the grid.
+const _signalsAdded = new Set();
 
 async function loadSignalsView() {
   const el = document.getElementById('view-signals');
@@ -6556,7 +6777,20 @@ async function runSignalsScan(extraSymbols) {
   if (meta) meta.textContent = 'Deep scan in progress — analyzing 6 signal dimensions per symbol...';
 
   try {
-    const payload = extraSymbols ? { symbols: extraSymbols } : {};
+    // The backend scores ONLY the symbols we send (defaulting to the
+    // portfolio when we send none) — so to keep user-added symbols across a
+    // full rescan we must send portfolio + added explicitly.
+    let payload = {};
+    if (extraSymbols && extraSymbols.length) {
+      payload = { symbols: extraSymbols };
+    } else if (_signalsAdded.size) {
+      let port = [];
+      try {
+        const p = State.portfolio || await API.get('/api/portfolio');
+        port = ((p && p.holdings) || []).filter(h => h.asset_type === 'stock').map(h => h.symbol);
+      } catch (e) {}
+      payload = { symbols: [...new Set([...port, ..._signalsAdded])] };
+    }
     const data = await API.post('/api/smart-money/scores', payload);
     loader.stop();
     if (data.error) throw new Error(data.error);
@@ -6586,14 +6820,17 @@ async function addSignalSymbol() {
   try {
     const data = await API.get(`/api/smart-money/score/${sym}`);
     if (data.error) throw new Error(data.error);
-    // Add to cache and re-render
+    // Add to cache and re-render; remember it so full rescans re-include it.
+    _signalsAdded.add(sym);
     _signalsCache = [data, ..._signalsCache.filter(s => s.symbol !== sym)];
     _signalsCache.sort((a, b) => (b.score || 0) - (a.score || 0));
     renderSignalsGrid(_signalsCache);
     if (meta) meta.textContent = `${sym} added — ${_signalsCache.length} symbols scored`;
     Toast.show(`${sym} score: ${data.score}/100 — ${data.signal}`, data.score >= 60 ? 'green' : 'amber');
   } catch(e) {
-    Toast.show(`${sym}: ${_esc(e.message)}`, 'red');
+    // Pass the RAW message — Toast.show escapes internally; pre-escaping
+    // here double-encoded entities ("Couldn&#39;t fetch data").
+    Toast.show(`${sym}: ${e.message}`, 'red');
     if (meta) meta.textContent = _signalsCache.length ? `${_signalsCache.length} symbols scored` : '';
   }
 }
@@ -7208,8 +7445,8 @@ function renderOptionsResult(data) {
       </div>
       <div style="display:flex;gap:20px;padding:8px 0;font-size:11px;color:var(--text-secondary);border-bottom:1px solid var(--border);margin-bottom:8px">
         <span>Price: <strong style="color:var(--text-primary)">$${fmt.price(data.current_price)}</strong></span>
-        <span>Calls: <strong class="col-positive">${bulls}</strong></span>
-        <span>Puts: <strong class="col-negative">${bears}</strong></span>
+        <span>Bullish: <strong class="col-positive">${bulls}</strong></span>
+        <span>Bearish: <strong class="col-negative">${bears}</strong></span>
         <span>Expirations: <strong>${data.expirations_scanned}</strong></span>
       </div>
       <div class="table-wrap">
@@ -7395,7 +7632,9 @@ function renderCongressView(data) {
 
 function filterCongressByTicker(ticker) {
   if (!_congressData) return;
-  const trades = (_congressData.trades || []).filter(t => t.ticker === ticker);
+  // ticker=null → show all trades (used by clearCongressFilter).
+  const trades = ticker ? (_congressData.trades || []).filter(t => t.ticker === ticker)
+                        : (_congressData.trades || []);
   const tbody = document.getElementById('congress-trades-body');
   const title = document.getElementById('congress-table-title');
   const clearBtn = document.getElementById('congress-clear-filter');
@@ -7419,13 +7658,17 @@ function filterCongressByTicker(ticker) {
       </tr>
     `).join('');
   }
-  if (title) title.textContent = `${ticker} TRADES (${trades.length})`;
-  if (clearBtn) clearBtn.style.display = '';
+  if (title) title.textContent = ticker ? `${ticker} TRADES (${trades.length})` : `ALL RECENT TRADES (${trades.length})`;
+  if (clearBtn) clearBtn.style.display = ticker ? '' : 'none';
 }
 
 function clearCongressFilter() {
   if (!_congressData) return;
-  renderCongressView(_congressData);
+  // Restore only the trades tbody/title in place. Re-running
+  // renderCongressView replaces #congress-body wholesale and silently
+  // deletes the appended Senate STOCK Act panel (recovering it costs a full
+  // PDF re-download via REFRESH).
+  filterCongressByTicker(null);
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -7518,7 +7761,7 @@ function renderScannerQuestionnaire(view, p) {
     // Sectors
     + '<div class="form-group" style="margin-bottom:16px">'
     + '<label class="form-label">SECTOR FOCUS (optional — leave empty for all)</label>'
-    + '<input class="form-input" id="scan-sectors" placeholder="Technology, Healthcare, Energy..." value="' + (p.sectors || []).join(', ') + '">'
+    + '<input class="form-input" id="scan-sectors" placeholder="Technology, Healthcare, Energy..." value="' + _esc((p.sectors || []).join(', ')) + '">'
     + '</div>'
 
     + '<button class="btn btn-green btn-lg" onclick="saveScannerProfile()" style="width:100%">SAVE PROFILE & START SCANNING</button>'
@@ -7581,8 +7824,11 @@ async function saveScannerProfile() {
     _scannerProfile = profile;
     Toast.show('Profile saved — starting scan...');
     var view = document.getElementById('view-scanner');
+    // renderScannerDashboard's cached-results check triggers runScan(false)
+    // itself when the new profile's cache misses (it always does right after
+    // a profile change) — calling runScan here too launched two concurrent
+    // 30-60s scans whose responses raced over #scan-results-area.
     renderScannerDashboard(view, profile);
-    runScan(false);
   } catch (e) {
     Toast.error('Failed to save profile');
   }
@@ -7644,7 +7890,7 @@ async function runScan(force) {
     Toast.show('Scan complete — ' + (data.opportunities || []).length + ' opportunities found');
   } catch (e) {
     area.innerHTML = '<div class="empty-state"><span class="empty-icon" style="color:var(--red)">!</span>'
-      + '<span style="color:var(--red)">Scan failed: ' + (e.message || 'Unknown error') + '</span>'
+      + '<span style="color:var(--red)">Scan failed: ' + _esc(e.message || 'Unknown error') + '</span>'
       + '<button class="btn btn-ghost btn-sm" onclick="runScan(true)" style="margin-top:8px">RETRY</button></div>';
   }
 }
@@ -7653,7 +7899,9 @@ function renderScanResults(data) {
   var area = document.getElementById('scan-results-area');
   if (!area) return;
   var opps = data.opportunities || [];
-  var meta = data.meta || {};
+  // Backend emits `scan_meta` (opportunity_scanner.scan_opportunities) —
+  // the old `data.meta` key never existed, so the meta line never rendered.
+  var meta = data.scan_meta || data.meta || {};
 
   if (opps.length === 0) {
     area.innerHTML = '<div class="empty-state"><span class="empty-icon">⊙</span>'
@@ -7662,13 +7910,18 @@ function renderScanResults(data) {
     return;
   }
 
-  var topPicks = opps.filter(function(o) { return o.tags && o.tags.indexOf('TOP PICK') !== -1; });
-  var earlySigs = opps.filter(function(o) { return o.tags && o.tags.indexOf('EARLY SIGNAL') !== -1; });
+  // Backend tags each opportunity with a single `badge` string ('TOP PICK' /
+  // 'EARLY SIGNAL'), not a `tags` array — reading o.tags left these panels
+  // permanently hidden.
+  var topPicks = opps.filter(function(o) { return o.badge === 'TOP PICK'; });
+  var earlySigs = opps.filter(function(o) { return o.badge === 'EARLY SIGNAL'; });
   var html = '';
 
-  // Meta info
-  if (meta.scanned_at) {
-    html += '<div style="text-align:right;font-size:10px;color:var(--text-dim);margin-bottom:8px">SCANNED: ' + meta.scanned_at + ' | UNIVERSE: ' + (meta.universe_size || '?') + ' SYMBOLS | STRATEGY: ' + (meta.strategy || '?').toUpperCase() + '</div>';
+  // Meta info (scan_meta has no scanned_at — show scan time / cache state)
+  if (meta.universe_size != null || meta.strategy) {
+    html += '<div style="text-align:right;font-size:10px;color:var(--text-dim);margin-bottom:8px">'
+      + (meta.cached ? 'CACHED RESULT' : ('SCAN TIME: ' + (meta.scan_time_ms != null ? meta.scan_time_ms + 'ms' : '?')))
+      + ' | UNIVERSE: ' + (meta.universe_size || '?') + ' SYMBOLS | STRATEGY: ' + _esc(String(meta.strategy || '?').toUpperCase()) + '</div>';
   }
 
   // Top Picks highlight
@@ -7702,12 +7955,15 @@ function renderScanResults(data) {
 
   opps.forEach(function(o, i) {
     var compColor = o.composite >= 70 ? 'var(--green)' : (o.composite >= 50 ? 'var(--amber)' : 'var(--text-dim)');
-    var tagBadges = (o.tags || []).map(function(t) {
+    // Backend fields: `badge` (single string) and `early_signals` (array) —
+    // the old o.tags / o.catalysts keys are never sent.
+    var tagBadges = (o.badge ? [o.badge] : []).map(function(t) {
       var cls = t === 'TOP PICK' ? 'col-positive' : (t === 'EARLY SIGNAL' ? 'col-amber' : '');
       return '<span class="signal-badge ' + cls + '" style="font-size:8px">' + _esc(t) + '</span>';
     }).join(' ');
-    var catalysts = (o.catalysts || []).slice(0, 2).join(', ');
-    var typeLabel = (o.asset_type || 'stock').toUpperCase();
+    var catalysts = (o.early_signals || []).slice(0, 2).join(', ');
+    // Backend labels the class as `asset_class` ('stock'/'etf'/'crypto').
+    var typeLabel = (o.asset_class || o.asset_type || 'stock').toUpperCase();
 
     html += '<tr>'
       + '<td style="color:var(--text-dim)">' + (i + 1) + '</td>'
@@ -7720,7 +7976,7 @@ function renderScanResults(data) {
       + '<td style="text-align:right">' + _fmtScanScore(o.scores, 'momentum') + '</td>'
       + '<td style="text-align:right">' + _fmtScanScore(o.scores, 'fundamentals') + '</td>'
       + '<td>' + tagBadges + '</td>'
-      + '<td style="font-size:10px;color:var(--text-secondary);max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="' + _esc((o.catalysts || []).join(', ')) + '">' + _esc(catalysts) + '</td>'
+      + '<td style="font-size:10px;color:var(--text-secondary);max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="' + _esc((o.early_signals || []).join(', ')) + '">' + _esc(catalysts) + '</td>'
       + '<td><button class="btn btn-ghost btn-sm" onclick="openResearch(\'' + _jesc(o.symbol) + '\')">RESEARCH</button></td>'
       + '</tr>';
   });
@@ -7731,11 +7987,11 @@ function renderScanResults(data) {
 
 function _scannerTopCard(o) {
   var compColor = o.composite >= 70 ? 'var(--green)' : 'var(--amber)';
-  var catalysts = (o.catalysts || []).slice(0, 3).map(function(c) {
+  var catalysts = (o.early_signals || []).slice(0, 3).map(function(c) {
     return '<div style="font-size:9px;color:var(--text-secondary)">+ ' + _esc(c) + '</div>';
   }).join('');
   return '<div class="kpi-card" style="cursor:pointer;border:1px solid var(--green-dim)" onclick="openResearch(\'' + _jesc(o.symbol) + '\')">'
-    + '<div class="kpi-label" style="color:var(--green)">' + _esc(o.symbol) + ' <span style="font-size:9px;color:var(--text-dim)">' + _esc((o.asset_type || 'stock').toUpperCase()) + '</span></div>'
+    + '<div class="kpi-label" style="color:var(--green)">' + _esc(o.symbol) + ' <span style="font-size:9px;color:var(--text-dim)">' + _esc((o.asset_class || o.asset_type || 'stock').toUpperCase()) + '</span></div>'
     + '<div class="kpi-value" style="color:' + compColor + ';font-size:28px">' + (o.composite != null ? o.composite.toFixed(1) : '—') + '<span style="font-size:12px;color:var(--text-dim)">/100</span></div>'
     + '<div style="font-size:10px;color:var(--text-secondary);margin-top:4px">' + _fmtScanPrice(o.price) + '</div>'
     + catalysts
@@ -7746,7 +8002,7 @@ function _scannerSignalCard(o) {
   return '<div class="kpi-card" style="cursor:pointer;border:1px solid var(--amber-dim, var(--amber))" onclick="openResearch(\'' + _jesc(o.symbol) + '\')">'
     + '<div class="kpi-label" style="color:var(--amber)">' + _esc(o.symbol) + '</div>'
     + '<div class="kpi-value" style="font-size:22px">' + (o.composite != null ? o.composite.toFixed(1) : '—') + '</div>'
-    + '<div style="font-size:9px;color:var(--text-dim);margin-top:2px">' + _esc((o.catalysts || []).slice(0, 2).join(' | ')) + '</div>'
+    + '<div style="font-size:9px;color:var(--text-dim);margin-top:2px">' + _esc((o.early_signals || []).slice(0, 2).join(' | ')) + '</div>'
     + '</div>';
 }
 
@@ -7825,10 +8081,10 @@ async function analyzeGex(sym) {
   if (input) input.value = symbol;
   var results = document.getElementById('gex-results');
   if (!results) return;
-  results.innerHTML = '<div class="loading"><div class="spinner"></div> Analyzing gamma exposure for ' + symbol + '...</div>';
+  results.innerHTML = '<div class="loading"><div class="spinner"></div> Analyzing gamma exposure for ' + _esc(symbol) + '...</div>';
 
   try {
-    var data = await API.get('/api/gex/' + symbol);
+    var data = await API.get('/api/gex/' + encodeURIComponent(symbol));
     if (!results.isConnected) return; // navigated away during fetch
     if (data.error) throw new Error(data.error);
     var g = data;
@@ -7925,10 +8181,10 @@ async function mapContagion(sym) {
   if (input) input.value = symbol;
   var results = document.getElementById('contagion-results');
   if (!results) return;
-  results.innerHTML = '<div class="loading"><div class="spinner"></div> Mapping contagion graph for ' + symbol + '...</div>';
+  results.innerHTML = '<div class="loading"><div class="spinner"></div> Mapping contagion graph for ' + _esc(symbol) + '...</div>';
 
   try {
-    var data = await API.get('/api/contagion/' + symbol);
+    var data = await API.get('/api/contagion/' + encodeURIComponent(symbol));
     if (!results.isConnected) return; // navigated away during fetch
     if (data.error) throw new Error(data.error);
 
@@ -7986,11 +8242,12 @@ async function mapContagion(sym) {
 }
 
 async function assessContagionImpact() {
-  var symbol = window._contagionSymbol;
-  if (!symbol) {
-    var input = document.getElementById('contagion-symbol');
-    symbol = input ? input.value.trim().toUpperCase() : '';
-  }
+  // Prefer what the user has TYPED — the stale window._contagionSymbol from
+  // the last successful map would silently assess the wrong company after
+  // the user changes the input without re-mapping.
+  var input = document.getElementById('contagion-symbol');
+  var symbol = input ? input.value.trim().toUpperCase() : '';
+  if (!symbol) symbol = window._contagionSymbol;
   if (!symbol) return;
   var results = document.getElementById('contagion-results');
   if (!results) return;
@@ -7999,7 +8256,7 @@ async function assessContagionImpact() {
   results.innerHTML = existing + '<div id="contagion-impact-loading" class="loading" style="margin-top:12px"><div class="spinner"></div> Assessing impact propagation...</div>';
 
   try {
-    var data = await API.get('/api/contagion/impact/' + symbol);
+    var data = await API.get('/api/contagion/impact/' + encodeURIComponent(symbol));
     if (!results.isConnected) return; // navigated away during fetch
     if (data.error) throw new Error(data.error);
     var loadEl = document.getElementById('contagion-impact-loading');
@@ -8189,7 +8446,7 @@ async function analyzeForecast(sym) {
   results.innerHTML = '<div class="loading"><div class="spinner"></div> Fusing forecast signals for ' + _esc(symbol) + '...</div>';
 
   try {
-    var data = await API.get('/api/forecast/ensemble/' + symbol + '?horizon=' + horizon);
+    var data = await API.get('/api/forecast/ensemble/' + encodeURIComponent(symbol) + '?horizon=' + horizon);
     if (!results.isConnected) return; // navigated away during fetch
     if (data.error) throw new Error(data.error);
     var ens = data.ensemble;
@@ -8329,10 +8586,10 @@ async function analyzeNarrative(sym) {
   if (input) input.value = symbol;
   var results = document.getElementById('narrative-results');
   if (!results) return;
-  results.innerHTML = '<div class="loading"><div class="spinner"></div> Analyzing narrative velocity for ' + symbol + '...</div>';
+  results.innerHTML = '<div class="loading"><div class="spinner"></div> Analyzing narrative velocity for ' + _esc(symbol) + '...</div>';
 
   try {
-    var data = await API.get('/api/narrative/' + symbol);
+    var data = await API.get('/api/narrative/' + encodeURIComponent(symbol));
     if (!results.isConnected) return; // navigated away during fetch
     if (data.error) throw new Error(data.error);
 
@@ -8439,10 +8696,10 @@ async function analyzeSyntheticInsider(sym) {
   if (input) input.value = symbol;
   var results = document.getElementById('si-results');
   if (!results) return;
-  results.innerHTML = '<div class="loading"><div class="spinner"></div> Computing synthetic insider composite for ' + symbol + '...</div>';
+  results.innerHTML = '<div class="loading"><div class="spinner"></div> Computing synthetic insider composite for ' + _esc(symbol) + '...</div>';
 
   try {
-    var data = await API.get('/api/synthetic-insider/' + symbol);
+    var data = await API.get('/api/synthetic-insider/' + encodeURIComponent(symbol));
     if (!results.isConnected) return; // navigated away during fetch
     if (data.error) throw new Error(data.error);
 
@@ -8530,10 +8787,17 @@ async function scanSyntheticInsiderPortfolio() {
     for (var i = 0; i < items.length; i++) {
       var it = items[i];
       var sc = it.composite_score || it.score || 0;
+      // Same alert-level → style mapping as analyzeSyntheticInsider.
+      // _alphaRegimeBadge maps gamma/liquidity regimes: it colored CRITICAL
+      // (the strongest BULLISH convergence) red and left the other levels
+      // unstyled — the portfolio scan contradicted the single-symbol view.
+      var lvl = String(it.alert_level || 'DORMANT').toUpperCase();
+      var lvlCls = (lvl === 'CRITICAL' || lvl === 'AWAKENING') ? 'col-positive' : (lvl === 'CONVERGING' ? 'col-amber' : '');
+      var lvlStyle = lvl === 'AWAKENING' ? 'color:var(--blue, #4488ff)' : (lvl === 'DORMANT' ? 'color:var(--text-dim)' : '');
       html += '<tr>'
         + '<td><span class="col-symbol" style="cursor:pointer" onclick="document.getElementById(\'si-symbol\').value=\'' + _jesc(it.symbol || it.ticker || '') + '\';analyzeSyntheticInsider()">' + _esc(it.symbol || it.ticker || '—') + '</span></td>'
         + '<td style="color:' + _alphaScoreColor(sc) + ';font-weight:700">' + _alphaFmtNum(sc, 1) + '</td>'
-        + '<td>' + _alphaRegimeBadge(it.alert_level || '—') + '</td>'
+        + '<td><span class="signal-badge ' + lvlCls + '" style="font-size:9px;' + lvlStyle + '">' + _esc(lvl) + '</span></td>'
         + '<td>' + (it.convergence_count != null ? it.convergence_count : '—') + '</td>'
         + '</tr>';
     }
@@ -8574,10 +8838,10 @@ async function detectReflexivity(sym) {
   if (input) input.value = symbol;
   var results = document.getElementById('reflex-results');
   if (!results) return;
-  results.innerHTML = '<div class="loading"><div class="spinner"></div> Detecting reflexivity loops for ' + symbol + '...</div>';
+  results.innerHTML = '<div class="loading"><div class="spinner"></div> Detecting reflexivity loops for ' + _esc(symbol) + '...</div>';
 
   try {
-    var data = await API.get('/api/reflexivity/' + symbol);
+    var data = await API.get('/api/reflexivity/' + encodeURIComponent(symbol));
     if (!results.isConnected) return; // navigated away during fetch
     if (data.error) throw new Error(data.error);
 
@@ -8812,10 +9076,10 @@ async function nowcastAltData(sym) {
   if (input) input.value = symbol;
   var results = document.getElementById('altdata-results');
   if (!results) return;
-  results.innerHTML = '<div class="loading"><div class="spinner"></div> Generating revenue nowcast for ' + symbol + '...</div>';
+  results.innerHTML = '<div class="loading"><div class="spinner"></div> Generating revenue nowcast for ' + _esc(symbol) + '...</div>';
 
   try {
-    var data = await API.get('/api/alt-data/' + symbol);
+    var data = await API.get('/api/alt-data/' + encodeURIComponent(symbol));
     if (!results.isConnected) return; // navigated away during fetch
     if (data.error) throw new Error(data.error);
 
@@ -8903,7 +9167,7 @@ async function renderSocialPulse(symbol) {
   if (!el) return;
   el.innerHTML = '<div class="panel mt-8"><div class="panel-body"><div class="loading"><div class="spinner"></div> Pulling social signals for ' + _esc(symbol) + '...</div></div></div>';
   try {
-    var d = await API.get('/api/alt-data/social/' + symbol);
+    var d = await API.get('/api/alt-data/social/' + encodeURIComponent(symbol));
     if (d.error) throw new Error(d.error);
     var comp = d.composite || {};
     var src = d.sources || {};
@@ -9113,7 +9377,7 @@ const DataPanels = {
               <div class="kpi-card blue"><div class="kpi-label">Half-Hr Fee</div><div class="kpi-value blue" style="font-size:14px">${fees.halfHourFee ?? '—'} sat/vB</div></div>
             </div>
             <div style="margin-top:8px;font-size:10px;color:var(--text-dim)">
-              Difficulty Δ: ${(btc?.difficulty_change_pct ?? 0).toFixed?.(2) ?? '—'}% — Retarget in ${btc?.remaining_blocks ?? '—'} blks
+              Difficulty Δ: ${btc?.difficulty_change_pct != null ? btc.difficulty_change_pct.toFixed(2) + '%' : '—'} — Retarget in ${btc?.remaining_blocks ?? '—'} blks
             </div>
             <div class="panel-header" style="margin-top:10px"><span class="panel-title">BTC Cross-Exchange</span>
               <span class="panel-meta">spread ${(xex?.max_spread_bps ?? 0).toFixed?.(1) ?? '—'} bps</span></div>
@@ -9152,9 +9416,12 @@ const DataPanels = {
           <div class="panel">
             <div class="panel-header"><span class="panel-title">VIX HISTORY (CBOE)</span></div>
             <div class="kpi-grid" style="grid-template-columns:1fr 1fr 1fr;gap:6px">
-              <div class="kpi-card"><div class="kpi-label">Close</div><div class="kpi-value" style="font-size:18px">${(vix?.vix_close ?? 0).toFixed?.(2) ?? '—'}</div></div>
-              <div class="kpi-card amber"><div class="kpi-label">High</div><div class="kpi-value amber" style="font-size:18px">${(vix?.vix_high ?? 0).toFixed?.(2) ?? '—'}</div></div>
-              <div class="kpi-card blue"><div class="kpi-label">Low</div><div class="kpi-value blue" style="font-size:18px">${(vix?.vix_low ?? 0).toFixed?.(2) ?? '—'}</div></div>
+              <!-- Null-check BEFORE formatting: coalescing to 0 confidently
+                   displayed 'Close 0.00' (volatility misreported as zero)
+                   when the upstream CBOE fetch degraded. -->
+              <div class="kpi-card"><div class="kpi-label">Close</div><div class="kpi-value" style="font-size:18px">${vix?.vix_close != null ? vix.vix_close.toFixed(2) : '—'}</div></div>
+              <div class="kpi-card amber"><div class="kpi-label">High</div><div class="kpi-value amber" style="font-size:18px">${vix?.vix_high != null ? vix.vix_high.toFixed(2) : '—'}</div></div>
+              <div class="kpi-card blue"><div class="kpi-label">Low</div><div class="kpi-value blue" style="font-size:18px">${vix?.vix_low != null ? vix.vix_low.toFixed(2) : '—'}</div></div>
             </div>
             <div style="margin-top:8px;font-size:10px;color:var(--text-dim)">${this._esc(vix?.vix_date || '')}</div>
           </div>
@@ -9209,7 +9476,7 @@ const DataPanels = {
         API.get('/api/calendar/splits').catch(() => ({splits: []})),
       ]);
       const earnRows = (earn?.earnings || []).slice(0, 8).map(e => `<tr>
-        <td><span class="col-symbol" onclick="openResearch('${this._esc(e.symbol)}')">${this._esc(e.symbol)}</span></td>
+        <td><span class="col-symbol" onclick="openResearch('${this._esc(_jesc(e.symbol))}')">${this._esc(e.symbol)}</span></td>
         <td style="font-size:10px;color:var(--text-secondary)">${this._esc((e.name||'').slice(0,28))}</td>
         <td style="font-size:10px">${this._esc(e.epsforecast || '—')}</td>
         <td style="font-size:9px;color:var(--text-dim)">${this._esc((e.time||'').replace('time-',''))}</td>
@@ -9221,12 +9488,12 @@ const DataPanels = {
         <td style="font-size:10px">${this._esc(i.proposedsharepriceeffectiverange || i.priceshare || i.expectedpricedate || '')}</td>
       </tr>`).join('');
       const divRows = (divs?.dividends || []).slice(0, 8).map(d => `<tr>
-        <td><span class="col-symbol" onclick="openResearch('${this._esc(d.symbol)}')">${this._esc(d.symbol)}</span></td>
+        <td><span class="col-symbol" onclick="openResearch('${this._esc(_jesc(d.symbol))}')">${this._esc(d.symbol)}</span></td>
         <td style="font-size:10px;color:var(--text-secondary)">${this._esc((d.name||'').slice(0,28))}</td>
         <td style="font-size:10px;color:var(--green)">${this._esc(d.dividend_rate || d.dividend || '—')}</td>
       </tr>`).join('');
       const splitRows = (splits?.splits || []).slice(0, 8).map(s => `<tr>
-        <td><span class="col-symbol" onclick="openResearch('${this._esc(s.symbol)}')">${this._esc(s.symbol)}</span></td>
+        <td><span class="col-symbol" onclick="openResearch('${this._esc(_jesc(s.symbol))}')">${this._esc(s.symbol)}</span></td>
         <td style="font-size:10px;color:var(--text-secondary)">${this._esc((s.name||'').slice(0,28))}</td>
         <td style="font-size:10px">${this._esc(s.ratio || s.split_ratio || '—')}</td>
       </tr>`).join('');
@@ -9380,7 +9647,7 @@ const DataPanels = {
       if (!parent.id) parent.id = 'wiki-root-' + Math.random().toString(36).slice(2, 8);
       parent.dataset.wikiRoot = '1';
       const parentId = parent.id;
-      const symAttr = this._esc(symbol);
+      const symAttr = this._esc(_jesc(symbol)); // JS-string context first, then HTML-attr
       const periodBtns = [7, 30, 90].map(d =>
         `<button class="btn btn-ghost btn-sm ${d === selectedDays ? 'active' : ''}" onclick="DataPanels.renderWikiAttention(document.getElementById('${parentId}'), '${symAttr}', ${d})">${d}D</button>`
       ).join('');
@@ -9617,7 +9884,7 @@ const DataPanels = {
         const sym = t.ticker || '';
         return `<tr>
           <td style="font-size:10px;color:var(--text-dim);white-space:nowrap">${this._esc(t.date || '')}</td>
-          <td><span class="col-symbol" style="cursor:pointer" onclick="openResearch('${this._esc(sym)}')">${this._esc(sym)}</span></td>
+          <td><span class="col-symbol" style="cursor:pointer" onclick="openResearch('${this._esc(_jesc(sym))}')">${this._esc(sym)}</span></td>
           <td style="font-size:11px">${this._esc(t.owner || '—')}</td>
           <td style="font-size:10px;color:var(--text-dim)">${this._esc(t.relationship || '—')}</td>
           <td style="font-size:11px;font-weight:600;color:${actColor}">${this._esc(t.transaction || '—')}</td>
@@ -9857,7 +10124,12 @@ const Ideas = {
       ? `<div class="panel" style="background:rgba(0,200,255,0.05);border:1px dashed var(--blue);padding:8px 12px;margin-bottom:8px;display:flex;align-items:center;gap:10px">
            <div class="spinner-sm"></div>
            <span style="font-size:11px;color:var(--blue);letter-spacing:.1em">ENRICHING — scanner · ML forecast · insider · options · peers · historical analog · thesis…</span>
-         </div>` : '';
+         </div>`
+      : d.enrichment_failed
+        ? `<div class="panel" style="background:rgba(255,170,0,0.05);border:1px dashed var(--amber);padding:8px 12px;margin-bottom:8px;display:flex;align-items:center;gap:10px">
+             <span style="font-size:11px;color:var(--amber);letter-spacing:.1em">ENRICHMENT FAILED — deep signals unavailable.</span>
+             <button class="btn btn-ghost btn-sm" onclick="Ideas.retryEnrichment()">RETRY</button>
+           </div>` : '';
 
     const belowNote = d.below_threshold
       ? `<div style="background:#3a2a00;border:1px solid var(--amber);padding:6px 10px;margin-bottom:8px;font-size:10px;color:var(--amber)">
@@ -10779,6 +11051,10 @@ const Ideas = {
       this.current = this.history[i];
       this.renderCurrent();
       this.renderHistory();
+      // An entry can still be pending if the user rolled on while its
+      // enrichment was in flight — re-trigger so it doesn't show skeletons
+      // forever (enrichCurrent's in-flight guard dedupes a live request).
+      if (this.current.enrichment_pending) this.enrichCurrent(this.current);
     }
   },
 
@@ -10838,25 +11114,56 @@ const Ideas = {
     }
   },
 
+  // Re-run enrichment for the current idea after a failure (banner button).
+  retryEnrichment() {
+    const cur = this.current;
+    if (!cur || !cur.symbol) return;
+    cur.enrichment_failed = false;
+    cur.enrichment_pending = true;
+    this.renderCurrent();
+    this.enrichCurrent(cur);
+  },
+
   async enrichCurrent(idea) {
     const sym = idea.symbol;
     const ac = idea.asset_class || 'stock';
     const strat = idea.strategy || 'growth';
     const url = `/api/ideas/enrich/${encodeURIComponent(sym)}?asset_class=${encodeURIComponent(ac)}&strategy=${encodeURIComponent(strat)}`;
+    // In-flight dedupe: showFromHistory may re-trigger while the original
+    // request is still pending — don't double-fetch the same idea.
+    const key = sym + '|' + (idea.generated_at || '');
+    this._enrichInflight = this._enrichInflight || new Set();
+    if (this._enrichInflight.has(key)) return;
+    this._enrichInflight.add(key);
     try {
       const enrichment = await API.get(url);
-      // Only merge if the user hasn't rolled to a different idea in the meantime
+      // ALWAYS persist the completed enrichment into the history entry, even
+      // if the user rolled on — otherwise reopening it from RECENT ROLLS
+      // showed permanent skeletons (enrichment_pending never cleared).
+      const hi = this.history.findIndex(h => h.symbol === sym && h.generated_at === idea.generated_at);
+      if (hi >= 0) Object.assign(this.history[hi], enrichment, { enrichment_pending: false, enrichment_failed: false });
+      // Only merge into the live view if the user hasn't rolled to a different idea
       if (this.current && this.current.symbol === sym && this.current.generated_at === idea.generated_at) {
         Object.assign(this.current, enrichment);
         this.current.enrichment_pending = false;
-        // Update the history entry too
-        const hi = this.history.findIndex(h => h.symbol === sym && h.generated_at === idea.generated_at);
-        if (hi >= 0) Object.assign(this.history[hi], enrichment, { enrichment_pending: false });
+        this.current.enrichment_failed = false;
         this.renderCurrent();
         this.renderHistory();
       }
     } catch (e) {
       console.warn('enrichment failed', e);
+      // Clear the pending flag (current AND history entry) and surface an
+      // inline failure + retry — a swallowed error left the ENRICHING
+      // banner and skeleton panels spinning forever.
+      const hi = this.history.findIndex(h => h.symbol === sym && h.generated_at === idea.generated_at);
+      if (hi >= 0) Object.assign(this.history[hi], { enrichment_pending: false, enrichment_failed: true });
+      if (this.current && this.current.symbol === sym && this.current.generated_at === idea.generated_at) {
+        this.current.enrichment_pending = false;
+        this.current.enrichment_failed = true;
+        this.renderCurrent();
+      }
+    } finally {
+      this._enrichInflight.delete(key);
     }
   },
 

@@ -449,6 +449,14 @@ def _reddit_panel(sector: str) -> Dict[str, Optional[float]]:
             posts = alt_signals.reddit_subreddit_posts(sub, sort="hot", limit=50) or []
         except Exception:
             continue
+        # WHY the emptiness check: alt_signals returns [] (not an exception)
+        # on HTTP 429/403/404 and for its 30-min fail-cache entries. Counting
+        # an empty result as a successful fetch of 0 posts turned every
+        # rate-limit window into delta = -100% (max-strength bearish) across
+        # all sectors. A genuinely empty hot list on a live subreddit is
+        # near-impossible, so treat [] as "no data" and skip it (fail-open).
+        if not posts:
+            continue
         total += len(posts)
         hits += 1
     if hits == 0:
@@ -486,11 +494,23 @@ def _hn_panel(etf: str, sector: str) -> Dict[str, Optional[float]]:
     return out
 
 
-def _wiki_panel(etf: str) -> Dict[str, Optional[float]]:
+def _wiki_panel(etf: str, wiki_hint: Optional[str] = None) -> Dict[str, Optional[float]]:
     out = {"wiki_attention_z": None}
     if wiki_attention is None:
         return out
     try:
+        # WHY the override registration: querying the raw ETF ticker (XLK…)
+        # always 404s — there is no Wikipedia article by that title — so
+        # wiki_attention_z was permanently None and the SECTORS `wiki_hint`
+        # field built for this was never used. We can't pass the hint as the
+        # symbol either: fetch_pageviews uppercases its argument before the
+        # title lookup, which would mangle "Financial sector" into a 404-ing
+        # all-caps title. Registering the hint (underscored, case preserved)
+        # under the uppercase ETF key routes the lookup to the intended
+        # article while keeping caching keyed by ETF. Fail-open throughout.
+        if wiki_hint:
+            wiki_attention.TICKER_OVERRIDES.setdefault(
+                etf.upper(), wiki_hint.replace(" ", "_"))
         data = wiki_attention.fetch_pageviews(etf, days=30) or {}
         points = data.get("points") or []
         if len(points) < 14:
@@ -526,10 +546,14 @@ def _options_pcr(etf: str) -> Optional[float]:
     puts  = chain.get("puts")  or []
     c_vol = sum((_safe_float(c.get("volume")) or 0.0) for c in calls)
     p_vol = sum((_safe_float(p.get("volume")) or 0.0) for p in puts)
-    total = c_vol + p_vol
-    if total <= 0:
+    # WHY p/c and not p/(p+c): the field is documented and displayed as a
+    # put/call RATIO ("PCR = put/call ratio" in the UI legend); the old
+    # put-SHARE formula showed 0.50 on balanced volume and could never
+    # represent true PCR > 1. Zero call volume makes the ratio undefined —
+    # return None rather than a fake number (advisory layer, fail-open).
+    if c_vol <= 0:
         return None
-    return round(p_vol / total, 3)
+    return round(p_vol / c_vol, 3)
 
 
 def _factor_panel() -> Dict[str, Optional[float]]:
@@ -559,7 +583,13 @@ def _factor_panel() -> Dict[str, Optional[float]]:
         except (TypeError, ValueError):
             continue
         if v == v and not math.isinf(v):  # skip NaN/inf (invalid JSON, poisons composite)
-            factors[cols[i]] = round(v, 3)
+            # WHY ×100: research_factors._parse_french_csv converts the Ken
+            # French percent values to DECIMALS (1.2% → 0.012). This module's
+            # field is `factor_1d_return_pct` and the composite clips fac/1.0,
+            # both percent conventions — without the conversion a big factor
+            # day contributed ~0.01 instead of ~1.0 (numerically dead). Same
+            # decimal→percent conversion synth_macrotranslate does.
+            factors[cols[i]] = round(v * 100.0, 3)
     out["factors"] = factors
     return out
 
@@ -581,7 +611,7 @@ def _composite_score(row: Dict[str, Any]) -> float:
       - reddit_mention_delta_pct: divided by 50
       - hn_polarity: already roughly [-1, +1]
       - wiki_attention_z: already a z, clipped
-      - options_pcr: centred at 0.6 (typical baseline), inverted
+      - options_pcr: true put/call ratio, centred at 0.9, inverted
     """
     parts: List[Tuple[float, float]] = []  # (weight, value)
 
@@ -620,10 +650,14 @@ def _composite_score(row: Dict[str, Any]) -> float:
 
     cong = row.get("congress_net_30d_usd")
     if cong is not None and cong != 0:
-        # log10-scale, signed
+        # log10-scale, signed. WHY the max(0, ...): below $1k of net flow,
+        # log10(|net|) - 3.0 goes negative, which FLIPPED the sign — a tiny
+        # net BUY scored bearish (and vice versa), pinning to max-strength
+        # at |net| = $1. Clamp the log excess at zero so sub-$1k flows just
+        # contribute ~nothing in the correct direction.
         sign = 1.0 if cong > 0 else -1.0
-        mag = math.log10(max(1.0, abs(cong)))
-        parts.append((0.06, _clip(sign * (mag - 3.0) * 0.5, -2, 2)))
+        mag = max(0.0, math.log10(max(1.0, abs(cong))) - 3.0)
+        parts.append((0.06, _clip(sign * mag * 0.5, -2, 2)))
 
     rd = row.get("reddit_mention_delta_pct")
     if rd is not None:
@@ -639,9 +673,11 @@ def _composite_score(row: Dict[str, Any]) -> float:
 
     pcr = row.get("options_pcr")
     if pcr is not None:
-        # Lower PCR = more bullish positioning, so invert.
-        # Baseline ~0.6; 0.4 → +0.4, 0.9 → -0.6.
-        parts.append((0.05, _clip((0.6 - pcr) * 2.0, -1.5, 1.5)))
+        # Lower PCR = more bullish positioning, so invert. options_pcr is now
+        # a TRUE put/call volume ratio (p/c, not put share), so the neutral
+        # baseline moves to ~0.9 (typical for equity sector ETFs) and the
+        # slope softens to match the wider range: 0.6 → +0.45, 1.4 → -0.75.
+        parts.append((0.05, _clip((0.9 - pcr) * 1.5, -1.5, 1.5)))
 
     fac = row.get("factor_1d_return_pct")
     if fac is not None:
@@ -783,7 +819,7 @@ def _build_sector_row(spec: Dict[str, str], insiders, congress, factors,
     row["congress_net_30d_usd"] = _cong if _cong is not None else None
     row.update(_reddit_panel(sector))
     row.update(_hn_panel(etf, sector))
-    row.update(_wiki_panel(etf))
+    row.update(_wiki_panel(etf, spec.get("wiki_hint")))
     row["options_pcr"] = _options_pcr(etf)
     row["composite_flow_score"] = _composite_score(row)
     return row

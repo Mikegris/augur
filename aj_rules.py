@@ -48,7 +48,14 @@ def update_position_state(book: Optional[Dict[str, Any]] = None) -> None:
     if book is None:
         book = aj_positions.paper_book()
     positions = book.get("positions") or {}
-    marks = _marks_for(list(positions.keys()))
+    # Resolve quote-convention symbols first (crypto 'BTC' -> 'BTC-USD') so a
+    # bare crypto ticker never records a colliding equity's price as its
+    # peak/last mark (which would corrupt trailing-stop state).
+    import aj_risk
+    qsyms = {sym: aj_risk._quote_symbol(sym, p.get("asset_type") or "")
+             for sym, p in positions.items()}
+    marks_q = _marks_for(list(qsyms.values()))
+    marks = {sym: marks_q.get(qsyms[sym]) for sym in positions}
     now = aj_db.utc_now_iso()
 
     with db_lock():
@@ -141,9 +148,15 @@ def exit_signals(cfg: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
     out: List[Dict[str, Any]] = []
     if tp > 0 or sl > 0 or tr > 0:        # core TP/SL/trailing (⑤⑥⑦)
         import aj_positions
+        import aj_risk
         book = aj_positions.paper_book()
         positions = book.get("positions") or {}
-        marks = _marks_for(list(positions.keys()))
+        # Quote-convention resolution: a bare crypto ticker marked on the equity
+        # feed (SOL = Emeren) would fire a false stop-loss at a bogus price.
+        qsyms = {sym: aj_risk._quote_symbol(sym, p.get("asset_type") or "")
+                 for sym, p in positions.items()}
+        marks_q = _marks_for(list(qsyms.values()))
+        marks = {sym: marks_q.get(qsyms[sym]) for sym in positions}
         state = {r["symbol"]: r for r in aj_db.query("SELECT * FROM aj_position_state")}
         for sym, p in positions.items():
             qty = float(p.get("qty") or 0)
@@ -236,12 +249,24 @@ def enhanced_gate(symbol: str, side: str, qty: float, price: float,
         book = aj_positions.paper_book()
         positions = book.get("positions") or {}
         held = float((positions.get(symbol) or {}).get("qty") or 0)
-        opening_new = side == "buy" and held <= 0
+        # aj_risk.classify_exit is the single source of truth for the
+        # closing / opening_new semantics (previously duplicated here and
+        # drifting from evaluate's). `closing` = risk-reducing close of a held
+        # position bounded by held qty (a sell beyond the long would OPEN a
+        # short — not exempt); `opening_new` = buying while FLAT (a buy
+        # against a held SHORT is a risk-reducing cover and must never be
+        # blocked by the new-entry gates ⑨/⑭ — exactly when covering matters).
+        import aj_risk
+        _exit = aj_risk.classify_exit(symbol, side, qty, held)
+        opening_new = _exit["opening_new"]
+        closing = _exit["closing"]
 
-        # ⑫ time-of-day filter (regular session only)
+        # ⑫ time-of-day filter (regular session only; never blocks a
+        # risk-reducing close — a stop-loss at the open must fire, not wait
+        # out the skip window while the loss runs)
         skip_open = int(cfg.get("trade_skip_open_min") or 0)
         skip_close = int(cfg.get("trade_skip_close_min") or 0)
-        if (skip_open > 0 or skip_close > 0) and aj_db.market_session() == "regular":
+        if not closing and (skip_open > 0 or skip_close > 0) and aj_db.market_session() == "regular":
             mins = _minutes_into_regular()
             if mins is not None:
                 if mins < skip_open:
@@ -254,14 +279,26 @@ def enhanced_gate(symbol: str, side: str, qty: float, price: float,
         if cap > 0 and opening_new and len(positions) >= cap:
             return "max open positions reached ({})".format(cap)
 
-        # ⑪ per-symbol daily trade cap
+        # ⑪ per-symbol daily trade cap — sliced on the same ET day bounds as the
+        # global trades/day cap (a UTC slice resets at ~8pm ET and would double
+        # the cap for anything traded across that boundary).
         sym_cap = int(cfg.get("max_trades_per_symbol_per_day") or 0)
         if sym_cap > 0:
-            today = aj_db.utc_now().strftime("%Y-%m-%d")
-            rows = aj_db.query(
-                "SELECT COUNT(*) AS n FROM aj_orders WHERE symbol=? "
-                "AND substr(COALESCE(submitted_at, created_at),1,10)=? "
-                "AND state NOT IN ('rejected','canceled')", (symbol, today))
+            import aj_risk
+            start_utc, end_utc = aj_risk._et_day_bounds_utc()
+            if start_utc and end_utc:
+                rows = aj_db.query(
+                    "SELECT COUNT(*) AS n FROM aj_orders WHERE symbol=? "
+                    "AND COALESCE(submitted_at, created_at) >= ? "
+                    "AND COALESCE(submitted_at, created_at) < ? "
+                    "AND state NOT IN ('rejected','canceled')",
+                    (symbol, start_utc, end_utc))
+            else:
+                today = aj_db.utc_now().strftime("%Y-%m-%d")
+                rows = aj_db.query(
+                    "SELECT COUNT(*) AS n FROM aj_orders WHERE symbol=? "
+                    "AND substr(COALESCE(submitted_at, created_at),1,10)=? "
+                    "AND state NOT IN ('rejected','canceled')", (symbol, today))
             if rows and int(rows[0]["n"]) >= sym_cap:
                 return "per-symbol daily trade cap ({}/{})".format(rows[0]["n"], sym_cap)
 
@@ -290,14 +327,22 @@ def enhanced_gate(symbol: str, side: str, qty: float, price: float,
                     sym_val = mv
             add = qty * price
             sym_val += add
-            equity = aj_alpha.account_equity(positions, marks) + add
+            equity = aj_alpha.account_equity(positions, marks)
+            # With a configured cash leg, a buy converts cash into position and
+            # leaves EQUITY unchanged — adding the notional would double-count
+            # it and understate the projected weight (cap fails open). Only the
+            # unfunded book (equity == MV) grows by the buy.
+            if aj_alpha._paper_cash() <= 0:
+                equity += add
             if equity > 0 and (sym_val / equity * 100.0) > wcap:
                 return "{} would be {:.1f}% of book (cap {:g}%)".format(
                     symbol, sym_val / equity * 100.0, wcap)
 
-        # ⑬ slippage guard (estimated adverse bps for a market order)
+        # ⑬ slippage guard (estimated adverse bps for a market order; a
+        # risk-reducing close is exempt — paying slippage beats stranding the
+        # position behind the guard indefinitely)
         smax = float(cfg.get("max_slippage_bps") or 0)
-        if smax > 0:
+        if smax > 0 and not closing:
             # Mirror the paper fill model in aj_broker._adverse_bps so the guard's
             # estimate tracks the real adverse-fill cost (slippage + a fraction of
             # the nominal half-spread) rather than a hard-coded magic multiplier.

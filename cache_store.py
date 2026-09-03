@@ -109,6 +109,10 @@ _COMPRESS_MIN_BYTES = 4 * 1024
 # Prefix used to mark gzip+base64 entries so cache_get can transparently
 # decompress legacy + new rows.
 _GZ_PREFIX = "gz:"
+# How long an EXPIRED disk row is kept before prune_disk deletes it. Must
+# cover cache_get_stale's default max_age_seconds (24h) so its serve-stale
+# disk fallback survives the boot/warmer sweeps.
+_EXPIRED_GRACE_SEC = 24 * 3600.0
 
 
 def _maybe_compress(raw: str) -> str:
@@ -202,6 +206,25 @@ def _looks_like_failure(value) -> bool:
             return True
         return False
     return False
+
+
+# Sentinel wrapper for failure-shaped values persisted deliberately via
+# cache_set(..., allow_empty=True) — i.e. NEGATIVE caches ("this PTR really
+# has no trades"). The disk read paths (_load_from_disk and init()'s hydrate)
+# unconditionally drop failure-shaped rows as poison from a broken session,
+# which silently killed persisted negative caches on LRU eviction or restart
+# and re-triggered the exact thundering herd (PDF re-download + re-parse)
+# they exist to prevent. Wrapping on write lets the readers tell
+# "deliberately cached empty" apart from "poison" and unwrap it.
+_NEG_SENTINEL = "__allow_empty__"
+
+
+def _unwrap_negative(val):
+    """Return (value, was_negative). Transparent for unwrapped rows so every
+    legacy cache entry keeps working."""
+    if isinstance(val, dict) and val.get(_NEG_SENTINEL) is True and "v" in val:
+        return val["v"], True
+    return val, False
 
 
 def _conn():
@@ -313,9 +336,19 @@ def prune_disk(target_bytes: Optional[int] = None) -> dict:
     target = _TOTAL_DISK_TARGET_BYTES if target_bytes is None else int(target_bytes)
     # 1) Expired sweep — the piece that was previously boot-only, which let
     #    expired rows pile up across a long-running session.
+    #    Expired rows get a GRACE window rather than deletion the instant
+    #    their TTL passes: cache_get_stale's disk fallback (_load_from_disk
+    #    with allow_expired=True) exists to serve recently-expired rows for
+    #    graceful degradation after a restart, and this sweep runs at boot
+    #    BEFORE any lookup (plus every 30 min via the warmer) — a zero-grace
+    #    delete made that path unreachable and contradicted
+    #    database.prune_api_cache's documented 3-day grace. The window
+    #    matches cache_get_stale's default max_age_seconds (24h); the size
+    #    cap below still evicts in-grace expired rows first when over target.
     try:
         c = _conn()
-        cur = c.execute("DELETE FROM api_cache WHERE expiry < ?", (time.time(),))
+        cur = c.execute("DELETE FROM api_cache WHERE expiry < ?",
+                        (time.time() - _EXPIRED_GRACE_SEC,))
         c.commit()
         summary["expired"] = cur.rowcount if (cur.rowcount and cur.rowcount > 0) else 0
     except Exception as e:
@@ -422,7 +455,10 @@ def init() -> None:
                     val = json.loads(_maybe_decompress(raw))
                 except Exception:
                     continue
-                if _looks_like_failure(val):
+                # Deliberate negative caches (sentinel-wrapped by cache_set
+                # with allow_empty=True) are NOT poison — hydrate them.
+                val, is_negative = _unwrap_negative(val)
+                if not is_negative and _looks_like_failure(val):
                     poisoned_keys.append(key)
                     skipped += 1
                     continue
@@ -476,7 +512,10 @@ def _load_from_disk(k: str, allow_expired: bool = False):
         val = json.loads(_maybe_decompress(raw))
     except Exception:
         return None
-    if _looks_like_failure(val):
+    # A sentinel-wrapped negative cache is a deliberate write — skip the
+    # poison check for it (see _NEG_SENTINEL).
+    val, is_negative = _unwrap_negative(val)
+    if not is_negative and _looks_like_failure(val):
         return None
     hit = (val, expiry, now)
     if not expired:
@@ -648,8 +687,13 @@ def cache_set(key, value, ttl: float, allow_empty: bool = False,
     # stay permanently disabled for the rest of the process.
     if not _ensure_table():
         return
+    payload = value
+    if allow_empty and _looks_like_failure(value):
+        # A deliberate negative cache heading to disk — wrap it so the disk
+        # read paths don't drop it as poison. See _NEG_SENTINEL.
+        payload = {_NEG_SENTINEL: True, "v": value}
     try:
-        raw = json.dumps(value, default=str)
+        raw = json.dumps(payload, default=str)
     except Exception:
         return
     stored = _maybe_compress(raw)
@@ -849,14 +893,27 @@ def stats() -> dict:
 
 
 def clear() -> int:
-    """Drop all entries (used by a future 'clear cache' settings button)."""
+    """Drop all entries (used by the 'clear cache' settings button)."""
     with _mem_lock:
         n = len(_mem)
         _mem.clear()
-    try:
-        c = _conn()
-        c.execute("DELETE FROM api_cache")
-        c.commit()
-    except Exception:
-        pass
+    # Disk delete with one retry: a transient SQLITE_BUSY (reclaim()'s VACUUM
+    # or a long write holding the file past the 5s busy_timeout) must not be
+    # silently swallowed — the supposedly-cleared rows would resurrect via
+    # lazy hydration on the next cache_get while clear() returned a count
+    # implying success. Retry once after a short backoff; if it still fails,
+    # log at WARNING so the failure is at least observable. (The int return
+    # shape is kept for existing callers.)
+    for attempt in (1, 2):
+        try:
+            c = _conn()
+            c.execute("DELETE FROM api_cache")
+            c.commit()
+            break
+        except Exception as e:
+            if attempt == 2:
+                log.warning("cache clear: disk delete failed (%s) — old rows "
+                            "will resurrect from disk via lazy hydration", e)
+            else:
+                time.sleep(0.5)
     return n

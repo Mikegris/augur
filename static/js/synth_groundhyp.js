@@ -337,9 +337,15 @@
     const spinner = containerEl.querySelector('#gh-spinner');
     const resultRoot = containerEl.querySelector('#gh-result-root');
 
+    // In-flight guard: the Enter-key handler bypasses the disabled RUN button,
+    // so without it two slow LLM-backed requests could race and the stale
+    // first response could overwrite the newer symbol's result panel.
+    let _inflight = false;
     function _go() {
+      if (_inflight) return;
       const sym = ((input && input.value) || '').trim().toUpperCase();
-      _run(resultRoot, sym, spinner, btn);
+      _inflight = true;
+      _run(resultRoot, sym, spinner, btn).finally(() => { _inflight = false; });
     }
     if (btn) btn.addEventListener('click', _go);
     if (input) input.addEventListener('keydown', (e) => {

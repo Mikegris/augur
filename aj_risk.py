@@ -43,6 +43,46 @@ def _held_qty(symbol: str) -> Optional[float]:
         return None
 
 
+def classify_exit(symbol: str, side: str, qty: Optional[float],
+                  held_qty: Optional[float]) -> Dict[str, Any]:
+    """SINGLE source of truth for the risk-reducing-exit classification. Three
+    drifting local definitions (evaluate's closing_sell/confirmed_closing_sell
+    + its flip guard, and enhanced_gate's closing/opening_new) previously
+    encoded the same semantics independently; they all consume this now.
+
+    Returns {closing, confirmed, flips, opening_new} where:
+      * closing      — the order reduces existing exposure: a SELL against a
+                       held LONG or a BUY-to-cover against a held SHORT,
+                       BOUNDED by the held qty (see flips). When held_qty is
+                       None (book state UNKNOWN) a SELL is still classified
+                       closing — it can only reduce risk, and exits/stop-losses
+                       must never be blocked by a book outage — but a BUY is
+                       NOT (it could open a new long, risk-increasing).
+      * confirmed    — closing AND the position is CONFIRMED (held_qty known).
+                       Cap exemptions require this: on unknown book state a
+                       large SELL could OPEN a short, so caps still bind.
+      * flips        — qty exceeds |held| (a sell beyond a held long opens a
+                       short; a cover beyond a held short opens a long). The
+                       excess is risk-INCREASING, so a flip clears BOTH closing
+                       flags. Pass qty=None when the order size isn't known yet
+                       (flip detection is skipped; re-classify once it is).
+      * opening_new  — a BUY while confirmed FLAT (opens a brand-new name);
+                       gates like max-open-positions / risk-off-VIX key on it.
+                       False on unknown book state (cannot confirm the name is
+                       new; those gates fail closed upstream anyway).
+    """
+    if held_qty is None:
+        return {"closing": side == "sell", "confirmed": False,
+                "flips": False, "opening_new": False}
+    held = float(held_qty)
+    sign_match = (side == "sell" and held > 0) or (side == "buy" and held < 0)
+    flips = bool(sign_match and qty is not None
+                 and float(qty) > abs(held) + 1e-9)
+    closing = sign_match and not flips
+    return {"closing": closing, "confirmed": closing, "flips": flips,
+            "opening_new": side == "buy" and abs(held) <= 1e-9}
+
+
 def _trading_enabled_fresh() -> bool:
     """Uncached read of the master switch — a kill/halt on another thread (or
     mid-evaluation) must be seen immediately, not up to 5s later through the
@@ -116,7 +156,8 @@ def _session_date() -> str:
         return aj_db.utc_now().strftime("%Y-%m-%d")
 
 
-def _session_open_unrealized(current_unrealized: float) -> float:
+def _session_open_unrealized(current_unrealized: float,
+                             allow_stamp: bool = True) -> float:
     """The unrealized mark captured at session open. Snapshotted once per ET
     trading day on first observation; subsequent calls return the stored value
     so the day's delta is measured from a fixed baseline.
@@ -138,6 +179,12 @@ def _session_open_unrealized(current_unrealized: float) -> float:
     # atomic INSERT OR IGNORE under the write lock and, if we lost, re-read and
     # return the value the winner stored (never our own later mark).
     val = aj_db.money(current_unrealized)
+    if not allow_stamp:
+        # The caller's mark set was incomplete (quote outage / book failure):
+        # stamping it would poison the day-P&L baseline for the whole ET day,
+        # masking real intraday drawdown once quotes return. Use the value for
+        # THIS call only and leave the snapshot for the first clean mark set.
+        return val
     try:
         with db._write_lock:
             conn = db.get_conn()
@@ -224,7 +271,7 @@ def compute_day_pnl(basis: Optional[str] = None) -> Dict[str, Any]:
     # the 'realized' basis means a mid-session switch to realized_plus_unrealized
     # measures drawdown from the TRUE session open, not from an arbitrary later
     # intra-day mark (which would silently reset the daily-loss baseline).
-    unreal_open = _session_open_unrealized(unreal)
+    unreal_open = _session_open_unrealized(unreal, allow_stamp=not warnings)
 
     if basis == "realized":
         day_pnl = realized
@@ -256,7 +303,10 @@ def _et_day_bounds_utc() -> tuple:
         return ("", "")
 
 
-def _trades_today() -> int:
+def _trades_today() -> Optional[int]:
+    """Orders submitted this ET day, or None when the count is UNKNOWN (DB
+    error). Callers must treat None as fail-closed — returning 0 here would
+    silently disable the trades/day cap for as long as the fault persists."""
     try:
         start_utc, end_utc = _et_day_bounds_utc()
         if start_utc and end_utc:
@@ -274,19 +324,20 @@ def _trades_today() -> int:
         return int(rows[0]["n"]) if rows else 0
     except Exception:
         log.exception("_trades_today failed")
-        return 0
+        return None
 
 
 def _order_price(symbol: str, order_type: str, limit_price: Optional[float],
                  asset_type: str = "") -> Optional[float]:
     if order_type == "limit" and limit_price is not None and float(limit_price) > 0:
         return float(limit_price)
-    mark = _marks([symbol]).get(symbol)
-    if mark is None:
-        qsym = _quote_symbol(symbol, asset_type)
-        if qsym != symbol:
-            mark = _marks([qsym]).get(qsym)
-    return mark
+    # Resolve the quote-convention symbol FIRST (crypto 'SOL' -> 'SOL-USD'): the
+    # bare form of a crypto ticker can collide with an equity (SOL = Emeren on
+    # NYSE) and a plausible-but-wrong price mis-sizes the order by orders of
+    # magnitude. For that reason there is deliberately NO bare-symbol fallback
+    # when the resolved form differs — no price means no trade (fail-closed).
+    qsym = _quote_symbol(symbol, asset_type)
+    return _marks([qsym]).get(qsym)
 
 
 def _ips_block_reason(symbol: str, side: str, qty: float, price: float,
@@ -337,9 +388,13 @@ def _project_pulse(symbol: str, side: str, qty: float, price: float,
     positions = book.get("positions") or {}
     sym_u = symbol.upper()
     rows: Dict[str, Dict[str, Any]] = {}
-    marks = _marks(list(positions.keys()))
+    # Quote-convention resolution (crypto 'BTC' -> 'BTC-USD') so a bare crypto
+    # ticker never projects at a colliding equity's price.
+    qsyms = {s: _quote_symbol(s, p.get("asset_type") or "")
+             for s, p in positions.items()}
+    marks = _marks(list(qsyms.values()))
     for s, p in positions.items():
-        mark = marks.get(s) or float(p.get("avg_cost") or 0)
+        mark = marks.get(qsyms[s]) or float(p.get("avg_cost") or 0)
         rows[s] = {"symbol": s, "asset_type": p.get("asset_type") or "stock",
                    "shares": float(p.get("qty") or 0), "mark": mark}
     # apply the trade
@@ -549,21 +604,14 @@ def evaluate(proposal: Dict[str, Any]) -> RiskDecision:
         # close what you hold; exits and stop-losses must never be blocked by a
         # since-narrowed allowlist).
         held_now = _held_qty(symbol)
-        if held_now is None:
-            # Position UNKNOWN (paper_book unavailable): do NOT silently block a
-            # potential exit. A SELL can only reduce risk, so permit it past the
-            # allowlist; all other caps still bind below. A BUY is NOT permitted
-            # on unknown state — it could open a new long (risk-increasing), so
-            # a covering BUY still requires a confirmed short below.
-            closing_sell = side == "sell"
-        else:
-            closing_sell = (side == "sell" and held_now > 0) or \
-                           (side == "buy" and held_now < 0)
-        # The per-order notional-cap exemption is RESTRICTED to a CONFIRMED held
-        # position. On unknown book state a large SELL would OPEN a short
-        # (risk-INCREASING), so the cap must still bind there even though the
-        # allowlist exemption (closing_sell) is allowed through.
-        confirmed_closing_sell = (held_now is not None) and closing_sell
+        # classify_exit is the single source of truth for closing/confirmed
+        # semantics (incl. the unknown-book and confirmed-only-cap-exemption
+        # rules — see its docstring). qty isn't parsed yet at this step, so
+        # classify WITHOUT the qty bound; the flip guard below re-classifies
+        # with the real qty before any cap exemption is applied.
+        _exit = classify_exit(symbol, side, None, held_now)
+        closing_sell = _exit["closing"]
+        confirmed_closing_sell = _exit["confirmed"]
         # Open universe = universe_mode 'open'/'market_screen' OR legacy
         # allow_any_symbol. MUST mirror aj_operator._scan_universe (both call
         # aj_config.is_open_universe) so a screened symbol isn't blocked here.
@@ -626,6 +674,35 @@ def evaluate(proposal: Dict[str, Any]) -> RiskDecision:
             return RiskDecision(decision="block", reason="qty must be a finite number > 0")
         order_notional = aj_db.money(qty * price)
 
+        # An order LARGER than the confirmed held position FLIPS it (see
+        # classify_exit's `flips`). The excess is risk-INCREASING, so the
+        # closing exemptions must not cover it: re-check the allowlist here and
+        # let the per-order cap below bind on the full order.
+        if classify_exit(symbol, side, qty, held_now)["flips"]:
+            closing_sell = False
+            confirmed_closing_sell = False
+            if not _open_universe and symbol not in allow:
+                _record("block", "flip beyond held qty; symbol not in allowlist",
+                        caps, None, pid)
+                return RiskDecision(
+                    decision="block",
+                    reason="{} {} qty {} exceeds held {} (would flip the position) "
+                           "and symbol is not in allowlist".format(
+                               symbol, side, qty, held_now))
+
+        # Day-P&L blindness is fail-CLOSED for risk-increasing orders: any
+        # warning from the P&L legs (paper book unavailable / missing marks)
+        # means the daily-loss HALT above ran on incomplete data, so only
+        # risk-reducing closes may proceed until the data heals.
+        if pnl.get("warnings") and not closing_sell:
+            wtxt = "; ".join(str(w) for w in pnl["warnings"])
+            _record("block", "day P&L degraded: " + wtxt[:200], caps,
+                    pnl.get("day_pnl"), pid)
+            return RiskDecision(
+                decision="block",
+                reason="day P&L degraded ({}) — new risk blocked (fail-closed)".format(
+                    wtxt[:120]))
+
         # Step 4 — per-order notional cap (0 => block). A risk-REDUCING held-sell
         # against a CONFIRMED position (confirmed_closing_sell) is EXEMPT: it can
         # only unwind existing exposure, so capping it would strand a position
@@ -641,9 +718,50 @@ def evaluate(proposal: Dict[str, Any]) -> RiskDecision:
                                     reason="order ${:,.2f} exceeds per-order cap ${:,.2f}".format(
                                         order_notional, max_notional))
 
-        # Step 5 — trades/day cap (0 => block)
+        # Step 4b — buying power (cash account). Binds exactly when a REAL
+        # cash scope exists (bp.enabled): a configured paper base, or a
+        # constructed live broker. The legacy unfunded book — and live-enabled
+        # with an unverified/un-constructable adapter, where only the paper
+        # book can trade — stays untouched. A risk-reducing CLOSE is exempt
+        # (a sell RAISES cash; a confirmed cover must never be stranded for
+        # cash). UNKNOWN available cash blocks new risk — fail-closed,
+        # matching the day-P&L rule above.
+        if side == "buy" and not closing_sell:
+            bp = None
+            try:
+                import aj_alpha
+                bp = aj_alpha.buying_power(cfg)
+            except Exception:
+                log.exception("buying_power failed")
+            if bp is None:
+                # The authority itself crashed: fail closed only when a cash
+                # scope is configured — never break the legacy unfunded book.
+                if bool(cfg.get("live_trading_enabled")) or \
+                        aj_db.money(cfg.get("paper_cash") or 0) > 0:
+                    _record("block", "buying-power check failed", caps, None, pid)
+                    return RiskDecision(decision="block",
+                                        reason="available cash unknown (fail-closed)")
+            elif bp.get("enabled"):
+                avail = bp.get("available")
+                if avail is None:
+                    _record("block", "available cash unknown", caps, None, pid)
+                    return RiskDecision(decision="block",
+                                        reason="available cash unknown (fail-closed)")
+                if order_notional > avail + 0.01:
+                    _record("block", "order {} > available cash {}".format(
+                        order_notional, aj_db.money(avail)), caps, None, pid)
+                    return RiskDecision(
+                        decision="block",
+                        reason="order ${:,.2f} exceeds available cash ${:,.2f}".format(
+                            order_notional, avail))
+
+        # Step 5 — trades/day cap (0 => block; UNKNOWN count => block)
         max_trades = int(cfg.get("max_trades_per_day") or 0)
         done_today = _trades_today()
+        if done_today is None:
+            _record("block", "trades-today count unavailable", caps, None, pid)
+            return RiskDecision(decision="block",
+                                reason="trades/day count unavailable (fail-closed)")
         if not (max_trades > 0 and done_today < max_trades):
             _record("block", "trades today {} >= cap {}".format(done_today, max_trades),
                     caps, None, pid)

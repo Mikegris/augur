@@ -265,7 +265,7 @@ def _load_factor_data() -> Tuple[List[str], np.ndarray, np.ndarray]:
     """
     ck = ("factors", "ff5_mom", "v1")
 
-    def _fetch() -> Tuple[List[str], List[List[float]], List[float]]:
+    def _fetch() -> Optional[Tuple[List[str], List[List[float]], List[float]]]:
         try:
             ff5_zip = _http_get(FF5_URL)
             mom_zip = _http_get(MOM_URL)
@@ -283,7 +283,12 @@ def _load_factor_data() -> Tuple[List[str], np.ndarray, np.ndarray]:
             log.warning("French factor download failed: %s", e)
             local = _load_csv_cache()
             if local is None:
-                return [], [], []
+                # Total failure (fresh install + transient outage): return
+                # None, which cache_store._looks_like_failure refuses to
+                # cache — a non-empty tuple like ([], [], []) would slip past
+                # it and freeze "factor data unavailable" for the full 24h
+                # TTL with no retry.
+                return None
             d, f, r = local
             return d, f.tolist(), r.tolist()
 
@@ -706,6 +711,16 @@ def portfolio_factor_exposure(holdings: List[dict], period_years: int = 5) -> di
             "as_of": ordered[-1],
             "effective_weights": {s: round(w, 6) for s, w in eff_weights.items()},
         }
+
+    # Renormalize by the covered weight: the accumulators above used FULL-
+    # portfolio weights, so any holding whose regression failed would deflate
+    # every beta and the blended alpha (two 50/50 holdings with one failure
+    # would report half the true market beta). coverage_weight stays as the
+    # transparency field showing how much of the book the average covers.
+    if weight_sum > 0:
+        for name in _FACTOR_COLS:
+            weighted[name] /= weight_sum
+        weighted_alpha /= weight_sum
 
     weighted_block = {
         "exposures": {name: round(weighted[name], 4) for name in _FACTOR_COLS},

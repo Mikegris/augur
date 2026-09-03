@@ -156,6 +156,35 @@ def _ttl_cutoff_iso() -> str:
     return cutoff.isoformat()
 
 
+def _hydrate_last_run_state() -> None:
+    """Restore last_run_* from idea_pool_state at import. warm_pool persists
+    these keys "for visibility across restarts", but warmer_status() reads
+    only the in-memory globals — without this hydration the UI badge (and
+    jarvis) reported a never-run warmer after every restart despite a fully
+    fresh pool. Best-effort: any failure leaves the cold-start defaults.
+    _last_run_epoch stays None on purpose — next_run_in_seconds is only
+    meaningful for a pass run by THIS process's warmer thread."""
+    global _last_run_started, _last_run_finished, _last_run_count
+    global _last_run_errors, _last_run_skipped
+    try:
+        finished = _state_get("last_run_finished")
+        if not finished:
+            return  # never ran (or state lost) — keep cold-start defaults
+        with _state_lock:
+            _last_run_started = _state_get("last_run_started") or None
+            _last_run_finished = finished
+            _last_run_count = int(_state_get("last_run_count") or 0)
+            _last_run_errors = int(_state_get("last_run_errors") or 0)
+            _last_run_skipped = int(_state_get("last_run_skipped") or 0)
+    except Exception as exc:  # noqa: BLE001 — advisory state must never break import
+        logger.warning("idea_pool: last-run state hydration failed: %s", exc)
+
+
+# Run on import (after the table bootstrap above) so warmer_status() reflects
+# the last completed pass immediately, not only after the next 6h pass.
+_hydrate_last_run_state()
+
+
 # ── Public lookup API ────────────────────────────────────────────────────────
 
 def get_warmed_dossier(symbol: str, asset_class: str, strategy: str) -> Optional[Dict[str, Any]]:
@@ -178,6 +207,16 @@ def get_warmed_dossier(symbol: str, asset_class: str, strategy: str) -> Optional
         dossier = json.loads(row["dossier_json"])
     except (TypeError, ValueError) as exc:
         logger.warning("idea_pool: failed to decode cached dossier for %s: %s", symbol, exc)
+        return None
+    # Serve-side quality gate (mirrors _warm_one's persist gate): a dossier
+    # with no snapshot price is a data-outage artifact — treat it as a cache
+    # miss so callers fall back to a cold build instead of serving a
+    # price-less pick for up to 24h. Also covers rows persisted before the
+    # persist-side gate existed.
+    try:
+        if (dossier.get("snapshot") or {}).get("price") in (None, 0):
+            return None
+    except AttributeError:
         return None
     dossier["from_warmed_pool"] = True
     return dossier
@@ -410,6 +449,20 @@ def _warm_one(target: Dict[str, str]) -> bool:
         )
         if not dossier:
             logger.warning("idea_pool: empty dossier for %s/%s/%s", symbol, asset_class, strategy)
+            return False
+        # Quality gate: a dossier with no price means every upstream fetch
+        # failed (e.g. a Yahoo/SEC outage during the pass) — the scanner's
+        # neutral-50 defaults still give it a ~47 composite, which would pass
+        # the picker's min_score gate and be served as a "fresh" pick for
+        # 24h. The cold path filters price-None dossiers; the warm path must
+        # not persist them either. Not persisting = retried next pass.
+        try:
+            price = (dossier.get("snapshot") or {}).get("price")
+        except AttributeError:
+            price = None
+        if price in (None, 0):
+            logger.warning("idea_pool: no price data for %s/%s/%s — not persisting",
+                           symbol, asset_class, strategy)
             return False
         _persist_dossier(symbol, asset_class, strategy, dossier)
         if _PERSIST_PAUSE_SECONDS:

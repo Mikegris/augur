@@ -1,0 +1,482 @@
+{
+ "kind": "replay",
+ "start": "2026-05-15",
+ "end": "2026-07-07",
+ "symbols": [
+  "AAPL",
+  "MSFT",
+  "NVDA",
+  "AMZN",
+  "GOOGL",
+  "META",
+  "TSLA",
+  "JPM",
+  "XOM",
+  "UNH"
+ ],
+ "cash": 100000.0,
+ "forecaster": "pit",
+ "config_overrides": [
+  "sell_prob_threshold=0.45",
+  "min_edge_pct_pts=0.25",
+  "take_profit_pct=20.0",
+  "stop_loss_pct=4",
+  "buy_prob_threshold=0.6"
+ ],
+ "days": 34,
+ "halts": 0,
+ "daily": [
+  {
+   "date": "2026-05-15",
+   "equity": 99988.0,
+   "available": 69988.0,
+   "executed": 6,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2026-05-18",
+   "equity": 99773.42,
+   "available": 39976.0,
+   "executed": 6,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2026-05-19",
+   "equity": 99396.47,
+   "available": 19749.4,
+   "executed": 5,
+   "exits": 1,
+   "ok": true
+  },
+  {
+   "date": "2026-05-20",
+   "equity": 99086.02,
+   "available": 0.0,
+   "executed": 4,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2026-05-21",
+   "equity": 98760.83,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2026-05-22",
+   "equity": 98545.63,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2026-05-26",
+   "equity": 97660.82,
+   "available": 3550.31,
+   "executed": 3,
+   "exits": 1,
+   "ok": true
+  },
+  {
+   "date": "2026-05-27",
+   "equity": 98124.13,
+   "available": 2609.06,
+   "executed": 4,
+   "exits": 1,
+   "ok": true
+  },
+  {
+   "date": "2026-05-28",
+   "equity": 98450.34,
+   "available": 0.0,
+   "executed": 1,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2026-05-29",
+   "equity": 97281.05,
+   "available": 19143.446376000004,
+   "executed": 3,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2026-06-01",
+   "equity": 95342.02,
+   "available": 32899.30637600001,
+   "executed": 4,
+   "exits": 2,
+   "ok": true
+  },
+  {
+   "date": "2026-06-02",
+   "equity": 96118.4,
+   "available": 27684.826376000005,
+   "executed": 2,
+   "exits": 1,
+   "ok": true
+  },
+  {
+   "date": "2026-06-03",
+   "equity": 95021.07,
+   "available": 27121.266376000003,
+   "executed": 4,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2026-06-04",
+   "equity": 95455.61,
+   "available": 7113.266376000004,
+   "executed": 4,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2026-06-05",
+   "equity": 93709.57,
+   "available": 10939.616376000005,
+   "executed": 4,
+   "exits": 1,
+   "ok": true
+  },
+  {
+   "date": "2026-06-08",
+   "equity": 92813.36,
+   "available": 935.6163760000045,
+   "executed": 2,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2026-06-09",
+   "equity": 90943.34,
+   "available": 50426.5,
+   "executed": 3,
+   "exits": 1,
+   "ok": true
+  },
+  {
+   "date": "2026-06-10",
+   "equity": 90436.55,
+   "available": 40422.5,
+   "executed": 2,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2026-06-11",
+   "equity": 90663.92,
+   "available": 30418.5,
+   "executed": 2,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2026-06-12",
+   "equity": 91576.15,
+   "available": 20414.5,
+   "executed": 2,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2026-06-15",
+   "equity": 91844.92,
+   "available": 10410.5,
+   "executed": 2,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2026-06-16",
+   "equity": 93002.28,
+   "available": 406.5,
+   "executed": 2,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2026-06-17",
+   "equity": 92429.27,
+   "available": 0.0,
+   "executed": 1,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2026-06-18",
+   "equity": 91403.21,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2026-06-22",
+   "equity": 92940.23,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2026-06-23",
+   "equity": 93608.87,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2026-06-24",
+   "equity": 93125.65,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2026-06-25",
+   "equity": 94448.76,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2026-06-26",
+   "equity": 94951.27,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2026-06-29",
+   "equity": 94102.03,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2026-06-30",
+   "equity": 93339.4,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2026-07-01",
+   "equity": 95523.09,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2026-07-02",
+   "equity": 95449.29,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2026-07-06",
+   "equity": 94757.47,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  }
+ ],
+ "labels": {
+  "built": 13,
+  "total": 13,
+  "base_rate": 0.0
+ },
+ "metalabel": {
+  "trained": true,
+  "n": 13,
+  "oos_auc": null,
+  "promoted": false,
+  "base_rate": 0.0,
+  "target": "profit",
+  "reason": "insufficient samples: 13 < min 50"
+ },
+ "caveats": [
+  "survivorship_bias: universe is names fetchable today; delisted names are underrepresented \u2014 prefer RELATIVE config comparisons over absolute returns"
+ ],
+ "trades": {
+  "trades": 13,
+  "wins": 0,
+  "losses": 13,
+  "win_rate": 0.0,
+  "avg_win": 0.0,
+  "avg_loss": 735.19,
+  "gross_profit": 0.0,
+  "gross_loss": 9557.5,
+  "profit_factor": 0.0,
+  "net": -9557.5
+ },
+ "gate": {
+  "pass": 74
+ },
+ "total_return_pct": -5.23,
+ "cagr_pct": -32.85,
+ "sharpe": -2.4,
+ "max_drawdown_pct": 9.55,
+ "benchmark_daily": [
+  {
+   "date": "2026-05-15",
+   "close": 739.17
+  },
+  {
+   "date": "2026-05-18",
+   "close": 738.65
+  },
+  {
+   "date": "2026-05-19",
+   "close": 733.73
+  },
+  {
+   "date": "2026-05-20",
+   "close": 741.25
+  },
+  {
+   "date": "2026-05-21",
+   "close": 742.72
+  },
+  {
+   "date": "2026-05-22",
+   "close": 745.64
+  },
+  {
+   "date": "2026-05-26",
+   "close": 750.59
+  },
+  {
+   "date": "2026-05-27",
+   "close": 750.46
+  },
+  {
+   "date": "2026-05-28",
+   "close": 754.6
+  },
+  {
+   "date": "2026-05-29",
+   "close": 756.48
+  },
+  {
+   "date": "2026-06-01",
+   "close": 758.54
+  },
+  {
+   "date": "2026-06-02",
+   "close": 759.57
+  },
+  {
+   "date": "2026-06-03",
+   "close": 754.24
+  },
+  {
+   "date": "2026-06-04",
+   "close": 757.09
+  },
+  {
+   "date": "2026-06-05",
+   "close": 737.55
+  },
+  {
+   "date": "2026-06-08",
+   "close": 739.22
+  },
+  {
+   "date": "2026-06-09",
+   "close": 737.05
+  },
+  {
+   "date": "2026-06-10",
+   "close": 725.43
+  },
+  {
+   "date": "2026-06-11",
+   "close": 737.76
+  },
+  {
+   "date": "2026-06-12",
+   "close": 741.75
+  },
+  {
+   "date": "2026-06-15",
+   "close": 754.83
+  },
+  {
+   "date": "2026-06-16",
+   "close": 750.33
+  },
+  {
+   "date": "2026-06-17",
+   "close": 740.96
+  },
+  {
+   "date": "2026-06-18",
+   "close": 746.74
+  },
+  {
+   "date": "2026-06-22",
+   "close": 744.39
+  },
+  {
+   "date": "2026-06-23",
+   "close": 733.58
+  },
+  {
+   "date": "2026-06-24",
+   "close": 733.24
+  },
+  {
+   "date": "2026-06-25",
+   "close": 734.3
+  },
+  {
+   "date": "2026-06-26",
+   "close": 728.99
+  },
+  {
+   "date": "2026-06-29",
+   "close": 741.0
+  },
+  {
+   "date": "2026-06-30",
+   "close": 746.77
+  },
+  {
+   "date": "2026-07-01",
+   "close": 745.76
+  },
+  {
+   "date": "2026-07-02",
+   "close": 744.78
+  },
+  {
+   "date": "2026-07-06",
+   "close": 750.67
+  }
+ ],
+ "benchmark_return_pct": 1.56,
+ "alpha_pct": -6.79,
+ "information_ratio": -2.44,
+ "tracking_error_pct": 21.57,
+ "run_id": "cf_20260706_c000",
+ "db_path": "/Users/gm/stock-tracker/data/replays/cf_20260706_c000/replay.db"
+}

@@ -38,6 +38,12 @@ def _db_path() -> str:
     return os.environ.get("AUGUR_DB_PATH", "wealth.db")
 
 
+# How long past its due date an unpriceable forecast keeps being retried
+# before score_due_forecasts abandons it (see WHY #244 there). 14 days is far
+# longer than any transient feed outage but short enough that a delisted
+# symbol's backlog can't starve the scoring queue for months.
+_ABANDON_GRACE_DAYS = 14
+
 # Serialize writes the same way database.py does. SQLite is fine with
 # concurrent reads but a compute-then-update race in score_due_forecasts
 # would otherwise double-score a row if two warmers fire simultaneously.
@@ -344,7 +350,31 @@ def score_due_forecasts(max_rows: int = 200) -> Dict[str, int]:
         score_price = _close_on_or_before_from_bars(bars, due_at)
 
         if not issue_price or not score_price:
-            # Don't mark scored — try again next cycle.
+            # WHY (#244): a permanently unpriceable row (delisted symbol —
+            # bars come back empty every run) must not be retried forever.
+            # The queue is ORDER BY issued_at ASC LIMIT max_rows, so a backlog
+            # of dead rows occupies the head and starves every newer due
+            # forecast — hit-rate badges for all other signals silently
+            # freeze. Retry for a generous grace window past due (feed
+            # hiccups recover well within it), then abandon: set scored_at so
+            # the row leaves the queue, leaving realized_return/hit NULL so
+            # the aggregate queries (which filter realized_return IS NOT
+            # NULL) never count it.
+            if now > due_at + timedelta(days=_ABANDON_GRACE_DAYS):
+                with _write_lock:
+                    try:
+                        _get_conn().execute(
+                            "UPDATE signal_forecasts SET scored_at = ? "
+                            "WHERE id = ? AND scored_at IS NULL",
+                            (_utc_now_iso(), int(row["id"])),
+                        )
+                        _get_conn().commit()
+                        log.info("abandoned unpriceable forecast id=%s %s "
+                                 "(due %s ago)", row["id"], row["symbol"],
+                                 now - due_at)
+                    except Exception as e:
+                        log.debug("abandoning row %s failed: %s", row["id"], e)
+            # Otherwise don't mark scored — try again next cycle.
             errors += 1
             continue
 
@@ -442,7 +472,12 @@ def get_track_record(
     conn = _get_conn()
     query = [
         "SELECT hit, realized_return, scored_at FROM signal_forecasts",
+        # realized_return IS NOT NULL excludes rows ABANDONED as unpriceable
+        # (#244: scored_at set, realized/hit left NULL) — they carry no
+        # information and would only inflate `n`. Every genuinely scored row
+        # (including NEUTRAL calls) always has realized_return set.
         "WHERE signal_name = ? AND scored_at IS NOT NULL",
+        "AND realized_return IS NOT NULL",
     ]
     params: List[Any] = [signal_name]
     if since:
@@ -474,6 +509,7 @@ def get_recent_calls(signal_name: str, limit: int = 20) -> List[Dict[str, Any]]:
                realized_return, hit, issue_price, score_price
           FROM signal_forecasts
          WHERE signal_name = ? AND scored_at IS NOT NULL
+           AND realized_return IS NOT NULL  -- hide abandoned rows (#244)
          ORDER BY scored_at DESC
          LIMIT ?
         """,
@@ -518,6 +554,7 @@ def get_scored_rows(
         "SELECT signal_name, symbol, issued_at, scored_at, horizon_days,",
         "predicted_direction, confidence, realized_return, hit, metadata",
         "FROM signal_forecasts WHERE signal_name = ? AND scored_at IS NOT NULL",
+        "AND realized_return IS NOT NULL",  # hide abandoned rows (#244)
     ]
     params: List[Any] = [signal_name]
     if since:

@@ -22,12 +22,25 @@ log = logging.getLogger("augur.aj_analytics")
 # ── ⑯ equity curve ────────────────────────────────────────────────────────────
 
 def snapshot_equity() -> Dict[str, Any]:
-    """Append today's paper equity (realized + unrealized) to aj_equity."""
+    """Append today's paper equity (realized + unrealized) to aj_equity.
+
+    The `date` key is the AMERICA/NEW_YORK trading date, NOT the UTC date: an
+    evening cycle (20:00–24:00 ET) is still "today" on the exchange clock but
+    already tomorrow in UTC, which shifted the aj_benchmark join (index closes
+    are keyed by ET date) by a whole day. `ts` stays UTC for audit ordering;
+    rows stamped before this fix keep their stored dates (backward compat —
+    only NEW snapshots are keyed in ET)."""
     import aj_risk
     import aj_metrics
     pnl = aj_risk.compute_day_pnl()
     cum = aj_metrics.cumulative_pnl()
-    row = {"ts": aj_db.utc_now_iso(), "date": aj_db.utc_now().strftime("%Y-%m-%d"),
+    now = aj_db.utc_now()
+    try:
+        from zoneinfo import ZoneInfo
+        date_str = now.astimezone(ZoneInfo("America/New_York")).strftime("%Y-%m-%d")
+    except Exception:  # zoneinfo/tzdata missing → degrade to the old UTC date
+        date_str = now.strftime("%Y-%m-%d")
+    row = {"ts": aj_db.utc_now_iso(), "date": date_str,
            "realized_usd": cum.get("realized_total", 0.0),
            "unrealized_usd": cum.get("unrealized_open", 0.0),
            "equity_usd": cum.get("total", 0.0),
@@ -100,6 +113,163 @@ def trade_stats() -> Dict[str, Any]:
         "profit_factor": round(gross_win / gross_loss, 2) if gross_loss > 0 else None,
         "net": aj_db.money(gross_win - gross_loss),
     }
+
+
+# ── conditional win-rate / expectancy slices ──────────────────────────────────
+
+def _instrument_of(symbol: str) -> str:
+    s = str(symbol or "")
+    if s.startswith("OPT:"):
+        return "option"
+    if s.endswith("-USD"):
+        return "crypto"
+    return "stock"
+
+
+def _conviction_bucket(v: Any) -> str:
+    """features_json.conviction is a 0/0.5/1.0 float (low/med/high) or None."""
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return "unknown"
+    if f >= 0.75:
+        return "high"
+    if f >= 0.25:
+        return "medium"
+    return "low"
+
+
+def _holding_bucket(days: Any) -> str:
+    try:
+        d = float(days)
+    except (TypeError, ValueError):
+        return "unknown"
+    if d <= 1:
+        return "≤1d"
+    if d <= 5:
+        return "1-5d"
+    if d <= 20:
+        return "5-20d"
+    return ">20d"
+
+
+def _slice_stats(rets: List[float], pnls: List[float]) -> Dict[str, Any]:
+    """Win-rate + expectancy + payoff for one slice of realized trades.
+
+    Reported on realized_return_pct (percent). `expectancy_pct` is the mean
+    return — the RIGHT objective (a low-win/high-payoff book can be very
+    profitable). `breakeven_win_rate` = 1/(1+payoff): the win rate this slice
+    would need GIVEN its own payoff ratio, so a slice is only "structurally
+    losing" when its win rate is below its OWN breakeven, not below 50%."""
+    n = len(rets)
+    wins = [r for r in rets if r > 0]
+    losses = [r for r in rets if r <= 0]
+    win_rate = len(wins) / n if n else None
+    avg_win = sum(wins) / len(wins) if wins else 0.0
+    avg_loss = sum(losses) / len(losses) if losses else 0.0   # ≤ 0
+    payoff = (avg_win / abs(avg_loss)) if avg_loss < 0 else None
+    breakeven = (1.0 / (1.0 + payoff)) if payoff and payoff > 0 else None
+    expectancy = sum(rets) / n if n else None
+    net = sum(pnls)
+    # Actionable flag: the slice loses REAL money (net$<0) AND on a mean-return
+    # basis AND its win rate is below its own payoff-implied breakeven — a
+    # structural loser, not just noise. Requiring net$<0 too avoids condemning a
+    # slice that is net-positive in dollars but has a slightly negative
+    # equal-weighted mean (size-weighted winners can outweigh many small losers).
+    # Needs a minimum sample so one bad trade can't condemn a slice.
+    structurally_losing = bool(
+        n >= 4 and net < 0 and expectancy is not None and expectancy < 0
+        and (breakeven is None or (win_rate is not None and win_rate < breakeven)))
+    return {
+        "n": n,
+        "win_rate": round(win_rate, 3) if win_rate is not None else None,
+        "avg_win_pct": round(avg_win, 2),
+        "avg_loss_pct": round(avg_loss, 2),
+        "payoff_ratio": round(payoff, 2) if payoff is not None else None,
+        "breakeven_win_rate": round(breakeven, 3) if breakeven is not None else None,
+        "expectancy_pct": round(expectancy, 3) if expectancy is not None else None,
+        "net_pnl_usd": aj_db.money(sum(pnls)),
+        "structurally_losing": structurally_losing,
+        "low_confidence": n < 4,
+    }
+
+
+def performance_slices(window: Optional[int] = None) -> Dict[str, Any]:
+    """Conditional win-rate + expectancy of realized paper trades, sliced by
+    regime / instrument / conviction / holding-period / edge.
+
+    Answers "WHERE are the losses coming from?" — the slices whose win rate is
+    below their own payoff-implied breakeven AND whose expectancy is negative
+    are the structural losers worth gating or downsizing. Reads aj_trade_labels
+    (the meta-label store: realized outcome + regime + entry features). Pure read.
+    """
+    import json as _json
+    sql = ("SELECT symbol, regime, holding_days, features_json, "
+           "realized_return_pct, realized_pnl_usd FROM aj_trade_labels "
+           "WHERE realized_return_pct IS NOT NULL ORDER BY id DESC")
+    if window:
+        sql += " LIMIT ?"
+        rows = aj_db.query(sql, (int(window),))
+    else:
+        rows = aj_db.query(sql)
+
+    # Normalize into flat records with all slice keys resolved once.
+    recs: List[Dict[str, Any]] = []
+    for r in rows:
+        try:
+            ret = float(r["realized_return_pct"])
+        except (TypeError, ValueError):
+            continue
+        if ret != ret:      # NaN
+            continue
+        feats = {}
+        try:
+            feats = _json.loads(r.get("features_json") or "{}")
+        except Exception:
+            feats = {}
+        edge = feats.get("edge")
+        recs.append({
+            "ret": ret,
+            "pnl": float(r.get("realized_pnl_usd") or 0.0),
+            "regime": (r.get("regime") or "unknown"),
+            "instrument": _instrument_of(r.get("symbol")),
+            "conviction": _conviction_bucket(feats.get("conviction")),
+            "holding": _holding_bucket(r.get("holding_days")),
+            "edge": ("high (≥8)" if isinstance(edge, (int, float)) and edge >= 8
+                     else "low (<8)" if isinstance(edge, (int, float)) else "unknown"),
+        })
+
+    def _group(dim: str) -> List[Dict[str, Any]]:
+        buckets: Dict[str, Dict[str, List[float]]] = {}
+        for rec in recs:
+            key = rec[dim]
+            b = buckets.setdefault(key, {"rets": [], "pnls": []})
+            b["rets"].append(rec["ret"])
+            b["pnls"].append(rec["pnl"])
+        out = []
+        for key, b in buckets.items():
+            stats = _slice_stats(b["rets"], b["pnls"])
+            stats["slice"] = key
+            out.append(stats)
+        # worst expectancy first — the actionable end of the list
+        return sorted(out, key=lambda s: (s["expectancy_pct"] is None, s["expectancy_pct"] or 0.0))
+
+    dims = ["regime", "instrument", "conviction", "holding", "edge"]
+    by = {d: _group(d) for d in dims}
+    overall = _slice_stats([r["ret"] for r in recs], [r["pnl"] for r in recs])
+    overall["slice"] = "ALL"
+
+    # The actionable shortlist: structurally-losing slices across every dimension,
+    # worst net P&L first.
+    flags = []
+    for d, slices in by.items():
+        for s in slices:
+            if s["structurally_losing"]:
+                flags.append({"dimension": d, **s})
+    flags.sort(key=lambda s: s["net_pnl_usd"])
+
+    return {"n": len(recs), "window": window, "overall": overall,
+            "by": by, "flags": flags}
 
 
 # ── ⑲ Sharpe-like on the equity curve ────────────────────────────────────────
@@ -240,8 +410,21 @@ def positions_detail() -> Dict[str, Any]:
         qty = float(p.get("qty") or 0)
         avg = float(p.get("avg_cost") or 0)
         mark = marks.get(qsyms[sym])
+        # Mark provenance for the UI: 'cost' = no mark at all (row shown at
+        # cost basis, P&L $0 is NOT "flat" — it's "unpriceable right now");
+        # 'stale' = option served from the last-good mark cache (chain feed
+        # throttled/closed); absent = live.
+        mark_src = None
         if mark is None:
             mark = avg
+            mark_src = "cost"
+        elif sym.startswith("OPT:"):
+            try:
+                import aj_options
+                if aj_options.mark_status(sym) == "stale":
+                    mark_src = "stale"
+            except Exception:
+                pass
         mv = qty * mark
         total_mv += mv
         gross_mv += abs(mv)
@@ -251,8 +434,13 @@ def positions_detail() -> Dict[str, Any]:
             "symbol": sym, "qty": round(qty, 4), "avg_cost": round(avg, 2),
             "mark": round(mark, 2), "market_value": aj_db.money(mv),
             "unrealized": aj_db.money(unreal),
-            "unrealized_pct": round((mark - avg) / avg * 100, 2) if avg > 0 else 0.0,
+            # % off the position's GROSS cost basis, sign-carried by the P&L
+            # itself: (mark-avg)/avg alone is INVERTED for a short (qty < 0),
+            # where a falling mark is a gain. unreal already embeds sign(qty).
+            "unrealized_pct": (round(unreal / (abs(avg) * abs(qty)) * 100, 2)
+                               if (avg > 0 and qty) else 0.0),
             "age_days": aj_rules.position_age_days(sym),
+            "mark_src": mark_src,
             "asset_type": p.get("asset_type") or "stock"})
     for r in rows:
         # Weight by gross exposure (sum of |market value|) so short legs and

@@ -281,6 +281,13 @@
     if (!containerEl) return;
     _injectStyle();
 
+    // Stale-response guard: each render bumps a per-container generation.
+    // Without it, a slow in-flight response for the PREVIOUS symbol resolves
+    // after a newer render and writes into the CURRENT [data-pf-body] nodes
+    // (header says MSFT, fan chart shows AAPL). The .then/.catch below bail
+    // when their captured generation is no longer current.
+    var gen = (containerEl._pfGen = (containerEl._pfGen || 0) + 1);
+
     symbol = (symbol || '').toString().toUpperCase();
     horizon = parseInt(horizon, 10) || 20;
 
@@ -314,6 +321,7 @@
             + '?horizon=' + encodeURIComponent(horizon);
 
     _fetchJSON(url).then(function (resp) {
+      if (containerEl._pfGen !== gen) return; // a newer render owns the panel
       // Accept either the bare probforecast payload or the {probabilistic,
       // point, spread_vs_median_pct} envelope from the vs-point endpoint —
       // the caller might switch endpoints later and we want either to render.
@@ -359,6 +367,7 @@
         containerEl._pfChart = _drawHistogram(canvas, data.histogram);
       }
     }).catch(function (err) {
+      if (containerEl._pfGen !== gen) return; // a newer render owns the panel
       containerEl.querySelector('[data-pf-body]').innerHTML =
         '<div class="pf-err">Failed to load: '
         + _esc(err && err.message ? err.message : err) + '</div>';

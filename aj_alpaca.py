@@ -37,7 +37,10 @@ _STATUS_MAP = {
     "pending_new": "submitted", "calculated": "accepted", "held": "accepted",
     "partially_filled": "partially_filled",
     "filled": "filled",
-    "canceled": "canceled", "pending_cancel": "canceled",
+    # pending_cancel is NOT terminal: the order can still fill while the cancel
+    # is pending — mapping it to 'canceled' made reconciliation stop watching
+    # an order that could later fill with no local record.
+    "canceled": "canceled", "pending_cancel": "accepted",
     "replaced": "accepted", "pending_replace": "accepted",
     "rejected": "rejected", "suspended": "rejected",
     "expired": "expired", "done_for_day": "expired", "stopped": "expired",
@@ -141,7 +144,20 @@ class AlpacaBroker(BrokerClient):
         elif order.get("notional") not in (None, ""):
             body["notional"] = str(order.get("notional"))
         if body["type"] == "limit":
-            body["limit_price"] = str(order.get("limit_price"))
+            # str(None) would serialize as the literal "None" and 422 at the
+            # venue, parking the order in 'unknown' — reject locally instead
+            # (mirrors PaperBroker's malformed-limit reject).
+            lp = order.get("limit_price")
+            try:
+                lp_ok = lp is not None and float(lp) > 0
+            except (TypeError, ValueError):
+                lp_ok = False
+            if not lp_ok:
+                return {"broker_order_id": None, "state": "rejected",
+                        "filled_qty": 0.0, "avg_fill_price": None,
+                        "fees_usd": 0.0, "fills": [],
+                        "raw": {"reason": "limit order without a valid limit price"}}
+            body["limit_price"] = str(lp)
         data = self._request("POST", "/v2/orders", body)
         res = self._to_result(data, with_fills=False)
         # If Alpaca already reports fills at submit (fast market order), pull
@@ -156,7 +172,14 @@ class AlpacaBroker(BrokerClient):
     def cancel(self, broker_order_id: str) -> Dict[str, Any]:
         try:
             self._request("DELETE", "/v2/orders/{}".format(broker_order_id))
-            return {"broker_order_id": broker_order_id, "state": "canceled"}
+            # A DELETE 204 only means the cancel REQUEST was accepted — the
+            # order enters pending_cancel and can still fill. Read the order
+            # back rather than asserting a terminal 'canceled' the venue never
+            # confirmed; on read failure report unknown for reconciliation.
+            try:
+                return self.get_order(broker_order_id)
+            except Exception:
+                return {"broker_order_id": broker_order_id, "state": "unknown"}
         except Exception as e:
             # Do NOT assert 'canceled' on failure — a still-live order would be
             # mistaken for canceled. Mark unknown; reconciliation confirms truth.
@@ -166,6 +189,15 @@ class AlpacaBroker(BrokerClient):
 
     def get_order(self, broker_order_id: str) -> Dict[str, Any]:
         data = self._request("GET", "/v2/orders/{}".format(broker_order_id))
+        return self._to_result(data, with_fills=True)
+
+    def get_order_by_client_id(self, client_order_id: str) -> Dict[str, Any]:
+        """Resolve an order by our deterministic client_order_id — the recovery
+        path for a submit that timed out AFTER Alpaca accepted the order (no
+        broker_order_id was ever stored locally)."""
+        data = self._request(
+            "GET", "/v2/orders:by_client_order_id?client_order_id={}".format(
+                client_order_id))
         return self._to_result(data, with_fills=True)
 
     def positions(self) -> List[Dict[str, Any]]:

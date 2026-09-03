@@ -192,10 +192,17 @@ def _insider_form4_net_60d(symbol: str) -> Optional[Dict[str, Any]]:
             val = float(t.get("value") or 0.0)
             if val <= 0:
                 continue
-            if t.get("transaction_type") == "BUY":
+            ttype = (t.get("transaction_type") or "").upper()
+            if ttype == "BUY":
                 net_value += val
-            else:
+            elif ttype == "SELL":
                 net_value -= val
+            else:
+                # OTHER:M option exercises, OTHER:F tax withholding, OTHER:A
+                # awards etc. are NOT open-market sells — counting them as
+                # sells inverted the sign on exec option exercises (mirrors
+                # _component_insider_form4 in synth_cluster).
+                continue
             n += 1
         except Exception:
             continue
@@ -428,9 +435,13 @@ def _reflexivity_strength_signed(symbol: str) -> Optional[Dict[str, Any]]:
     if not strength or strength < 20:  # weak loops aren't worth comparing
         return None
     direction = (best.get("direction") or "NEUTRAL").upper()
-    if direction in ("UP", "POSITIVE", "BULLISH"):
+    # The detector's actual vocabulary is VIRTUOUS/VICIOUS; the UP/DOWN
+    # synonyms are kept for robustness to future emitters. Without the
+    # VIRTUOUS/VICIOUS entries, equity_feedback and index_inclusion loops
+    # always fell into the loop-type fallback and were silently dropped.
+    if direction in ("VIRTUOUS", "UP", "POSITIVE", "BULLISH"):
         sign = 1.0
-    elif direction in ("DOWN", "NEGATIVE", "BEARISH"):
+    elif direction in ("VICIOUS", "DOWN", "NEGATIVE", "BEARISH"):
         sign = -1.0
     else:
         # equity_feedback loops are intrinsically reinforcing — treat as
@@ -675,27 +686,33 @@ def _pair_row(symbol: str, pair: dict,
 
     key_a, key_b = _PAIR_SIGNALS[pair["name"]]
 
-    def _z(key: str, norm: float) -> float:
-        # z-score against the signal's own cross-sectional distribution;
-        # mean-center then scale by std. Std<=0 (degenerate) → fall back to
-        # the centered value so we never divide by ~0 and manufacture a blowout.
+    def _usable_stats(key: str) -> Optional[Tuple[float, float]]:
+        # Usable = present (>=3 cross-sectional observations upstream) AND a
+        # non-degenerate std. std≈0 means every symbol shares (almost) the
+        # same value, so z-scoring would divide by ~0 or collapse to ~0.
         if not norm_stats:
-            return norm
+            return None
         stats = norm_stats.get(key)
         if not stats:
-            return norm
+            return None
         mean, std = stats
         if std and std > 1e-9:
-            return (norm - mean) / std
-        # std≈0: every symbol shares (almost) the same value for this key, so
-        # mean-centering (norm-mean) collapses everyone to ~0 and erases any
-        # real divergence on the *other* leg of a pair. Fall back to the RAW
-        # norm so this key retains its directional magnitude instead of
-        # flattening to zero.
-        return norm
+            return (mean, std)
+        return None
 
-    za = _z(key_a, a["norm"])
-    zb = _z(key_b, b["norm"])
+    # Z-score BOTH legs or NEITHER. Mixing one z-scored leg (routinely ±2-3)
+    # with one raw-norm leg (bounded ±1) makes `magnitude` a unit mismatch:
+    # a thin-data key (e.g. options_pcr with <3 observations) would clear the
+    # 0.8 threshold on scale alone, not real opposition. When either leg
+    # lacks usable stats, compare both in raw-norm space.
+    stats_a = _usable_stats(key_a)
+    stats_b = _usable_stats(key_b)
+    if stats_a and stats_b:
+        za = (a["norm"] - stats_a[0]) / stats_a[1]
+        zb = (b["norm"] - stats_b[0]) / stats_b[1]
+    else:
+        za = a["norm"]
+        zb = b["norm"]
 
     magnitude = abs(za - zb)
     if magnitude <= _DIVERGENCE_THRESHOLD:
@@ -912,17 +929,23 @@ def divergence_map(universe=None, top_n: int = 20) -> dict:
         # expensive partner fetches are skipped when their gating signal is
         # missing. parallel_map fills a slot with None when the work fn
         # raises (matching the old skip-on-error behavior) and falls back to
-        # serial by itself when threads can't spawn. The overall batch
-        # deadline of _PER_SYMBOL_TIMEOUT_S × 4 is a hard cap so one slow
-        # upstream can't stall the scan forever, with headroom for symbols
-        # queued behind the _MAX_WORKERS limit.
+        # serial by itself when threads can't spawn.
+        # NOTE: safe_executor's timeout_per_item is really an overall BATCH
+        # deadline (deadline = now + timeout_per_item), so it must scale with
+        # how many worker "waves" the universe needs — a flat ×4 gave a
+        # 100-symbol cold-cache scan 180s TOTAL, silently truncating most
+        # slots to None and caching a gutted result for an hour. One
+        # _PER_SYMBOL_TIMEOUT_S per wave of _MAX_WORKERS (min 4 waves of
+        # headroom) keeps the hard cap so one slow upstream can't stall the
+        # scan forever, without starving big universes.
+        waves = max(4, -(-len(symbols) // _MAX_WORKERS))  # ceil division
         # Pass 1: gather every symbol's signals (no thresholding yet) so we
         # can z-score each signal against its own cross-sectional distribution.
         raw_signals = safe_executor.parallel_map(
             _gather_symbol_signals,
             symbols,
             max_workers=_MAX_WORKERS,
-            timeout_per_item=_PER_SYMBOL_TIMEOUT_S * 4,
+            timeout_per_item=_PER_SYMBOL_TIMEOUT_S * waves,
             thread_name_prefix="divmap",
         )
         per_symbol_signals: Dict[str, Dict[str, Optional[Dict[str, Any]]]] = {}

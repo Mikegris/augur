@@ -70,16 +70,42 @@ def _crypto_population(cfg: Dict[str, Any]) -> List[str]:
     norm = norm[:top]
     # Robustness: persist the last GOOD list; on a fetch failure (e.g. CoinGecko
     # 429) reuse it instead of collapsing to the tiny curated fallback.
+    # Guards on the last-good itself:
+    #   • only OVERWRITE it when the new list is ≥ ~80% of the cached size (or
+    #     larger) — a partial 15-of-60 response must not permanently shrink the
+    #     remembered universe;
+    #   • store a timestamp alongside, and IGNORE a last-good older than 7 days
+    #     at read time — an ancient list should not resurrect delisted names
+    #     forever. Legacy bare-list entries (no timestamp) stay readable.
     try:
         import aj_db
         import json as _json
-        if len(norm) >= 10:
-            aj_db.set_setting_raw("__aj_crypto_lastgood", _json.dumps(norm))
-        else:
-            raw = aj_db.get_setting_raw("__aj_crypto_lastgood")
-            cached = _json.loads(raw) if raw else []
-            if len(cached) > len(norm):
-                norm = cached[:top]
+        cached: List[str] = []
+        cached_ts = None
+        raw = aj_db.get_setting_raw("__aj_crypto_lastgood")
+        if raw:
+            try:
+                obj = _json.loads(raw)
+                if isinstance(obj, dict):           # new format {"ts":…, "symbols":[…]}
+                    cached = list(obj.get("symbols") or [])
+                    cached_ts = obj.get("ts")
+                elif isinstance(obj, list):         # legacy bare-list format
+                    cached = obj
+            except Exception:
+                cached = []
+        if cached and cached_ts:
+            try:
+                from datetime import timedelta
+                ts = aj_db.parse_iso(cached_ts)
+                if ts is None or aj_db.utc_now() - ts > timedelta(days=7):
+                    cached = []                     # too old to trust
+            except Exception:
+                pass
+        if len(norm) >= 10 and len(norm) >= int(0.8 * len(cached)):
+            aj_db.set_setting_raw("__aj_crypto_lastgood", _json.dumps(
+                {"ts": aj_db.utc_now_iso(), "symbols": norm}))
+        elif len(cached) > len(norm):
+            norm = [str(s).upper() for s in cached][:top]
     except Exception:
         pass
     if not norm:
@@ -94,13 +120,19 @@ def _crypto_population(cfg: Dict[str, Any]) -> List[str]:
 
 # ── rotation (sweep the full population across cycles) ─────────────────────────
 
-def _rotate(pop: List[str], batch: int) -> List[str]:
-    """Return the next `batch` names, advancing a persisted wrap-around cursor."""
+def _rotate(pop: List[str], batch: int) -> Tuple[List[str], Any]:
+    """Return (next `batch` names, cursor value to persist once quotes land).
+
+    The cursor is deliberately NOT persisted here: advancing it before the
+    batch quote runs meant a failed/empty quote batch (e.g. a burst of 429s)
+    permanently skipped that slice until the sweep wrapped. The caller commits
+    via _advance_cursor(new_off) only AFTER the slice actually produced quotes.
+    new_off is None when there is nothing to advance (pop fits in one batch)."""
     n = len(pop)
     if n == 0:
-        return []
+        return [], None
     if n <= batch:
-        return pop
+        return pop, None
     import aj_db
     try:
         raw = aj_db.get_setting_raw(_CURSOR_KEY)
@@ -108,11 +140,19 @@ def _rotate(pop: List[str], batch: int) -> List[str]:
     except Exception:
         off = 0
     sl = (pop + pop)[off:off + batch]
+    return sl, (off + batch) % n
+
+
+def _advance_cursor(new_off: Any) -> None:
+    """Persist the sweep cursor — call ONLY after the slice's quotes succeeded,
+    so a 429/empty batch retries the same slice next cycle instead of skipping."""
+    if new_off is None:
+        return
     try:
-        aj_db.set_setting_raw(_CURSOR_KEY, str((off + batch) % n))
+        import aj_db
+        aj_db.set_setting_raw(_CURSOR_KEY, str(new_off))
     except Exception:
         log.debug("could not advance screen cursor", exc_info=True)
-    return sl
 
 
 # ── screen ────────────────────────────────────────────────────────────────────
@@ -123,6 +163,42 @@ def _num(v: Any) -> float:
         return f if f == f else 0.0          # NaN → 0
     except (TypeError, ValueError):
         return 0.0
+
+
+def _is_junk_ticker(symbol: str) -> bool:
+    """True for warrants / units / rights — structurally poor instruments
+    (illiquid, time-decaying, complex terms) the momentum agent should never
+    trade. Unambiguous suffix forms + the bare 5-char class-W/U pattern.
+    Distinct from _likely_optionable (which only nudges RANKING): this
+    HARD-excludes from the tradable shortlist."""
+    s = str(symbol or "").upper()
+    if not s:
+        return True
+    if any(tok in s for tok in (".WS", ".WT", "-WT", "-UN", ".RT", "-RT",
+                                "/WS", ".U ", "-U.")):
+        return True
+    # bare 5-char alpha ending W (warrant) or U (unit): CORZW, BODYW, BLUWW…
+    if len(s) == 5 and s[-1] in ("W", "U") and s.isalpha():
+        return True
+    return False
+
+
+def _likely_optionable(symbol: str) -> bool:
+    """Cheap, network-free guess at whether a ticker carries listed options.
+    Warrants / units / rights almost never do; everything else is assumed
+    optionable (the true chain check happens later in aj_options.pick_contract,
+    which safely falls back to equity when no chain exists). This only nudges
+    ranking — it is never a hard filter."""
+    s = str(symbol or "").upper()
+    if not s:
+        return False
+    # explicit warrant / unit / right suffixes
+    if any(tok in s for tok in (".WS", ".WT", "-WT", ".U", "-UN", ".RT", "-RT", "/WS")):
+        return False
+    # bare 5-char class tickers ending W (warrant) or U (unit) — e.g. CORZW
+    if len(s) == 5 and s[-1] in ("W", "U") and s.isalpha():
+        return False
+    return True
 
 
 def _cache_upsert(rows: Dict[str, Any]) -> None:
@@ -183,7 +259,8 @@ def screen(cfg: Dict[str, Any] = None) -> List[str]:
         min_dvol = _num(cfg.get("screen_min_dollar_volume", 1_000_000))
         min_mcap = _num(cfg.get("screen_min_market_cap", 0))
 
-        equities = _rotate(_equity_population(cfg), batch)
+        pop_eq = _equity_population(cfg)
+        equities, cursor_next = _rotate(pop_eq, batch)
         cryptos = _crypto_population(cfg)
         if not equities and not cryptos:
             return []
@@ -197,6 +274,12 @@ def screen(cfg: Dict[str, Any] = None) -> List[str]:
             log.exception("screen: batch quote failed")
         if quotes:
             _cache_upsert({s: quotes[s] for s in equities if s in quotes})
+        # Commit the sweep cursor only now that this slice actually produced
+        # equity quotes; on a failed/empty batch (429 burst) the cursor stays
+        # put so the SAME slice is retried next cycle instead of being skipped
+        # until the sweep wraps.
+        if any(s in quotes for s in equities):
+            _advance_cursor(cursor_next)
 
         # rank across the whole fresh cache (global-best), else this slice only
         pool = _cache_fresh(ttl)
@@ -207,10 +290,28 @@ def screen(cfg: Dict[str, Any] = None) -> List[str]:
                          change_pct=_num((quotes.get(s) or {}).get("change_pct")))
                     for s in equities if s in quotes]
 
+        # When options are enabled, softly prefer names likely to carry a
+        # listed, liquid option chain so buys can actually route to the options
+        # sleeve. This is a NETWORK-FREE structural heuristic (no per-name chain
+        # lookups — those caused the rolling-sweep rate-limit collapse): sub-$X
+        # names and warrant/unit/right tickers rarely have liquid options. It is
+        # a rank BOOST only — nothing is hard-dropped, so equity trading is
+        # unaffected and non-optionable names remain selectable when they score.
+        prefer_opt = bool(cfg.get("trade_options") and cfg.get("option_prefer_optionable", True))
+        opt_min_px = _num(cfg.get("option_optionable_min_price", 10.0))
+
         scored = []
         for q in pool:
             sym = q.get("symbol")
             if not sym or sym.endswith("-USD"):
+                continue
+            # HARD-exclude warrants / units / rights from the tradable
+            # shortlist. _likely_optionable already identifies them but only
+            # de-ranked them, so a warrant (e.g. CORZW) could still be BOUGHT
+            # as shares — an illiquid, decaying, structurally poor instrument
+            # the agent has no thesis for. Crypto and normal equities are
+            # unaffected; this filters only the unambiguous junk suffixes.
+            if _is_junk_ticker(sym):
                 continue
             px = _num(q.get("price"))
             if px < min_price:
@@ -226,10 +327,45 @@ def screen(cfg: Dict[str, Any] = None) -> List[str]:
             if min_mcap > 0 and mcap < min_mcap:
                 continue
             momentum = abs(_num(q.get("change_pct")))
+            # The optionability nudge is a BOUNDED score boost (×1.25 on the
+            # momentum component), NOT a primary sort key: sorting optionable
+            # names first turned the "soft preference" into a de-facto hard
+            # filter (every screen_max slot went to likely-optionable ≥$X
+            # names), violating _likely_optionable's never-a-hard-filter
+            # contract. A strong non-optionable mover can still out-rank a
+            # weak optionable one.
+            if prefer_opt and px >= opt_min_px and _likely_optionable(sym):
+                momentum *= 1.25
             scored.append((sym, momentum, dvol))
+        # rank by (boosted) momentum, then dollar-volume as the tiebreak
         scored.sort(key=lambda x: (-x[1], -x[2]))
         out = [s for s, _, _ in scored[:smax]]
         out.extend(c for c in cryptos if c not in out)
+        # Sweep telemetry (#11): make a 429-driven universe collapse VISIBLE
+        # (cursor position, per-slice quote hit-rate, fresh-cache depth,
+        # shortlist size) instead of silently degrading to crypto-only.
+        # Surfaced through aj_metrics.status() -> dashboard / `aj status`.
+        try:
+            import json as _json
+            import aj_db          # module-local import: aj_db is NOT a module-
+            # level name here (every other user imports it inside its own
+            # function). Without this the telemetry write raised NameError
+            # every cycle, swallowed at debug — the 429-collapse visibility
+            # panel this block exists to feed NEVER wrote a single row.
+            quoted = sum(1 for s in equities if s in quotes)
+            aj_db.set_setting_raw("__aj_screen_telemetry", _json.dumps({
+                "ts": aj_db.utc_now_iso(),
+                "population": len(pop_eq),
+                "cursor": cursor_next,
+                "slice_size": len(equities),
+                "slice_quoted": quoted,
+                "quote_hit_rate": round(quoted / len(equities), 3) if equities else None,
+                "cache_pool": len(pool),
+                "shortlist": len(out),
+                "crypto": len(cryptos),
+            }))
+        except Exception:
+            log.debug("screen telemetry persist skipped", exc_info=True)
         return out
     except Exception:
         log.exception("screen failed; returning empty (fail-closed)")

@@ -216,6 +216,17 @@ def _earnings_dates(symbol: str) -> List[str]:
     where ``Reported EPS`` is non-null, which is the canonical 'announced'
     marker.
 
+    WHY (#224): T0 is anchored to the trading day on-or-before the event date,
+    but most reporters announce AFTER the close (~16:30 ET) — anchoring T0 to
+    the announcement's calendar date measures the close 30 min BEFORE the
+    reaction and mislabels the real move as post-event drift. yfinance's index
+    carries the announcement time (tz-aware ET), so when the timestamp is at
+    or after the 16:00 close we shift the event date to the next calendar day;
+    _event_window_curve's "on or before" lookup then lands T0 on the first
+    close AFTER the announcement. Timestamps with no time component (midnight
+    — time unknown) are left as-is: pre-reaction T0 for those is documented
+    behavior, not a claim we can't back.
+
     Limitation: yfinance can throttle / break under bot detection. Callers
     should handle an empty list (this function never raises)."""
     try:
@@ -241,6 +252,12 @@ def _earnings_dates(symbol: str) -> List[str]:
 
     out = []
     for idx in past.index:
+        # AMC reporters: reaction lands on the NEXT session (#224, see above).
+        try:
+            if getattr(idx, "hour", 0) >= 16:
+                idx = idx + pd.Timedelta(days=1)
+        except Exception:
+            pass
         d = _to_date(idx)
         if d:
             out.append(d.isoformat())
@@ -337,6 +354,26 @@ _EST_WINDOW = 250
 _EST_MIN = 60  # need at least this many overlapping est-window obs for OLS
 
 
+def _t_p_value_two_sided(t_stat: float, dof: int) -> float:
+    """Two-sided p-value for a t-statistic under Student-t with `dof` degrees
+    of freedom.
+
+    WHY (#222): the cross-sectional CAR t-stat can be built from as few as
+    n_mm=5 events (4 dof); a normal-approx erfc p-value there is ~10x too
+    small (t=2.8, 4 dof: true p≈0.049 vs erfc≈0.005), flagging borderline
+    results as significant. Use the exact Student-t CDF via scipy (bundled —
+    sklearn depends on it); only if scipy is somehow unavailable fall back to
+    the old normal approximation, which is anti-conservative for tiny dof but
+    preserves the previous behavior rather than dropping the stat entirely."""
+    if dof < 1:
+        return float("nan")
+    try:
+        from scipy import stats as _scipy_stats
+        return float(2.0 * _scipy_stats.t.sf(abs(t_stat), dof))
+    except Exception:
+        return math.erfc(abs(t_stat) / math.sqrt(2.0))
+
+
 def _market_model_ar_curve(sym_closes: pd.Series, bench_closes: pd.Series,
                            event_dt: datetime.date,
                            window_days: int) -> Optional[np.ndarray]:
@@ -376,20 +413,32 @@ def _market_model_ar_curve(sym_closes: pd.Series, bench_closes: pd.Series,
 
     # Build aligned (sym, bench) simple-return frames on shared dates over the
     # union of estimation + event windows.
+    # WHY (#221): pct_change()'s default fill_method pads NaNs forward, which
+    # fabricates 0% benchmark returns on days the benchmark has no bar (the
+    # NaNs created by the reindex below). Those fake zeros survive dropna(),
+    # bias β toward 0 and corrupt the event-day ARs — pass fill_method=None so
+    # missing days stay NaN and are removed by the existing df.dropna().
     seg_sym = sym_closes.iloc[est_lo - 1: hi + 1]
-    sym_ret = seg_sym.pct_change().dropna()
+    sym_ret = seg_sym.pct_change(fill_method=None).dropna()
     # Re-align the benchmark onto the symbol's trading days.
     bench_on_sym = bench_closes.reindex(sym_closes.index).iloc[est_lo - 1: hi + 1]
-    bench_ret = bench_on_sym.pct_change()
+    bench_ret = bench_on_sym.pct_change(fill_method=None)
     df = pd.DataFrame({"sym": sym_ret, "mkt": bench_ret}).dropna()
     if df.empty:
         return None
 
     # Split into estimation (dates strictly before the event window) and event.
+    # WHY (#220): the event window holds the 2W returns close[-W]→close[+W] —
+    # matching the raw cumulative curves, which anchor at the close of day -W.
+    # Including the row AT event_start_ts (the return close[-W-1]→close[-W])
+    # made the CAR span 2W+1 returns, shifting every point one return early
+    # relative to the raw curves it must be directly comparable to. That
+    # boundary return belongs to neither window (estimation already ends at
+    # est_hi = lo-1), which is fine — it sits inside the exclusion gap.
     event_start_ts = sym_closes.index[lo]
     est = df[df.index < event_start_ts]
-    evt = df[df.index >= event_start_ts]
-    if len(est) < _EST_MIN or len(evt) != (2 * window_days + 1):
+    evt = df[df.index > event_start_ts]
+    if len(est) < _EST_MIN or len(evt) != (2 * window_days):
         return None
 
     x = est["mkt"].to_numpy(dtype=float)
@@ -405,8 +454,10 @@ def _market_model_ar_curve(sym_closes: pd.Series, bench_closes: pd.Series,
 
     r_sym = evt["sym"].to_numpy(dtype=float)
     r_mkt = evt["mkt"].to_numpy(dtype=float)
-    ar = r_sym - (alpha + beta * r_mkt)  # daily abnormal returns
-    car = np.cumsum(ar)                  # cumulative AR path (length 2W+1)
+    ar = r_sym - (alpha + beta * r_mkt)  # 2W daily abnormal returns
+    # Prepend the 0.0 baseline at day -W (#220) so the CAR path has length
+    # 2W+1 and starts at 0 exactly like the raw cumulative-return curves.
+    car = np.concatenate([[0.0], np.cumsum(ar)])
     return car
 
 
@@ -468,8 +519,15 @@ def _summary_stats(curves: np.ndarray, dates: List[str],
     # NaN-aware hit rate. `np.mean(rel > 0)` treats `nan > 0` as False, so
     # any windows with missing data depress the rate. Filter NaNs first so
     # the rate reflects only events with usable post-event returns.
-    finite_rel = rel[np.isfinite(rel)]
-    hit = float(np.mean(finite_rel > 0)) if finite_rel.size else 0.0
+    # WHY (#225): like avg_post5/avg_abs_move above, gate on full_post5 — a
+    # window_days < 5 study would otherwise report the T+window hit rate as
+    # if it were the standard T+5 stat (the exact mislabeling the sibling
+    # fields were set to None for).
+    if full_post5:
+        finite_rel = rel[np.isfinite(rel)]
+        hit = float(np.mean(finite_rel > 0)) if finite_rel.size else 0.0
+    else:
+        hit = None
 
     # WHY (S13): magnitude consumers (e.g. synth_catalyst) want the typical
     # ABSOLUTE move around the event. Averaging signed returns and then taking
@@ -502,7 +560,7 @@ def _summary_stats(curves: np.ndarray, dates: List[str],
         "avg_T0_return_pct": round(avg_T0, 3),
         "avg_post_event_5d_pct": round(avg_post5, 3) if avg_post5 is not None else None,
         "avg_abs_event_move_pct": round(avg_abs_move, 3) if avg_abs_move is not None else None,
-        "hit_rate_positive_post": round(hit, 3),
+        "hit_rate_positive_post": round(hit, 3) if hit is not None else None,
         "best_window": best,
         "worst_window": worst,
     }
@@ -692,8 +750,9 @@ def _compute(symbol: str, event_type: str, window_days: int,
         sd = float(np.std(car_end, ddof=1)) if n_mm > 1 else 0.0
         se = sd / math.sqrt(n_mm) if sd > 0 and n_mm > 1 else float("nan")
         t_stat = mean_car / se if (se == se and se > 0) else float("nan")
-        # Two-sided normal-approx p-value (consistent with the factor module).
-        p_value = (math.erfc(abs(t_stat) / math.sqrt(2.0))
+        # Two-sided Student-t p-value with n_mm-1 dof (#222) — the normal
+        # approximation massively understates p at the small n this runs at.
+        p_value = (_t_p_value_two_sided(t_stat, n_mm - 1)
                    if t_stat == t_stat else float("nan"))
         market_model.update({
             "available": True,
@@ -758,10 +817,22 @@ def event_study(symbol: str, event_type: str = "earnings",
 
     try:
         import cache_store
-        return cache_store.coalesce(
+        res = cache_store.coalesce(
             key, _CACHE_TTL,
             lambda: _compute(symbol, et, window_days, period_years, benchmark),
         )
+        # WHY (#223): _compute's error envelope carries 6 keys, so
+        # cache_store's failure heuristic ('error' present AND <=3 keys)
+        # doesn't catch it and coalesce caches a transient failure (e.g. a
+        # yfinance 429 during the bars fetch) for the full 24h TTL. Evict it
+        # immediately so the next request recomputes once the feed recovers —
+        # mirroring fetcher.get_dividend_data's explicit guard.
+        if isinstance(res, dict) and res.get("error"):
+            try:
+                cache_store.cache_delete(key)
+            except Exception:
+                pass
+        return res
     except Exception as e:
         # If the cache layer is unavailable for any reason, do the work
         # uncached rather than failing the request.

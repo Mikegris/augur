@@ -240,8 +240,12 @@
   // POST /api/jarvis/ask/stream over a fetch ReadableStream: SSE-formatted
   // frames, `status` events narrate what Jarvis is doing (tool consults,
   // research, synthesis), one terminal `answer` frame carries the same
-  // payload /api/jarvis/ask returns. Throws on any transport/parse trouble so
-  // callers fall back to the plain POST — streaming is strictly an upgrade.
+  // payload /api/jarvis/ask returns. Throws on any transport/parse trouble;
+  // errors carry `streamUnavailable: true` ONLY when the endpoint rejected
+  // the ask outright (non-2xx / no body) — that's the sole case where a
+  // plain-POST retry is safe. Once the server has accepted the stream it
+  // finishes and persists the exchange in the background, so callers must
+  // NOT re-POST after a mid-stream death (duplicate turn, double AI spend).
   async function askStream(body, onStatus, signal) {
     const resp = await fetch('/api/jarvis/ask/stream', {
       method: 'POST',
@@ -249,7 +253,11 @@
       body: JSON.stringify(body),
       signal,
     });
-    if (!resp.ok || !resp.body) throw new Error('stream unavailable (' + resp.status + ')');
+    if (!resp.ok || !resp.body) {
+      const err = new Error('stream unavailable (' + resp.status + ')');
+      err.streamUnavailable = true; // server never accepted the ask — POST retry is safe
+      throw err;
+    }
     const reader = resp.body.getReader();
     const dec = new TextDecoder();
     let buf = '';
@@ -762,7 +770,12 @@
             `<div class="jp-resume-turn"><span class="jp-resume-q">⟩ ${esc(t.q)}</span><br>${esc(t.a.slice(0, 180))}${t.a.length > 180 ? '…' : ''}</div>`).join('');
           this.answer.innerHTML = `<div class="jp-resume">${tail}<div class="jp-resume-hint">— continuing this thread; ⌫ NEW THREAD to reset —</div></div>`;
         }
-      } catch (e) { this._convId = null; /* stateless fallback */ }
+      } catch (e) {
+        // Stateless fallback — but only if nothing newer (an ask response or
+        // NEW THREAD) set _convId while this resume was in flight; a late
+        // failure must not clobber their id and fork the persisted thread.
+        if (seq === this._resumeSeq && this._convId === convAtStart) this._convId = null;
+      }
     },
     close() {
       this.el.classList.remove('open');
@@ -928,11 +941,13 @@
       if (e.key === 'ArrowDown') { e.preventDefault(); if (n) { this._sel = (this._sel + 1) % n; this._renderList(); } }
       else if (e.key === 'ArrowUp') { e.preventDefault(); if (n) { this._sel = (this._sel - 1 + n) % n; this._renderList(); } }
       else if (e.key === 'Enter') { e.preventDefault(); this._run(); }
-      else if (e.altKey && !e.metaKey && !e.ctrlKey && /^[1-9]$/.test(e.key)) {
+      else if (e.altKey && !e.metaKey && !e.ctrlKey && /^Digit[1-9]$/.test(e.code)) {
         // Alt+1..9 quick-select. Cmd/Ctrl+1..9 is the browser's tab-switch
         // shortcut, so we bind Alt instead; the modifier still keeps plain
-        // digits typed into a query from being hijacked.
-        const idx = Number(e.key) - 1;
+        // digits typed into a query from being hijacked. Match on e.code
+        // (physical key), NOT e.key: on macOS Option+digit composes symbols
+        // ('¡','™','£',…), so an e.key digit test never fires there.
+        const idx = Number(e.code.slice(5)) - 1;
         if ((this.input.value.trim() !== '' || n > 0) && idx < n) {
           e.preventDefault();
           this._sel = idx;
@@ -1053,6 +1068,15 @@
           }, abort ? abort.signal : undefined);
         } catch (streamErr) {
           if (streamErr && streamErr.name === 'AbortError') return; // palette closed mid-ask
+          if (!streamErr || !streamErr.streamUnavailable) {
+            // Connection died AFTER the server accepted the ask — it finishes
+            // and persists the exchange in the background, so re-POSTing would
+            // duplicate the turn and double the AI spend. Point at the thread.
+            this.answer.innerHTML = '<div class="jp-answer"><div class="jp-answer-text">■ Connection dropped — I\'m finishing that answer in the background; it\'ll be in this thread when you reopen.</div></div>';
+            return;
+          }
+          // Stream endpoint unavailable (old server, proxy) — the plain POST
+          // is the answer of record.
           r = await API.post('/api/jarvis/ask', body);
         }
         if (r.conversation_id) this._convId = r.conversation_id;
@@ -1405,6 +1429,10 @@
         this._startPolling();
         return;
       }
+      // SSE frames carry activity only — the vitals strip (AI budget, warmer)
+      // must be fetched explicitly here, or it never renders on browsers where
+      // SSE works (the polling path refreshes it per tick; this path doesn't).
+      this._refreshHealth();
       let es;
       try {
         es = new EventSource('/api/jarvis/activity/stream');
@@ -1616,7 +1644,11 @@
   // (mic, premium voice, proposals with confirm). Right: the investor lenses —
   // macro brief, temperament check, position review, memory manager.
   const CommandCenter = {
-    _convId: null, _busy: false, _chatGen: 0,
+    // _chatGen guards the chat column (bumped by load() AND _send());
+    // _viewGen guards the side lenses and is bumped ONLY by load() — _send()
+    // must not invalidate in-flight lens fetches, or asking a question while
+    // the macro/temperament calls are pending strands them on spinners forever.
+    _convId: null, _busy: false, _chatGen: 0, _viewGen: 0,
 
     async load() {
       const view = document.getElementById('view-jarvis');
@@ -1631,6 +1663,7 @@
       // visit can't overwrite the fresh chat, and clear any stranded send
       // lock (a send awaiting when the user navigated away leaves _busy true).
       this._chatGen++;
+      this._viewGen++; // invalidate in-flight lens fetches from a prior visit
       // Abort a still-streaming ask from a prior visit before clearing the lock,
       // otherwise its late resolve would paint into the rebuilt DOM / break STOP.
       if (this._abort) { try { this._abort.abort(); } catch (e) {} this._abort = null; }
@@ -1720,6 +1753,11 @@
       }
       document.getElementById('jv-new-thread').addEventListener('click', async () => {
         try {
+          // Invalidate any still-in-flight _loadChat: without this its late
+          // resolve passes the gen check, repaints the OLD conversation over
+          // the fresh-thread bubble and reverts _convId to the old thread
+          // (the palette guards the same race with _resumeSeq++).
+          this._chatGen++;
           const r = await API.post('/api/jarvis/conversation/new', {});
           this._convId = r.conversation_id;
           document.getElementById('jv-chat').innerHTML =
@@ -1894,8 +1932,18 @@
             if (thinking) thinking.innerHTML = '<span class="jv-trail">■ stopped — I\'ll keep the answer in the thread.</span>';
             return;
           }
-          // Stream path failed (old server, proxy buffering) — the plain
-          // POST is the answer of record.
+          if (!streamErr || !streamErr.streamUnavailable) {
+            // Connection died AFTER the server accepted the ask — same as
+            // STOP, it finishes and persists the exchange in the background,
+            // so re-POSTing would duplicate the turn and double the AI spend.
+            if (gen === this._chatGen && thinking) {
+              thinking.innerHTML = '<span class="jv-trail">■ connection dropped — the answer will land in this thread shortly.</span>';
+            }
+            return;
+          }
+          // Stream endpoint outright unavailable (old server, proxy) — the
+          // server never accepted the ask, so the plain POST is the answer
+          // of record.
           r = await API.post('/api/jarvis/ask', body);
         }
         // Superseded by a newer load()/send() while we awaited — don't touch
@@ -1977,11 +2025,13 @@
     },
 
     async _loadSide() {
-      // Capture the generation so a slow lens fetch from a prior visit can't
-      // overwrite the current panel after a quick navigate-away-and-back.
-      const gen = this._chatGen;
+      // Capture the VIEW generation so a slow lens fetch from a prior visit
+      // can't overwrite the current panel after a quick navigate-away-and-back.
+      // NOT _chatGen: _send() bumps that, and a send racing these fetches
+      // would discard their results and strand the lens panels on spinners.
+      const gen = this._viewGen;
       API.get('/api/jarvis/lens/macro').then(m => {
-        if (gen !== this._chatGen) return;
+        if (gen !== this._viewGen) return;
         const el = document.getElementById('jv-macro');
         if (!el) return;
         const chips = [];
@@ -1992,13 +2042,13 @@
         const spk = document.getElementById('jv-macro-speak');
         if (spk) spk.onclick = () => Voice.speak(m.voice || m.narrative, null, true);
       }).catch(e => {
-        if (gen !== this._chatGen) return;
+        if (gen !== this._viewGen) return;
         const el = document.getElementById('jv-macro');
         if (el) el.innerHTML = `<span class="text-dim" style="font-size:11px">${esc(e.message)}</span>`;
       });
 
       API.get('/api/jarvis/lens/temperament').then(t => {
-        if (gen !== this._chatGen) return;
+        if (gen !== this._viewGen) return;
         const el = document.getElementById('jv-temperament');
         if (!el) return;
         // Glyph carries polarity too (not color alone) for colorblind users.
@@ -2019,7 +2069,7 @@
         const picks = ((p && p.holdings) || []).slice(0, 6).map(h =>
           `<button class="btn btn-ghost btn-sm jv-pick" data-sym="${esc(h.symbol)}">${esc(h.symbol)}</button>`).join(' ');
         const el = document.getElementById('jv-review-picks');
-        if (gen !== this._chatGen || !el) return;
+        if (gen !== this._viewGen || !el) return;
         el.innerHTML = picks;
         el.querySelectorAll('.jv-pick').forEach(b =>
           b.addEventListener('click', () => this._review(b.dataset.sym)));

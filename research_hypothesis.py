@@ -261,9 +261,15 @@ def _validate_hypothesis(h: Any) -> Optional[Dict[str, Any]]:
     if not isinstance(pred, dict):
         return None
 
-    direction = (pred.get("direction") or "").upper()
+    direction = (pred.get("direction") or "").upper().strip()
+    # Sideways-flavoured words are a legitimate RANGE call, just misspelled by
+    # the LLM. Anything else (including missing) is NOT silently coerced to
+    # "UP" — that fabricated a bullish call the model never made and polluted
+    # the lab hit-rate with directional grades of non-directional predictions.
+    if direction in ("SIDEWAYS", "NEUTRAL", "FLAT"):
+        direction = "RANGE"
     if direction not in ("UP", "DOWN", "RANGE"):
-        direction = "UP"
+        return None  # unusable — caller surfaces "unparseable hypothesis"
 
     try:
         mag = float(pred.get("magnitude_pct") or 0.0)
@@ -433,29 +439,31 @@ def save_hypothesis(hypothesis: Dict[str, Any], symbol: str, source: str = "ai")
 
     # Best-effort issued price.
     #
-    # WHY (Q4): score_hypothesis measures the realized return as
-    # (horizon_close - issued_price) / issued_price, where horizon_close is the
-    # DAILY CLOSE on/before the due date (via _close_price_on_or_before). If we
-    # capture issued_price from the LIVE intraday quote here, the entry basis is
-    # an intraday tick while the exit basis is a daily close — a mismatch that
-    # leaks the intraday move on creation day into every realized return (a few
-    # tenths of a % of phantom signal, enough to flip small-magnitude UP/DOWN
-    # calls). Capture the entry from the SAME daily-close basis as the exit so
-    # the two endpoints are measured consistently. Fall back to the live quote
-    # only when the historical close is unavailable.
+    # WHY (Q4 revisited): the entry MUST reflect the information state the LLM
+    # conditioned on. The context snapshot (_gather_context) carries the LIVE
+    # quote, so capturing the entry as the daily close on-or-before "now"
+    # (usually the PREVIOUS close mid-session, or a stale/pre-gap cached bar)
+    # credits the hypothesis with an intraday move it already observed — e.g.
+    # a +3% morning gap the model saw before saying UP would count toward the
+    # UP call (look-ahead bias) and can single-handedly clear the magnitude
+    # threshold. The residual entry(tick)-vs-exit(daily close) basis mismatch
+    # is a few tenths of a %, strictly smaller than the gap-sized look-ahead
+    # it replaces. Fall back to the recent daily close ONLY when no live quote
+    # is available (closed-market hours, feed hiccup) — outside a session the
+    # last close and the live price coincide anyway.
     issued_price: Optional[float] = None
     try:
-        import research_tracker
-        issued_price = research_tracker._close_price_on_or_before(
-            symbol, datetime.now(tz=timezone.utc))
+        import fetcher
+        q = fetcher.get_quote(symbol) or {}
+        if "error" not in q and q.get("price") is not None:
+            issued_price = float(q["price"])
     except Exception:
         issued_price = None
     if issued_price is None:
         try:
-            import fetcher
-            q = fetcher.get_quote(symbol) or {}
-            if "error" not in q and q.get("price") is not None:
-                issued_price = float(q["price"])
+            import research_tracker
+            issued_price = research_tracker._close_price_on_or_before(
+                symbol, datetime.now(tz=timezone.utc))
         except Exception:
             issued_price = None
 
@@ -543,12 +551,22 @@ def update_hypothesis_status(hypothesis_id: int, status: str) -> bool:
     if status not in ("OPEN", "CONFIRMED", "REJECTED", "INVALIDATED"):
         raise ValueError("invalid status: {}".format(status))
     init_hypothesis_db()
-    closed_at = None if status == "OPEN" else _now_iso()
     with closing(_conn()) as c:
-        cur = c.execute(
-            "UPDATE hypotheses SET status = ?, closed_at = ? WHERE id = ?",
-            (status, closed_at, int(hypothesis_id)),
-        )
+        if status == "OPEN":
+            # Reopening: clear the stale realized_return along with closed_at,
+            # otherwise the row shows a realized return from its prior scoring
+            # while nominally still in-horizon (until the next batch scorer
+            # overwrites it).
+            cur = c.execute(
+                "UPDATE hypotheses SET status = ?, closed_at = NULL, "
+                "realized_return = NULL WHERE id = ?",
+                (status, int(hypothesis_id)),
+            )
+        else:
+            cur = c.execute(
+                "UPDATE hypotheses SET status = ?, closed_at = ? WHERE id = ?",
+                (status, _now_iso(), int(hypothesis_id)),
+            )
         c.commit()
         return cur.rowcount > 0
 

@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import logging
 import math
+from datetime import datetime, timezone
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
 import numpy as np
@@ -70,6 +71,29 @@ def _daily_log_returns(symbol: str, period: str = "2y") -> Optional[np.ndarray]:
     return dated[1]
 
 
+def _bar_date_key(raw) -> Optional[str]:
+    """Normalize a bar's date/time field to a CALENDAR-DATE string join key.
+
+    WHY: bars carry either an ISO 'date' or an epoch-seconds 'time' whose
+    intraday offset depends on the fetch path (yf.history stamps midnight-ET
+    ≈ 04:00 UTC, the v8 chart fallback stamps session open ≈ 13:30 UTC,
+    crypto stamps UTC midnight). Keying the inner join by the raw epoch
+    string makes the common-date intersection EMPTY whenever two symbols
+    came from different paths — so collapse everything to the UTC calendar
+    date before joining."""
+    if raw is None:
+        return None
+    s = str(raw)
+    try:
+        ts = int(float(s))
+    except (TypeError, ValueError):
+        return s[:10]  # already an ISO-ish date string
+    try:
+        return datetime.fromtimestamp(ts, tz=timezone.utc).date().isoformat()
+    except (OverflowError, OSError, ValueError):
+        return s
+
+
 def _dated_log_returns(symbol: str, period: str = "2y"):
     """Return (dates, returns) where dates[i] is the bar date of returns[i],
     or None. Dates let the estimator inner-join on common trading days — a
@@ -82,11 +106,12 @@ def _dated_log_returns(symbol: str, period: str = "2y"):
     except Exception as e:
         log.warning("get_chart_data(%s) failed: %s", symbol, e)
         return None
-    rows = [(b.get("date") or b.get("time") or b.get("timestamp"), b.get("close"))
+    rows = [(_bar_date_key(b.get("date") or b.get("time") or b.get("timestamp")), b.get("close"))
             for b in bars if b and b.get("close") is not None]
+    rows = [(d, c) for d, c in rows if d is not None]
     if len(rows) < MIN_HISTORY_DAYS:
         return None
-    dates = [str(d) for d, _ in rows]
+    dates = [d for d, _ in rows]
     arr = np.asarray([c for _, c in rows], dtype=float)
     arr = np.where(arr > 0, arr, np.nan)
     rets = np.diff(np.log(arr))                      # return[i] spans dates[i]→dates[i+1]
@@ -232,6 +257,19 @@ def _sum_to_one_constraint() -> Dict:
     return {"type": "eq", "fun": lambda w: np.sum(w) - 1.0}
 
 
+def _cons_float(cons: Dict, key: str, default: float) -> float:
+    """None-/empty-tolerant numeric constraint read.
+
+    WHY: the optimizer UI sends the whole constraints object with untouched
+    inputs as null (e.g. {"target_return": null}), and dict.get(key, default)
+    returns None for present-but-null keys — float(None) then 500s the route.
+    Treat None/'' as "not supplied" and fall back to the default."""
+    v = cons.get(key)
+    if v is None or v == "":
+        return float(default)
+    return float(v)
+
+
 def _project_to_box(w: np.ndarray, bounds: List[Tuple[float, float]]) -> np.ndarray:
     """Project a weight vector onto the box [lo,hi] per component while keeping
     Σw≈1, by redistributing any residual into each component's remaining slack
@@ -335,11 +373,19 @@ def markowitz_optimize(
         return {"error": "Insufficient price history for any of the requested symbols"}
 
     n = len(used)
-    rf = float(cons.get("risk_free_rate", DEFAULT_RF))
-    min_w = float(cons.get("min_weight", 0.0))
-    max_w = float(cons.get("max_weight", 1.0))
-    long_only = bool(cons.get("long_only", True))
+    rf = _cons_float(cons, "risk_free_rate", DEFAULT_RF)
+    min_w = _cons_float(cons, "min_weight", 0.0)
+    max_w = _cons_float(cons, "max_weight", 1.0)
+    long_only = bool(cons.get("long_only", True) if cons.get("long_only") is not None else True)
     bounds = _build_bounds(n, min_w, max_w, long_only)
+    # Infeasible weight box (Σlo > 1 or Σhi < 1): SLSQP can never satisfy
+    # Σw=1, and the fallback start point silently sums to ≠1 — the UI would
+    # render an allocation that doesn't add up. Fail loudly instead. (#248)
+    lo_sum = sum(b[0] for b in bounds)
+    hi_sum = sum(b[1] for b in bounds)
+    if lo_sum > 1.0 + 1e-9 or hi_sum < 1.0 - 1e-9:
+        return {"error": (f"infeasible weight bounds for {n} assets: "
+                          f"min_weight={min_w}, max_weight={max_w} cannot sum to 1")}
     base_constraints: List[Dict] = [_sum_to_one_constraint()]
 
     # Optional turnover / transaction-cost penalty (C). Default 0 → existing
@@ -347,7 +393,7 @@ def markowitz_optimize(
     # is ``tc_bps`` (basis points) times one-way turnover Σ|w_i − w0_i|,
     # subtracted from the objective so the optimiser trades off expected
     # improvement against the cost of moving away from the current book.
-    tc_bps = float(cons.get("transaction_cost_bps", 0.0) or 0.0)
+    tc_bps = _cons_float(cons, "transaction_cost_bps", 0.0)
     cur_w_map = cons.get("current_weights") or {}
     w_prev = np.array([float(cur_w_map.get(s, 0.0)) for s in used], dtype=float)
     tc_rate = tc_bps / 10000.0
@@ -368,13 +414,13 @@ def markowitz_optimize(
         def fn(w: np.ndarray) -> float:
             return float(np.dot(w, cov @ w)) + _turnover_cost(w)
     elif objective == "target_return":
-        target = float(cons.get("target_return", float(np.mean(mean))))
+        target = _cons_float(cons, "target_return", float(np.mean(mean)))
         base_constraints.append({"type": "eq", "fun": lambda w, t=target: float(np.dot(w, mean)) - t})
 
         def fn(w: np.ndarray) -> float:
             return float(np.dot(w, cov @ w)) + _turnover_cost(w)
     elif objective == "target_vol":
-        target_v = float(cons.get("target_vol", 0.15))
+        target_v = _cons_float(cons, "target_vol", 0.15)
         base_constraints.append(
             {"type": "eq", "fun": lambda w, t=target_v: math.sqrt(max(float(np.dot(w, cov @ w)), 0.0)) - t}
         )
@@ -419,12 +465,15 @@ def markowitz_optimize(
         "efficient_frontier": frontier,
         "converged": bool(res.success),
     }
-    # For the equality-constrained objectives a failed solve usually means the
-    # target is infeasible under the box constraints; we returned the feasible
-    # start point. Surface that explicitly so the UI can explain the fallback
-    # rather than presenting the naive start as an "optimal" portfolio.
-    if not res.success and objective in ("target_return", "target_vol"):
-        out["warning"] = "target infeasible under constraints; returning feasible start"
+    # A failed solve returns the feasible start point, NOT an optimum.
+    # Surface that explicitly for EVERY objective so the UI can explain the
+    # fallback rather than presenting the naive start as "optimal". For the
+    # equality-constrained objectives the usual cause is an infeasible target.
+    if not res.success:
+        if objective in ("target_return", "target_vol"):
+            out["warning"] = "target infeasible under constraints; returning feasible start"
+        else:
+            out["warning"] = "optimizer did not converge; returning feasible start point"
     return out
 
 
@@ -592,7 +641,12 @@ def black_litterman(
     P_rows: List[np.ndarray] = []
     Q_vals: List[float] = []
     confs: List[float] = []
-    for v, c in zip(views or [], view_confidence or []):
+    # Iterate views by INDEX — zip() truncates to the shorter list, silently
+    # dropping any view without a matching confidence entry instead of giving
+    # it the documented 0.5 default.
+    conf_list = list(view_confidence or [])
+    for vi, v in enumerate(views or []):
+        c = conf_list[vi] if vi < len(conf_list) else 0.5
         if not isinstance(v, dict):
             continue
         vtype = v.get("type", "absolute")
@@ -652,8 +706,12 @@ def black_litterman(
     if minimize is not None:
         try:
             bounds = _build_bounds(n, 0.0, 1.0, long_only=True)
+            # rf=0 here: μ̄ is ALREADY in excess-return units (π = λΣw_mkt and
+            # the views are expected EXCESS returns), so subtracting DEFAULT_RF
+            # again would double-count the risk-free rate and tilt the tangency
+            # solution toward higher-vol names.
             w_star, bl_converged = _constrained_max_sharpe(
-                mu_bar, Sigma, DEFAULT_RF, bounds)
+                mu_bar, Sigma, 0.0, bounds)
         except Exception as e:  # pragma: no cover - defensive
             log.warning("BL constrained solve failed, using closed form: %s", e)
             w_star = None
@@ -669,7 +727,13 @@ def black_litterman(
         else:
             w_star = np.full(n, 1.0 / n)
 
-    ret, vol, sharpe = _portfolio_stats(w_star, mean, Sigma, DEFAULT_RF)
+    # Report headline stats from the POSTERIOR the weights were optimized on,
+    # not the historical mean — otherwise a strong user view moves the weights
+    # but the displayed expected return/Sharpe contradicts blended_returns.
+    # μ̄ is excess; add rf back so expected_return_pct is in the same
+    # total-return units as the other optimizers (Sharpe is unchanged since
+    # _portfolio_stats subtracts rf again).
+    ret, vol, sharpe = _portfolio_stats(w_star, mu_bar + DEFAULT_RF, Sigma, DEFAULT_RF)
 
     return {
         "symbols": used,

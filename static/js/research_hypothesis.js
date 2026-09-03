@@ -207,11 +207,20 @@
     const summary = _state.container && _state.container.querySelector('#hyp-list-summary');
     if (!tbody) return;
     tbody.innerHTML = '<tr><td colspan="7" class="muted">Loading…</td></tr>';
-    const list = await apiList({
-      status: _state.statusFilter || undefined,
-      symbol: _state.symbolFilter || undefined,
-      limit: 100,
-    });
+    let list;
+    try {
+      list = await apiList({
+        status: _state.statusFilter || undefined,
+        symbol: _state.symbolFilter || undefined,
+        limit: 100,
+      });
+    } catch (err) {
+      // Network failure (server restart, sleep/wake): without this catch the
+      // rejection is unhandled and the table shows 'Loading…' forever.
+      tbody.innerHTML = '<tr><td colspan="7" class="hyp-error">Error: ' +
+        _escape((err && err.message) || 'network error') + '</td></tr>';
+      return;
+    }
     if (!Array.isArray(list)) {
       tbody.innerHTML = '<tr><td colspan="7" class="hyp-error">Error: ' +
         _escape((list && list.error) || 'load failed') + '</td></tr>';
@@ -241,7 +250,20 @@
           act === 'reject'  ? 'REJECTED' :
           'INVALIDATED';
         btn.disabled = true;
-        await apiSetStatus(id, newStatus);
+        try {
+          await apiSetStatus(id, newStatus);
+        } catch (err) {
+          // Offline/API failure: re-enable the button (it would otherwise
+          // stay disabled forever) and surface the failure in the row.
+          btn.disabled = false;
+          const cell = btn.closest('td') || btn.parentElement;
+          if (cell && !cell.querySelector('.hyp-error')) {
+            cell.insertAdjacentHTML('beforeend',
+              '<div class="hyp-error">Update failed: ' +
+              _escape((err && err.message) || 'network error') + '</div>');
+          }
+          return;
+        }
         _refreshList();
       });
     });

@@ -78,6 +78,108 @@ def test_risk_debate_stops_early_and_zero_rounds():
     assert aj_debate.risk_debate("AAPL", prop, "", _full_call(), rounds=0) == []
 
 
+def test_risk_vote_majority_and_skips_unparseable():
+    # ENHANCEMENT B (unit): tolerant RiskStance parsing + strict-majority vote.
+    turns = [
+        {"debate": "risk", "role": "aggressive", "round": 0,
+         "content": '{"assessment":"cut","recommended_action":"SELL"}'},
+        {"debate": "risk", "role": "conservative", "round": 0,
+         "content": 'Sure! Here is my view: {"assessment":"exit","recommended_action":"SELL"}'},
+        {"debate": "risk", "role": "neutral", "round": 0,
+         "content": "no json here at all"},                 # unparseable => skipped
+    ]
+    v = aj_debate.risk_vote(turns)
+    assert v["n_turns"] == 3 and v["n_parsed"] == 2
+    assert v["votes"] == {"SELL": 2} and v["majority"] == "SELL"
+    # 1-1-1 split => no majority; a lone stance => no majority (needs 2 votes)
+    split = aj_debate.risk_vote([
+        {"content": '{"recommended_action":"BUY"}'},
+        {"content": '{"recommended_action":"SELL"}'},
+        {"content": '{"recommended_action":"HOLD"}'},
+    ])
+    assert split["majority"] is None and split["n_parsed"] == 3
+    lone = aj_debate.risk_vote([{"content": '{"recommended_action":"BUY"}'}])
+    assert lone["majority"] is None
+    # parsed JSON with NO explicit action key must not fabricate a HOLD vote
+    noact = aj_debate.risk_vote([{"content": '{"assessment":"hmm"}'}] * 3)
+    assert noact["n_parsed"] == 0 and noact["majority"] is None
+    assert aj_debate.risk_vote([]) == {"votes": {}, "n_parsed": 0, "n_turns": 0,
+                                       "majority": None}
+
+
+def _vote_fallback_call(manager_rec, risk_actions, arbiter_text):
+    """Role-aware fake: risk debaters vote per `risk_actions`; the arbiter
+    returns `arbiter_text` (prose => unparseable => council falls back)."""
+    def call(tier, role, system, prompt):
+        if "research.bull" in role or "research.bear" in role:
+            return "argument"
+        if "research_manager" in role:
+            return '{"recommendation":"%s","rationale":"r"}' % manager_rec
+        if "trader" in role:
+            return '{"action":"%s","reasoning":"t"}' % (
+                "BUY" if manager_rec in ("BUY", "OVERWEIGHT") else
+                "SELL" if manager_rec in ("SELL", "UNDERWEIGHT") else "HOLD")
+        for persp, act in risk_actions.items():
+            if "risk." + persp in role:
+                return '{"assessment":"a","recommended_action":"%s"}' % act
+        if "arbiter" in role:
+            return arbiter_text
+        return None
+    return call
+
+
+def test_arbiter_fallback_uses_risk_vote_majority():
+    # ENHANCEMENT B (pipeline): arbiter output is prose (unparseable) => the
+    # council prefers the deterministic 2-of-3 risk-stance majority over the
+    # plan-derived action, and persists the tally in the decision audit payload.
+    aj_config.set_config({"max_research_rounds": 1, "max_risk_rounds": 1})
+    aj_council.clear_cache()
+    _set_analysts({"fundamentals": (5.0, 0.7), "technical": (5.0, 0.7)})
+    call = _vote_fallback_call(
+        "HOLD", {"aggressive": "SELL", "conservative": "SELL", "neutral": "BUY"},
+        "On reflection, it is hard to say.")     # prose: extract_json => {}
+    dec = aj_council.run("VOTEFB", call=call)
+    assert dec.action is Action.SELL, dec.action        # 2-of-3 SELL adopted
+    assert "risk-vote fallback" in dec.dissent, dec.dissent
+    import json as _j
+    row = db.get_conn().execute(
+        "SELECT decision_json FROM aj_council_runs WHERE symbol='VOTEFB' "
+        "ORDER BY id DESC LIMIT 1").fetchone()
+    doc = _j.loads(row["decision_json"])
+    assert doc.get("risk_vote", {}).get("majority") == "SELL", doc.get("risk_vote")
+    assert doc["risk_vote"]["votes"] == {"SELL": 2, "BUY": 1}
+    assert aj_db.verify_audit_chain()["ok"]
+
+
+def test_arbiter_fallback_vote_never_contradicts_rating():
+    # A BUY<->SELL flip against the rating-implied action is incoherent for
+    # sizing (signed_score reads the rating) — the vote is recorded but the
+    # implied action is kept, mirroring the arbiter's own reconciliation.
+    aj_config.set_config({"max_research_rounds": 1, "max_risk_rounds": 1})
+    aj_council.clear_cache()
+    _set_analysts({"fundamentals": (5.0, 0.7), "technical": (5.0, 0.7)})
+    call = _vote_fallback_call(
+        "BUY", {"aggressive": "SELL", "conservative": "SELL", "neutral": "SELL"},
+        "no json")
+    dec = aj_council.run("VOTECON", call=call)
+    assert dec.rating is Rating.BUY
+    assert dec.action is Action.BUY, dec.action         # implied action kept
+    assert "contradicts rating" in dec.dissent, dec.dissent
+
+
+def test_arbiter_fallback_no_majority_keeps_plan_action():
+    # 1-1-1 split => no majority => the existing plan-derived fallback stands.
+    aj_config.set_config({"max_research_rounds": 1, "max_risk_rounds": 1})
+    aj_council.clear_cache()
+    _set_analysts({"fundamentals": (5.0, 0.7), "technical": (5.0, 0.7)})
+    call = _vote_fallback_call(
+        "HOLD", {"aggressive": "BUY", "conservative": "SELL", "neutral": "HOLD"},
+        "no json")
+    dec = aj_council.run("VOTESPL", call=call)
+    assert dec.action is Action.HOLD, dec.action
+    assert "risk-vote fallback" not in dec.dissent
+
+
 # ── arbiter ───────────────────────────────────────────────────────────────────
 
 def test_arbiter_synthesizes_decision():

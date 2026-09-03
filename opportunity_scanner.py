@@ -160,8 +160,17 @@ def save_scanner_profile(profile):
         merged["asset_types"] = ["stocks", "etfs"]
     if not isinstance(merged["sectors"], list):
         merged["sectors"] = []
-    merged["budget_min"] = max(0, float(merged.get("budget_min", 0)))
-    merged["budget_max"] = max(merged["budget_min"], float(merged.get("budget_max", 10000)))
+    # Budgets arrive from unvalidated request JSON — a non-numeric value must
+    # degrade to the defaults, not 500 the save endpoint with ValueError/
+    # TypeError (app.py has no try/except around this call).
+    try:
+        merged["budget_min"] = max(0, float(merged.get("budget_min", 0)))
+    except (ValueError, TypeError):
+        merged["budget_min"] = 0
+    try:
+        merged["budget_max"] = max(merged["budget_min"], float(merged.get("budget_max", 10000)))
+    except (ValueError, TypeError):
+        merged["budget_max"] = max(merged["budget_min"], 10000)
     db.set_setting("scanner_profile", json.dumps(merged))
 
 
@@ -183,7 +192,9 @@ def _build_universe(profile):
     seen = set()
     strategy = profile.get("strategy", "growth")
     asset_types = profile.get("asset_types", ["stocks", "etfs"])
-    sectors = [s.lower() for s in profile.get("sectors", [])]
+    # NB: the profile's `sectors` restriction is applied AFTER scoring (in
+    # scan_opportunities), where each equity's sector is known from its
+    # fundamentals — candidate symbols here carry no sector metadata yet.
 
     def _add(sym, asset_class, source):
         s = sym.upper()
@@ -248,6 +259,11 @@ def _build_universe(profile):
         for w in watchlist:
             atype = w.get("asset_type", "stock")
             if atype == "crypto" and "crypto" not in asset_types:
+                continue
+            # Mirror the crypto gate for equities: a crypto-only profile must
+            # not pull stock/ETF watchlist names into the scan (they'd be
+            # scored via _score_equity and violate the asset_types contract).
+            if atype != "crypto" and not ({"stocks", "etfs"} & set(asset_types)):
                 continue
             _add(w["symbol"], atype, "watchlist")
     except Exception:
@@ -588,9 +604,17 @@ def _score_equity(symbol, profile, weights, prefetch=None):
     return result
 
 
-def _score_crypto(symbol, profile, weights):
-    # type: (str, dict, dict) -> Dict[str, Any]
-    """Score a crypto opportunity — uses subset of signals."""
+def _score_crypto(symbol, profile, weights, coin_id=None):
+    # type: (str, dict, dict, Optional[str]) -> Dict[str, Any]
+    """Score a crypto opportunity — uses subset of signals.
+
+    `coin_id` (optional, ADDED): the resolved CoinGecko id for `symbol`.
+    Callers that discover coins outside the curated UNIVERSE_CRYPTO_IDS map
+    (e.g. idea_generator's full-discovery mode, which has _resolve_crypto_id)
+    MUST pass it — the lower-cased-symbol guess below is only correct for
+    coins whose id happens to equal their ticker, and can even hit a
+    different coin entirely on id collisions. Omitting it preserves the
+    original curated-map behavior."""
     result = {
         "symbol": symbol,
         "asset_class": "crypto",
@@ -600,7 +624,8 @@ def _score_crypto(symbol, profile, weights):
         "composite": 0,
     }
 
-    coin_id = UNIVERSE_CRYPTO_IDS.get(symbol, symbol.lower())
+    if not coin_id:
+        coin_id = UNIVERSE_CRYPTO_IDS.get(symbol, symbol.lower())
 
     # Get crypto quote from CoinGecko
     try:
@@ -814,8 +839,26 @@ def scan_opportunities(profile=None, force_refresh=False):
         lambda task: task[0](task[1]), tasks, max_workers=6,
         thread_name_prefix="opp-scan",
     )
+    # Sector restriction: PROFILE_DEFAULTS documents "empty = all sectors",
+    # so a non-empty list must actually restrict. The sector is only known
+    # post-scoring (details.fundamentals.sector from fetcher); entries whose
+    # sector is unknown (crypto, ETFs, fundamentals miss) are KEPT — this is
+    # an advisory layer, so missing metadata fails open rather than silently
+    # emptying the scan.
+    _want_sectors = set(
+        str(s).strip().lower() for s in (profile.get("sectors") or [])
+        if str(s).strip()
+    )
+
+    def _sector_ok(res):
+        if not _want_sectors:
+            return True
+        sec = (((res.get("details") or {}).get("fundamentals") or {})
+               .get("sector") or "").strip().lower()
+        return (not sec) or sec in _want_sectors
+
     for result in scored:
-        if result and result.get("composite", 0) > 0:
+        if result and result.get("composite", 0) > 0 and _sector_ok(result):
             opportunities.append(result)
 
     # Sort by composite score descending

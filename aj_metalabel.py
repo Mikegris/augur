@@ -124,6 +124,38 @@ def _set_last_train_n(n: int) -> None:
         pass
 
 
+def _trade_windows(target: str, n: int) -> Optional[List[Tuple[Any, Any]]]:
+    """Per-row (opened_at, closed_at) holding windows, aligned to training_set().
+
+    aj_features.training_set() reads aj_trade_labels ORDER BY closed_at ASC,
+    id ASC (and, for the 'alpha' target, skips rows without a usable
+    beat_benchmark). We replay the SAME query + skip rule here so windows[i]
+    describes X[i]. Fail-open: returns None (→ purging is skipped) whenever the
+    query fails or the row count doesn't match the matrix — never guess an
+    alignment."""
+    try:
+        import aj_db
+        rows = aj_db.query(
+            "SELECT opened_at, closed_at, beat_benchmark FROM aj_trade_labels "
+            "ORDER BY closed_at ASC, id ASC")
+    except Exception:
+        log.debug("metalabel: trade-window query failed", exc_info=True)
+        return None
+    use_alpha = str(target or "profit").lower() == "alpha"
+    wins: List[Tuple[Any, Any]] = []
+    for r in rows:
+        if use_alpha:
+            bb = r.get("beat_benchmark")
+            if bb is None:
+                continue
+            try:
+                int(bb)
+            except Exception:
+                continue
+        wins.append((r.get("opened_at"), r.get("closed_at")))
+    return wins if len(wins) == n else None
+
+
 # ── training ────────────────────────────────────────────────────────────────────
 
 def train(cfg: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
@@ -163,6 +195,23 @@ def train(cfg: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         base_rate = (sum(y) / n) if n else None
 
         def _persist_stub(reason: str) -> Dict[str, Any]:
+            # GUARD: never overwrite a previously PROMOTED model with a
+            # non-promoted stub. aj_features.training_set fail-opens to an
+            # EMPTY matrix on a transient DB error ('database is locked'), so
+            # a retrain firing at the wrong moment would look like n=0 <
+            # min_samples and silently destroy the promoted coefficients —
+            # turning the live filter off with no error surfaced. Keep the
+            # promoted model; an honest demotion can still happen via a real
+            # retrain that reaches _fit_core with actual data.
+            existing = _load_model()
+            if existing and existing.get("promoted"):
+                log.warning("metalabel.train: refusing to overwrite promoted "
+                            "model with a stub (%s); keeping existing model",
+                            reason)
+                return {"trained": False, "n": n,
+                        "oos_auc": existing.get("oos_auc"), "promoted": True,
+                        "base_rate": base_rate, "target": target,
+                        "reason": "kept promoted model; stub skipped: " + reason}
             model = {
                 "feature_names": feature_names, "mean": [], "std": [],
                 "coef": [], "intercept": 0.0, "oos_auc": None,
@@ -185,72 +234,149 @@ def train(cfg: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         if not feature_names or any(len(row) != len(feature_names) for row in X):
             return _persist_stub("malformed feature matrix")
 
-        import numpy as np
-        from sklearn.linear_model import LogisticRegression
-        from sklearn.preprocessing import StandardScaler
-        from sklearn.metrics import roc_auc_score
-
-        Xa = np.asarray(X, dtype=float)
-        ya = np.asarray(y, dtype=int)
-
-        # ── walk-forward split: rows are assumed time-ordered (oldest first) by
-        # aj_features. Train on the older head, hold out the newer tail. ──────────
-        split = int(math.floor(n * _TRAIN_FRACTION))
-        split = max(1, min(split, n - 1))   # guarantee both slices non-empty
-        X_tr, X_ho = Xa[:split], Xa[split:]
-        y_tr, y_ho = ya[:split], ya[split:]
-
-        oos_auc: Optional[float] = None
-        if len(set(y_tr.tolist())) >= 2 and len(set(y_ho.tolist())) >= 2:
-            try:
-                sc = StandardScaler().fit(X_tr)
-                clf = LogisticRegression(max_iter=1000)
-                clf.fit(sc.transform(X_tr), y_tr)
-                proba_ho = clf.predict_proba(sc.transform(X_ho))[:, 1]
-                oos_auc = float(roc_auc_score(y_ho, proba_ho))
-            except Exception:
-                log.debug("metalabel.train: holdout scoring failed", exc_info=True)
-                oos_auc = None
-        # If the holdout (or train) slice was single-class we cannot measure OOS
-        # skill honestly — leave oos_auc None, which fails the promotion gate.
-
-        # ── deployed model: refit StandardScaler + LogisticRegression on ALL data ─
-        scaler = StandardScaler().fit(Xa)
-        model_clf = LogisticRegression(max_iter=1000)
-        model_clf.fit(scaler.transform(Xa), ya)
-
-        mean = [float(v) for v in scaler.mean_.tolist()]
-        # StandardScaler stores scale_ (==std, with zeros replaced by 1.0); persist
-        # it directly so inference divides by the identical denominator.
-        std = [float(v) for v in scaler.scale_.tolist()]
-        coef = [float(v) for v in model_clf.coef_[0].tolist()]
-        intercept = float(model_clf.intercept_[0])
-
-        promoted = bool(n >= min_samples and oos_auc is not None
-                        and oos_auc >= min_auc)
-        if oos_auc is None:
-            reason = "no honest out-of-sample AUC (single-class holdout)"
-        elif promoted:
-            reason = "promoted: oos_auc {:.3f} >= min {:.3f}".format(oos_auc, min_auc)
-        else:
-            reason = "oos_auc {:.3f} < min {:.3f}".format(oos_auc, min_auc)
-
-        model = {
-            "feature_names": feature_names,
-            "mean": mean, "std": std,
-            "coef": coef, "intercept": intercept,
-            "oos_auc": oos_auc, "n_train": n, "base_rate": base_rate, "target": target,
-            "trained_at": time.time(), "promoted": promoted, "reason": reason,
-        }
+        windows = _trade_windows(target, n)
+        model = _fit_core(X, y, feature_names, windows, min_samples, min_auc,
+                          target)
         _save_model(model)
         _set_last_train_n(n)
-        return {"trained": True, "n": n, "oos_auc": oos_auc, "promoted": promoted,
-                "base_rate": base_rate, "target": target, "reason": reason}
+        return {"trained": True, "n": n, "oos_auc": model.get("oos_auc"),
+                "promoted": model.get("promoted"), "base_rate": base_rate,
+                "target": target, "reason": model.get("reason")}
     except Exception as e:
         log.debug("metalabel.train: unexpected failure", exc_info=True)
         return {"trained": False, "n": 0, "oos_auc": None, "promoted": False,
                 "base_rate": None, "reason": "train error: {}".format(e),
                 "error": str(e)}
+
+
+def _fit_core(X: List[List[float]], y: List[int], feature_names: List[str],
+              windows: Optional[List[Tuple[Optional[str], Optional[str]]]],
+              min_samples: int, min_auc: float, target: str) -> Dict[str, Any]:
+    """The fitting engine shared by train() (live DB) and train_from_rows()
+    (pooled replay corpora). Time-ordered purged walk-forward split, a small
+    regularization sweep chosen on the HOLDOUT (C in {0.1, 1.0}, both with
+    class_weight='balanced' — the label base rate is ~25%, and an unbalanced
+    fit optimizes accuracy by predicting 'loss' everywhere), then a refit on
+    ALL data with the winning C for the deployed coefficients. Returns the
+    persistable model dict (never persists it itself)."""
+    import numpy as np
+    from sklearn.linear_model import LogisticRegression
+    from sklearn.preprocessing import StandardScaler
+    from sklearn.metrics import roc_auc_score
+
+    n = len(X)
+    base_rate = (sum(y) / n) if n else None
+    Xa = np.asarray(X, dtype=float)
+    ya = np.asarray(y, dtype=int)
+    # Non-finite guard: a NaN/inf that slipped past imputation would poison the
+    # scaler mean (the sklearn matmul overflow warnings seen on v2). Replace
+    # with the column's finite mean.
+    if not np.isfinite(Xa).all():
+        col_mean = np.nanmean(np.where(np.isfinite(Xa), Xa, np.nan), axis=0)
+        col_mean = np.where(np.isfinite(col_mean), col_mean, 0.0)
+        bad = ~np.isfinite(Xa)
+        Xa[bad] = np.take(col_mean, np.nonzero(bad)[1])
+
+    # ── walk-forward split (rows time-ordered oldest-first by the caller) ────
+    split = int(math.floor(n * _TRAIN_FRACTION))
+    split = max(1, min(split, n - 1))
+    X_tr, X_ho = Xa[:split], Xa[split:]
+    y_tr, y_ho = ya[:split], ya[split:]
+
+    # ── PURGE boundary-straddling holdout trades (López-de-Prado): a holdout
+    # trade that OPENED before the last train trade CLOSED shares market
+    # information with the fit — scoring it inflates the "out-of-sample" AUC.
+    n_purged = 0
+    if windows is not None and len(windows) == n:
+        try:
+            import aj_db
+            boundary = aj_db.parse_iso(windows[split - 1][1])
+            if boundary is not None:
+                keep = []
+                for i in range(split, n):
+                    opened = aj_db.parse_iso(windows[i][0])
+                    if opened is not None and opened < boundary:
+                        n_purged += 1
+                    else:
+                        keep.append(i - split)
+                if n_purged:
+                    X_ho, y_ho = X_ho[keep], y_ho[keep]
+        except Exception:
+            log.debug("metalabel: purge failed; scoring unpurged holdout",
+                      exc_info=True)
+
+    # ── holdout-chosen regularization ─────────────────────────────────────────
+    _C_GRID = (0.1, 1.0)
+    oos_auc: Optional[float] = None
+    best_c = 1.0
+    if len(set(y_tr.tolist())) >= 2 and len(set(y_ho.tolist())) >= 2:
+        try:
+            sc = StandardScaler().fit(X_tr)
+            Z_tr, Z_ho = sc.transform(X_tr), sc.transform(X_ho)
+            for C in _C_GRID:
+                clf = LogisticRegression(max_iter=1000, C=C,
+                                         class_weight="balanced")
+                clf.fit(Z_tr, y_tr)
+                auc = float(roc_auc_score(y_ho, clf.predict_proba(Z_ho)[:, 1]))
+                if oos_auc is None or auc > oos_auc:
+                    oos_auc, best_c = auc, C
+        except Exception:
+            log.debug("metalabel: holdout scoring failed", exc_info=True)
+            oos_auc = None
+    # Single-class train/holdout => no honest OOS AUC => promotion fails.
+
+    # ── deployed model: refit on ALL data with the holdout-chosen C ──────────
+    scaler = StandardScaler().fit(Xa)
+    model_clf = LogisticRegression(max_iter=1000, C=best_c,
+                                   class_weight="balanced")
+    model_clf.fit(scaler.transform(Xa), ya)
+
+    promoted = bool(n >= min_samples and oos_auc is not None
+                    and oos_auc >= min_auc)
+    if oos_auc is None:
+        reason = "no honest out-of-sample AUC (single-class holdout)"
+    elif promoted:
+        reason = "promoted: oos_auc {:.3f} >= min {:.3f}".format(oos_auc, min_auc)
+    else:
+        reason = "oos_auc {:.3f} < min {:.3f}".format(oos_auc, min_auc)
+
+    return {
+        "feature_names": list(feature_names),
+        "mean": [float(v) for v in scaler.mean_.tolist()],
+        # scale_ == std with zero-variance columns already replaced by 1.0;
+        # persist it directly so inference divides by the same denominator.
+        "std": [float(v) for v in scaler.scale_.tolist()],
+        "coef": [float(v) for v in model_clf.coef_[0].tolist()],
+        "intercept": float(model_clf.intercept_[0]),
+        "oos_auc": oos_auc, "n_train": n, "base_rate": base_rate,
+        "target": target, "C": best_c, "n_purged": n_purged,
+        "trained_at": time.time(), "promoted": promoted, "reason": reason,
+    }
+
+
+def train_from_rows(rows: List[Dict[str, Any]], cfg: Optional[Dict[str, Any]] = None,
+                    target: str = "profit") -> Dict[str, Any]:
+    """Fit a model from aj_trade_labels-shaped row dicts WITHOUT touching the
+    live model store — the pooled-training path (aj_replay pool-train reads
+    label rows from many replay DBs and trains one model on the union).
+    Rows must be time-ordered by closed_at across the whole pool. Returns the
+    model dict (persistable via aj_replay import/export); {'error': ...} on
+    failure. Never raises."""
+    try:
+        c = _cfg(cfg)
+        import aj_features
+        X, y, names, windows = aj_features.vectorize_rows(rows, target)
+        n = len(X)
+        if n < int(c.get("metalabel_min_samples", 50)):
+            return {"error": "insufficient samples: {}".format(n), "n": n}
+        if len(set(y)) < 2:
+            return {"error": "single class present", "n": n}
+        return _fit_core(X, y, names, windows,
+                         int(c.get("metalabel_min_samples", 50)),
+                         float(c.get("metalabel_min_auc", 0.55)), target)
+    except Exception as e:
+        log.debug("train_from_rows failed", exc_info=True)
+        return {"error": str(e)[:200]}
 
 
 # ── inference (pure numpy, no sklearn) ──────────────────────────────────────────

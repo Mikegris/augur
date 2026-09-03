@@ -223,10 +223,14 @@
   // ── Monte Carlo NAV cone shift readout ───────────────────────────────────
   function _mcBlock(mcDelta) {
     if (!mcDelta) return _empty("Monte Carlo shift unavailable");
+    // WHY (#294): the *_shift values are proposed−current terminal NAV, so
+    // POSITIVE = better — _deltaColor's invert=true means "down is good" and
+    // painted improvements red / deteriorations green. Only PROB OF LOSS
+    // (where a LOWER probability is good) is inverted.
     const rows = [
-      ["P05 (worst-case)", mcDelta.p05_shift, true],   // invert: a higher p05 is good
-      ["MEDIAN", mcDelta.median_shift, true],
-      ["P95 (best-case)", mcDelta.p95_shift, true],
+      ["P05 (worst-case)", mcDelta.p05_shift, false],  // higher worst-case NAV is good
+      ["MEDIAN", mcDelta.median_shift, false],
+      ["P95 (best-case)", mcDelta.p95_shift, false],
       ["PROB OF LOSS", mcDelta.prob_loss_delta_pct, true],  // invert: a LOWER prob of loss is good
     ];
     return `

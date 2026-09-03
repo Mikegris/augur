@@ -154,20 +154,27 @@ def _slice_window(
     start: Optional[str],
     end: Optional[str],
 ) -> pd.DataFrame:
-    """Restrict ``df`` to the [start, end] inclusive window if provided."""
+    """Restrict ``df`` to the [start, end] inclusive window if provided.
+
+    Raises ``ValueError`` on an unparseable start/end. WHY (#228): silently
+    swallowing the parse failure ran the backtest over the full 5y history
+    while the response still echoed the requested window — the user would
+    attribute full-history metrics to their (typo'd) window. Fail loudly so
+    the caller can return an explicit error instead.
+    """
     out = df
     if start:
         try:
             ts = pd.to_datetime(start).normalize()
-            out = out[out.index >= ts]
         except Exception:
-            pass
+            raise ValueError("invalid start date: {!r}".format(start))
+        out = out[out.index >= ts]
     if end:
         try:
             ts = pd.to_datetime(end).normalize()
-            out = out[out.index <= ts]
         except Exception:
-            pass
+            raise ValueError("invalid end date: {!r}".format(end))
+        out = out[out.index <= ts]
     return out
 
 
@@ -420,6 +427,9 @@ def _compute_metrics(
     # are included by design, so this is a time-weighted (not in-market-only)
     # Sharpe; expose the in-market bar count below so the number stays
     # interpretable for a signal that's only occasionally in the market.
+    # NOTE (#230): this pnl-based count is a fallback only — _run overrides
+    # sharpe_in_market_bars with the exact position-vector count, because a
+    # cost-only flat bar has nonzero pnl and a held-but-unchanged bar has 0.
     in_market_bars = 0
     if pnl_by_bar and len(pnl_by_bar) > 2:
         arr = np.asarray(pnl_by_bar, dtype=float)
@@ -508,7 +518,24 @@ def _run(
             "signals": [],
         }
 
-    df = _slice_window(df_full, start, end)
+    try:
+        df = _slice_window(df_full, start, end)
+    except ValueError as e:
+        # WHY (#228): a bad start/end must surface as an error, not silently
+        # run over the full history while echoing the requested window.
+        return {
+            "symbol": symbol,
+            "signal": _resolve_signal_name(signal_fn),
+            "error": str(e),
+            "n_signals": 0,
+            "hit_rate": 0.0,
+            "avg_return_per_signal": 0.0,
+            "total_return_pct": 0.0,
+            "sharpe": 0.0,
+            "max_drawdown_pct": 0.0,
+            "equity_curve": [],
+            "signals": [],
+        }
     if len(df) < _MIN_BARS_FOR_BACKTEST:
         return {
             "symbol": symbol,
@@ -532,6 +559,14 @@ def _run(
     closes = df["Close"].to_numpy(dtype=float)
     dates = list(df.index)
     n = len(df)
+    # WHY (#226): the walk-forward must restrict only the DECISION bars to
+    # [start, end] — the history handed to the signal must keep the pre-window
+    # bars from df_full. Slicing history to the window meant adapters needing
+    # a long lookback (momentum needs ~273 bars) silently fired zero signals
+    # on short windows even though the lookback existed in df_full. `offset`
+    # maps window bar t to its position in df_full so hist_slice retains the
+    # pre-window lookback; pnl/equity/signal accounting stays window-only.
+    offset = int(df_full.index.get_loc(df.index[0]))
 
     # position[t] is the direction held between close[t] and close[t+1].
     # +1 = long, -1 = short, 0 = flat. We accumulate by overlaying every
@@ -544,10 +579,15 @@ def _run(
     # signal can clear a still-open longer prior position past its own exit.
     prev_max_exit = 0
 
-    for t in range(_MIN_LOOKBACK, n):
-        # The signal sees strictly past bars only — slice up to (but not
-        # including) bar t. This is the leak-prevention invariant.
-        hist_slice = df.iloc[:t]
+    # Pre-window history counts toward the minimum lookback, so decisions can
+    # start on the window's second bar (t >= 1 keeps entry_idx = t-1 valid)
+    # when enough history precedes the window.
+    for t in range(max(1, _MIN_LOOKBACK - offset), n):
+        # The signal sees strictly past bars only — slice df_full up to (but
+        # not including) window bar t. This is the leak-prevention invariant:
+        # df.iloc[t] is df_full.iloc[offset + t], so the slice ends at the bar
+        # immediately before the decision bar while keeping pre-window history.
+        hist_slice = df_full.iloc[:offset + t]
 
         try:
             out = signal_fn(hist_slice, sig_params)
@@ -668,6 +708,12 @@ def _run(
         pnl_by_bar[-1] -= final_cost
 
     metrics = _compute_metrics(pnl_by_bar, dates, signal_log)
+    # WHY (#230): in-market bars must be counted from the POSITION vector, not
+    # from nonzero pnl — a cost-only exit bar is flat yet printed pnl=-cost
+    # (counted as in-market), while a held bar whose close was exactly
+    # unchanged printed pnl 0.0 (dropped). Override the pnl-based estimate
+    # _compute_metrics derives with the exact position-based count.
+    metrics["sharpe_in_market_bars"] = int(np.count_nonzero(position))
 
     # Leakage accounting (C): the ml_forecast adapter reuses a single current
     # forecast across all historical bars (documented look-ahead), so its
@@ -712,7 +758,13 @@ def _run(
         "signal":   _resolve_signal_name(signal_fn),
         "start":    start or (dates[0].strftime("%Y-%m-%d") if dates else None),
         "end":      end   or (dates[-1].strftime("%Y-%m-%d") if dates else None),
-        "params":   {k: v for k, v in sig_params.items() if k != "symbol"},
+        # WHY (#227): adapter_ml_forecast memoizes its full forecast payload
+        # into sig_params under '_ml_forecast_cache::<SYM>' — an internal memo,
+        # not a user parameter. Echoing it bloated the response/cache entry by
+        # multiple KB, so filter internal keys alongside 'symbol'.
+        "params":   {k: v for k, v in sig_params.items()
+                     if k != "symbol"
+                     and not str(k).startswith("_ml_forecast_cache::")},
         "as_of":    datetime.now(timezone.utc).strftime("%Y-%m-%d"),
         **metrics,
     }
@@ -759,12 +811,20 @@ def run_backtest(
 
     try:
         import cache_store
-        return cache_store.coalesce(
-            ("backtest", symbol, name, start or "_", end or "_",
-             str(horizon_override or "_"), ph),
-            _CACHE_TTL,
-            _do,
-        )
+        key = ("backtest", symbol, name, start or "_", end or "_",
+               str(horizon_override or "_"), ph)
+        result = cache_store.coalesce(key, _CACHE_TTL, _do)
+        # WHY (#229): _run's error envelopes carry ~12 keys, so cache_store's
+        # failure heuristic ('error' + <=3 keys) doesn't recognise them and a
+        # transient fetch failure ("Insufficient history…") would be served
+        # stale for the full 6h TTL. Evict error results immediately so the
+        # next call recomputes once the feed recovers; successes stay cached.
+        if isinstance(result, dict) and result.get("error"):
+            try:
+                cache_store.cache_delete(key)
+            except Exception:
+                pass
+        return result
     except Exception as e:
         log.warning("cache_store unavailable for backtest %s/%s: %s", symbol, name, e)
         return _do()

@@ -224,6 +224,66 @@ def test_take_profit_and_stop_exit():
         _restore_fetch()
 
 
+def test_gap_through_stop_fills_at_open_not_stop_level():
+    # An earnings-style gap 100→80 through a 5% stop must book ~-20%, not -5%:
+    # the stop is a resting order, so the fill is the OPEN, clamped inside the
+    # bar's tradable range. buy_prob_threshold=0 forces entry at the first
+    # decision bar (t=60, fill at close[59]); the gap bar lands on the first
+    # MANAGED bar (t=61).
+    import pandas as pd
+    closes = _uptrend(62)          # bars 0..61; entry fill = close[59]
+    entry = closes[59]
+    gap = entry * 0.80             # whole bar trades 20% below the entry
+    closes[60] = closes[59]        # bar 60 is skipped by management (quirk)
+    closes[61] = gap
+    df = pd.DataFrame({"Open":  closes[:61] + [gap],
+                       "High":  closes[:61] + [gap * 1.001],
+                       "Low":   [c * 0.999 for c in closes[:61]] + [gap * 0.999],
+                       "Close": closes})
+    res = B._walk_symbol("GAP", df,
+                         _cfg(buy_prob_threshold=0.0, min_edge_pct_pts=0.0,
+                              stop_loss_pct=5.0, max_holding_days=999),
+                         horizon=20, regime="bull")
+    stops = [t for t in res["trades"] if t["reason"] == "stop_loss"]
+    check(len(stops) == 1, "gap stop: exactly one stop_loss trade")
+    if stops:
+        g = stops[0]["gross_pct"]
+        check(g < -15.0,
+              "gap stop: books the gap loss ({:.2f}%), not the -5% stop level".format(g))
+
+
+def test_open_position_force_closed_at_end_of_data():
+    # A position still open when the series ends must be counted (force-closed
+    # at the final close, reason end_of_data) — not silently discarded.
+    import pandas as pd
+    closes = _uptrend(120)
+    df = pd.DataFrame({"Close": closes,
+                       "High": [c * 1.005 for c in closes],
+                       "Low": [c * 0.995 for c in closes]})
+    res = B._walk_symbol("UP", df, _cfg(max_holding_days=999), horizon=20,
+                         regime="bull")
+    check(len(res["trades"]) >= 1, "end_of_data: open position was counted")
+    check(any(t["reason"] == "end_of_data" for t in res["trades"]),
+          "end_of_data: force-close carries the end_of_data reason")
+    check(len(res["returns"]) == len(res["trades"]),
+          "end_of_data: returns/trades stay aligned")
+
+
+def test_sharpe_is_frequency_annualized_not_t_stat():
+    # The old sharpe scaled by sqrt(n_trades): doubling the SAME trade stream
+    # inflated it by sqrt(2). The annualized ratio must be sample-size stable.
+    rets = [0.01, 0.03] * 10
+    holds = [5.0] * len(rets)
+    s1 = B._metrics_from_trades(rets, hold_days=holds)["sharpe"]
+    s2 = B._metrics_from_trades(rets * 2, hold_days=holds * 2)["sharpe"]
+    check(abs(s1 - s2) < 1e-9,
+          "sharpe: invariant to sample size ({} vs {})".format(s1, s2))
+    import math as m
+    expect = (0.02 / 0.01) * m.sqrt(252.0 / 5.0)
+    check(abs(s1 - expect) < 1e-3,
+          "sharpe: mean/sd * sqrt(252/avg_hold) ({} vs {:.4f})".format(s1, expect))
+
+
 def test_policy_expectancy_verdict_and_summary():
     _patch_fetch({s: _uptrend() for s in
                   ["AAPL", "MSFT", "NVDA", "SPY", "AMZN",
@@ -251,6 +311,25 @@ def test_policy_expectancy_uses_allowlist():
         check(set(rep.get("symbols", [])) == {"TSLA", "AMD"},
               "allowlist: used cfg symbol_allowlist as universe ({})".format(
                   rep.get("symbols")))
+        check(rep.get("selection_bias") is None,
+              "allowlist: no selection_bias caveat for a chosen universe")
+    finally:
+        _restore_fetch()
+
+
+def test_default_basket_stamps_selection_bias_caveat():
+    # Empty allowlist + empty screen cache (fresh temp DB) → the built-in
+    # basket of today's mega-cap winners runs, and the payload must say so.
+    _patch_fetch({s: _uptrend() for s in B._DEFAULT_BASKET})
+    try:
+        rep = B.policy_expectancy(cfg=_cfg(symbol_allowlist=[]))
+        check(set(rep.get("symbols", [])) == set(B._DEFAULT_BASKET),
+              "default basket: fell back to the built-in basket")
+        check(bool(rep.get("selection_bias")),
+              "default basket: selection_bias caveat stamped ({})".format(
+                  rep.get("selection_bias")))
+        check("survivorship" in str(rep.get("selection_bias", "")),
+              "default basket: caveat names survivorship bias")
     finally:
         _restore_fetch()
 
@@ -287,6 +366,63 @@ def test_symbol_cap_enforced():
             res["n_symbols"]))
     finally:
         _restore_fetch()
+
+
+def test_bootstrap_ci95_deterministic_and_shaped():
+    # 12 solid positive trades → CI present, deterministic, mean inside it
+    rets = [0.01, 0.02] * 6
+    m1 = B._metrics_from_trades(rets)
+    m2 = B._metrics_from_trades(list(rets))
+    check(isinstance(m1.get("ci95"), list) and len(m1["ci95"]) == 2,
+          "bootstrap: ci95 is a [lo, hi] pair at n>=10")
+    check(m1["ci95"] == m2["ci95"],
+          "bootstrap: deterministic — same trades, same CI ({})".format(m1["ci95"]))
+    check(m1["ci95"][0] <= m1["expectancy_pct"] <= m1["ci95"][1],
+          "bootstrap: point estimate lies inside its CI")
+    check(m1["ci95"][0] > 0,
+          "bootstrap: all-positive trades → CI lower bound > 0")
+    # below 10 trades → no bootstrap, ci95 None (insufficient-data behavior)
+    check(B._metrics_from_trades([0.01] * 9).get("ci95") is None,
+          "bootstrap: skipped below 10 trades (ci95=None)")
+    check(B._empty_metrics().get("ci95") is None,
+          "bootstrap: empty metrics carry ci95=None")
+
+
+def _fake_bt(agg):
+    """A backtest_policy stand-in returning a fixed aggregate."""
+    return lambda syms, cfg=None, **k: {
+        "aggregate": agg, "n_symbols": 1, "regime": "test",
+        "coverage": "price_signals_only", "per_symbol": {}, "per_regime": {},
+        "params": {}, "symbols": list(syms),
+    }
+
+
+def test_verdict_gated_on_ci95_lower_bound():
+    # mean > 0 but hugely dispersed → CI spans zero → NOT positive expectancy
+    noisy = [0.5, -0.45] * 6            # mean +2.5%/trade, sd ~47%
+    agg_noisy = B._metrics_from_trades(noisy)
+    check(agg_noisy["expectancy_pct"] > 0 and agg_noisy["ci95"][0] <= 0,
+          "verdict-gate fixture: positive mean, CI spans zero ({})".format(
+              agg_noisy["ci95"]))
+    solid = [0.01, 0.02] * 6            # every resample mean > 0
+    agg_solid = B._metrics_from_trades(solid)
+    orig = B.backtest_policy
+    try:
+        B.backtest_policy = _fake_bt(agg_noisy)
+        rep = B.policy_expectancy(cfg=_cfg(), symbols=["X"])
+        check(rep["verdict"] != "positive expectancy",
+              "verdict: mean>0 with CI spanning zero is NOT positive ({})".format(
+                  rep["verdict"]))
+        check(rep.get("ci95") == agg_noisy["ci95"],
+              "verdict: payload reports the aggregate ci95")
+        B.backtest_policy = _fake_bt(agg_solid)
+        rep2 = B.policy_expectancy(cfg=_cfg(), symbols=["X"])
+        check(rep2["verdict"] == "positive expectancy",
+              "verdict: CI fully above zero → positive expectancy")
+        check("CI" in rep2.get("summary", ""),
+              "verdict: summary mentions the CI")
+    finally:
+        B.backtest_policy = orig
 
 
 if __name__ == "__main__":

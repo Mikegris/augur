@@ -57,14 +57,20 @@ def _make_call(cfg: Dict[str, Any], budget: Budget,
     deep_tok = int(cfg.get("council_deep_max_tokens", 1024) or 1024)
     quick_tok = int(cfg.get("council_quick_max_tokens", 512) or 512)
 
-    def call(tier: str, role: str, system: str, prompt: str) -> Optional[str]:
+    # `json_mode` (default False — every existing caller is unchanged) lets the
+    # STRICT-JSON roles request native JSON output from the backend; the roles
+    # opt in via aj_routing.call_json, which falls back to the plain 4-arg
+    # invocation for legacy callables (injected test fakes, default_call).
+    def call(tier: str, role: str, system: str, prompt: str,
+             json_mode: bool = False) -> Optional[str]:
         if budget.exhausted():
             return None
         mt = deep_tok if tier == aj_routing.DEEP else quick_tok
         try:
             r = aj_routing.complete_tiered(
                 prompt, tier=tier, system=system, role=role, max_tokens=mt,
-                sensitivity=aj_routing.PUBLIC, cycle_id=cycle_id)
+                sensitivity=aj_routing.PUBLIC, cycle_id=cycle_id,
+                json_mode=json_mode)
             if r:
                 # count only completed model calls toward the per-cycle cap so a
                 # transport failure can't exhaust the budget (cost guard) and the
@@ -106,6 +112,11 @@ def _cache_key(symbol: str, cfg: Dict[str, Any]) -> str:
         str(int(cfg.get("max_research_rounds", 1) or 0)),
         str(int(cfg.get("max_risk_rounds", 1) or 0)),
         str(bool(cfg.get("personas_enabled", False))),
+        # Tier models are part of the advice's identity: swapping the deep/quick
+        # model must MISS the cache, never serve the old model's cached advice
+        # for the remainder of the TTL.
+        str(cfg.get("council_deep_model", "") or ""),
+        str(cfg.get("council_quick_model", "") or ""),
         _current_regime(),
     ]
     return "{}|{}|{}".format(str(symbol).upper(), analysts, ",".join(knobs))
@@ -192,6 +203,85 @@ def coequal_unlocked(cfg: Optional[Dict[str, Any]] = None) -> bool:
         return False
 
 
+# ── analyst skill (realized hit-rate) weighting ───────────────────────────────
+# Consensus weights each analyst not just by SELF-REPORTED confidence but by
+# realized skill: an analyst 'hit' when its score direction (score vs the 5.0
+# neutral midpoint) matched the sign of a resolved reflection's raw_return for
+# the same symbol. Inline constants (deliberately not config keys — no operator
+# knob needed; the cold-start guard makes them safe defaults):
+
+_HIT_RATE_WINDOW_DAYS = 90    # trailing realized-outcome window
+_HIT_RATE_MIN_SAMPLES = 10    # cold start: below this, neutral 1.0x multiplier
+_HIT_RATE_TTL_S = 600         # 10-min per-process memo so consensus stays cheap
+
+# memo: {"exp": epoch_seconds, "rates": {analyst: (hit_rate, n_samples)}}
+_hit_rate_memo: Dict[str, Any] = {"exp": 0.0, "rates": {}}
+_hit_rate_lock = threading.Lock()
+
+
+def _analyst_hit_rates() -> Dict[str, Any]:
+    """Per-analyst realized hit-rate over the trailing window, memoized for
+    _HIT_RATE_TTL_S per process. Joins aj_analyst_reports → aj_council_runs →
+    resolved aj_reflections by symbol (report must PRECEDE the reflection).
+    Neutral calls (score == 5.0) and flat outcomes (raw_return == 0) carry no
+    directional signal and are skipped. Returns {analyst: (hit_rate, n)}.
+    Fail-open: any error => {} (consensus degrades to pure confidence
+    weighting, i.e. current behavior). Never raises."""
+    now = time.time()
+    with _hit_rate_lock:
+        if now < _hit_rate_memo["exp"]:
+            return _hit_rate_memo["rates"]
+    rates: Dict[str, Any] = {}
+    try:
+        from datetime import timedelta
+        import database as db
+        cutoff = (aj_db.utc_now() - timedelta(days=_HIT_RATE_WINDOW_DAYS)
+                  ).replace(microsecond=0).isoformat()
+        rows = db.get_conn().execute(
+            "SELECT r.analyst a, r.score s, f.raw_return ret "
+            "FROM aj_reflections f "
+            "JOIN aj_council_runs c ON c.symbol = f.symbol "
+            "JOIN aj_analyst_reports r ON r.council_run_id = c.id "
+            "WHERE f.ts >= ? AND r.ts >= ? AND r.ts <= f.ts",
+            (cutoff, cutoff)).fetchall()
+        tally: Dict[str, List[int]] = {}   # analyst -> [hits, samples]
+        for row in rows:
+            try:
+                direction = float(row["s"]) - 5.0
+                ret = float(row["ret"]) if row["ret"] is not None else 0.0
+            except (TypeError, ValueError):
+                continue
+            if direction == 0.0 or ret == 0.0:
+                continue      # no directional call / flat outcome => no sample
+            h = tally.setdefault(str(row["a"]), [0, 0])
+            h[1] += 1
+            if direction * ret > 0:
+                h[0] += 1
+        rates = {a: (h[0] / float(h[1]), h[1]) for a, h in tally.items() if h[1]}
+    except Exception:
+        log.debug("analyst hit-rate computation failed (fail-open)", exc_info=True)
+        rates = {}
+    with _hit_rate_lock:
+        _hit_rate_memo["exp"] = now + _HIT_RATE_TTL_S
+        _hit_rate_memo["rates"] = rates
+    return rates
+
+
+def _skill_weight(r: AnalystReport, rates: Dict[str, Any]) -> float:
+    """Blend confidence with realized skill: confidence * (0.5 + hit_rate) once
+    an analyst has >= _HIT_RATE_MIN_SAMPLES resolved samples. Below that (cold
+    start) the multiplier is a NEUTRAL 1.0x — identical to today's pure
+    confidence weighting, so a thin sample can never move the consensus. Note
+    hit_rate == 0.5 (coin flip) is also exactly neutral. Never raises."""
+    try:
+        hr = rates.get(r.analyst)
+        if hr and int(hr[1]) >= _HIT_RATE_MIN_SAMPLES:
+            return r.confidence * (0.5 + float(hr[0]))
+    except Exception:
+        pass
+    return r.confidence
+
+
 # ── analyst selection + consensus ─────────────────────────────────────────────
 
 def _selected_analysts(cfg: Dict[str, Any]) -> List[str]:
@@ -245,18 +335,27 @@ def _score_to_rating(avg: float) -> Rating:
 
 
 def _consensus(reports: List[AnalystReport]):
-    """Confidence-weighted consensus → (rating, confidence, thesis, dissent)."""
+    """Skill×confidence-weighted consensus → (rating, confidence, thesis,
+    dissent). Each analyst's weight is its self-reported confidence times a
+    realized hit-rate multiplier (see _skill_weight); with no skill data (cold
+    start, empty rates, or any hit-rate error) every multiplier is 1.0 and this
+    reduces EXACTLY to the historical pure-confidence weighting (fail-open)."""
     backed = [r for r in reports if r.confidence > 0.0]
     if not backed:
         return Rating.HOLD, 0.0, "no analyst evidence", ""
-    wsum = sum(r.confidence for r in backed) or 1.0
-    avg = sum(r.score * r.confidence for r in backed) / wsum
-    # Conviction is CONFIDENCE-WEIGHTED (consistent with the score, which is also
-    # confidence-weighted): each analyst's confidence is weighted by itself, so a
-    # strong analyst dominates instead of being diluted by an unweighted mean of
-    # weak ones. Equivalent to Σc² / Σc; reduces to the plain mean when all the
-    # confidences are equal.
-    conf = clamp(sum(r.confidence * r.confidence for r in backed) / wsum, 0.0, 1.0, 0.0)
+    try:
+        rates = _analyst_hit_rates()
+    except Exception:                 # belt-and-braces: helper is already fail-open
+        rates = {}
+    ws = [(r, _skill_weight(r, rates)) for r in backed]
+    wsum = sum(w for _, w in ws) or 1.0
+    avg = sum(r.score * w for r, w in ws) / wsum
+    # Conviction is WEIGHT-WEIGHTED (consistent with the score): each analyst's
+    # confidence is weighted by its blended weight, so a strong (and proven)
+    # analyst dominates instead of being diluted by an unweighted mean of weak
+    # ones. With neutral skill multipliers this is Σc² / Σc — the historical
+    # formula — and reduces to the plain mean when all confidences are equal.
+    conf = clamp(sum(r.confidence * w for r, w in ws) / wsum, 0.0, 1.0, 0.0)
     rating = _score_to_rating(avg)
     # thesis: top key point or narrative per analyst
     bits = []
@@ -280,19 +379,28 @@ def _consensus(reports: List[AnalystReport]):
 
 def _persist(dec: CouncilDecision, reports: List[AnalystReport],
              turns: Optional[List[Dict[str, Any]]],
-             cycle_id: Optional[str]) -> Optional[int]:
+             cycle_id: Optional[str],
+             risk_vote: Optional[Dict[str, Any]] = None) -> Optional[int]:
     turns = turns or []
     run_id = None
+    # The persisted decision document carries the deterministic risk-vote tally
+    # (when a risk debate ran) so the fallback's inputs are inspectable in both
+    # the queryable decision_json AND the immutable audit chain.
+    decision_doc = dec.to_audit()
+    if risk_vote:
+        decision_doc["risk_vote"] = risk_vote
     try:
         run_id = aj_db.insert(
             "aj_council_runs", ts=aj_db.utc_now_iso(), cycle_id=cycle_id,
-            symbol=dec.symbol, policy=None, status=dec.status,
+            symbol=dec.symbol,
+            policy=str(aj_config.get_config().get("council_policy", "advisory")),
+            status=dec.status,
             rating=dec.rating.value, action=dec.action.value,
             conviction=dec.conviction, thesis=dec.thesis,
             price_target=dec.price_target, time_horizon=dec.time_horizon,
             stop_hint=dec.stop_hint, dissent=dec.dissent, cost_usd=dec.cost_usd,
             latency_ms=dec.latency_ms, n_calls=dec.n_calls,
-            decision_json=_json(dec.to_audit()))
+            decision_json=_json(decision_doc))
         for r in reports:
             aj_db.insert("aj_analyst_reports", council_run_id=run_id,
                          ts=aj_db.utc_now_iso(), analyst=r.analyst, band=r.band,
@@ -308,7 +416,7 @@ def _persist(dec: CouncilDecision, reports: List[AnalystReport],
     # Audit hash chain — independent of the queryable copy.
     try:
         aj_db.audit("council_run",
-                    {"decision": dec.to_audit(),
+                    {"decision": decision_doc,
                      "reports": [r.to_audit() for r in reports],
                      "debate": turns},
                     cycle_id=cycle_id, ref_id=run_id, actor="council")
@@ -373,7 +481,12 @@ def run(symbol: str, cfg: Optional[Dict[str, Any]] = None,
                 _inflight[key] = my_event
         if wait_on is not None:
             # Another thread owns this key — wait for it, then read its result.
-            wait_on.wait(timeout=120)
+            # The wait must comfortably exceed a WORST-CASE full council run
+            # (~12 sequential DEEP calls: analysts, debate rounds, manager,
+            # trader, risk rounds, arbiter — minutes, not seconds); a short
+            # timeout made waiters give up and recompute, doubling the LLM
+            # spend this in-flight registry exists to prevent.
+            wait_on.wait(timeout=600)
             cached = _cache_get(symbol, cfg)
             if cached is not None:
                 return cached
@@ -412,6 +525,7 @@ def _compute(symbol: str, cfg: Dict[str, Any], cycle_id: Optional[str],
     risk_turns: List[Dict[str, Any]] = []
     proposal: Optional[TraderProposal] = None
     final: Optional[CouncilDecision] = None
+    vote: Optional[Dict[str, Any]] = None
     debate_ran = False
     if rounds > 0 and reports and not budget.exhausted():
         research_turns = aj_debate.research_debate(symbol, reports, mem_text, the_call, rounds)
@@ -427,6 +541,11 @@ def _compute(symbol: str, cfg: Dict[str, Any], cycle_id: Optional[str],
                 # reasons on the proposal itself. (Richer private context would
                 # need PRIVATE/local-only routing — a future refinement.)
                 risk_turns = aj_debate.risk_debate(symbol, proposal, "", the_call, risk_rounds)
+                # Deterministic tally of the parsed risk stances — computed
+                # up-front (pure parsing, no model call) so the audit payload
+                # always carries it AND the arbiter-unavailable path below can
+                # fall back to it instead of ignoring the risk debate entirely.
+                vote = aj_debate.risk_vote(risk_turns) if risk_turns else None
             final = _arbiter(symbol, plan, proposal, risk_turns, mem_text, conf, the_call)
 
     turns = research_turns + risk_turns
@@ -455,7 +574,29 @@ def _compute(symbol: str, cfg: Dict[str, Any], cycle_id: Optional[str],
             symbol, plan, proposal, confidence=conf,
             dissent=dissent, status=status, cost_usd=budget.cost_usd,
             latency_ms=elapsed, n_calls=budget.n_calls)
-    run_id = _persist(dec, reports, turns, cycle_id)
+        # Arbiter unavailable/unparseable but the risk debate DID run: prefer
+        # the deterministic 2-of-3 majority of the parsed risk stances over
+        # silently discarding the debate (the stances carry explicit
+        # recommended_action votes). No majority => the plan-derived action
+        # above stands (existing fallback). A BUY<->SELL flip against the
+        # rating-implied action is incoherent for sizing (signed_score reads
+        # the rating) — mirror the arbiter's reconciliation: keep the implied
+        # action and record the conflict instead.
+        if vote and vote.get("majority"):
+            from aj_schemas import parse_action, Action, _RATING_ACTION
+            voted = parse_action(vote["majority"], default=dec.action)
+            implied = _RATING_ACTION.get(dec.rating, Action.HOLD)
+            contradicts = ((voted == Action.BUY and implied == Action.SELL) or
+                           (voted == Action.SELL and implied == Action.BUY))
+            if contradicts:
+                note = "risk-vote {} contradicts rating {} — kept {}".format(
+                    voted.value, dec.rating.value, implied.value)
+            else:
+                dec.action = voted
+                note = "arbiter unavailable; risk-vote fallback: {} ({}/{} stances)".format(
+                    voted.value, vote["votes"].get(voted.value, 0), vote["n_parsed"])
+            dec.dissent = "; ".join(filter(None, [dec.dissent, note]))[:400]
+    run_id = _persist(dec, reports, turns, cycle_id, risk_vote=vote)
     # Stamp the exact persisted run id so callers can fetch this run's artifacts
     # directly (covers both the arbiter `final` and the `from_plan` branches —
     # `dec` is whichever was assigned above) instead of re-querying "latest run
@@ -501,8 +642,8 @@ def _arbiter(symbol: str, plan: ResearchPlan, proposal: Optional[TraderProposal]
               "Risk debate:\n{risk}{mem}\n\nFinal decision (JSON):").format(
         plan=plan.render(), prop=(proposal.render() if proposal else "(none)"),
         risk=transcript, mem=mem)
-    text = call(aj_routing.DEEP, "council.arbiter",
-                _ARBITER_SYS.format(symbol=symbol), prompt)
+    text = aj_routing.call_json(call, aj_routing.DEEP, "council.arbiter",
+                                _ARBITER_SYS.format(symbol=symbol), prompt)
     if not text:
         return None
     d = extract_json(text)
@@ -691,11 +832,25 @@ def _spy_return_since(ts_iso: str, end_iso: Optional[str] = None) -> float:
     horizon (S007). Fail-open to 0."""
     try:
         import fetcher
-        bars = fetcher.get_chart_data("SPY", "6mo", "1d")
-        if not isinstance(bars, list) or len(bars) < 2:
-            return 0.0
         import aj_db
         dt = aj_db.parse_iso(ts_iso)
+        # Size the fetch window from the trade's age — a fixed 6mo window gave
+        # any older round-trip the oldest available bar as its "start",
+        # understating the benchmark and overstating alpha.
+        period = "6mo"
+        if dt is not None:
+            age_days = (aj_db.utc_now() - dt).days
+            if age_days > 1500:
+                period = "10y"
+            elif age_days > 650:
+                period = "5y"
+            elif age_days > 300:
+                period = "2y"
+            elif age_days > 150:
+                period = "1y"
+        bars = fetcher.get_chart_data("SPY", period, "1d")
+        if not isinstance(bars, list) or len(bars) < 2:
+            return 0.0
         start = None
         for b in bars:
             bt = b.get("time")
@@ -767,24 +922,11 @@ def reflect_due(cfg: Optional[Dict[str, Any]] = None, max_per_call: int = 5,
         open_syms = set((aj_positions.paper_book().get("positions") or {}).keys())
     except Exception:
         open_syms = set()
-    try:
-        import aj_analytics
-        attr = {a["symbol"]: a for a in aj_analytics.attribution()}
-    except Exception:
-        attr = {}
     import hashlib
     for r in rows:
         if len(out) >= max_per_call:
             break
         sym, run_id = r["symbol"], r["id"]
-        situation = "run:{}".format(run_id)
-        h = hashlib.sha256(situation.encode("utf-8")).hexdigest()[:16]
-        try:
-            if conn.execute("SELECT 1 FROM aj_reflections WHERE situation_hash=?",
-                            (h,)).fetchone():
-                continue                      # already reflected
-        except Exception:
-            continue
         if sym in open_syms:
             continue                          # only reflect CLOSED round-trips
         # S006: return is realized P&L over the CLOSED round-trip's OWN cost
@@ -792,6 +934,22 @@ def reflect_due(cfg: Optional[Dict[str, Any]] = None, max_per_call: int = 5,
         rt = _closed_round_trip(sym)
         if not rt or rt.get("basis_usd", 0) <= 0:
             continue                          # no sound per-round-trip basis => skip
+        # Dedup on the ROUND-TRIP identity, not the council run id: every later
+        # BUY run of the same symbol (routine with the 6h decision cache, and
+        # many runs never trade at all) re-reflected the same last-closed
+        # round-trip, inflating track_record() past coequal_min_samples off a
+        # single real outcome. The legacy run-keyed hash is also checked so
+        # pre-existing reflections aren't duplicated once.
+        situation = "rt:{}:{}:{}".format(sym, rt.get("first_buy_ts") or "",
+                                         rt.get("last_sell_ts") or "")
+        h = hashlib.sha256(situation.encode("utf-8")).hexdigest()[:16]
+        legacy_h = hashlib.sha256("run:{}".format(run_id).encode("utf-8")).hexdigest()[:16]
+        try:
+            if conn.execute("SELECT 1 FROM aj_reflections WHERE situation_hash IN (?,?)",
+                            (h, legacy_h)).fetchone():
+                continue                      # this round-trip already reflected
+        except Exception:
+            continue
         raw = float(rt["realized_usd"]) / float(rt["basis_usd"])
         # S007: benchmark over the trade's actual holding window (first buy →
         # last sell), not run-ts→now. Fall back to run-ts→now if fills missing.

@@ -33,6 +33,7 @@ Python 3.9 compatible.
 
 from __future__ import annotations
 
+import json
 import logging
 import math
 import threading
@@ -142,6 +143,80 @@ def log_ensemble(symbol: str, horizon_days: int, result: Dict[str, Any]) -> None
 # 2/3. MEASURE — Brier score, reliability curve, component leaderboard.
 # --------------------------------------------------------------------------
 
+# Matches research_tracker.get_scored_rows' default LIMIT.
+_SCORED_ROWS_LIMIT = 5000
+
+
+def _recent_scored_rows(signal_name: str,
+                        since: Optional[str] = None,
+                        symbol: Optional[str] = None,
+                        limit: int = _SCORED_ROWS_LIMIT) -> List[Dict[str, Any]]:
+    """The NEWEST `limit` scored rows for a signal, chronological order.
+
+    WHY this exists: research_tracker.get_scored_rows applies its LIMIT to an
+    ``ORDER BY scored_at ASC`` query, i.e. it returns the OLDEST 5000 rows.
+    Once a busy component (ens:rf_classifier at the 15-min ensemble TTL)
+    accrues more scored rows than the limit, every calibration built on it —
+    adaptive weight tilts, Brier skill, phase→P(up) — would freeze on the
+    earliest history and never see recent skill. Query newest-first here
+    (research_tracker isn't ours to change) and reverse back to chronological
+    so downstream consumers see the same shape get_scored_rows produces.
+    Falls back to get_scored_rows on any failure. Never raises.
+    """
+    try:
+        import research_tracker
+        research_tracker.init_tracker_db()
+        conn = research_tracker._get_conn()
+        q = [
+            "SELECT signal_name, symbol, issued_at, scored_at, horizon_days,",
+            "predicted_direction, confidence, realized_return, hit, metadata",
+            "FROM signal_forecasts WHERE signal_name = ? AND scored_at IS NOT NULL",
+        ]
+        params: List[Any] = [signal_name]
+        if since:
+            q.append("AND scored_at >= ?")
+            params.append(since)
+        if symbol:
+            q.append("AND symbol = ?")
+            params.append(symbol.upper())
+        q.append("ORDER BY scored_at DESC LIMIT ?")
+        params.append(int(limit))
+        rows = conn.execute(" ".join(q), params).fetchall()
+        out: List[Dict[str, Any]] = []
+        for r in rows:
+            md: Dict[str, Any] = {}
+            if r["metadata"]:
+                try:
+                    parsed = json.loads(r["metadata"])
+                    if isinstance(parsed, dict):
+                        md = parsed
+                except Exception:
+                    md = {}
+            out.append({
+                "signal_name": r["signal_name"],
+                "symbol": r["symbol"],
+                "issued_at": r["issued_at"],
+                "scored_at": r["scored_at"],
+                "horizon_days": r["horizon_days"],
+                "direction": r["predicted_direction"],
+                "confidence": r["confidence"],
+                "realized_return": r["realized_return"],
+                "hit": r["hit"],
+                "metadata": md,
+            })
+        out.reverse()  # chronological, matching get_scored_rows' contract
+        return out
+    except Exception as e:
+        log.debug("_recent_scored_rows direct query failed (%s); "
+                  "falling back to get_scored_rows", e)
+        try:
+            import research_tracker
+            return research_tracker.get_scored_rows(
+                signal_name, since=since, symbol=symbol)
+        except Exception:
+            return []
+
+
 def _brier_from_rows(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
     """Brier score + reliability buckets from scored rows that carry a
     `prob_up` in metadata. Outcome = 1 if realized_return > 0 else 0.
@@ -224,7 +299,7 @@ def ensemble_calibration(since: Optional[str] = None,
     except Exception:
         return {"error": "research_tracker unavailable"}
     record = research_tracker.get_track_record(ENSEMBLE_SIGNAL, since=since, symbol=symbol)
-    rows = research_tracker.get_scored_rows(ENSEMBLE_SIGNAL, since=since, symbol=symbol)
+    rows = _recent_scored_rows(ENSEMBLE_SIGNAL, since=since, symbol=symbol)
     cal = _brier_from_rows(rows)
     return {"signal": ENSEMBLE_SIGNAL, "track_record": record, "calibration": cal}
 
@@ -241,7 +316,7 @@ def component_leaderboard(since: Optional[str] = None) -> List[Dict[str, Any]]:
     for key in COMPONENT_KEYS:
         sig = _component_signal(key)
         rec = research_tracker.get_track_record(sig, since=since)
-        rows = research_tracker.get_scored_rows(sig, since=since)
+        rows = _recent_scored_rows(sig, since=since)
         cal = _brier_from_rows(rows)
         out.append({
             "key": key,
@@ -272,7 +347,8 @@ _phase_cache_lock = threading.Lock()
 _PHASE_TTL = 600
 
 
-def narrative_phase_prob(phase: str) -> Optional[float]:
+def narrative_phase_prob(phase: str,
+                         horizon_days: Optional[int] = None) -> Optional[float]:
     """Calibrated P(up | narrative phase) from REALIZED outcomes (A4).
 
     Reads the scored ``ens:narrative`` ledger rows, keeps those whose stored
@@ -281,11 +357,18 @@ def narrative_phase_prob(phase: str) -> Optional[float]:
     phase→probability. Returns None when there isn't enough same-phase history
     (the common cold-start case), so the caller falls back to the documented
     prior. Never raises.
+
+    WHY (Q9, same rule as adaptive_weights): up-frequency is horizon-specific
+    — the share of 5-day up-moves differs systematically from 20-day — so a
+    "calibrated" prob pooled across horizons mislabels itself. Pass
+    ``horizon_days`` to restrict the outcomes to the requested horizon (and
+    key the cache on it); ``None`` keeps the pooled behavior for legacy
+    callers that don't know their horizon.
     """
     if not phase:
         return None
     phase = phase.upper()
-    key = ("phase", phase)
+    key = ("phase", phase, horizon_days)
     with _phase_cache_lock:
         hit = _phase_cache.get(key)
     if hit is not None and (time.time() - hit[0]) < _PHASE_TTL:
@@ -293,12 +376,13 @@ def narrative_phase_prob(phase: str) -> Optional[float]:
 
     result: Optional[float] = None
     try:
-        import research_tracker
-        rows = research_tracker.get_scored_rows(_component_signal("narrative"))
+        rows = _recent_scored_rows(_component_signal("narrative"))
         ups = 0
         n = 0
         for r in rows:
             if r.get("hit") is None:
+                continue
+            if horizon_days is not None and r.get("horizon_days") != horizon_days:
                 continue
             md = r.get("metadata") or {}
             rp = (md.get("phase") or "").upper()
@@ -381,7 +465,7 @@ def adaptive_weights(base_weights: Dict[str, float],
                 # scans returning overlapping data. Pull the scored rows once
                 # and derive BOTH the directional sample size (n_directional =
                 # rows with a non-null hit) and the Brier calibration from them.
-                rows = research_tracker.get_scored_rows(_component_signal(k))
+                rows = _recent_scored_rows(_component_signal(k))
                 if horizon_days is not None:
                     rows = [r for r in rows
                             if r.get("horizon_days") == horizon_days]

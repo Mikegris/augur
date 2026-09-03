@@ -279,9 +279,15 @@ def _parse_ptr_pdf(pdf_bytes, member_name, doc_id, filing_year):
     text = re.sub(r"Digitally Signed.*", "", text, flags=re.DOTALL)
     text = re.sub(r"I\s+V\s+D\s*\n.*", "", text, flags=re.DOTALL)
     text = re.sub(r"I\s+P\s+O.*", "", text, flags=re.DOTALL)
-    text = re.sub(r"C\s+S\s*\n", "", text)
-    text = re.sub(r"F\s+I\s*\n", "", text)
-    text = re.sub(r"T\s*\n", "", text)
+    # WHY (#277): these lone column-header letters must be removed as WHOLE
+    # lines only. Unanchored, r"T\s*\n" ate the trailing 'T' + newline off any
+    # legitimate line ending in T (a standalone 'JT' owner cell became 'J' and
+    # merged with the next line), corrupting owner attribution and the
+    # line-based transaction scan; likewise '... C S\n' could delete a
+    # trailing Sell code. [ \t] (not \s) keeps the match on a single line.
+    text = re.sub(r"(?m)^C[ \t]+S[ \t]*\n", "", text)
+    text = re.sub(r"(?m)^F[ \t]+I[ \t]*\n", "", text)
+    text = re.sub(r"(?m)^T[ \t]*\n", "", text)
 
     # Collapse multiple blank lines
     text = re.sub(r"\n{3,}", "\n\n", text)
@@ -317,7 +323,15 @@ def _parse_ptr_pdf(pdf_bytes, member_name, doc_id, filing_year):
             combined3 = combined
 
         ticker_match = re.search(TICKER_RE, combined3)
-        if not ticker_match:
+        # WHY (#269): only anchor a transaction when the ticker match STARTS
+        # on line i (it may still span into i+1/i+2 for wrapped rows). The
+        # 3-line lookahead otherwise re-matched the same ticker at i, i+1 and
+        # i+2 without advancing past it, creating duplicate rows whose owner
+        # was read from the wrong line (header/'$15,000' continuation lines
+        # yielded a bogus 'Self' twin that survived the dedupe key). A ticker
+        # sitting on line i+1 is simply anchored one iteration later, with the
+        # owner read from its own line.
+        if not ticker_match or ticker_match.start() >= len(line):
             i += 1
             continue
 
@@ -361,7 +375,15 @@ def _parse_ptr_pdf(pdf_bytes, member_name, doc_id, filing_year):
             # PE/SE win over the single-letter P/S (regex alternation is ordered,
             # not longest-match); otherwise an exercise can be mislabeled a plain
             # buy/sell.
-            m = re.search(r"\]\s+(PE|SE|P|S)\b", after_ticker)
+            # WHY (#268): the code must be anchored to the START of
+            # after_ticker (the text right after this row's '[ST]' bracket).
+            # Searching for r"\]\s+..." could never match the current row —
+            # its own ']' was consumed by the ticker match — so the only ']'
+            # left in the 5-line block belonged to the NEXT transaction, and
+            # every row except a filing's last inherited the next row's P/S
+            # code (flipping buys to sells). Fall back to the pre-date window
+            # below, as before.
+            m = re.match(r"\s+(PE|SE|P|S)\b", after_ticker)
             if not m:
                 # Check in pre_date window after removing owner prefix
                 clean = re.sub(OWNER_RE, "", pre_date).strip()

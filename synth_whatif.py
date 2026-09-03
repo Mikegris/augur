@@ -15,7 +15,7 @@ independent research lenses and presenting the deltas in a single bundle:
      drawdowns and reports the per-scenario loss shift in absolute % terms.
 
   3. Monte Carlo NAV cones (research_montecarlo.simulate_portfolio):
-     2000 paths × 365 trading days; reports terminal NAV percentile shifts
+     2000 paths × 252 trading days (1 year); reports terminal NAV percentile shifts
      (p05 / median / p95) and the change in probability-of-loss.
 
   4. Optimizer verdict (research_optimizer.markowitz_optimize, max_sharpe):
@@ -172,7 +172,7 @@ def _whatif_uncached(
     cur_stress, cur_stress_err = _stress_test(current)
     new_stress, new_stress_err = _stress_test(proposed)
 
-    # ── Section 4: Monte Carlo. The fixed 2000 paths × 365 days is a deliberate
+    # ── Section 4: Monte Carlo. The fixed 2000 paths × 252 days is a deliberate
     # compromise — anything heavier and a single what-if would dominate request
     # latency, but 2000 is enough to give stable percentile estimates at the
     # outer p05/p95 cones.
@@ -323,8 +323,9 @@ def _build_view(
         if initial and mean is not None:
             expected_return_pct = round((float(mean) / float(initial) - 1.0) * 100.0, 4)
         if initial and std is not None:
-            # Terminal stdev as % of initial NAV — approximates 1-year vol since
-            # horizon is 365 days. Good enough as a Sharpe-ratio denominator.
+            # Terminal stdev as % of initial NAV — a true 1-year vol since the
+            # horizon is 252 TRADING days. Good enough as a Sharpe-ratio
+            # denominator.
             expected_vol_pct = round((float(std) / float(initial)) * 100.0, 4)
 
     # Scenario losses (% of current NAV) keyed by short slug.
@@ -412,8 +413,14 @@ def _monte_carlo(
     if research_montecarlo is None:
         return None, "research_montecarlo module unavailable"
     try:
+        # 252 TRADING days = 1 calendar year. horizon_days is trading days
+        # (research_montecarlo documents this explicitly and does NOT clamp
+        # 365) — passing 365 simulated ~17.4 calendar months while the results
+        # were treated as annual figures downstream (expected_return/vol and
+        # the Sharpe delta against the ANNUAL risk-free rate), inflating both
+        # books' numbers ~45%.
         sim = research_montecarlo.simulate_portfolio(
-            holdings, n_paths=2000, horizon_days=365,
+            holdings, n_paths=2000, horizon_days=252,
             method="historical_bootstrap",
         )
         if not isinstance(sim, dict):

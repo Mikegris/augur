@@ -72,7 +72,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(me
 
 # Single source of truth for the app version — surfaced at /api/version and
 # in jarvis.health_snapshot().
-APP_VERSION = "3.14.3"
+APP_VERSION = "3.25.1"
 
 _TICKER_RE = re.compile(r"^[A-Z0-9][A-Z0-9.\-]{0,9}$")
 
@@ -95,6 +95,26 @@ def _normalize_asset_type(value, default="stock"):
     at = (value or default)
     at = at.strip().lower() if isinstance(at, str) else default
     return at if at in _KNOWN_ASSET_TYPES else default
+
+def _normalize_txn_date(raw):
+    """Normalize a client-supplied transaction date to ISO YYYY-MM-DD.
+
+    db.get_transactions orders by the stored date STRING, so a non-ISO value
+    (e.g. "07/10/2026") would sort among ISO "2026-…" rows completely wrong,
+    permanently. Returns (iso_or_None, ok): None/"" -> (None, True) so the DB
+    default applies; unparseable -> (None, False) so callers can 400.
+    """
+    if raw is None or (isinstance(raw, str) and not raw.strip()):
+        return None, True
+    if not isinstance(raw, str):
+        return None, False
+    s = raw.strip()
+    for fmt in ("%Y-%m-%d", "%m/%d/%Y"):
+        try:
+            return datetime.strptime(s, fmt).strftime("%Y-%m-%d"), True
+        except ValueError:
+            pass
+    return None, False
 
 def _err(e, msg="internal error", status=500):
     """Log an engine/DB/upstream exception server-side and return a generic
@@ -587,7 +607,14 @@ def delete_account(account_id):
 @app.route("/api/portfolio")
 def get_portfolio():
     acct_filter = request.args.get("account_id")
-    holdings = db.get_portfolio(account_id=_safe_int(acct_filter, None) if acct_filter else None)
+    acct_id = None
+    if acct_filter:
+        acct_id = _safe_int(acct_filter, None)
+        if acct_id is None:
+            # A malformed id must not silently drop the filter and return the
+            # ENTIRE portfolio as if it were that account's — 400 like the PUT.
+            return jsonify({"error": "account_id must be an integer"}), 400
+    holdings = db.get_portfolio(account_id=acct_id)
     if not holdings:
         return jsonify({"holdings": [], "summary": {}})
 
@@ -665,6 +692,9 @@ def add_position():
         return jsonify({"error": "shares must be > 0"}), 400
     if avg_cost < 0 or fees < 0:
         return jsonify({"error": "avg_cost and fees must be >= 0"}), 400
+    txn_date, date_ok = _normalize_txn_date(data.get("date"))
+    if not date_ok:
+        return jsonify({"error": "date must be YYYY-MM-DD"}), 400
     acct_id = _safe_int(data.get("account_id"), None) if data.get("account_id") else None
     asset_type = _normalize_asset_type(data.get("asset_type"))
     row_id = db.add_position(
@@ -685,7 +715,7 @@ def add_position():
         shares=shares,
         price=avg_cost,
         fees=fees,
-        date=data.get("date"),
+        date=txn_date,
         notes=data.get("notes", ""),
         account_id=acct_id,
     )
@@ -744,10 +774,23 @@ def get_watchlist():
     items = db.get_watchlist()
     if not items:
         return jsonify([])
-    symbols = [i["symbol"] for i in items]
-    prices = fetcher.get_quotes_batch(symbols)
+    # Crypto watchlist symbols must be fetched as their -USD Yahoo pair — a
+    # bare 'BTC' resolves to an EQUITY (Grayscale's ETF), showing the wrong
+    # instrument's price. Mirrors _portfolio_live_prices / snapshot worker.
+    query = []
+    pair_of = {}  # bare symbol -> -USD pair (UPPER, matching batch keys)
+    for i in items:
+        sym = i["symbol"]
+        if i.get("asset_type") == "crypto" and isinstance(sym, str):
+            pair = (sym + "-USD").upper()
+            pair_of[sym] = pair
+            query.append(pair)
+        else:
+            query.append(sym)
+    prices = fetcher.get_quotes_batch(query)
     for item in items:
-        q = prices.get(item["symbol"], {})
+        key = pair_of.get(item["symbol"], item["symbol"])
+        q = prices.get(key, {})
         item.update({
             "price": q.get("price"),
             "change": q.get("change"),
@@ -774,6 +817,11 @@ def add_watchlist():
         alert_low = _opt_float(data.get("alert_low"))
     except (TypeError, ValueError):
         return jsonify({"error": "alert_high/alert_low must be numeric"}), 400
+    # float("nan")/float("inf") parse cleanly; a stored NaN later serializes as
+    # the invalid-JSON literal NaN and breaks the whole watchlist render.
+    for v in (alert_high, alert_low):
+        if v is not None and not math.isfinite(v):
+            return jsonify({"error": "alert_high/alert_low must be finite"}), 400
     is_new = db.add_to_watchlist(
         symbol=data["symbol"],
         name=data.get("name", ""),
@@ -840,13 +888,23 @@ def add_transaction():
         return jsonify({"error": "shares, price, fees must be numeric"}), 400
     if not (math.isfinite(shares) and math.isfinite(price) and math.isfinite(fees)):
         return jsonify({"error": "shares, price, fees must be finite"}), 400
+    # Sign guards (mirror add_position): a negative shares/price is recorded
+    # verbatim and silently corrupts the buy/sell totals in
+    # /api/transactions/summary. Sells are modeled via the action field.
+    if shares <= 0:
+        return jsonify({"error": "shares must be > 0"}), 400
+    if price < 0 or fees < 0:
+        return jsonify({"error": "price and fees must be >= 0"}), 400
+    txn_date, date_ok = _normalize_txn_date(data.get("date"))
+    if not date_ok:
+        return jsonify({"error": "date must be YYYY-MM-DD"}), 400
     db.add_transaction(
         symbol=data["symbol"],
         action=data["action"],
         shares=shares,
         price=price,
         fees=fees,
-        date=data.get("date"),
+        date=txn_date,
         notes=data.get("notes", ""),
     )
     return jsonify({"status": "recorded"})
@@ -1008,26 +1066,18 @@ def portfolio_import():
     except (UnicodeDecodeError, AttributeError):
         return jsonify({"error": "File must be UTF-8 encoded CSV"}), 400
     reader = csv.DictReader(io.StringIO(content))
-    headers = [h.strip().strip('"').lower() for h in (reader.fieldnames or [])]
 
     imported = 0
     skipped = 0
     errors = []
 
-    # Detect format by sniffing headers
-    def _get(row, *keys):
-        for k in keys:
-            for h in row:
-                if h.strip().strip('"').lower() == k.lower():
-                    val = row[h]
-                    if val and str(val).strip() not in ("", "--", "N/A"):
-                        return str(val).strip()
-        return None
-
     for i, row in enumerate(reader):
         try:
-            # Normalize keys
-            norm = {k.strip().strip('"').lower(): v for k, v in row.items()}
+            # Normalize keys. Skip DictReader's restkey (None) — a row with
+            # more cells than headers would otherwise crash on None.strip()
+            # and the row would land in errors instead of importing.
+            norm = {k.strip().strip('"').lower(): v for k, v in row.items()
+                    if isinstance(k, str)}
 
             # Detect broker format and extract fields
             symbol = None
@@ -1092,12 +1142,18 @@ def portfolio_import():
             if avg_cost is None or avg_cost <= 0:
                 avg_cost = 0.0  # Allow import with zero cost
 
+            # Round-trip our own exporter's columns: asset_type especially —
+            # hardcoding "stock" re-imported crypto as an equity, so BTC was
+            # then quoted as the NYSE ticker 'BTC' (Grayscale's ETF).
             db.add_position(
                 symbol=symbol,
                 name=name,
                 shares=shares,
                 avg_cost=avg_cost,
-                asset_type="stock",
+                asset_type=_normalize_asset_type(norm.get("asset_type")),
+                sector=str(norm.get("sector") or "").strip(),
+                currency=str(norm.get("currency") or "").strip() or "USD",
+                notes=str(norm.get("notes") or "").strip(),
             )
             imported += 1
         except Exception as e:
@@ -1243,9 +1299,32 @@ def get_alerts():
     # Enrich with current prices
     symbols = list({a["symbol"] for a in alerts
                     if isinstance(a.get("symbol"), str) and a["symbol"]})
-    prices = fetcher.get_quotes_batch(symbols) if symbols else {}
+    # Crypto alert symbols must be fetched as their -USD Yahoo pair (a bare
+    # 'BTC' resolves to an equity) — same inference the alert-trigger worker
+    # uses, or distance_pct is computed against the wrong instrument.
+    # Advisory enrichment: fail open to the unmapped fetch on any DB hiccup.
+    crypto_set = set()
+    try:
+        for h in db.get_portfolio() or []:
+            if h.get("asset_type") == "crypto":
+                crypto_set.add(str(h["symbol"]).upper())
+        for w in db.get_watchlist() or []:
+            if w.get("asset_type") == "crypto":
+                crypto_set.add(str(w["symbol"]).upper())
+    except Exception:
+        crypto_set = set()
+    query = []
+    pair_of = {}  # bare alert symbol -> -USD pair (UPPER, matches batch keys)
+    for s in symbols:
+        if s.upper() in crypto_set:
+            pair_of[s] = (s + "-USD").upper()
+            query.append(pair_of[s])
+        else:
+            query.append(s)
+    prices = fetcher.get_quotes_batch(query) if query else {}
     for a in alerts:
-        q = prices.get(a["symbol"], {})
+        sym = a.get("symbol")
+        q = prices.get(pair_of.get(sym, sym), {})
         cur = q.get("price")
         a["current_price"] = cur
         if cur is not None and cur != 0 and a["price"] is not None:
@@ -1416,6 +1495,16 @@ def stress_test():
     # Content-Type or malformed body; request.json would raise 415/400 instead.
     body = request.get_json(silent=True) or {}
     custom_drop = body.get("custom_drop_pct")   # e.g. -30.0
+    # Coerce + finiteness-guard (mirror add_alert): a string "-30" (HTML number
+    # inputs serialize as strings) crashes the fetcher's format-string with an
+    # unhandled 500, and NaN poisons every position's new_value into invalid JSON.
+    if custom_drop is not None:
+        try:
+            custom_drop = float(custom_drop)
+        except (TypeError, ValueError):
+            return jsonify({"error": "custom_drop_pct must be numeric"}), 400
+        if not math.isfinite(custom_drop):
+            return jsonify({"error": "custom_drop_pct must be finite"}), 400
 
     holdings = db.get_portfolio()
     if not holdings:
@@ -1447,11 +1536,14 @@ def earnings_calendar():
     holdings = db.get_portfolio()
     watchlist = db.get_watchlist()
     symbols = list({h["symbol"] for h in holdings} | {w["symbol"] for w in watchlist})
-    # Filter to stocks only (skip crypto, ETFs without earnings)
-    stock_symbols = [
-        s for s in symbols
-        if not any(h["symbol"] == s and h["asset_type"] == "crypto" for h in holdings)
-    ]
+    # Filter to stocks only (skip crypto, ETFs without earnings). Crypto can
+    # come from EITHER source — a watchlist-only BTC would otherwise reach the
+    # earnings fetcher as the unrelated equity ticker BTC.
+    crypto_syms = (
+        {h["symbol"] for h in holdings if h.get("asset_type") == "crypto"}
+        | {w["symbol"] for w in watchlist if w.get("asset_type") == "crypto"}
+    )
+    stock_symbols = [s for s in symbols if s not in crypto_syms]
 
     calendar = earnings_module.get_earnings_calendar(stock_symbols)
     return jsonify(calendar)
@@ -1924,6 +2016,12 @@ def smart_money_scores_bulk():
     import smart_money
     data = request.get_json(silent=True) or {}
     symbols = data.get("symbols", [])
+    # A JSON STRING is iterable — "NVDA" would be scanned per character as the
+    # real tickers N/V/D/A, returning plausible-but-wrong results. Require a
+    # list and keep only valid tickers.
+    if symbols and not isinstance(symbols, list):
+        return jsonify({"error": "symbols must be a list"}), 400
+    symbols = [str(s).strip().upper() for s in symbols if _valid_ticker(s)]
     if not symbols:
         # Default: portfolio symbols
         holdings = db.get_portfolio()
@@ -1956,14 +2054,22 @@ def options_flow_scan():
     """Scan unusual options activity for portfolio symbols."""
     data = request.get_json(silent=True) or {}
     symbols = data.get("symbols", [])
+    # See smart_money_scores_bulk: a JSON string would be scanned per character.
+    if symbols and not isinstance(symbols, list):
+        return jsonify({"error": "symbols must be a list"}), 400
+    symbols = [str(s).strip().upper() for s in symbols if _valid_ticker(s)]
     if not symbols:
         holdings = db.get_portfolio()
         symbols = list({h["symbol"] for h in holdings if h["asset_type"] == "stock"})
     if not symbols:
         return jsonify({"results": []})
+    scanned = symbols[:15]
     try:
-        results = fetcher.scan_unusual_options_portfolio(symbols[:15])
-        return jsonify({"results": results, "scanned": len(symbols)})
+        results = fetcher.scan_unusual_options_portfolio(scanned)
+        # Report what was ACTUALLY scanned — claiming len(symbols) told the
+        # user all N names were screened when everything past 15 was skipped.
+        return jsonify({"results": results, "scanned": len(scanned),
+                        "truncated": len(symbols) > len(scanned)})
     except Exception as e:
         return _err(e)
 
@@ -2170,6 +2276,10 @@ def synthetic_insider_scan():
     import synthetic_insider
     data = request.get_json(silent=True) or {}
     symbols = data.get("symbols", [])
+    # See smart_money_scores_bulk: a JSON string would be scanned per character.
+    if symbols and not isinstance(symbols, list):
+        return jsonify({"error": "symbols must be a list"}), 400
+    symbols = [str(s).strip().upper() for s in symbols if _valid_ticker(s)]
     if not symbols:
         holdings = db.get_portfolio()
         symbols = list(set(h["symbol"] for h in holdings if h.get("asset_type") != "crypto"))
@@ -2233,6 +2343,10 @@ def alt_data_scan():
     import alt_data_engine
     data = request.get_json(silent=True) or {}
     symbols = data.get("symbols", [])
+    # See smart_money_scores_bulk: a JSON string would be scanned per character.
+    if symbols and not isinstance(symbols, list):
+        return jsonify({"error": "symbols must be a list"}), 400
+    symbols = [str(s).strip().upper() for s in symbols if _valid_ticker(s)]
     if not symbols:
         holdings = db.get_portfolio()
         symbols = list(set(h["symbol"] for h in holdings if h.get("asset_type") != "crypto"))
@@ -2350,29 +2464,47 @@ def congress_all():
         import congress as house_mod
         house_trades = house_mod.get_congress_summary(days=120, max_pdfs=40)
         house_rows = []
-        for member in house_trades.get("members", []):
-            for t in member.get("trades", []) or []:
-                if not isinstance(t, dict):
-                    continue
-                tk = (t.get("ticker") or "").upper()
-                if symbol and tk != symbol.upper():
-                    continue
-                house_rows.append({
-                    "chamber": "House",
-                    "name": member.get("name"),
-                    "ticker": tk,
-                    "asset_description": t.get("asset_description") or "",
-                    "type": t.get("transaction_type") or "",
-                    "amount": t.get("amount") or "",
-                    "date": t.get("transaction_date") or "",
-                    "filed": member.get("filing_date") or "",
-                    "ptr_link": member.get("pdf_url") or "",
-                })
+        # get_congress_summary returns a FLAT trades list (there is no
+        # "members" grouping) whose rows use congress.py's field names
+        # (member_name/txn_type/txn_date/amount_str/notif_date/pdf_url) —
+        # map them into the senate-row schema built above.
+        for t in house_trades.get("trades", []) or []:
+            if not isinstance(t, dict):
+                continue
+            tk = (t.get("ticker") or "").upper()
+            if symbol and tk != symbol.upper():
+                continue
+            house_rows.append({
+                "chamber": "House",
+                "name": t.get("member_name") or "",
+                "ticker": tk,
+                "asset_description": t.get("asset_type") or "",
+                "type": t.get("txn_type") or "",
+                "amount": t.get("amount_str") or "",
+                "date": t.get("txn_date") or "",
+                "filed": t.get("notif_date") or "",
+                "ptr_link": t.get("pdf_url") or "",
+            })
     except Exception as e:
         log.debug("house combined: %s", e)
         house_rows = []
     combined = senate + house_rows
-    combined.sort(key=lambda r: (r.get("date") or "", r.get("filed") or ""), reverse=True)
+
+    # Sort on PARSED dates, newest first. Both chambers report MM/DD/YYYY,
+    # which sorts wrong lexicographically across year boundaries
+    # ("12/05/2025" > "01/15/2026") — the top-`limit` slice would then drop
+    # the genuinely newest trades entirely.
+    def _cg_dt(s):
+        for fmt in ("%m/%d/%Y", "%Y-%m-%d"):
+            try:
+                return datetime.strptime(str(s or "").strip(), fmt)
+            except ValueError:
+                pass
+        return None
+
+    combined.sort(key=lambda r: (_cg_dt(r.get("date")) or datetime.min,
+                                 _cg_dt(r.get("filed")) or datetime.min),
+                  reverse=True)
     sliced = combined[:limit]
     # Report counts actually included in the returned slice, not pre-truncation.
     return jsonify({
@@ -2891,7 +3023,10 @@ def ideas_random():
     _ms_raw = request.args.get("min_score")
     if _ms_raw is not None and str(_ms_raw).strip() != "":
         try:
-            min_score = min(max(float(_ms_raw), 0.0), 100.0)
+            _ms = float(_ms_raw)
+            # min/max pass NaN straight through the clamp — a NaN threshold
+            # disables the filter AND serializes as invalid-JSON literal NaN.
+            min_score = min(max(_ms, 0.0), 100.0) if math.isfinite(_ms) else None
         except (TypeError, ValueError):
             min_score = None
     discovery_mode = (request.args.get("discovery_mode") or "curated").strip().lower()
@@ -3220,8 +3355,13 @@ def api_hypothesis_save():
             hyp, symbol, source=data.get("source", "ai"),
         )
         return jsonify({"id": hid})
-    except Exception as e:
+    except ValueError as e:
+        # Validation failures keep their specific message as a client 400.
         return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        # Server faults (DB locked, disk full) must not masquerade as client
+        # errors nor leak raw driver detail — same policy as sibling routes.
+        return _err(e)
 
 
 @app.route("/api/research/hypothesis", methods=["GET"])
@@ -3591,6 +3731,8 @@ def jarvis_tts_route():
     404 when keyless/capped/failed — the frontend falls back to browser
     speechSynthesis, so this endpoint is strictly an upgrade."""
     data = request.get_json(silent=True) or {}
+    if not isinstance(data, dict):
+        return jsonify({"error": "expected JSON object"}), 400
     text = data.get("text")
     if not text or not isinstance(text, str):
         return jsonify({"error": "expected JSON body with a 'text' string"}), 400
@@ -3657,6 +3799,281 @@ def aj_config_route():
         return _err(e)
 
 
+def _aj_replays_base(create=False):
+    """The replay artifacts dir, resolved robustly: env override first, then
+    repo-relative, then beside the (resolved) DB — the packaged desktop app
+    runs from a frozen bundle where __file__ is NOT the working repo."""
+    import os as _os
+    # An explicit env override wins UNCONDITIONALLY — filtering it through the
+    # isdir check below silently redirected artifacts beside the DB whenever
+    # the configured dir didn't exist yet, so tools watching AJ_REPLAYS_DIR
+    # saw nothing.
+    env_dir = _os.environ.get("AJ_REPLAYS_DIR") or ""
+    if env_dir:
+        if create:
+            _os.makedirs(env_dir, exist_ok=True)
+        return env_dir
+    candidates = [
+        _os.path.join(_os.path.dirname(_os.path.abspath(__file__)),
+                      "data", "replays"),
+    ]
+    try:
+        import database as _dbm
+        candidates.append(_os.path.join(
+            _os.path.dirname(_dbm.DB_PATH), "data", "replays"))
+        candidates.append(_os.path.join(
+            _os.path.dirname(_os.path.realpath(_dbm.DB_PATH)),
+            "data", "replays"))
+    except Exception:
+        pass
+    base = next((c for c in candidates if c and _os.path.isdir(c)), None)
+    if base is None:
+        # prefer beside-the-resolved-DB for a fresh dir (always writable and
+        # reachable from both the repo and the bundle); candidates[-1] is the
+        # repo-relative path only when the DB lookup failed.
+        base = candidates[-1]
+        if create:
+            _os.makedirs(base, exist_ok=True)
+    return base
+
+
+# One replay launch at a time from the UI; state lives here so /status can
+# report progress without a DB round-trip (the replay uses its OWN db anyway).
+_AJ_REPLAY_PROC = {"proc": None, "run_id": None, "started": None, "log": None}
+# Serializes the poll-check + Popen + state update — two concurrent POSTs
+# could otherwise both pass the poll() check, mint the same run_id, truncate
+# each other's run.log and corrupt the shared replay.db/result.json.
+_AJ_REPLAY_LOCK = threading.Lock()
+
+
+@app.route("/api/aj/replay/run", methods=["POST"])
+def aj_replay_run_route():
+    """Launch a historical replay in a fresh, DB-isolated subprocess. The
+    running app is never touched — artifacts land in the replays dir and the
+    Replay Lab panel picks them up when done."""
+    try:
+        import os as _os
+        import subprocess as _sp
+        import re as _re
+        from datetime import datetime as _dt, timedelta as _td, timezone as _tz
+        data = request.get_json(silent=True) or {}
+        syms = [s.strip().upper() for s in
+                str(data.get("symbols") or "").replace(" ", ",").split(",")
+                if s.strip()]
+        syms = [s for s in syms if _re.match(r"^[A-Z0-9.\-^]{1,10}$", s)]
+        if not syms or len(syms) > 30:
+            return jsonify({"error": "1-30 valid symbols required"}), 400
+        end = str(data.get("end") or (_dt.now(_tz.utc) - _td(days=1)).strftime("%Y-%m-%d"))
+        start = str(data.get("start") or (_dt.now(_tz.utc) - _td(days=730)).strftime("%Y-%m-%d"))
+        if not (_re.match(r"^\d{4}-\d{2}-\d{2}$", start)
+                and _re.match(r"^\d{4}-\d{2}-\d{2}$", end) and start < end):
+            return jsonify({"error": "invalid start/end dates"}), 400
+        try:
+            cash = max(1000.0, min(1e8, float(data.get("cash") or 100000)))
+        except (TypeError, ValueError):
+            cash = 100000.0
+        import aj_replay
+        base = _aj_replays_base(create=True)
+        # Hold the lock across check + launch + state update so concurrent
+        # POSTs can't both pass the poll() check; %f makes run_id unique even
+        # for back-to-back launches within the same second.
+        with _AJ_REPLAY_LOCK:
+            p = _AJ_REPLAY_PROC
+            if p["proc"] is not None and p["proc"].poll() is None:
+                return jsonify({"error": "a replay is already running",
+                                "run_id": p["run_id"]}), 409
+            run_id = "ui_" + _dt.now(_tz.utc).strftime("%Y%m%d_%H%M%S_%f")
+            prefix, env = aj_replay.spawn_cmd_env(run_id, base)
+            cache_dir = _os.path.join(_os.path.dirname(base), "replay_cache")
+            cmd = prefix + ["run", "--run-id", run_id, "--out-dir", base,
+                            "--cache-dir", cache_dir,
+                            "--symbols", ",".join(syms),
+                            "--start", start, "--end", end, "--cash", str(cash),
+                            "--forecaster",
+                            ("ensemble" if data.get("forecaster") == "ensemble"
+                             else "pit")]
+            log_path = _os.path.join(base, run_id, "run.log")
+            logf = open(log_path, "w")
+            proc = _sp.Popen(cmd, env=env, stdout=logf, stderr=_sp.STDOUT,
+                             cwd=_os.path.dirname(base) or None)
+            p.update({"proc": proc, "run_id": run_id, "log": log_path,
+                      "started": _dt.now(_tz.utc).isoformat()})
+        return jsonify({"launched": True, "run_id": run_id,
+                        "symbols": syms, "start": start, "end": end,
+                        "cash": cash})
+    except Exception as e:
+        return _err(e)
+
+
+@app.route("/api/aj/replay/status", methods=["GET"])
+def aj_replay_status_route():
+    try:
+        import os as _os
+        p = _AJ_REPLAY_PROC
+        if p["proc"] is None:
+            return jsonify({"running": False, "run_id": None})
+        rc = p["proc"].poll()
+        tail = ""
+        try:
+            if p["log"] and _os.path.exists(p["log"]):
+                with open(p["log"]) as f:
+                    tail = f.read()[-600:]
+        except Exception:
+            pass
+        return jsonify({"running": rc is None, "run_id": p["run_id"],
+                        "started": p["started"], "returncode": rc,
+                        "log_tail": tail})
+    except Exception as e:
+        return _err(e)
+
+
+@app.route("/api/aj/lab", methods=["GET"])
+def aj_lab_route():
+    """Research Scientist status: experiment queue, recent verdicts with
+    evidence, promotions/demotions, and the current deflated promotion bar."""
+    try:
+        import aj_lab
+        return jsonify(aj_lab.status())
+    except Exception as e:
+        return _err(e)
+
+
+@app.route("/api/aj/replays", methods=["GET"])
+def aj_replays_route():
+    """Index + latest details of stored replay-engine artifacts (data/replays).
+    Read-only file reads — replays themselves always run out-of-process
+    against isolated DBs (see aj_replay)."""
+    try:
+        import os as _os
+        import json as _json
+        base = _aj_replays_base()
+        runs, grids = [], []
+        latest, latest_mtime = None, -1.0
+        if _os.path.isdir(base):
+            for d in sorted(_os.listdir(base)):
+                rp = _os.path.join(base, d, "result.json")
+                gp = _os.path.join(base, d, "grid.json")
+                if _os.path.exists(rp):
+                    try:
+                        with open(rp) as f:
+                            r = _json.load(f)
+                    except Exception:
+                        continue
+                    runs.append({"run_id": d, "start": r.get("start"),
+                                 "end": r.get("end"),
+                                 "total_return_pct": r.get("total_return_pct"),
+                                 "benchmark_return_pct": r.get("benchmark_return_pct"),
+                                 "alpha_pct": r.get("alpha_pct"),
+                                 "sharpe": r.get("sharpe"),
+                                 "max_drawdown_pct": r.get("max_drawdown_pct"),
+                                 "trades": (r.get("trades") or {}).get("trades"),
+                                 "forecaster": r.get("forecaster")})
+                    m = _os.path.getmtime(rp)
+                    if m > latest_mtime:
+                        latest_mtime = m
+                        # decimate the daily series so the payload stays small.
+                        # ALWAYS keep the final point — daily[::step] drops it
+                        # whenever (len-1) % step != 0, making the chart's
+                        # terminal value disagree with total_return_pct.
+                        def _decimate(series):
+                            step = max(1, len(series) // 400)
+                            dec = series[::step]
+                            if series and (len(series) - 1) % step != 0:
+                                dec.append(series[-1])
+                            return dec
+                        daily = r.get("daily") or []
+                        bench = r.get("benchmark_daily") or []
+                        latest = dict(runs[-1])
+                        latest.update({
+                            "daily": _decimate(daily),
+                            "benchmark_daily": _decimate(bench),
+                            "gate": r.get("gate"),
+                            "metalabel": {"oos_auc": (r.get("metalabel") or {}).get("oos_auc")},
+                            "labels_built": (r.get("labels") or {}).get("built"),
+                            "win_rate": (r.get("trades") or {}).get("win_rate"),
+                            "profit_factor": (r.get("trades") or {}).get("profit_factor"),
+                            "caveats": r.get("caveats"),
+                        })
+                elif _os.path.exists(gp):
+                    try:
+                        with open(gp) as f:
+                            g = _json.load(f)
+                    except Exception:
+                        continue
+                    grids.append({
+                        "grid_id": d, "start": g.get("start"), "end": g.get("end"),
+                        "params": g.get("params"), "winner": g.get("winner"),
+                        "train_frac": g.get("train_frac"),
+                        "cells": [{k: c.get(k) for k in
+                                   ("run_id", "params", "train_sharpe",
+                                    "test_sharpe", "test_return_pct",
+                                    "alpha_pct", "max_drawdown_pct")}
+                                  for c in (g.get("cells") or [])],
+                    })
+        return jsonify({"runs": runs, "grids": grids, "latest": latest})
+    except Exception as e:
+        return _err(e)
+
+
+@app.route("/api/aj/trades/<path:symbol>", methods=["GET"])
+def aj_trades_route(symbol):
+    """Per-symbol trade history drill-down: every fill (with the proposal's
+    thesis), the FIFO round-trips with realized P&L, and the current position.
+    Answers 'did the agent actually buy this, and did the sell add up?'
+    without scrolling the recent-orders table."""
+    try:
+        import re as _re
+        import aj_db
+        sym = str(symbol or "").upper().strip()
+        # Length bound must fit the app's OWN option symbols
+        # (OPT:AAPL:20260717:C:150.0 is 25 chars; 4-letter underliers and
+        # 4-digit strikes routinely reach 26+) — 24 rejected most options.
+        if not _re.match(r"^[A-Z0-9.:\-^_]{1,40}$", sym):
+            return jsonify({"error": "invalid symbol"}), 400
+        fills = aj_db.query(
+            "SELECT f.id AS fill_id, f.order_id, o.side, f.qty, f.price, "
+            "f.fees_usd, f.filled_at, o.state, o.proposal_id, p.thesis, "
+            "p.risk_reason FROM aj_fills f "
+            "JOIN aj_orders o ON f.order_id = o.id "
+            "LEFT JOIN aj_proposals p ON o.proposal_id = p.id "
+            "WHERE o.symbol = ? AND o.mode = 'paper' "
+            "ORDER BY f.filled_at ASC, f.id ASC", (sym,))
+        for f in fills:
+            f["thesis"] = (f.get("thesis") or f.get("risk_reason") or "")[:160]
+            f.pop("risk_reason", None)
+        trips = []
+        try:
+            import aj_features
+            for t in aj_features._round_trips("paper"):
+                if (t.get("symbol") or "").upper() != sym:
+                    continue
+                ep, xp = t.get("entry_price"), t.get("exit_price")
+                gain = None
+                try:
+                    if ep and xp and float(ep) > 0:
+                        gain = round((float(xp) / float(ep) - 1.0) * 100.0, 2)
+                except (TypeError, ValueError):
+                    pass
+                trips.append({"opened_at": t.get("opened_at"),
+                              "closed_at": t.get("closed_at"),
+                              "qty": t.get("qty"), "side": t.get("side"),
+                              "entry_price": ep, "exit_price": xp,
+                              "realized_pnl_usd": t.get("realized_pnl_usd"),
+                              "gain_pct": gain})
+        except Exception:
+            pass
+        position = None
+        try:
+            import aj_positions
+            position = (aj_positions.paper_book().get("positions") or {}).get(sym)
+        except Exception:
+            pass
+        return jsonify({"symbol": sym, "position": position,
+                        "fills": fills, "round_trips": trips})
+    except Exception as e:
+        return _err(e)
+
+
 @app.route("/api/aj/proposals", methods=["GET"])
 def aj_proposals_route():
     try:
@@ -3675,6 +4092,20 @@ def aj_orders_route():
         limit = max(1, _safe_int(request.args.get("limit"), 50))
         return jsonify({"orders": aj_db.query(
             "SELECT * FROM aj_orders ORDER BY id DESC LIMIT ?", (limit,))})
+    except Exception as e:
+        return _err(e)
+
+
+@app.route("/api/aj/performance/slices", methods=["GET"])
+def aj_performance_slices_route():
+    """Conditional win-rate + expectancy of realized paper trades, sliced by
+    regime / instrument / conviction / holding-period / edge. Surfaces WHERE the
+    losses come from (slices below their own payoff-implied breakeven). Optional
+    ?window=N limits to the most recent N closed trades."""
+    try:
+        import aj_analytics
+        window = _safe_int(request.args.get("window"), 0) or None
+        return jsonify(aj_analytics.performance_slices(window))
     except Exception as e:
         return _err(e)
 
@@ -3780,15 +4211,27 @@ def aj_approve_route(pid):
                     "order_type": row.get("order_type") or "market",
                     "limit_price": row.get("limit_price"),
                     "account_id": row.get("account_id")}
-        rd = aj_risk.evaluate(proposal)
-        if rd.get("decision") != "pass":
-            aj_db.update("aj_proposals", pid, status="blocked", risk_reason=rd.get("reason"))
-            _jarvis_act_refund(_stamps)
-            return jsonify({"ok": False, "decision": rd.get("decision"), "reason": rd.get("reason")}), 400
-        aj_db.audit("approval", {"proposal_id": pid, "mode": rd.get("mode"),
-                                 "required": True, "decision": "human-approved"},
-                    ref_id=pid, actor="human:web")
-        ex = aj_execution.execute_trade(proposal, rd, cycle_id=row.get("cycle_id"))
+        # Anything raising between the compare-and-set claim above and
+        # completion (evaluate/audit/execute_trade) must release the claim —
+        # a proposal stranded in 'approving' has NO recovery path anywhere
+        # (it's neither 'approved' nor 'proposed', so every retry 400s
+        # forever) and its rate-limit slot would never be refunded.
+        try:
+            rd = aj_risk.evaluate(proposal)
+            if rd.get("decision") != "pass":
+                aj_db.update("aj_proposals", pid, status="blocked", risk_reason=rd.get("reason"))
+                _jarvis_act_refund(_stamps)
+                return jsonify({"ok": False, "decision": rd.get("decision"), "reason": rd.get("reason")}), 400
+            aj_db.audit("approval", {"proposal_id": pid, "mode": rd.get("mode"),
+                                     "required": True, "decision": "human-approved"},
+                        ref_id=pid, actor="human:web")
+            ex = aj_execution.execute_trade(proposal, rd, cycle_id=row.get("cycle_id"))
+        except Exception as e:
+            try:
+                aj_db.update_if("aj_proposals", pid, "status", "approving", status=prev_status)
+            finally:
+                _jarvis_act_refund(_stamps)
+            return _err(e)
         # execute_trade flips status to 'executed' on a fill. If nothing filled,
         # release the claim back to its prior status so the proposal isn't left
         # permanently stuck in the intermediate 'approving' state.
@@ -3804,6 +4247,34 @@ def aj_analytics_route():
     try:
         import aj_analytics
         return jsonify(aj_analytics.summary())
+    except Exception as e:
+        return _err(e)
+
+
+@app.route("/api/aj/tax", methods=["GET"])
+def aj_tax_route():
+    """Realized-gain tax view: short/long-term split + estimated liability at the
+    configured flat rates, with a per-tax-year breakdown (Insights: Tax view)."""
+    try:
+        import aj_tax, aj_db
+        aj_db.aj_init()
+        mode = (request.args.get("mode") or "paper").strip() or "paper"
+        year = _safe_int(request.args.get("year"), 0) or None
+        return jsonify(aj_tax.tax_summary(mode, year))
+    except Exception as e:
+        return _err(e)
+
+
+@app.route("/api/aj/tax/lots.csv", methods=["GET"])
+def aj_tax_lots_route():
+    """Form-8949-style CSV of every closed lot for a tax preparer."""
+    try:
+        import aj_tax, aj_db
+        aj_db.aj_init()
+        mode = (request.args.get("mode") or "paper").strip() or "paper"
+        return Response(aj_tax.realized_lots_csv(mode), mimetype="text/csv",
+                        headers={"Content-Disposition": "attachment; filename=aj_tax_lots.csv",
+                                 "Cache-Control": "no-store"})
     except Exception as e:
         return _err(e)
 
@@ -3904,9 +4375,14 @@ def aj_position_detail_route(symbol):
                                                                 opened_at=pos.get("opened_at"))
                 out["profit_ladder"] = aj_execution_alpha.profit_ladder(p2, cfg, mark=mark)
                 avg = float(pos.get("avg_cost") or 0)
+                # pct == 0 is the aj_config default meaning DISABLED — emitting
+                # avg*(1±0) would render both a TP and an SL at exactly
+                # breakeven for an exit rule that isn't active.
+                tp_pct = float(cfg.get("take_profit_pct", 0) or 0)
+                sl_pct = float(cfg.get("stop_loss_pct", 0) or 0)
                 out["levels"] = {
-                    "take_profit": avg * (1 + float(cfg.get("take_profit_pct", 0) or 0) / 100.0) if avg else None,
-                    "stop_loss": avg * (1 - float(cfg.get("stop_loss_pct", 0) or 0) / 100.0) if avg else None,
+                    "take_profit": avg * (1 + tp_pct / 100.0) if (avg and tp_pct > 0) else None,
+                    "stop_loss": avg * (1 - sl_pct / 100.0) if (avg and sl_pct > 0) else None,
                 }
             except Exception:
                 pass
@@ -4148,6 +4624,10 @@ def jarvis_act_route():
     except Exception as e:
         return jsonify({"error": "jarvis_tools unavailable"}), 503
     data = request.get_json(silent=True) or {}
+    # A valid-JSON non-object body (array/string) would make `"actions" in
+    # data` a substring test and .get() raise AttributeError (unhandled 500).
+    if not isinstance(data, dict):
+        return jsonify({"error": "expected JSON object"}), 400
     # ── Batch form: {"actions": [{tool, args}, …]} (≤10) ───────────────────
     # Validated for shape here; per-action whitelisting/validation happens in
     # jarvis_tools.execute_mutating_batch so each result carries its own
@@ -4167,8 +4647,17 @@ def jarvis_act_route():
         batch_fn = getattr(jarvis_tools, "execute_mutating_batch", None)
         if batch_fn is None:
             return jsonify({"error": "batch execution unavailable"}), 500
-        _stamps = _jarvis_act_charge(len(actions))
-        if not _stamps:
+        # Charge only actions that will actually EXECUTE (mirroring the single
+        # path, which validates before charging). The executor re-checks the
+        # exact same whitelist and rejects the rest without executing — a
+        # fully-rejected batch must not burn the shared 10/60s budget.
+        n_exec = sum(
+            1 for a in actions
+            if jarvis_tools.is_mutating(a["tool"])
+            and jarvis_tools.valid_proposal_args(a["tool"], a["args"])
+        )
+        _stamps = _jarvis_act_charge(n_exec) if n_exec else []
+        if n_exec and not _stamps:
             return jsonify({"error": "rate limited"}), 429
         try:
             r = batch_fn(actions)
@@ -4538,6 +5027,8 @@ def jarvis_watches_add_route():
     except Exception as e:
         return jsonify({"error": "jarvis_watches unavailable"}), 503
     data = request.get_json(silent=True) or {}
+    if not isinstance(data, dict):
+        return jsonify({"error": "expected JSON object"}), 400
     name = data.get("name")
     conditions = data.get("conditions")
     if not isinstance(name, str) or not name.strip():
@@ -4616,6 +5107,8 @@ def jarvis_policy_set_route():
     except Exception as e:
         return jsonify({"error": "jarvis_policy unavailable"}), 503
     data = request.get_json(silent=True) or {}
+    if not isinstance(data, dict):
+        return jsonify({"error": "expected JSON object"}), 400
     kind = data.get("kind")
     value = data.get("value")
     text = data.get("text")
@@ -4802,6 +5295,8 @@ def synth_catalyst_post():
     if synth_catalyst is None:
         return jsonify({"error": "synth_catalyst module not available"}), 503
     body = request.get_json(silent=True) or {}
+    if not isinstance(body, dict):
+        return jsonify({"error": "expected JSON object"}), 400
     syms = body.get("symbols") or []
     if not isinstance(syms, list):
         return jsonify({"error": "`symbols` must be an array"}), 400
@@ -4841,6 +5336,8 @@ def synth_cluster_scan_post():
     if not synth_cluster:
         return jsonify({"error": "synth_cluster module not available"}), 503
     body = request.get_json(silent=True) or {}
+    if not isinstance(body, dict):
+        return jsonify({"error": "expected JSON object"}), 400
     direction = (body.get("direction") or "bullish").lower()
     if direction not in ("bullish", "bearish"):
         direction = "bullish"
@@ -4876,7 +5373,20 @@ def synth_divergence_map_route():
         return jsonify({"error": "synth_divmap module not available"}), 503
     if request.method == "POST":
         body = request.get_json(silent=True) or {}
+        if not isinstance(body, dict):
+            return jsonify({"error": "expected JSON object"}), 400
         universe = body.get("universe")
+        # Mirror the GET branch's string handling — a raw string is treated by
+        # synth_divmap._universe_to_list as an unknown label and silently
+        # falls back to scanning the full SP500 top-100 (the exact browser-
+        # timeout failure documented below).
+        if isinstance(universe, str):
+            if universe == "sp500_top100":
+                universe = None
+            else:
+                universe = [s.strip().upper() for s in universe.split(",") if s.strip()]
+        elif universe is not None and not isinstance(universe, list):
+            return jsonify({"error": "universe must be a list of symbols"}), 400
         top_n = _safe_int(body.get("top_n"), 20)
     else:
         # GET accepts the literal "sp500_top100" label OR a comma-separated
@@ -4930,6 +5440,10 @@ def synth_macrotranslate_get(release_id):
         surprise_pct = float(surprise) if surprise not in (None, "") else None
     except (TypeError, ValueError):
         surprise_pct = None
+    # float() parses 'nan'/'inf'; NaN mis-buckets as a large positive surprise
+    # (all comparisons False) and serializes as invalid-JSON literal NaN.
+    if surprise_pct is not None and not math.isfinite(surprise_pct):
+        return jsonify({"error": "surprise must be a finite number"}), 400
     try:
         return jsonify(synth_macrotranslate.macro_translate(release_id, surprise_pct=surprise_pct))
     except Exception as e:
@@ -4941,6 +5455,8 @@ def synth_macrotranslate_portfolio(release_id):
     if not synth_macrotranslate:
         return jsonify({"error": "synth_macrotranslate module not available"}), 503
     body = request.get_json(silent=True) or {}
+    if not isinstance(body, dict):
+        return jsonify({"error": "expected JSON object"}), 400
     holdings = body.get("holdings") or []
     surprise_pct = body.get("surprise_pct")
     if not holdings:
@@ -4971,6 +5487,9 @@ def synth_macrotranslate_portfolio(release_id):
         surprise_pct = float(surprise_pct) if surprise_pct not in (None, "") else None
     except (TypeError, ValueError):
         surprise_pct = None
+    # Same NaN/inf hole as the GET route above — reject non-finite values.
+    if surprise_pct is not None and not math.isfinite(surprise_pct):
+        return jsonify({"error": "surprise_pct must be a finite number"}), 400
     try:
         return jsonify(synth_macrotranslate.macro_translate(
             release_id, surprise_pct=surprise_pct, portfolio_holdings=holdings))
@@ -5011,6 +5530,8 @@ def synth_whatif_post():
     if not synth_whatif:
         return jsonify({"error": "synth_whatif module not available"}), 503
     body = request.get_json(silent=True) or {}
+    if not isinstance(body, dict):
+        return jsonify({"error": "expected JSON object"}), 400
     current = body.get("current_holdings") or []
     candidate = body.get("candidate") or {}
     if not isinstance(current, list) or not isinstance(candidate, dict):

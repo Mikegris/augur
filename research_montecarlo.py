@@ -247,13 +247,15 @@ def prob_of_target(
         prob_touch_approximate = True
     else:
         terminal = paths[:, -1]
-        # Direction matters: an UP-target is "ever ≥ target", a DOWN-target
-        # (below the starting NAV) is "ever ≤ target".
+        # prob_terminal_ge_target is ALWAYS P(terminal >= target) — the key's
+        # documented semantics (and how the UI renders it) must not flip for
+        # a down-target. Direction only changes what "touch" means: an
+        # UP-target is "ever ≥ target", a DOWN-target (below the starting
+        # NAV) is "ever ≤ target" (a barrier you fall through).
+        prob_term = float((terminal >= target_nav).mean())
         if target_nav >= initial_nav:
-            prob_term = float((terminal >= target_nav).mean())
             prob_touch = float((paths >= target_nav).any(axis=1).mean())
         else:
-            prob_term = float((terminal <= target_nav).mean())
             prob_touch = float((paths <= target_nav).any(axis=1).mean())
 
     implied_return_pct = (
@@ -366,12 +368,18 @@ def _fetch_returns(symbol: str, lookback_days: int) -> Optional[pd.Series]:
         return None
     # bars is a list of {time, open, high, low, close, volume}; build a
     # date-indexed Close series, then convert to daily returns.
+    # Index by the calendar DATE, not the full bar timestamp: different fetch
+    # sources stamp the same session differently (yf.history → 04:00 UTC,
+    # Yahoo v8 fallback → 13:30 UTC). _build_returns_matrix outer-joins on the
+    # index and dropna()s, so mixed intraday stamps would share ZERO rows and
+    # silently evict every holding but one. normalize() collapses both to the
+    # same midnight key.
     close = pd.Series(
         [float(b["close"]) for b in bars if b.get("close") is not None],
         index=pd.to_datetime(
             [b["time"] for b in bars if b.get("close") is not None],
             unit="s", utc=True,
-        ).tz_convert(None),
+        ).tz_convert(None).normalize(),
         name=symbol.upper(),
     )
     if len(close) < 30:
@@ -565,7 +573,11 @@ def _summarize(nav_paths: np.ndarray, initial_nav: float, horizon_days: int,
     }
 
     # Path-level drawdown: for every path, max drawdown from running peak.
-    running_peak = np.maximum.accumulate(nav_paths, axis=1)
+    # The peak must start at the INCEPTION NAV (normalized 1.0), not the
+    # day-1 value: a path that opens -8% would otherwise measure later losses
+    # from the already-depressed 0.92 "peak", understating max drawdown and
+    # the prob_drawdown_10/20pct tail-risk numbers.
+    running_peak = np.maximum(np.maximum.accumulate(nav_paths, axis=1), 1.0)
     drawdowns = (nav_paths / running_peak) - 1.0  # ≤ 0
     max_dd_per_path = drawdowns.min(axis=1)  # most-negative value per path
 

@@ -72,6 +72,35 @@ def _cache_get(symbol):
                 return _forecast_cache[symbol]
     return None
 
+
+# WHY (#174): freshness was only checked on READ and nothing ever evicted, so
+# a full-universe scan (thousands of symbols) left every expired result dict
+# (31-point path, importances, regime stats) plus a per-symbol Lock resident
+# for the process lifetime of the long-running desktop app. Sweep expired
+# entries on every cache WRITE (cheap: one dict pass per 2-5s training run)
+# and cap total entries with an oldest-first fallback.
+_CACHE_MAX_ENTRIES = 512
+
+
+def _evict_expired_locked():
+    """Evict expired cache entries + their locks. Caller holds _cache_lock."""
+    now = _time.time()
+    stale = [s for s, ts in _cache_times.items() if now - ts >= _CACHE_TTL]
+    if len(_cache_times) - len(stale) > _CACHE_MAX_ENTRIES:
+        # Still over cap after the TTL sweep — drop the oldest fresh entries.
+        fresh = sorted((s for s in _cache_times if s not in set(stale)),
+                       key=lambda s: _cache_times.get(s, 0))
+        stale.extend(fresh[: len(fresh) - _CACHE_MAX_ENTRIES])
+    for s in stale:
+        _forecast_cache.pop(s, None)
+        _cache_times.pop(s, None)
+        # Only drop an idle lock — popping one a trainer currently holds would
+        # let a second caller mint a fresh lock and retrain the same symbol
+        # concurrently (the thundering herd _symbol_locks exists to prevent).
+        lk = _symbol_locks.get(s)
+        if lk is not None and not lk.locked():
+            _symbol_locks.pop(s, None)
+
 # ── Feature Engineering ───────────────────────────────────────────────────────
 
 def _build_features(hist):
@@ -444,21 +473,34 @@ def _trend_forecast(hist, days_ahead=30):
     upper_price = round(current_price * np.exp(log_ratio + ci_factor), 2)
     lower_price = round(current_price * np.exp(log_ratio - ci_factor), 2)
 
-    # Forecast path (daily for chart)
+    # Forecast path (daily for chart). NOTE: built from the SHORT (60d) fit
+    # only, so its day-30 endpoint is the short-window projection and can
+    # differ from the blended headline `forecast_price` (short/mid/long mix)
+    # shown beside it — the chart trades headline consistency for a path
+    # that tracks the recent trend.
     w = min(60, n)
     short_coeffs = np.polyfit(np.arange(w), log_prices[-w:], 1)
+    # WHY (#175): the fitted value at the anchor is NOT the actual last close
+    # (any stock sitting off its regression line started the rendered path at
+    # a visibly different price than the live quote). Offset the whole path in
+    # log space so day 0 equals current_price exactly.
+    _anchor_offset = float(np.log(current_price)
+                           - np.polyval(short_coeffs, w - 1))
     path = []
     for d in range(days_ahead + 1):
         # WHY (Q12): the fit's x-axis runs 0..w-1, so the *last observed* day
         # sits at t=w-1, not t=w. Evaluating day0 at t=w over-extrapolated the
         # whole path by one step. Anchor day d at t=w-1+d. Likewise the band
-        # must vanish at d=0 (no forecast error on the anchor), so use √d.
+        # must vanish at d=0 (no forecast error on the anchor).
         t = (w - 1) + d
-        log_p = np.polyval(short_coeffs, t)
+        log_p = np.polyval(short_coeffs, t) + _anchor_offset
         p = float(np.exp(log_p))
         # Proper prediction-interval band (B4): includes slope uncertainty, so
         # the cone widens correctly with horizon instead of only as √d.
-        band = _pi_se(d) * 1.96
+        # d=0 is the OBSERVED close, not a forecast — zero band by invariant
+        # (#175: _pi_se's "1 +" new-observation term is nonzero even at the
+        # anchor, which painted an uncertainty band on "today").
+        band = _pi_se(d) * 1.96 if d > 0 else 0.0
         u = float(np.exp(log_p + band))
         l = float(np.exp(log_p - band))
         path.append({"day": d, "price": round(p, 2), "upper": round(u, 2), "lower": round(l, 2)})
@@ -539,6 +581,21 @@ def _detect_regime(hist, features=None):
         return "LOW VOL TREND"
 
     cluster_labels = {i: _label_cluster(c) for i, c in cluster_chars.items()}
+
+    # WHY (#162): two clusters can map to the SAME semantic label (common:
+    # "LOW VOL TREND" is the default branch), and regime_stats below is keyed
+    # by label — a duplicate silently overwrote the other cluster's stats, so
+    # consumers (forecast_ensemble looks up regime_stats[current_regime] for
+    # vol_20d) could pair the current regime with the WRONG cluster's vol.
+    # Disambiguate duplicates ("LOW VOL TREND #2") and use the disambiguated
+    # label everywhere (current_regime, distribution, stats) so the label →
+    # stats lookup is always the current bar's own cluster.
+    _label_seen: dict = {}
+    for i in sorted(cluster_labels):
+        base = cluster_labels[i]
+        _label_seen[base] = _label_seen.get(base, 0) + 1
+        if _label_seen[base] > 1:
+            cluster_labels[i] = "%s #%d" % (base, _label_seen[base])
 
     # Current regime
     current_cluster = int(labels[-1])
@@ -964,5 +1021,6 @@ def _ml_forecast_compute(symbol):
     with _cache_lock:
         _forecast_cache[symbol] = results
         _cache_times[symbol] = _time.time()
+        _evict_expired_locked()
 
     return results

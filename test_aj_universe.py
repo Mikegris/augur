@@ -80,9 +80,16 @@ def test_screen_fail_closed_on_quote_error():
 def test_rotation_advances_cursor():
     aj_db.set_setting_raw("__aj_screen_cursor", "0")
     pop = [str(i) for i in range(10)]
-    s1 = aj_universe._rotate(list(pop), 3)
-    s2 = aj_universe._rotate(list(pop), 3)
+    # _rotate no longer persists the cursor itself: the caller commits via
+    # _advance_cursor only after the slice's quotes succeed (so a 429/empty
+    # batch retries the same slice instead of skipping it).
+    s1, n1 = aj_universe._rotate(list(pop), 3)
+    aj_universe._advance_cursor(n1)                       # quotes "succeeded"
+    s2, n2 = aj_universe._rotate(list(pop), 3)
     assert s1 == ["0", "1", "2"] and s2 == ["3", "4", "5"]   # swept forward
+    # a failed batch (cursor NOT committed) must re-serve the same slice
+    s3, _ = aj_universe._rotate(list(pop), 3)
+    assert s3 == s2, "uncommitted cursor must retry the same slice"
 
 
 def test_scan_dispatch_market_screen():
@@ -151,6 +158,39 @@ def test_open_universe_helper_agrees():
     aj_config.set_config({"allow_any_symbol": True})
     assert aj_config.is_open_universe() is True
     aj_config.set_config({"universe_mode": "market_screen", "allow_any_symbol": False})
+
+
+def test_junk_tickers_excluded_and_telemetry_writes():
+    db.get_conn().execute("DELETE FROM aj_screen_cache"); db.get_conn().commit()
+    aj_db.set_setting_raw("__aj_crypto_lastgood", "")
+    aj_db.set_setting_raw("__aj_screen_telemetry", "")
+    _mock_population(["GOOD", "CORZW", "BODYW", "REAL"], cryptos=())
+    _mock_quotes({
+        "GOOD":  {"price": 40, "volume": 5e6, "market_cap": 2e9, "change_pct": 6.0},
+        "CORZW": {"price": 12, "volume": 5e6, "market_cap": 2e9, "change_pct": 9.0},  # warrant
+        "BODYW": {"price": 15, "volume": 5e6, "market_cap": 2e9, "change_pct": 8.0},  # warrant
+        "REAL":  {"price": 30, "volume": 5e6, "market_cap": 2e9, "change_pct": 4.0},
+    })
+    aj_config.set_config({"universe_mode": "market_screen", "screen_min_price": 1.0,
+                          "screen_min_dollar_volume": 1_000_000, "screen_max": 10,
+                          "include_crypto": False})
+    out = aj_universe.screen()
+    # warrants hard-excluded even though they were the strongest movers
+    assert "CORZW" not in out and "BODYW" not in out, out
+    assert "GOOD" in out and "REAL" in out, out
+    # telemetry actually persisted (the aj_db NameError regression)
+    import json
+    tel = aj_db.get_setting_raw("__aj_screen_telemetry")
+    assert tel, "screen telemetry never wrote"
+    t = json.loads(tel)
+    assert t["shortlist"] == len(out) and "quote_hit_rate" in t
+
+
+def test_is_junk_ticker_unit():
+    for j in ("CORZW", "BODYW", "BLUWW", "SPAC.WS", "FOO-WT", "BAR-UN"):
+        assert aj_universe._is_junk_ticker(j), j
+    for ok in ("AAPL", "NVDA", "BRK-B", "BTC-USD", "GOOGL", ""):
+        assert not aj_universe._is_junk_ticker(ok) or ok == "", ok
 
 
 if __name__ == "__main__":

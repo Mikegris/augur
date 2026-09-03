@@ -29,8 +29,11 @@ aj_db.aj_init()
 
 def _reset():
     conn = db.get_conn()
-    for t in ("aj_orders", "aj_fills", "aj_proposals", "aj_audit"):
-        conn.execute("DELETE FROM {}".format(t))
+    # audit_maintenance: aj_audit is append-only (v10 triggers); the test
+    # reset is explicit maintenance and must use the scoped unlock.
+    with aj_db.audit_maintenance():
+        for t in ("aj_orders", "aj_fills", "aj_proposals", "aj_audit"):
+            conn.execute("DELETE FROM {}".format(t))
     conn.execute("DELETE FROM settings WHERE key LIKE 'aj_%' OR key LIKE '__aj_%'")
     conn.commit()
     try:
@@ -65,6 +68,56 @@ def test_secret_lease_expiry_and_delete():
     aj_secrets.delete("k")
     assert aj_secrets.has("k") is False
     assert aj_secrets.lease("k") is None
+
+
+def test_secret_rotate_key_round_trip():
+    _reset()
+    import base64
+    aj_secrets.store("alpaca_key_id", "PK_ROTATE_ME")
+    aj_secrets.store("alpaca_secret_key", "SK_ROTATE_ME")
+    old_key = os.environ["AUGUR_SECRETS_KEY"]
+    r = aj_secrets.rotate_master_key()
+    assert r["ok"] is True and r["rotated"] == 2, r
+    assert r["env_key_active"] is True                     # env is this test's source
+    # key material never in the result (counts/paths only)
+    assert old_key not in str(r) and os.environ["AUGUR_SECRETS_KEY"] not in str(r)
+    # round trip: stored secrets still lease fine under the NEW key
+    assert aj_secrets.lease("alpaca_key_id", caller="test").value == "PK_ROTATE_ME"
+    assert aj_secrets.lease("alpaca_secret_key", caller="test").value == "SK_ROTATE_ME"
+    # the OLD key must no longer decrypt the stored blob
+    row = db.get_conn().execute(
+        "SELECT value FROM settings WHERE key='__aj_sec_alpaca_key_id'").fetchone()
+    try:
+        Fernet(old_key.encode()).decrypt(base64.b64decode(row["value"]))
+        assert False, "old key still decrypts after rotation"
+    except AssertionError:
+        raise
+    except Exception:
+        pass
+    # the new key was persisted to the key-file convention as well
+    assert r.get("key_file") and os.path.exists(r["key_file"])
+    with open(r["key_file"], "rb") as f:
+        assert f.read().strip() == os.environ["AUGUR_SECRETS_KEY"].encode()
+
+
+def test_secret_rotate_aborts_on_undecryptable_blob():
+    _reset()
+    import base64
+    aj_secrets.store("good", "GOOD_VALUE")
+    # a blob the current key can NOT decrypt (foreign key / corruption)
+    foreign = Fernet(Fernet.generate_key()).encrypt(b"orphan")
+    db.set_setting("__aj_sec_orphan", base64.b64encode(foreign).decode("ascii"))
+    before = db.get_conn().execute(
+        "SELECT value FROM settings WHERE key='__aj_sec_good'").fetchone()["value"]
+    old_env = os.environ["AUGUR_SECRETS_KEY"]
+    r = aj_secrets.rotate_master_key()
+    assert r["ok"] is False and "orphan" in r["error"], r   # names the scope only
+    assert "GOOD_VALUE" not in str(r)
+    # NOTHING changed: same ciphertext, same active key, still leasable
+    after = db.get_conn().execute(
+        "SELECT value FROM settings WHERE key='__aj_sec_good'").fetchone()["value"]
+    assert after == before and os.environ["AUGUR_SECRETS_KEY"] == old_env
+    assert aj_secrets.lease("good", caller="test").value == "GOOD_VALUE"
 
 
 # ── Alpaca gating (fail-closed) ───────────────────────────────────────────────
@@ -182,6 +235,114 @@ def test_alpaca_reconcile_dedups_fills():
     assert fills[0]["n"] == 1, fills
     o = aj_db.get_row("aj_orders", oid)
     assert o["state"] == "filled" and o["filled_qty"] == 5
+
+
+# ── PaperBroker partial fills (paper_partial_fills, §12.5 extension) ──────────
+
+def _patch_paper_cfg(**over):
+    """Overlay keys onto aj_config.get_config for one test. Needed because the
+    partial-fill keys live in aj_config DEFAULTS owned by another writer; the
+    broker only cfg.get()s them (absent → flag OFF). Returns the original
+    get_config for the caller's finally-restore."""
+    orig = aj_config.get_config
+
+    def patched():
+        cfg = dict(orig())
+        cfg.update(over)
+        return cfg
+    aj_config.get_config = patched
+    return orig
+
+
+def test_paper_partial_fills_off_is_single_full_fill():
+    _reset()
+    import fetcher
+    orig_q = fetcher.get_quote
+    fetcher.get_quote = lambda s: {"price": 100.0}
+    orig_cfg = _patch_paper_cfg(paper_partial_fills=False, fee_bps=0.0,
+                                paper_slippage_bps=0.0, paper_spread_fraction=0.0,
+                                min_fee_usd=0.0)
+    try:
+        b = aj_broker.PaperBroker()
+        # $100k notional dwarfs the $25k default budget — but the flag is OFF,
+        # so behavior must be the legacy one: one instant, complete fill.
+        r = b.submit({"symbol": "NVDA", "side": "buy", "qty": 1000,
+                      "order_type": "market", "asset_type": "stock",
+                      "client_order_id": "pp0"})
+        assert r["state"] == "filled" and r["filled_qty"] == 1000.0, r
+        assert len(r["fills"]) == 1 and r["fills"][0]["qty"] == 1000.0, r["fills"]
+        assert r["avg_fill_price"] == 100.0, r
+        # polling a filled order must not mutate it
+        o = b.get_order(r["broker_order_id"])
+        assert o["state"] == "filled" and len(o["fills"]) == 1, o
+    finally:
+        fetcher.get_quote = orig_q
+        aj_config.get_config = orig_cfg
+
+
+def test_paper_partial_fill_then_completion_on_poll():
+    _reset()
+    import fetcher
+    orig_q = fetcher.get_quote
+    fetcher.get_quote = lambda s: {"price": 100.0}
+    orig_cfg = _patch_paper_cfg(paper_partial_fills=True,
+                                paper_fill_liquidity_usd=25000,
+                                fee_bps=0.0, paper_slippage_bps=0.0,
+                                paper_spread_fraction=0.0, min_fee_usd=0.0)
+    try:
+        b = aj_broker.PaperBroker()
+        r = b.submit({"symbol": "NVDA", "side": "buy", "qty": 1000,
+                      "order_type": "market", "asset_type": "stock",
+                      "client_order_id": "pp1"})
+        # $25k budget / $100 = 250 shares now; 750 rest as partially_filled
+        assert r["state"] == "partially_filled", r
+        assert abs(r["filled_qty"] - 250.0) < 1e-9, r
+        assert len(r["fills"]) == 1 and abs(r["raw"]["remaining"] - 750.0) < 1e-9, r
+        # deterministic participation — same inputs, same partial fill
+        r2 = b.submit({"symbol": "NVDA", "side": "buy", "qty": 1000,
+                       "order_type": "market", "asset_type": "stock",
+                       "client_order_id": "pp2"})
+        assert abs(r2["filled_qty"] - 250.0) < 1e-9, r2
+        # a later poll completes the remainder AT THE CURRENT QUOTE,
+        # appending a second fill (price moved 100 → 102 meanwhile)
+        fetcher.get_quote = lambda s: {"price": 102.0}
+        o = b.get_order(r["broker_order_id"])
+        assert o["state"] == "filled" and abs(o["filled_qty"] - 1000.0) < 1e-9, o
+        assert len(o["fills"]) == 2 and abs(o["fills"][1]["qty"] - 750.0) < 1e-9, o["fills"]
+        assert abs(o["fills"][1]["price"] - 102.0) < 1e-9, o["fills"]
+        # aggregates must stay consistent with the fills list — downstream
+        # _apply_broker_result/_recompute_order trusts them verbatim
+        vwap = sum(f["qty"] * f["price"] for f in o["fills"]) / o["filled_qty"]
+        assert abs(o["avg_fill_price"] - vwap) < 1e-9, (o["avg_fill_price"], vwap)
+        assert abs(vwap - (250 * 100.0 + 750 * 102.0) / 1000.0) < 1e-9, vwap
+        # a second poll is idempotent — no third fill appears
+        o2 = b.get_order(r["broker_order_id"])
+        assert len(o2["fills"]) == 2 and o2["state"] == "filled", o2
+    finally:
+        fetcher.get_quote = orig_q
+        aj_config.get_config = orig_cfg
+
+
+def test_paper_partial_fill_small_order_unaffected():
+    _reset()
+    import fetcher
+    orig_q = fetcher.get_quote
+    fetcher.get_quote = lambda s: {"price": 100.0}
+    orig_cfg = _patch_paper_cfg(paper_partial_fills=True,
+                                paper_fill_liquidity_usd=25000,
+                                fee_bps=0.0, paper_slippage_bps=0.0,
+                                paper_spread_fraction=0.0, min_fee_usd=0.0)
+    try:
+        b = aj_broker.PaperBroker()
+        # $10k notional < $25k budget → fills fully even with the flag ON
+        r = b.submit({"symbol": "NVDA", "side": "buy", "qty": 100,
+                      "order_type": "market", "asset_type": "stock",
+                      "client_order_id": "pp3"})
+        assert r["state"] == "filled" and r["filled_qty"] == 100.0, r
+        assert len(r["fills"]) == 1, r["fills"]
+    finally:
+        fetcher.get_quote = orig_q
+        aj_config.get_config = orig_cfg
 
 
 if __name__ == "__main__":

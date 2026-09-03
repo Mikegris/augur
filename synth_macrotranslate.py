@@ -282,9 +282,15 @@ class _FactorFrame:
         self.available = True
 
     def forward_5d(self, on_or_after: datetime.date) -> Optional[Dict[str, float]]:
-        """Sum of daily factor returns over the 5 trading days at/after
-        `on_or_after`. Returns None when the date falls outside the frame
-        or there aren't 5 forward days available.
+        """Sum of daily factor returns over the 5 trading days STARTING THE
+        SESSION AFTER `on_or_after`. Returns None when the date falls outside
+        the frame or there aren't 5 forward days available.
+
+        Entry convention matches `_forward_return`: the release-day move is
+        already over by the time the print is actionable, so the window starts
+        one session AFTER the release — otherwise the factor window (days 0-4)
+        and the price windows (days 1-5) are misaligned by one session and the
+        projection includes the unactionable release-day factor move.
 
         Daily Ken French returns are additive (decimal). For a 5-day
         cumulative log-return view the sum is a tight first-order
@@ -293,7 +299,7 @@ class _FactorFrame:
         if not self.available or self.factor_matrix is None:
             return None
         target = on_or_after.isoformat()
-        # First trading day at or after target
+        # First trading day at or after target (the release session) …
         i = None
         for d in self.dates:
             if d >= target:
@@ -301,12 +307,14 @@ class _FactorFrame:
                 break
         if i is None:
             return None
-        end = i + _FWD_DAYS
+        # … then ENTER one session later, matching _forward_return.
+        start = i + 1
+        end = start + _FWD_DAYS
         if end > len(self.dates):
             return None
         try:
             import numpy as np
-            block = self.factor_matrix[i:end]
+            block = self.factor_matrix[start:end]
             sums = np.sum(block, axis=0)
             return {
                 name: float(sums[k]) * 100.0  # decimal → percent
@@ -567,13 +575,19 @@ def _portfolio_projection(holdings: List[dict],
         worst_case = round(min(projected_dist), 4)
     else:
         # Fallback: SPY 5-day IQR rescaled by market beta (old behaviour).
+        # A NEGATIVE beta flips the ordering when scaling, so sort/re-min-max
+        # AFTER multiplying — otherwise the IQR bounds come out reversed and
+        # "best_case" is actually the projected loss.
         band_basis = "spy_iqr_x_market_beta"
         q1, _med, q3 = _quartiles(spy_5d_distribution)
         if q1 is not None and q3 is not None:
-            iqr = [round(q1 * scale, 4), round(q3 * scale, 4)]
+            lo_b, hi_b = sorted([q1 * scale, q3 * scale])
+            iqr = [round(lo_b, 4), round(hi_b, 4)]
         if spy_5d_distribution:
-            best_case = round(max(spy_5d_distribution) * scale, 4)
-            worst_case = round(min(spy_5d_distribution) * scale, 4)
+            ext_a = max(spy_5d_distribution) * scale
+            ext_b = min(spy_5d_distribution) * scale
+            best_case = round(max(ext_a, ext_b), 4)
+            worst_case = round(min(ext_a, ext_b), 4)
 
     # Per-holding winners/losers via individual factor exposures.
     per_symbol: List[dict] = []
@@ -649,19 +663,23 @@ def macro_translate(release_id: str,
         except Exception:
             fp = ""
 
-    surprise_bucket: Optional[str] = None
-    if surprise_pct is not None:
-        try:
-            sp = float(surprise_pct)
-            # 4-bin signed bucket so similar surprises share a cache entry.
-            if   sp <= -0.5: surprise_bucket = "neg2"
-            elif sp <  0.0:  surprise_bucket = "neg1"
-            elif sp <  0.5:  surprise_bucket = "pos1"
-            else:            surprise_bucket = "pos2"
-        except (TypeError, ValueError):
-            surprise_bucket = None
+    # NOTE: surprise_pct is deliberately NOT part of the cache key. Nothing in
+    # the computation conditions on it (it's only echoed back in the release
+    # envelope), so bucketing it fragmented the 6h cache into up to 4
+    # byte-identical recomputes (~12 chart pulls + factor frame each) per
+    # release. We echo the caller's value into the envelope post-cache instead.
+    cache_key = ("macrotranslate", rid, fp)
 
-    cache_key = ("macrotranslate", rid, surprise_bucket or "any", fp)
+    def _echo_surprise(res: dict) -> dict:
+        """Overwrite release.surprise_pct with THIS caller's value, on a
+        shallow copy — cache_store may hand back the shared cached object."""
+        if not isinstance(res, dict):
+            return res
+        out2 = dict(res)
+        rel = dict(out2.get("release") or {})
+        rel["surprise_pct"] = surprise_pct
+        out2["release"] = rel
+        return out2
 
     def _compute() -> dict:
         episodes_raw = _historical_release_dates(rid)
@@ -736,8 +754,13 @@ def macro_translate(release_id: str,
                             pv = float(valued[-2][1])
                         except (TypeError, ValueError):
                             lv = pv = None
-                        if pv:
-                            delta_pct = round((lv - pv) / pv * 100.0, 4)
+                        # Divide by abs(prior): signed series (e.g. T10Y2Y goes
+                        # negative during inversions) otherwise FLIP the sign of
+                        # the change — a rising spread showed as a decline. A
+                        # prior of exactly 0 has no defined percent change, so
+                        # delta_pct stays None there.
+                        if lv is not None and pv:
+                            delta_pct = round((lv - pv) / abs(pv) * 100.0, 4)
             except Exception:
                 pass
 
@@ -763,12 +786,12 @@ def macro_translate(release_id: str,
         return out
 
     if cache_store is None:
-        return _compute()
+        return _echo_surprise(_compute())
     try:
-        return cache_store.coalesce(cache_key, _CACHE_TTL, _compute)
+        return _echo_surprise(cache_store.coalesce(cache_key, _CACHE_TTL, _compute))
     except Exception as e:
         log.warning("cache_store.coalesce(macrotranslate) failed: %s", e)
-        return _compute()
+        return _echo_surprise(_compute())
 
 
 def _release_envelope(meta: dict,

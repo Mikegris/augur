@@ -313,17 +313,29 @@ def _score_options(ticker, current_price, hist):
                 bid = ask = None
             if bid and ask and bid > 0 and ask > 0:
                 return (bid + ask) / 2.0
-            return float(df["lastPrice"].iloc[0])
+            # lastPrice on a thin/after-hours row is frequently NaN or 0 —
+            # propagating it makes the straddle NaN, iv_premium NaN, and
+            # every `<` comparison False, pinning the score to max-bearish 2
+            # on a DATA GAP. Return NaN explicitly so the caller can detect
+            # it and bail to neutral. (NaN != NaN is the self-test below.)
+            try:
+                last = float(df["lastPrice"].iloc[0])
+            except (TypeError, ValueError):
+                return float("nan")
+            return last if (last == last and last > 0) else float("nan")
 
         atm_calls = calls.iloc[(calls["strike"] - current_price).abs().argsort()[:1]]
         atm_puts  = puts.iloc[(puts["strike"] - current_price).abs().argsort()[:1]]
         straddle_price = _leg_mid(atm_calls) + _leg_mid(atm_puts)
+        if not (straddle_price == straddle_price) or straddle_price <= 0:
+            return 8  # no usable quotes on either leg — data gap, stay neutral
         raw_implied_move_pct = straddle_price / current_price * 100 if current_price else 0
-        # The ATM straddle prices roughly a 1.25-sigma move, while HV below is a
-        # 1-sigma quantity. Divide the straddle-implied move by ~1.25 so that a
-        # fairly-priced chain (IV == HV) yields iv_premium ~= 1.0 instead of a
-        # spurious ~1.25 premium on every name.
-        implied_move_pct = raw_implied_move_pct / 1.25
+        # An ATM straddle prices ≈0.8σ of the horizon move (2·φ(0)·σ·√T =
+        # 0.7979·σ√T), NOT 1.25σ — the old /1.25 "correction" went the wrong
+        # direction and doubled the bias: a fairly priced chain (IV == HV,
+        # raw ratio ≈0.8) scored 14/15 "IV cheap" on nearly every liquid
+        # name. Divide by 0.8 so IV == HV maps to iv_premium ≈ 1.0.
+        implied_move_pct = raw_implied_move_pct / 0.8
 
         # Historical volatility (30-day) — use shared history
         if hist.empty or len(hist) < 20:

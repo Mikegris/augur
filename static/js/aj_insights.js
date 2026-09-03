@@ -97,7 +97,18 @@
     if (typeof Chart === "undefined") return null;
     return c.getContext ? c.getContext("2d") : null;
   }
-  function keepChart(id, chart) { if (chart) W._charts[id] = chart; }
+  function keepChart(id, chart) {
+    if (!chart) return;
+    // Destroy any instance already registered under this id before
+    // overwriting: charts created outside chartCtx() (e.g. loadReplay's
+    // poll-completion re-render) would otherwise leak the old instance in
+    // Chart.js's internal registry — detached canvas, contexts and
+    // ResizeObserver included — one per re-render.
+    if (W._charts[id] && W._charts[id] !== chart) {
+      try { W._charts[id].destroy(); } catch (e) {}
+    }
+    W._charts[id] = chart;
+  }
 
   // ── panel scaffold ───────────────────────────────────────────────────────
   function card(title, id, sub) {
@@ -860,6 +871,303 @@
   }
 
   // ──────────────────────────────────────────────────────────────────────────
+  //  15 · Replay Lab — historical replays + config grids (aj_replay artifacts)
+  // ──────────────────────────────────────────────────────────────────────────
+  function replayForm() {
+    var today = new Date();
+    var end = new Date(today.getTime() - 86400000).toISOString().slice(0, 10);
+    var start = new Date(today.getTime() - 730 * 86400000).toISOString().slice(0, 10);
+    return '<div id="aj-replay-form" style="display:flex;flex-wrap:wrap;gap:6px;' +
+      'align-items:center;font-size:11px;margin-bottom:8px;padding:6px;' +
+      'background:#151515;border-radius:6px;">' +
+      '<input id="aj-replay-syms" placeholder="AAPL,MSFT,NVDA" ' +
+        'style="flex:2;min-width:130px;font-size:11px;" title="replay universe (comma-separated)">' +
+      '<input id="aj-replay-start" type="date" value="' + start + '" style="font-size:11px;">' +
+      '<input id="aj-replay-end" type="date" value="' + end + '" style="font-size:11px;">' +
+      '<input id="aj-replay-cash" type="number" value="100000" ' +
+        'style="width:80px;font-size:11px;" title="starting cash $">' +
+      '<button class="btn" id="aj-replay-go" style="font-size:11px;padding:3px 10px;">Run replay</button>' +
+      '<span id="aj-replay-status" class="muted" style="font-size:11px;"></span>' +
+      '</div>';
+  }
+
+  // Last replay run_id whose completion we already rendered. The status
+  // endpoint keeps reporting {running:false, run_id, returncode:0} for the
+  // rest of the server session after a replay finishes, and wireReplayForm's
+  // wire-up poll() runs on every render — without this guard, a completed
+  // run triggers loadReplay → wireReplayForm → poll → loadReplay forever
+  // (unthrottled request/re-render loop). Module-level so it survives
+  // re-renders within this page life.
+  var _replayHandledRun = null;
+
+  function wireReplayForm(body) {
+    var go = document.getElementById("aj-replay-go");
+    var st = document.getElementById("aj-replay-status");
+    if (!go) return;
+
+    function poll() {
+      API.get("/api/aj/replay/status").then(function (s) {
+        if (s.running) {
+          if (st) st.textContent = "running " + (s.run_id || "") + "…";
+          if (go) go.disabled = true;
+          setTimeout(poll, 5000);
+        } else if (s.run_id) {
+          if (st) st.textContent = s.returncode === 0
+            ? "done — " + s.run_id : "failed (see run.log)";
+          if (go) go.disabled = false;
+          // Re-render ONCE per completed run — mark it handled BEFORE the
+          // async loadReplay so the re-wired form's poll() can't re-enter.
+          if (s.returncode === 0 && s.run_id !== _replayHandledRun) {
+            _replayHandledRun = s.run_id;
+            loadReplay(body);   // re-render with the new run
+          }
+        }
+      }).catch(function () { if (go) go.disabled = false; });
+    }
+
+    go.addEventListener("click", function () {
+      var syms = (document.getElementById("aj-replay-syms") || {}).value || "";
+      if (!syms.trim()) { if (st) st.textContent = "enter symbols first"; return; }
+      go.disabled = true;
+      if (st) st.textContent = "launching…";
+      API.post("/api/aj/replay/run", {
+        symbols: syms,
+        start: (document.getElementById("aj-replay-start") || {}).value,
+        end: (document.getElementById("aj-replay-end") || {}).value,
+        cash: (document.getElementById("aj-replay-cash") || {}).value
+      }).then(function (r) {
+        if (st) st.textContent = "running " + (r.run_id || "") +
+          "… (first run downloads history; isolated from live trading)";
+        setTimeout(poll, 5000);
+      }).catch(function (e) {
+        go.disabled = false;
+        if (st) st.textContent = "launch failed: " + (e && e.message || "error");
+      });
+    });
+    // a replay may already be in flight from an earlier visit
+    poll();
+  }
+
+  function labSection(lab) {
+    if (!lab || lab.error) return "";
+    var badge = lab.enabled
+      ? '<span style="color:' + GREEN + ';">\u25cf on</span>'
+      : '<span class="muted">\u25cb off</span>';
+    var html = '<div style="font-size:12px;margin-top:12px;border-top:1px solid #1b1b1b;padding-top:8px;">' +
+      '<b>Research Scientist</b> ' + badge +
+      ' <span class="muted">\u00b7 ' + esc(String(lab.experiments_total || 0)) +
+      ' experiments \u00b7 promotion bar \u0394sharpe \u2265 ' + esc(String(lab.current_margin)) +
+      ' \u00b7 queue ' + esc(String((lab.queue || []).length)) + '</span></div>';
+    var recent = (lab.recent || []).slice(0, 5);
+    if (recent.length) {
+      html += '<table class="data-table" style="width:100%;font-size:11px;margin-top:4px;">' +
+        '<thead><tr><th>hypothesis</th><th>verdict</th><th>\u0394sharpe</th><th>wins</th></tr></thead><tbody>' +
+        recent.map(function (r) {
+          var col = r.verdict === "promoted" ? GREEN :
+                    (r.verdict === "rejected" ? RED : MUTED);
+          return '<tr><td>' + esc((r.hypothesis || "").slice(0, 60)) + '</td>' +
+            '<td style="color:' + col + ';">' + esc(r.verdict || "\u2014") + '</td>' +
+            '<td>' + esc(r.mean_delta === null || r.mean_delta === undefined ? "\u2014" : r.mean_delta) + '</td>' +
+            '<td>' + esc(r.wins === null || r.wins === undefined ? "\u2014" : r.wins) + '</td></tr>';
+        }).join("") + '</tbody></table>';
+    }
+    var promos = (lab.promotions || []).slice(0, 4);
+    if (promos.length) {
+      html += '<div class="muted" style="font-size:11px;margin-top:6px;">promotions</div>' +
+        promos.map(function (p) {
+          var col = p.status === "active" ? GREEN :
+                    (p.status === "demoted" ? RED : MUTED);
+          return '<div style="font-size:11px;">' + esc(p.key) + ': ' +
+            esc(String(p.old_value)) + ' \u2192 <b>' + esc(String(p.new_value)) + '</b> ' +
+            '<span style="color:' + col + ';">[' + esc(p.status) + ']</span>' +
+            (p.demote_reason ? ' <span class="muted">' + esc(p.demote_reason) + '</span>' : '') +
+            '</div>';
+        }).join("");
+    }
+    return html;
+  }
+
+  function loadReplay(body) {
+    return Promise.all([
+      API.get("/api/aj/replays"),
+      API.get("/api/aj/lab").catch(function () { return null; })
+    ]).then(function (both) {
+      var data = both[0], lab = both[1];
+      var latest = data && data.latest;
+      var grids = (data && data.grids) || [];
+      if (!latest && !grids.length) {
+        body.innerHTML = replayForm() +
+          '<div class="muted" style="font-size:12px;">no replays yet — pick a ' +
+          'universe and press Run (or use: python aj_cli.py replay run …)</div>';
+        wireReplayForm(body);
+        return;
+      }
+      var html = replayForm();
+      if (latest) {
+        var alpha = num(latest.alpha_pct);
+        var aColor = alpha === null ? MUTED : (alpha >= 0 ? GREEN : RED);
+        html += '<div style="font-size:12px;margin-bottom:6px;">' +
+          '<span class="muted">latest run</span> <b>' + esc(latest.run_id) + '</b>' +
+          ' <span class="muted">' + esc(latest.start) + " → " + esc(latest.end) + '</span></div>' +
+          '<div style="display:flex;flex-wrap:wrap;gap:10px;font-size:12px;margin-bottom:8px;">' +
+          '<span>return <b>' + fmtPct(latest.total_return_pct) + '</b></span>' +
+          '<span>bench ' + fmtPct(latest.benchmark_return_pct) + '</span>' +
+          '<span style="color:' + aColor + ';">alpha <b>' + fmtPct(latest.alpha_pct) + '</b></span>' +
+          '<span>sharpe ' + (num(latest.sharpe) === null ? "—" : latest.sharpe) + '</span>' +
+          '<span>maxDD ' + fmtPct(latest.max_drawdown_pct) + '</span>' +
+          '<span>trades ' + esc(latest.trades == null ? "—" : latest.trades) + '</span>' +
+          '<span>metalabel AUC ' + (latest.metalabel && num(latest.metalabel.oos_auc) !== null
+            ? Number(latest.metalabel.oos_auc).toFixed(3) : "—") + '</span>' +
+          '</div>';
+        html += '<div style="height:160px;"><canvas id="aj-ins-replay-chart"></canvas></div>';
+      }
+      grids.slice(-1).forEach(function (g) {
+        var win = g.winner || {};
+        html += '<div style="font-size:12px;margin-top:10px;">' +
+          '<span class="muted">grid</span> <b>' + esc(g.grid_id) + '</b>' +
+          ' <span class="muted">ranked on train window; judged on holdout</span></div>';
+        var cells = (g.cells || []).slice().sort(function (a, b) {
+          return (num(b.test_sharpe, -999)) - (num(a.test_sharpe, -999));
+        });
+        html += '<table class="data-table" style="width:100%;font-size:11px;margin-top:4px;">' +
+          '<thead><tr><th>params</th><th>train shp</th><th>holdout shp</th>' +
+          '<th>holdout ret</th><th>alpha</th></tr></thead><tbody>' +
+          cells.slice(0, 6).map(function (c) {
+            var isWin = win.run_id && c.run_id === win.run_id;
+            var p = Object.keys(c.params || {}).map(function (k) {
+              return k.replace(/_/g, " ").replace("pct", "%") + "=" + c.params[k];
+            }).join(" · ");
+            return '<tr' + (isWin ? ' style="color:' + AMBER + ';"' : '') + '><td>' +
+              esc(p) + (isWin ? " ★" : "") + '</td>' +
+              '<td>' + esc(c.train_sharpe == null ? "—" : c.train_sharpe) + '</td>' +
+              '<td><b>' + esc(c.test_sharpe == null ? "—" : c.test_sharpe) + '</b></td>' +
+              '<td>' + fmtPct(c.test_return_pct) + '</td>' +
+              '<td>' + fmtPct(c.alpha_pct) + '</td></tr>';
+          }).join("") + '</tbody></table>';
+      });
+      html += labSection(lab);
+      body.innerHTML = html;
+      wireReplayForm(body);
+      if (!latest || !(latest.daily || []).length) return;
+      // normalized % curves: agent equity vs buy-and-hold benchmark
+      var d0 = latest.daily.filter(function (d) { return num(d.equity) !== null; });
+      if (!d0.length) return;
+      var e0 = num(d0[0].equity);
+      var labels = d0.map(function (d) { return d.date; });
+      var agent = d0.map(function (d) { return (num(d.equity) / e0 - 1) * 100; });
+      // benchmark aligned to the agent's dates (last close on/before each) so
+      // both lines share one axis even after independent decimation
+      var bmap = {};
+      (latest.benchmark_daily || []).forEach(function (b) {
+        if (num(b.close) !== null) bmap[b.date] = num(b.close);
+      });
+      var bkeys = Object.keys(bmap).sort();
+      var b0 = bkeys.length ? bmap[bkeys[0]] : null;
+      var bench = labels.map(function (d) {
+        if (b0 === null) return null;
+        var last = null;
+        for (var i = 0; i < bkeys.length && bkeys[i] <= d; i++) last = bkeys[i];
+        return last === null ? null : (bmap[last] / b0 - 1) * 100;
+      });
+      var ctx = document.getElementById("aj-ins-replay-chart");
+      if (!ctx || typeof Chart === "undefined") return;
+      var datasets = [{ label: "agent", data: agent, borderColor: ACCENT,
+                        borderWidth: 1.5, pointRadius: 0, tension: 0.1 }];
+      if (b0 !== null) {
+        datasets.push({ label: "benchmark", data: bench, borderColor: MUTED,
+                        borderWidth: 1, pointRadius: 0, borderDash: [4, 3], tension: 0.1 });
+      }
+      var chart = new Chart(ctx, {
+        type: "line",
+        data: { labels: labels, datasets: datasets },
+        options: {
+          responsive: true, maintainAspectRatio: false, animation: false,
+          plugins: {
+            legend: { labels: { color: MUTED, font: { size: 10 }, boxWidth: 12 } },
+            title: { display: true, text: "replayed equity vs benchmark (%)",
+                     color: MUTED, font: { size: 11 } }
+          },
+          scales: {
+            x: { ticks: { color: MUTED, font: { size: 9 }, maxTicksLimit: 8 },
+                 grid: { color: "#1b1b1b" } },
+            y: { ticks: { color: MUTED, font: { size: 9 },
+                          callback: function (v) { return v + "%"; } },
+                 grid: { color: "#1b1b1b" } }
+          }
+        }
+      });
+      keepChart("aj-ins-replay-chart", chart);
+    });
+  }
+
+  // 16. TAX VIEW (realized-gain short/long-term split + estimated liability)
+  // /api/aj/tax -> {short_term_gain, long_term_gain, total_realized, rates,
+  //   rates_configured, estimate:{tax_total,...}, after_tax_realized,
+  //   wash_sale_flags, by_year:[{year, short_term_gain, long_term_gain,
+  //   total_realized, trades, wash_sale_losses, tax_total}], note}
+  async function loadTax(body) {
+    try {
+      var d = await API.get("/api/aj/tax");
+      if (!d || d.error) return placeholder(body, "tax view unavailable");
+      if (!d.closed_lots) {
+        return placeholder(body, "No closed trades yet — realized gains appear here once the agent sells a position.");
+      }
+      var st = num(d.short_term_gain, 0), lt = num(d.long_term_gain, 0),
+          tot = num(d.total_realized, 0);
+      function stat(label, val, col) {
+        return '<div style="display:flex;justify-content:space-between;font-size:12px;padding:3px 0;">' +
+          '<span class="muted">' + esc(label) + '</span>' +
+          '<span style="color:' + (col || "inherit") + ';font-variant-numeric:tabular-nums;">' + val + '</span></div>';
+      }
+      var totCol = tot >= 0 ? GREEN : RED;
+      var h = '<div style="font-size:20px;font-weight:600;color:' + totCol + ';margin-bottom:1px;">' +
+        money(tot) + ' <span style="font-size:12px;" class="muted">realized</span></div>' +
+        '<div class="muted" style="font-size:10px;margin-bottom:10px;">' +
+        num(d.closed_lots, 0) + ' closed lots' +
+        (d.wash_sale_flags ? ' · <span style="color:' + AMBER + ';">' + num(d.wash_sale_flags, 0) + ' wash-sale flag(s)</span>' : '') +
+        '</div>';
+      h += stat("short-term gain (≤1yr, ordinary)", money(st), st >= 0 ? GREEN : RED);
+      h += stat("long-term gain (>1yr, preferential)", money(lt), lt >= 0 ? GREEN : RED);
+      var r = d.rates || {};
+      if (d.rates_configured) {
+        var est = d.estimate || {};
+        h += '<div style="border-top:1px solid #222;margin:8px 0 4px;"></div>';
+        h += stat("est. tax — short (@" + fmtPct(num(r.short_term) * 100, 0) + ")", money(est.tax_short_term), RED);
+        h += stat("est. tax — long (@" + fmtPct(num(r.long_term) * 100, 0) + ")", money(est.tax_long_term), RED);
+        h += stat("estimated tax owed", money(est.tax_total), RED);
+        h += stat("after-tax realized", money(d.after_tax_realized), num(d.after_tax_realized, 0) >= 0 ? GREEN : RED);
+        if (num(est.loss_carryover, 0) < 0)
+          h += stat("loss carryover", money(est.loss_carryover), MUTED);
+      } else {
+        h += '<div class="muted" style="font-size:11px;margin:8px 0;padding:6px 8px;background:#161616;border-radius:4px;">' +
+          'Set <code>tax_short_term_rate</code> and <code>tax_long_term_rate</code> in Config to estimate the liability. ' +
+          'Showing the gain split only.</div>';
+      }
+      // per-year table
+      var yrs = d.by_year || [];
+      if (yrs.length) {
+        h += '<table class="data-table" style="width:100%;font-size:11px;margin-top:10px;"><thead><tr>' +
+          '<th>year</th><th>short-term</th><th>long-term</th><th>realized</th>' +
+          (d.rates_configured ? '<th>est. tax</th>' : '') + '<th>trades</th></tr></thead><tbody>';
+        yrs.forEach(function (y) {
+          var yt = num(y.total_realized, 0);
+          h += '<tr><td>' + esc(y.year) + '</td>' +
+            '<td style="color:' + (num(y.short_term_gain, 0) >= 0 ? GREEN : RED) + ';">' + money(y.short_term_gain) + '</td>' +
+            '<td style="color:' + (num(y.long_term_gain, 0) >= 0 ? GREEN : RED) + ';">' + money(y.long_term_gain) + '</td>' +
+            '<td style="color:' + (yt >= 0 ? GREEN : RED) + ';">' + money(yt) + '</td>' +
+            (d.rates_configured ? '<td style="color:' + RED + ';">' + money(y.tax_total) + '</td>' : '') +
+            '<td>' + num(y.trades, 0) + '</td></tr>';
+        });
+        h += '</tbody></table>';
+      }
+      h += '<div style="margin-top:10px;"><a href="/api/aj/tax/lots.csv" ' +
+        'style="font-size:11px;color:' + ACCENT + ';text-decoration:none;">↓ export closed lots (Form 8949 CSV)</a></div>';
+      h += '<div class="muted" style="font-size:10px;margin-top:8px;line-height:1.4;">' + esc(d.note || "") + '</div>';
+      body.innerHTML = h;
+    } catch (e) { placeholder(body, "tax view unavailable"); }
+  }
+
+  // ──────────────────────────────────────────────────────────────────────────
   //  render
   // ──────────────────────────────────────────────────────────────────────────
   var PANELS = [
@@ -876,7 +1184,9 @@
     ["11 · Policy Expectancy",     "aj-ins-backtest",  "walk-forward edge of the policy", loadBacktest],
     ["12 · Learned Edge",          "aj-ins-metalabel", "meta-label P(profit) model", loadMetalabel],
     ["13 · Risk Governor",         "aj-ins-governor",  "total exposure dial + circuit breaker", loadRiskGovernor],
-    ["14 · Benchmark vs Indexes",  "aj-ins-benchmark", "agent return vs SPY/QQQ/DIA/IWM", loadBenchmark]
+    ["14 · Benchmark vs Indexes",  "aj-ins-benchmark", "agent return vs SPY/QQQ/DIA/IWM", loadBenchmark],
+    ["15 · Replay Lab",            "aj-ins-replay",    "historical replays + config grids (aj_replay)", loadReplay],
+    ["16 · Tax View",              "aj-ins-tax",       "realized gains: short/long-term + estimated tax", loadTax]
   ];
 
   function render(rootEl) {

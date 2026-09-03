@@ -58,6 +58,25 @@ def _clamp(value, lo=0, hi=100):
     return value
 
 
+def _pct_from_fraction(v):
+    # type: (object) -> Optional[float]
+    """Convert a fetcher.get_fundamentals ratio field (fraction) to percent.
+
+    BOTH upstream paths deliver FRACTIONS: yfinance .info reports
+    revenueGrowth/earningsGrowth/profitMargins as decimals (1.26 == +126%),
+    and the Finviz fallback's _num() strips the '%' suffix and divides by
+    100. The old magnitude heuristic (`-1 < x < 1` -> x*100) therefore left
+    any growth >= 100% unconverted, scoring a hypergrowth 1.26 as "1.3%
+    growth" and dragging the nowcast BEARISH for exactly the strongest
+    growers. Always multiply; never guess from magnitude."""
+    if v is None:
+        return None
+    try:
+        return float(v) * 100.0
+    except (TypeError, ValueError):
+        return None
+
+
 def _fmt_market_cap(mc):
     """Format market cap as $XB or $XM string."""
     if mc is None:
@@ -80,23 +99,10 @@ def _fmt_market_cap(mc):
 def _score_revenue_momentum(fundamentals):
     # type: (dict) -> dict
     """Signal 1: Revenue Momentum (weight 30%)."""
-    rev_growth = fundamentals.get("revenue_growth")
-    earn_growth = fundamentals.get("earnings_growth")
-    profit_margin = fundamentals.get("profit_margin")
-
-    # Convert to percentages if they look like decimals (e.g. 0.25 -> 25)
-    if rev_growth is not None:
-        rev_growth = float(rev_growth)
-        if -1 < rev_growth < 1 and rev_growth != 0:
-            rev_growth = rev_growth * 100
-    if earn_growth is not None:
-        earn_growth = float(earn_growth)
-        if -1 < earn_growth < 1 and earn_growth != 0:
-            earn_growth = earn_growth * 100
-    if profit_margin is not None:
-        profit_margin = float(profit_margin)
-        if -1 < profit_margin < 1 and profit_margin != 0:
-            profit_margin = profit_margin * 100
+    # Fractions -> percent, unconditionally (see _pct_from_fraction WHY).
+    rev_growth = _pct_from_fraction(fundamentals.get("revenue_growth"))
+    earn_growth = _pct_from_fraction(fundamentals.get("earnings_growth"))
+    profit_margin = _pct_from_fraction(fundamentals.get("profit_margin"))
 
     if rev_growth is None:
         return {"score": 50, "detail": "Revenue growth data unavailable", "weight": 0.30}
@@ -447,13 +453,8 @@ def _score_scale_trajectory(fundamentals):
     """Signal 6: Scale Trajectory (weight 5%)."""
     employees = fundamentals.get("employees")
     market_cap = fundamentals.get("market_cap")
-    rev_growth = fundamentals.get("revenue_growth")
-
-    # Normalize revenue_growth to percentage
-    if rev_growth is not None:
-        rev_growth = float(rev_growth)
-        if -1 < rev_growth < 1 and rev_growth != 0:
-            rev_growth = rev_growth * 100
+    # Fraction -> percent, unconditionally (see _pct_from_fraction WHY).
+    rev_growth = _pct_from_fraction(fundamentals.get("revenue_growth"))
 
     try:
         employees = int(employees) if employees else 0

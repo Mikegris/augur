@@ -60,7 +60,7 @@ def _compute_rsi(close: pd.Series, period: int = 14) -> pd.Series:
 
     Degenerate cases preserved:
       - No losses (loss == 0, gain > 0) -> RSI = 100
-      - No gains  (gain == 0)           -> RSI = 0
+      - No gains  (gain == 0, loss > 0) -> RSI = 0
       - Perfectly flat window           -> NaN (caller treats as undefined)
     """
     delta = close.diff()
@@ -75,7 +75,10 @@ def _compute_rsi(close: pd.Series, period: int = 14) -> pd.Series:
     rsi = pd.Series(np.nan, index=close.index, dtype=float)
     valid = gain.notna() & loss.notna()
     no_loss = valid & (loss == 0) & (gain > 0)
-    no_gain = valid & (gain == 0)
+    # Require loss > 0 so the perfectly-flat window (gain==0 AND loss==0)
+    # falls through to NaN below — RSI 0.0 there would band a halted/flat
+    # series as maximally OVERSOLD and feed a spurious analog match.
+    no_gain = valid & (gain == 0) & (loss > 0)
     normal = valid & (loss > 0) & (gain > 0)
     rs = gain[normal] / loss[normal]
     rsi.loc[normal] = 100 - (100 / (1 + rs))
@@ -442,6 +445,10 @@ def compute_historical_analog(symbol: str) -> dict:
     if len(matches) < _MIN_MATCHES:
         band_cands = candidates.dropna(subset=["rsi_band", "vol_band", "trend_position"])
         method = "band_match"
+        # Drop the abandoned k-NN distance summary — the contract below says
+        # similarity is None for band_match, and keeping it would pair band-
+        # match stats with distances of matches that aren't the ones reported.
+        similarity = None
         matches = _find_matches(
             band_cands, current_rsi_band, current_vol_band, current_trend,
             require_trend=True, require_vol=True,

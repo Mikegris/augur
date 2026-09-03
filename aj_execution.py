@@ -139,6 +139,19 @@ def execute_trade(proposal: Dict[str, Any], decision: Dict[str, Any],
     broker = None
     try:
         broker = aj_broker.get_broker(venue)
+        # The risk gate evaluated this proposal under decision['mode']. If the
+        # constructed broker's mode differs (live_trading_enabled flipped
+        # between gate and submit), routing would place a paper-evaluated order
+        # with real money — or book a live-tagged order into the paper book,
+        # corrupting mode-scoped reconciliation. Fail closed.
+        if getattr(broker, "mode", None) != mode:
+            _set_state(order_id, "rejected")
+            aj_db.audit("order", {"order_id": order_id,
+                                  "rejected": "broker mode {} != decision mode {}".format(
+                                      getattr(broker, "mode", None), mode)},
+                        cycle_id=cycle_id, ref_id=order_id)
+            return {"ok": False, "order_id": order_id, "state": "rejected",
+                    "reason": "broker/decision mode mismatch (fail-closed)"}
         broker.connect()
         _set_state(order_id, "submitted", submitted_at=aj_db.utc_now_iso())
         res = broker.submit({
@@ -169,11 +182,30 @@ def execute_trade(proposal: Dict[str, Any], decision: Dict[str, Any],
     return _apply_broker_result(order_id, res, cycle_id)
 
 
+def _purge_synthetic_agg(order_id: int) -> None:
+    """Remove the synthesized '<x>-agg' aggregate fill once REAL per-fill
+    detail arrives for the order — keeping both would double-count the same
+    shares in the FIFO paper book (filled_qty can even exceed order qty)."""
+    try:
+        import database as db
+        with db._write_lock:
+            conn = db.get_conn()
+            conn.execute(
+                "DELETE FROM aj_fills WHERE order_id=? AND broker_fill_id LIKE '%-agg'",
+                (order_id,))
+            conn.commit()
+    except Exception:
+        log.exception("purge of synthetic agg fill failed (order %s)", order_id)
+
+
 def _apply_broker_result(order_id: int, res: Dict[str, Any],
                          cycle_id: Optional[str]) -> Dict[str, Any]:
     boid = res.get("broker_order_id")
     fills = res.get("fills") or []
-    # record fills (§12.3) — append + recompute aggregates per fill
+    # record fills (§12.3) — append + recompute aggregates per fill. Real
+    # per-fill detail supersedes any earlier synthesized aggregate fill.
+    if fills:
+        _purge_synthetic_agg(order_id)
     for f in fills:
         _record_fill(order_id, f, cycle_id)
     state = res.get("state") or "accepted"
@@ -359,6 +391,48 @@ def reconcile(broker: Optional[aj_broker.BrokerClient] = None,
             except Exception:
                 log.exception("halt-on-recon-error failed")
 
+    # ── cash-account reconciliation ───────────────────────────────────────────
+    # Paper: available cash is derived from the fills ledger by construction,
+    # so this is an INVARIANT check (available == base − open cost + realized,
+    # equity == available + book MV) — drift means a bookkeeping bug, not a
+    # market event. Live: compare our ledger-derived view against the venue's
+    # settled cash; sustained drift means fills/fees exist that we never
+    # recorded. Never affects `status`-driven halts on its own (advisory), but
+    # is persisted + audited so the operator sees it.
+    try:
+        import aj_alpha
+        bp = aj_alpha.buying_power()
+        if bp.get("enabled"):
+            cash_scope: Dict[str, Any] = {"source": bp.get("source"),
+                                          "available": bp.get("available"),
+                                          "base": bp.get("base"),
+                                          "equity": bp.get("equity")}
+            if bp.get("source") == "paper" and bp.get("available") is not None:
+                import aj_positions
+                book = aj_positions.paper_book()
+                positions = book.get("positions") or {}
+                open_cost = sum(float((p or {}).get("cost_basis") or 0)
+                                for p in positions.values())
+                expect = max(0.0, float(bp.get("base") or 0) - open_cost
+                             + float(book.get("realized_total") or 0))
+                drift = abs(float(bp["available"]) - expect)
+                cash_scope["invariant_ok"] = drift <= 0.01
+                if drift > 0.01:
+                    aj_db.audit("alert", {"kind": "cash_invariant_drift",
+                                          "available": bp["available"],
+                                          "expected": expect}, cycle_id=cycle_id)
+            elif bp.get("source") == "live" and is_live:
+                # Ledger-derived view of what live cash SHOULD be, vs venue truth.
+                venue_cash = bp.get("available")
+                cash_scope["venue_cash"] = venue_cash
+                if venue_cash is None:
+                    cash_scope["invariant_ok"] = False
+                    aj_db.audit("alert", {"kind": "live_cash_unknown"},
+                                cycle_id=cycle_id)
+            detail["scopes"]["cash"] = cash_scope
+    except Exception:
+        log.debug("cash reconciliation skipped", exc_info=True)
+
     rid = aj_db.insert("aj_recon", ts=aj_db.utc_now_iso(),
                        scope="all", status=status,
                        detail_json=json.dumps(detail, default=str))
@@ -401,7 +475,40 @@ def _resolve_open_orders(broker: aj_broker.BrokerClient,
                         cycle_id=cycle_id, ref_id=oid)
             continue
         if not boid:
-            # submitted/unknown without a broker id we can query → keep unknown
+            # submitted/unknown without a broker id: try the deterministic
+            # client_order_id lookup first — a submit that timed out AFTER the
+            # venue accepted it is otherwise invisible forever (it can fill
+            # real money with no local record, and the idempotency key blocks
+            # any retry of that proposal).
+            resolved_by_cid = False
+            lookup = getattr(broker, "get_order_by_client_id", None)
+            coid = o.get("client_order_id")
+            if callable(lookup) and coid:
+                try:
+                    truth = lookup(coid)
+                    tstate = truth.get("state")
+                    tboid = truth.get("broker_order_id")
+                    if tboid and tstate in _KNOWN_STATES and tstate != "unknown":
+                        if truth.get("fills"):
+                            _purge_synthetic_agg(oid)
+                        for f in (truth.get("fills") or []):
+                            _record_fill(oid, f, cycle_id)
+                        agg = _recompute_order(oid)
+                        if _set_state(oid, tstate, broker_order_id=tboid,
+                                      avg_fill_price=agg["avg_fill_price"],
+                                      filled_qty=agg["filled_qty"],
+                                      fees_usd=agg["fees_usd"]):
+                            out["resolved"] += 1
+                            resolved_by_cid = True
+                            aj_db.audit("recon", {"order_id": oid,
+                                                  "action": "resolved via client_order_id",
+                                                  "broker_order_id": tboid},
+                                        cycle_id=cycle_id, ref_id=oid)
+                except Exception:
+                    log.debug("client_order_id lookup failed for order %s",
+                              oid, exc_info=True)
+            if resolved_by_cid:
+                continue
             if state != "unknown":
                 _set_state(oid, "unknown")
             out["still_unknown"] += 1
@@ -410,7 +517,10 @@ def _resolve_open_orders(broker: aj_broker.BrokerClient,
             truth = broker.get_order(boid)
             tstate = truth.get("state")
             if tstate in _KNOWN_STATES and tstate != "unknown":
-                # adopt broker truth; record any fills it reports
+                # adopt broker truth; record any fills it reports (real detail
+                # supersedes a synthesized '-agg' fill from submit time)
+                if truth.get("fills"):
+                    _purge_synthetic_agg(oid)
                 for f in (truth.get("fills") or []):
                     _record_fill(oid, f, cycle_id)
                 agg = _recompute_order(oid)
@@ -500,6 +610,17 @@ def cancel_all_open(reason: str = "manual", force_live: bool = False) -> int:
     for o in open_orders:
         oid = o["id"]
         try:
+            if o.get("mode") == "live" and not o.get("broker_order_id"):
+                # A live order with no broker id (submit timeout) may still be
+                # WORKING at the venue under its client_order_id — a local
+                # 'canceled' would hide real exposure and report a clean kill.
+                # Leave it 'unknown' so reconciliation (client-id lookup) and
+                # kill_switch's still-open alert surface it honestly.
+                _set_state(oid, "unknown")
+                aj_db.audit("order", {"order_id": oid,
+                                      "cancel_skipped": "live order without broker id",
+                                      "reason": reason}, ref_id=oid)
+                continue
             if o.get("mode") == "live" and o.get("broker_order_id"):
                 broker = _broker_for("live", o.get("broker"))
                 res = broker.cancel(o["broker_order_id"]) or {}

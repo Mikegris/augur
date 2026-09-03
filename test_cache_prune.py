@@ -50,13 +50,17 @@ def test_prune_expired_only():
     now = time.time()
     _insert("fresh1", "x" * 100, now + 3600)
     _insert("fresh2", "y" * 100, now + 3600)
-    _insert("old1", "z" * 100, now - 10)
-    _insert("old2", "w" * 100, now - 3600)
+    # Beyond the serve-stale grace window → swept.
+    _insert("old1", "z" * 100, now - cs._EXPIRED_GRACE_SEC - 10)
+    _insert("old2", "w" * 100, now - cs._EXPIRED_GRACE_SEC - 3600)
+    # Expired but INSIDE the grace window — must survive the sweep so
+    # cache_get_stale's disk fallback keeps working after a restart.
+    _insert("graced", "g" * 100, now - 10)
     out = cs.prune_disk(target_bytes=10 ** 9)  # cap effectively disabled
     assert out["expired"] == 2, out
     assert out["evicted"] == 0, out
-    assert _keys() == {"fresh1", "fresh2"}, _keys()
-    print("  [OK] prune_disk removes only expired rows")
+    assert _keys() == {"fresh1", "fresh2", "graced"}, _keys()
+    print("  [OK] prune_disk removes only expired-beyond-grace rows")
 
 
 def test_size_cap_evicts_largest_first():
@@ -86,7 +90,8 @@ def test_reclaim_vacuums():
     path = _fresh_db()
     now = time.time()
     for i in range(50):
-        _insert("k%d" % i, "Q" * 2000, now - 10)  # all expired → all pruned
+        # all expired beyond the grace window → all pruned
+        _insert("k%d" % i, "Q" * 2000, now - cs._EXPIRED_GRACE_SEC - 10)
     out = cs.reclaim(force_vacuum=True)
     assert out["expired"] == 50, out
     assert _count() == 0, _count()

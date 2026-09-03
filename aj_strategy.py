@@ -102,8 +102,41 @@ def size_order(symbol: str, side: str, cfg: Dict[str, Any], held_qty: float,
             log.debug("risk governor skipped", exc_info=True)
 
     target = min(target, max_notional)
-    if target <= 0:
+    # Fix A — per-asset-class notional cap (opt-in). A crypto position risks a
+    # far larger fraction of its notional than an equity (routine 50%+ swings; a
+    # -73.8% lot is what tripped the governor breaker), so cap crypto ENTRIES
+    # below the global per-order cap when configured. Sells are exits — never
+    # capped here (see below). 0 => disabled (legacy behavior).
+    if side == "buy" and atype == "crypto":
+        crypto_cap = aj_db.money(cfg.get("max_crypto_notional_usd") or 0)
+        if crypto_cap > 0:
+            target = min(target, crypto_cap)
+    # A zero/negative sizing budget vetoes ENTRIES only (max_order_notional_usd
+    # defaults to 0.0). A sell is an EXIT sized from the held position, not from
+    # `target` — vetoing it here would strand risk a sell signal meant to remove.
+    # The dust floor and risk governor below already exempt sells the same way.
+    if side != "sell" and target <= 0:
         return None
+
+    # Cash-account clamp: never PROPOSE beyond available cash. The risk gate
+    # (step 4b) is the enforcing rail and would block the order anyway —
+    # clamping here turns a would-be block into a right-sized entry that
+    # spends what's actually left. Unknown cash => skip the entry (the gate
+    # would fail-close it); a no-cash-configured account is a no-op.
+    if side == "buy":
+        try:
+            import aj_alpha
+            bp = aj_alpha.buying_power(cfg)
+            if bp.get("enabled"):
+                avail = bp.get("available")
+                if avail is None:
+                    return None
+                if target > avail:
+                    target = aj_db.money(avail)
+                if target <= 0:
+                    return None
+        except Exception:
+            log.debug("buying-power clamp skipped", exc_info=True)
 
     if side == "sell":
         # A sell is an EXIT — close the full held position. The notional target

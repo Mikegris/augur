@@ -72,3 +72,5 @@ node_modules/
 
 # v2.4 local digest drops
 digests/
+data/replays/**/replay.db
+data/replays/**/.aj_*.lock

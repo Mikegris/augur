@@ -15,7 +15,8 @@ import logging
 from typing import Any, Callable, Dict, List, Optional
 
 import aj_routing
-from aj_schemas import AnalystReport, ResearchPlan, TraderProposal
+from aj_schemas import (AnalystReport, ResearchPlan, RiskStance, TraderProposal,
+                        extract_json)
 
 log = logging.getLogger("augur.aj_debate")
 
@@ -86,10 +87,17 @@ def research_manager(symbol: str, reports: List[AnalystReport],
     sys = _MGR_SYS.format(symbol=symbol)
     prompt = "Analyst reports:\n{r}\n\nDebate:\n{t}\n\nYour decision (JSON):".format(
         r=_reports_md(reports), t=transcript)
-    text = call(aj_routing.DEEP, "council.research_manager", sys, prompt)
+    # STRICT-JSON role → request native JSON mode when the call supports it.
+    text = aj_routing.call_json(call, aj_routing.DEEP,
+                                "council.research_manager", sys, prompt)
     if not text:
         return None
-    return ResearchPlan.from_llm(text)
+    d = extract_json(text)
+    # Prose/unparseable output must fall back to the analyst consensus (None),
+    # not silently replace it with a parse-failure HOLD plan marked status "ok".
+    if not (d.get("recommendation") or d.get("rating")):
+        return None
+    return ResearchPlan.from_llm(d)
 
 
 # ── trader (plan → executable proposal) ───────────────────────────────────────
@@ -108,10 +116,18 @@ def trader(symbol: str, plan: ResearchPlan, call: CallFn) -> Optional[TraderProp
         return None
     sys = _TRADER_SYS.format(symbol=symbol)
     prompt = "Research plan:\n{}\n\nYour proposal (JSON):".format(plan.render())
-    text = call(aj_routing.DEEP, "council.trader", sys, prompt)
+    # STRICT-JSON role → request native JSON mode when the call supports it.
+    text = aj_routing.call_json(call, aj_routing.DEEP, "council.trader", sys, prompt)
     if not text:
         return None
-    return TraderProposal.from_llm(text)
+    d = extract_json(text)
+    # Unparseable trader output must NOT default to a HOLD proposal: the
+    # decision layer takes proposal.action over the rating-implied action, so a
+    # silent HOLD would override a SELL plan with the 0.5 hold-trim factor.
+    # None lets the council derive the action from the plan (documented path).
+    if not (d.get("action") or d.get("decision")):
+        return None
+    return TraderProposal.from_llm(d)
 
 
 # ── risk debate (3 perspectives, hard-terminated) ─────────────────────────────
@@ -142,7 +158,9 @@ def risk_debate(symbol: str, proposal: TraderProposal, portfolio_text: str,
         sys = _RISK_SYS.format(persp=persp, symbol=symbol)
         prompt = ("Proposal:\n{p}{c}\n\nDebate so far:\n{h}\n\nYour view:").format(
             p=prop_md, c=ctx, h=history or "(none yet)")
-        text = call(aj_routing.DEEP, "council.risk." + persp, sys, prompt)
+        # STRICT-JSON role → request native JSON mode when the call supports it.
+        text = aj_routing.call_json(call, aj_routing.DEEP,
+                                    "council.risk." + persp, sys, prompt)
         if not text:
             break
         text = str(text).strip()
@@ -154,3 +172,41 @@ def risk_debate(symbol: str, proposal: TraderProposal, portfolio_text: str,
         turns.append({"debate": "risk", "role": persp, "round": i // 3,
                       "content": text})
     return turns
+
+
+def risk_vote(turns: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Deterministic majority vote over the parsed risk stances (RiskStance).
+
+    Parses each risk turn's JSON tolerantly (extract_json); turns that are
+    unparseable OR carry no explicit recommended_action/action key are SKIPPED —
+    we never fabricate a HOLD vote from garbage output. `majority` is set only
+    when one action has a STRICT majority of the parsed stances AND at least two
+    concurring votes (2-of-3 in the standard single-round debate); a 1-1-1 split
+    or a lone stance yields None. Advisory ONLY: the council uses this as the
+    fallback when the arbiter model is unavailable/unparseable, and persists the
+    tally in the decision audit payload. Never raises.
+
+    Returns {"votes": {action: n}, "n_parsed": int, "n_turns": int,
+             "majority": "BUY"|"HOLD"|"SELL"|None}.
+    """
+    votes: Dict[str, int] = {}
+    n_parsed = 0
+    for t in (turns or []):
+        try:
+            d = extract_json(t.get("content", ""))
+            if not d or not (d.get("recommended_action") or d.get("action")):
+                continue                      # unparseable / no explicit vote
+            stance = RiskStance.from_llm(str(t.get("role", "neutral")),
+                                         int(t.get("round", 0) or 0), d)
+        except Exception:
+            continue                          # tolerate any malformed turn
+        n_parsed += 1
+        a = stance.recommended_action.value
+        votes[a] = votes.get(a, 0) + 1
+    majority = None
+    if votes:
+        top, top_n = max(votes.items(), key=lambda kv: kv[1])
+        if top_n >= 2 and top_n * 2 > n_parsed:
+            majority = top
+    return {"votes": votes, "n_parsed": n_parsed,
+            "n_turns": len(turns or []), "majority": majority}

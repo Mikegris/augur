@@ -30,7 +30,13 @@ const ChartEngine = (() => {
       horzLines:  { color: COLORS.border, style: 1 },
     },
     crosshair: {
-      mode: LightweightCharts?.CrosshairMode?.Normal ?? 1,
+      // window.-prefixed on purpose: bare `LightweightCharts?.` throws
+      // ReferenceError for an UNDECLARED identifier (optional chaining does
+      // not protect that), which killed the whole ChartEngine IIFE — Chart.js
+      // charts included — whenever the lightweight-charts CDN failed to load.
+      // Property access off window is safe and degrades to the literal 1
+      // (CrosshairMode.Normal's value).
+      mode: window.LightweightCharts?.CrosshairMode?.Normal ?? 1,
       vertLine: { color: COLORS.green + '60', labelBackgroundColor: COLORS.bgElevated },
       horzLine: { color: COLORS.green + '60', labelBackgroundColor: COLORS.bgElevated },
     },
@@ -58,7 +64,16 @@ const ChartEngine = (() => {
         const ro = instances[id]._resizeObserver;
         if (ro && typeof ro.disconnect === 'function') ro.disconnect();
       } catch(e) {}
-      try { instances[id].remove(); } catch(e) {}
+      // The registry holds BOTH library types: Lightweight Charts instances
+      // (torn down with .remove()) and Chart.js instances registered by
+      // createEquityChart (torn down with .destroy() — Chart.js 4 has no
+      // .remove(), so calling it threw into the catch and the chart plus its
+      // ResizeObserver leaked on every trading-view render).
+      try {
+        const c = instances[id];
+        if (typeof c.destroy === 'function') c.destroy();
+        else if (typeof c.remove === 'function') c.remove();
+      } catch(e) {}
       delete instances[id];
     }
   }

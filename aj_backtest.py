@@ -38,8 +38,10 @@ Python 3.9 compatible.
 """
 from __future__ import annotations
 
+import hashlib
 import logging
 import math
+import random
 from typing import Any, Dict, List, Optional
 
 import numpy as np
@@ -47,14 +49,29 @@ import pandas as pd
 
 log = logging.getLogger("augur.aj_backtest")
 
-# Built-in liquid basket used when no symbols / allowlist are supplied.
+# Built-in liquid basket used ONLY as the last-resort fallback when no symbols,
+# allowlist, or screener-cache universe are available. CAVEAT: these are
+# TODAY'S mega-cap winners, so any default-basket backtest carries survivorship
+# bias — results are stamped with `selection_bias` (see policy_expectancy).
 _DEFAULT_BASKET = ["AAPL", "MSFT", "NVDA", "SPY", "AMZN",
                    "GOOGL", "META", "JPM", "XOM", "UNH"]
+_DEFAULT_BASKET_CAVEAT = (
+    "universe fell back to the built-in basket of today's mega-cap winners; "
+    "results overstate expectancy (survivorship bias)")
 
 _MAX_SYMBOLS = 15            # hard cap on universe size (cost guard)
 _MIN_BARS = 80               # need enough history to compute the leak-free edge
 _LOOKBACK = 60               # bars of context required before the first decision
 _VOL_FLOOR = 1e-6
+
+# Bootstrap CI over per-trade returns: a positive MEAN alone is fragile — with
+# few/noisy trades it flips sign under resampling, so the verdict would bless
+# luck. We report a nonparametric 95% CI of the mean and require its LOWER
+# bound to clear zero before calling the policy "positive expectancy".
+_BOOT_RESAMPLES = 1000       # bootstrap resamples per CI
+_BOOT_MIN_TRADES = 10        # below this the resampled means are pure noise —
+                             # skip the bootstrap (ci95=None, matches the
+                             # existing insufficient-data cutoff)
 
 
 # ───────────────────────────── data plumbing ────────────────────────────────
@@ -85,13 +102,15 @@ def _load_closes(symbol: str, period: str) -> Optional[pd.DataFrame]:
             df = df.set_index("Date")
         df = df.rename(columns={"open": "Open", "high": "High", "low": "Low",
                                 "close": "Close", "volume": "Volume"})
-        for col in ("High", "Low"):
+        # Open is carried so gap-throughs can fill at the OPEN (an earnings gap
+        # 100→80 through a 5% stop really fills near 80, not at the stop level).
+        for col in ("High", "Low", "Open"):
             if col not in df.columns:
                 df[col] = df["Close"]
         df = df[df["Close"] > 0]
         df = df[~df.index.duplicated(keep="last")]
         df = df.sort_index()
-        return df[["Close", "High", "Low"]]
+        return df[["Open", "High", "Low", "Close"]]
     except Exception as e:
         log.warning("normalise(%s) failed: %s", symbol, e)
         return None
@@ -185,19 +204,53 @@ def _edge_at(hist: pd.DataFrame) -> Optional[Dict[str, float]]:
 
 # ───────────────────────────── metrics roll-up ──────────────────────────────
 
+def _bootstrap_ci95(rs: List[float]) -> Optional[List[float]]:
+    """Nonparametric bootstrap 95% CI of the MEAN per-trade net return,
+    reported in PERCENT (same units as expectancy_pct): resample the trade
+    list with replacement _BOOT_RESAMPLES times, take each sample's mean,
+    return the [2.5th, 97.5th] percentiles.
+
+    DETERMINISM: the RNG is a private random.Random seeded from a HASH OF THE
+    TRADE LIST itself — no wall clock, no global random state — so the same
+    trades always yield the same interval and the verdict cannot flap between
+    otherwise-identical runs. md5 (not built-in hash()) because str hashing is
+    salted per process and this must be stable across processes/restarts.
+
+    Returns None below _BOOT_MIN_TRADES — too few trades for resampling to
+    say anything; callers keep the existing insufficient-data behavior.
+    """
+    n = len(rs)
+    if n < _BOOT_MIN_TRADES:
+        return None
+    key = ",".join("{:.10e}".format(r) for r in rs).encode("utf-8")
+    rng = random.Random(int(hashlib.md5(key).hexdigest()[:16], 16))
+    means = []
+    for _ in range(_BOOT_RESAMPLES):
+        means.append(sum(rng.choices(rs, k=n)) / n)   # resample w/ replacement
+    means.sort()
+    lo = means[int(round(0.025 * (_BOOT_RESAMPLES - 1)))]
+    hi = means[int(round(0.975 * (_BOOT_RESAMPLES - 1)))]
+    return [round(lo * 100.0, 4), round(hi * 100.0, 4)]
+
+
 def _empty_metrics() -> Dict[str, Any]:
     return {
         "n_trades": 0, "hit_rate": 0.0, "avg_win": 0.0, "avg_loss": 0.0,
         "profit_factor": 0.0, "expectancy_pct": 0.0, "sharpe": 0.0,
         "max_drawdown": 0.0, "turnover": 0.0, "total_return": 0.0,
+        "ci95": None,
     }
 
 
-def _metrics_from_trades(returns: List[float]) -> Dict[str, Any]:
+def _metrics_from_trades(returns: List[float],
+                         hold_days: Optional[List[float]] = None) -> Dict[str, Any]:
     """Aggregate a list of per-trade NET fractional returns into metrics.
 
     `returns` are net of round-trip costs. total_return is the COMPOUNDED equity
-    growth of sequentially risking the same fraction on each trade.
+    growth of sequentially risking the same fraction on each trade — callers
+    must pass the returns in CHRONOLOGICAL exit order for it (and max_drawdown)
+    to describe a real equity path. `hold_days` (parallel to `returns`, holding
+    period of each trade in bars) drives the Sharpe annualization below.
     """
     rs = [float(r) for r in returns if isinstance(r, (int, float)) and math.isfinite(r)]
     n = len(rs)
@@ -217,7 +270,22 @@ def _metrics_from_trades(returns: List[float]) -> Dict[str, Any]:
         profit_factor = float("inf") if gross_win > 0 else 0.0
     expectancy = float(arr.mean())
     sd = float(arr.std())
-    sharpe = float(expectancy / sd * math.sqrt(n)) if sd > _VOL_FLOOR else 0.0
+    # Sharpe: mean/sd is the PER-TRADE ratio; annualize by TRADE FREQUENCY —
+    # sqrt(252 / avg holding days) trades' worth of independent bets per year.
+    # (The old * sqrt(n_trades) scaling was a t-statistic, not a Sharpe: it
+    # grows without bound as the sample gets longer, not as the edge improves.)
+    hs = [float(h) for h in (hold_days or [])
+          if isinstance(h, (int, float)) and math.isfinite(h) and h > 0]
+    avg_hold = (sum(hs) / len(hs)) if hs else 0.0
+    if sd > _VOL_FLOOR:
+        if avg_hold >= 1.0:
+            sharpe = float(expectancy / sd * math.sqrt(252.0 / avg_hold))
+        else:
+            # no holding-period info → report the raw per-trade ratio,
+            # NOT a sample-size-inflated t-stat.
+            sharpe = float(expectancy / sd)
+    else:
+        sharpe = 0.0
 
     # Equity curve: compound each trade's net return; drawdown off that curve.
     nav = 1.0
@@ -244,6 +312,8 @@ def _metrics_from_trades(returns: List[float]) -> Dict[str, Any]:
         "max_drawdown": round(max_dd * 100.0, 4),
         "turnover": float(n),   # each closed trade = one round-trip
         "total_return": round(total_return * 100.0, 4),
+        # 95% bootstrap CI of the mean return (%, [lo, hi]); None when n < 10.
+        "ci95": _bootstrap_ci95(rs),
     }
 
 
@@ -279,6 +349,10 @@ def _walk_symbol(
     closes = df["Close"].to_numpy(dtype=float)
     highs = df["High"].to_numpy(dtype=float)
     lows = df["Low"].to_numpy(dtype=float)
+    # Open is optional (older callers hand in Close/High/Low frames); fall back
+    # to Close so the gap-fill clamp below degrades to the plain hi-clamp.
+    opens = (df["Open"].to_numpy(dtype=float) if "Open" in df.columns
+             else closes)
     dates = list(df.index)
     n = len(closes)
 
@@ -289,6 +363,26 @@ def _walk_symbol(
     entry_px = 0.0
     peak_px = 0.0
     weight = 1.0
+
+    def _book_exit(px: float, why: str, exit_i: int) -> None:
+        """Close the open trade at `px` on bar `exit_i` and record it."""
+        gross = (px / entry_px) - 1.0
+        net = (1.0 - one_way) * (px / entry_px) * (1.0 - one_way) - 1.0
+        net *= weight  # fixed-fractional position weight
+        returns.append(float(net))
+        trades.append({
+            "symbol": symbol,
+            "entry_date": _fmt(dates, entry_idx),
+            "exit_date": _fmt(dates, exit_i),
+            "entry_px": round(entry_px, 4),
+            "exit_px": round(float(px), 4),
+            "gross_pct": round(gross * 100.0, 4),
+            "net_pct": round(net * 100.0, 4),
+            "held_days": int(exit_i - entry_idx),
+            "reason": why,
+            "weight": round(weight, 3),
+            "regime": regime,
+        })
 
     t = _LOOKBACK
     while t < n:
@@ -325,23 +419,29 @@ def _walk_symbol(
         hi = float(highs[t]) if math.isfinite(highs[t]) else float(closes[t])
         lo = float(lows[t]) if math.isfinite(lows[t]) else float(closes[t])
         cl = float(closes[t])
-        if hi > peak_px:
-            peak_px = hi
+        op = float(opens[t]) if math.isfinite(opens[t]) and opens[t] > 0 else cl
 
         held_days = t - entry_idx
         exit_px = None
         reason = None
 
         # Stop-loss / trailing-stop checked against the bar low (worst case).
+        # GAP CLAMP: a stop is a resting order — if the bar OPENED below the
+        # stop level (earnings gap 100→80 through a 5% stop), the real fill is
+        # ~the open, not the stop price. Fill at min(stop, open), and never
+        # above the bar's high, so a gap-through books its true loss.
         if sl > 0:
             sl_px = entry_px * (1.0 - sl)
             if lo <= sl_px:
-                exit_px, reason = sl_px, "stop_loss"
+                exit_px, reason = min(sl_px, op, hi), "stop_loss"
         if exit_px is None and trail > 0:
+            # peak_px here is the peak over bars < t ONLY — ratcheting it with
+            # THIS bar's high before testing this bar's low would let the stop
+            # trail an intrabar move it couldn't have seen (look-ahead).
             tr_px = peak_px * (1.0 - trail)
             if lo <= tr_px:
-                # fill at the trail level, but never above this bar's high
-                exit_px, reason = min(tr_px, hi), "trailing_stop"
+                # fill at the trail level, gap-clamped like the stop-loss
+                exit_px, reason = min(tr_px, op, hi), "trailing_stop"
         # Take-profit checked against the bar high (best case).
         if exit_px is None and tp > 0:
             tp_px = entry_px * (1.0 + tp)
@@ -351,26 +451,26 @@ def _walk_symbol(
         if exit_px is None and held_days >= max_hold:
             exit_px, reason = cl, "max_holding_days"
 
+        # Only AFTER the exit tests may this bar's high ratchet the trail peak
+        # (it becomes observable history for bar t+1 onward).
+        if hi > peak_px:
+            peak_px = hi
+
         if exit_px is not None and exit_px > 0:
-            gross = (exit_px / entry_px) - 1.0
-            net = (1.0 - one_way) * (exit_px / entry_px) * (1.0 - one_way) - 1.0
-            net *= weight  # fixed-fractional position weight
-            returns.append(float(net))
-            trades.append({
-                "symbol": symbol,
-                "entry_date": _fmt(dates, entry_idx),
-                "exit_date": _fmt(dates, t),
-                "entry_px": round(entry_px, 4),
-                "exit_px": round(float(exit_px), 4),
-                "gross_pct": round(gross * 100.0, 4),
-                "net_pct": round(net * 100.0, 4),
-                "reason": reason,
-                "weight": round(weight, 3),
-                "regime": regime,
-            })
+            _book_exit(float(exit_px), reason, t)
             in_pos = False
             entry_idx = -1
         t += 1
+
+    # A position still open when the series ends must be COUNTED, not silently
+    # dropped — discarding it biases the stats toward trades that managed to
+    # exit. Force-close at the final bar's close.
+    if in_pos and n > 0:
+        last_cl = float(closes[n - 1])
+        if math.isfinite(last_cl) and last_cl > 0:
+            _book_exit(last_cl, "end_of_data", n - 1)
+            in_pos = False
+            entry_idx = -1
 
     return {"returns": returns, "trades": trades, "regime": regime}
 
@@ -437,9 +537,11 @@ def backtest_policy(
             regime = "unknown"
 
         per_symbol: Dict[str, Any] = {}
-        all_returns: List[float] = []
         all_trades: List[Dict[str, Any]] = []
-        per_regime_returns: Dict[str, List[float]] = {}
+        # (exit_date, net_return, held_days) triples — kept together so the
+        # aggregate can be re-sorted CHRONOLOGICALLY across symbols below.
+        all_rows: List[Any] = []
+        per_regime_rows: Dict[str, List[Any]] = {}
 
         for sym in syms:
             df = _load_closes(sym, period)
@@ -451,16 +553,29 @@ def backtest_policy(
                 continue
             res = _walk_symbol(sym, df, cfg, horizon, regime)
             rets = res["returns"]
-            per_symbol[sym] = _metrics_from_trades(rets)
+            holds = [tr.get("held_days") for tr in res["trades"]]
+            per_symbol[sym] = _metrics_from_trades(rets, hold_days=holds)
             per_symbol[sym]["regime"] = res["regime"]
-            all_returns.extend(rets)
             all_trades.extend(res["trades"])
-            per_regime_returns.setdefault(res["regime"], []).extend(rets)
+            rows = [(tr.get("exit_date") or "", r, tr.get("held_days"))
+                    for r, tr in zip(rets, res["trades"])]
+            all_rows.extend(rows)
+            per_regime_rows.setdefault(res["regime"], []).extend(rows)
 
-        aggregate = _metrics_from_trades(all_returns)
-        per_regime = {
-            reg: _metrics_from_trades(rs) for reg, rs in per_regime_returns.items()
-        }
+        # Sort ALL trades by exit date before compounding the aggregate: the
+        # naive per-symbol concatenation replayed symbol A's 2 years, then
+        # symbol B's 2 years, ... as ONE sequence, making the aggregate
+        # total_return / max_drawdown a fictional equity path. Chronological
+        # order gives a real (sequential-capital) path; expectancy / hit-rate /
+        # profit-factor are order-independent and unchanged either way.
+        all_rows.sort(key=lambda x: x[0])
+        aggregate = _metrics_from_trades([x[1] for x in all_rows],
+                                         hold_days=[x[2] for x in all_rows])
+        per_regime = {}
+        for reg, rows in per_regime_rows.items():
+            rows.sort(key=lambda x: x[0])
+            per_regime[reg] = _metrics_from_trades(
+                [x[1] for x in rows], hold_days=[x[2] for x in rows])
 
         return {
             "coverage": "price_signals_only",
@@ -499,7 +614,9 @@ def policy_expectancy(
     non-empty, else a built-in liquid basket, capped at 15), runs
     `backtest_policy`, and returns the aggregate metrics plus a `verdict`
     ("positive expectancy" / "negative expectancy" / "insufficient data"),
-    `expectancy_pct`, `n_trades`, and a one-line `summary`. Fail-open.
+    `expectancy_pct`, `ci95` (bootstrap 95% CI of the mean return, %; the
+    positive verdict requires ci95[0] > 0), `n_trades`, and a one-line
+    `summary`. Fail-open.
     """
     try:
         if cfg is None:
@@ -510,6 +627,7 @@ def policy_expectancy(
                 cfg = {}
         cfg = dict(cfg or {})
 
+        selection_bias = None
         if symbols:
             universe = [str(s).upper().strip() for s in symbols if str(s).strip()]
         else:
@@ -517,7 +635,25 @@ def policy_expectancy(
             if isinstance(allow, list) and allow:
                 universe = [str(s).upper().strip() for s in allow if str(s).strip()]
             else:
-                universe = list(_DEFAULT_BASKET)
+                # Prefer the screener's recently-seen candidates (a pure DB
+                # read of aj_screen_cache — NO network) over the hard-coded
+                # basket, so the tested universe matches what the agent
+                # actually trades. Ranked by dollar volume, like the screener.
+                universe = []
+                try:
+                    import aj_universe
+                    ttl = int(cfg.get("screen_cache_ttl_min", 45) or 45)
+                    pool = aj_universe._cache_fresh(ttl) or []
+                    pool.sort(key=lambda r: -(float(r.get("price") or 0.0)
+                                              * float(r.get("volume") or 0.0)))
+                    universe = [str(r.get("symbol") or "").upper().strip()
+                                for r in pool if r.get("symbol")]
+                except Exception:
+                    log.debug("screen-cache universe unavailable", exc_info=True)
+                    universe = []
+                if not universe:
+                    universe = list(_DEFAULT_BASKET)
+                    selection_bias = _DEFAULT_BASKET_CAVEAT
         universe = list(dict.fromkeys(universe))[:_MAX_SYMBOLS]
 
         bt = backtest_policy(universe, cfg=cfg)
@@ -533,19 +669,26 @@ def policy_expectancy(
         agg = bt.get("aggregate", _empty_metrics())
         n_trades = int(agg.get("n_trades", 0))
         exp = float(agg.get("expectancy_pct", 0.0))
+        ci95 = agg.get("ci95")   # [lo, hi] in %, or None below 10 trades
 
         if n_trades < 10:
             verdict = "insufficient data"
-        elif exp > 0:
+        elif exp > 0 and ci95 is not None and float(ci95[0]) > 0:
+            # "positive expectancy" now requires the WHOLE bootstrap CI to
+            # clear zero, not just the point estimate — a mean the resamples
+            # frequently flip negative is noise, not edge (fail-closed toward
+            # "no edge" so nothing sizes up on luck).
             verdict = "positive expectancy"
         else:
             verdict = "negative expectancy"
 
         summary = (
-            "{verdict}: {exp:+.2f}% net expectancy/trade over {n} trades "
-            "({sym} symbols, hit-rate {hr:.0%}, profit-factor {pf}, "
+            "{verdict}: {exp:+.2f}% net expectancy/trade (95% CI {ci}) over "
+            "{n} trades ({sym} symbols, hit-rate {hr:.0%}, profit-factor {pf}, "
             "regime={reg}). Scope: price signals only."
         ).format(
+            ci=("[{:+.2f}%, {:+.2f}%]".format(float(ci95[0]), float(ci95[1]))
+                if ci95 is not None else "n/a"),
             verdict=verdict,
             exp=exp,
             n=n_trades,
@@ -559,8 +702,13 @@ def policy_expectancy(
         return {
             "verdict": verdict,
             "expectancy_pct": round(exp, 4),
+            # bootstrap 95% CI of the mean per-trade return (%) — the verdict
+            # gate above; None below 10 trades (insufficient data).
+            "ci95": ci95,
             "n_trades": n_trades,
             "summary": summary,
+            # non-None only when the survivorship-biased default basket ran
+            "selection_bias": selection_bias,
             "coverage": bt.get("coverage", "price_signals_only"),
             "aggregate": agg,
             "per_symbol": bt.get("per_symbol", {}),

@@ -42,16 +42,23 @@ def path_allowed(path: str) -> bool:
     """False if the path touches anything forbidden — checked against the full
     path, the basename, AND every individual segment, so a forbidden directory
     (e.g. 'secrets') ANYWHERE in the path is caught, not just at the start (the
-    old code only matched 'secrets/*' as a prefix)."""
-    p = str(path or "").replace("\\", "/")
+    old code only matched 'secrets/*' as a prefix).
+
+    Matching is CASE-INSENSITIVE by design: macOS APFS (and Windows NTFS) are
+    case-insensitive filesystems, so '/tmp/WEALTH.DB' opens the same file as
+    '/tmp/wealth.db' — a case-sensitive guard would be trivially bypassed. We
+    lower-case both sides and use fnmatchcase (plain fnmatch normalizes per the
+    HOST filesystem, which is exactly the inconsistency we're avoiding)."""
+    p = str(path or "").replace("\\", "/").lower()
     base = p.rsplit("/", 1)[-1]
     segments = [s for s in p.split("/") if s]
     for pat in FORBIDDEN_PATHS:
+        pat = pat.lower()
         pat_dir = pat[:-2] if pat.endswith("/*") else pat  # 'secrets/*' -> 'secrets'
-        if fnmatch.fnmatch(p, pat) or fnmatch.fnmatch(base, pat):
+        if fnmatch.fnmatchcase(p, pat) or fnmatch.fnmatchcase(base, pat):
             return False
         for seg in segments:
-            if fnmatch.fnmatch(seg, pat) or fnmatch.fnmatch(seg, pat_dir):
+            if fnmatch.fnmatchcase(seg, pat) or fnmatch.fnmatchcase(seg, pat_dir):
                 return False
     return True
 

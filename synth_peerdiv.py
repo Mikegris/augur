@@ -317,8 +317,11 @@ def _m_factor_mkt_beta(sym: str) -> Optional[float]:
 def _m_ytd_return_pct(sym: str) -> Optional[float]:
     """Compute year-to-date return from a 1y daily chart.
 
-    Picks the first bar with year == current year and compares last close
-    to that bar's close. If no such bar exists, returns None.
+    Baseline is the PRIOR year's final close (the bar just before the first
+    bar of the current year), so the year's first session move counts toward
+    the return — measuring from the first trading day's CLOSE silently
+    excluded any Jan-2 gap for the whole year. Falls back to the first
+    in-year close only when the 1y window holds no prior-year bar.
     """
     if fetcher is None:
         return None
@@ -332,17 +335,23 @@ def _m_ytd_return_pct(sym: str) -> Optional[float]:
         if last_close is None or last_ts is None:
             return None
         year = datetime.utcfromtimestamp(int(last_ts)).year
-        first_in_year: Optional[Dict[str, Any]] = None
-        for b in bars:
+        first_idx: Optional[int] = None
+        for idx, b in enumerate(bars):
             ts = b.get("time")
             if ts is None:
                 continue
             if datetime.utcfromtimestamp(int(ts)).year == year:
-                first_in_year = b
+                first_idx = idx
                 break
-        if first_in_year is None:
+        if first_idx is None:
             return None
-        start_close = _safe_float(first_in_year.get("close"))
+        start_close = None
+        if first_idx > 0:
+            # Prior-year close = the true YTD reference.
+            start_close = _safe_float(bars[first_idx - 1].get("close"))
+        if not start_close:
+            # No usable prior-year bar in the window → old behaviour.
+            start_close = _safe_float(bars[first_idx].get("close"))
         if not start_close:
             return None
         return round((last_close / start_close - 1.0) * 100.0, 3)

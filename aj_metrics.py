@@ -157,8 +157,10 @@ def status() -> Dict[str, Any]:
     cfg = aj_config.get_config()
     import aj_risk
     out = {
-        # AJTA agent version. v3.4 adds the Analyst Council advisory layer.
-        "version": "3.14.3",
+        # AJTA agent version. v3.16 delivers the 20-enhancement batch (schema
+        # v10, append-only audit, decision-feature persistence, v2 ML features,
+        # adapter scorecard, journal, backoff, partial fills, key rotation).
+        "version": "3.22.5",
         "trading_enabled": cfg.get("trading_enabled"),
         "live_trading_enabled": cfg.get("live_trading_enabled"),
         "session": aj_db.market_session(),
@@ -185,6 +187,23 @@ def status() -> Dict[str, Any]:
         out["scheduler"] = aj_autonomy.scheduler_status(cfg)
     except Exception:
         log.debug("status scheduler failed", exc_info=True)
+    # Cash account: base / available / equity from the single authority the
+    # gate and sizing consume — the dashboard shows exactly what binds.
+    try:
+        import aj_alpha
+        out["buying_power"] = aj_alpha.buying_power(cfg)
+    except Exception:
+        log.debug("status buying_power failed", exc_info=True)
+    # Screen-sweep telemetry (#11): cursor/hit-rate/pool depth written by
+    # aj_universe.screen() each cycle, so a 429-driven universe collapse is
+    # visible on the dashboard instead of silently degrading to crypto-only.
+    try:
+        import json as _json
+        raw = aj_db.get_setting_raw("__aj_screen_telemetry")
+        if raw:
+            out["screen_telemetry"] = _json.loads(raw)
+    except Exception:
+        log.debug("status screen telemetry failed", exc_info=True)
     # effectiveness layer: which alpha/selection/execution/allocation features
     # are live, plus the IC-promotion verdict for the orthogonal signals.
     try:
@@ -196,7 +215,7 @@ def status() -> Dict[str, Any]:
         if cfg.get("multi_factor_signals"):
             import aj_ic
             eff["signal_promotion"] = aj_ic.promotion_status(
-                ["smart_money", "insider", "congress", "social"], cfg)
+                ["smart_money", "insider", "congress", "social", "events"], cfg)
         eff["metalabel_enabled"] = bool(cfg.get("metalabel_enabled"))
         try:
             import aj_metalabel

@@ -9,6 +9,10 @@ Usage:
     python aj_cli.py recon                       # reconcile against broker truth
     python aj_cli.py config [--set k=v ...]      # show / set risk config
     python aj_cli.py verify                       # show VERIFY-gate status
+    python aj_cli.py explain [--cycle CYCLE_ID]  # decision funnel for a cycle
+    python aj_cli.py secret --rotate-key          # rotate the secrets master key
+    python aj_cli.py replay <run|grid|counterfactual|report|list|...> ...
+                                                  # historical replay engine
 
 The kill switch is intentionally a plain, dependency-light path — it must be
 reachable without the model or the web app in the loop.
@@ -32,7 +36,9 @@ def cmd_run(argv):
         print(json.dumps({"ok": False,
                           "error": "unknown mode {!r}; expected paper|live".format(mode)}),
               file=sys.stderr)
-        return
+        # Non-zero so a cron/monitor sees the misconfiguration instead of an
+        # eternally-"successful" job that never runs a cycle.
+        return 2
     if mode == "live":
         # live cycles still NEVER auto-execute; the operator only proposes +
         # gates, leaving approval to a human. Make the posture explicit.
@@ -45,6 +51,50 @@ def cmd_status(argv):
     import aj_db, aj_metrics
     aj_db.aj_init()
     _print(aj_metrics.status())
+
+
+def cmd_replay(argv):
+    """Run the replay engine in a FRESH subprocess: `run` must bind an
+    isolated DB before any aj import, and this CLI process has already bound
+    the live one — delegation gives isolation by construction."""
+    import os, subprocess
+    env = dict(os.environ)
+    env.pop("AUGUR_DB_PATH", None)   # let aj_replay pick the per-run DB
+    # -m invocation (not a file path) so this also works from the frozen
+    # desktop bundle, where aj_replay lives inside python39.zip.
+    env["PYTHONPATH"] = os.pathsep.join(p for p in sys.path if p)
+    p = subprocess.run([sys.executable, "-m", "aj_replay"] + list(argv), env=env)
+    return p.returncode
+
+
+def cmd_events(argv):
+    """Event-alpha: status (default) | run (ingest+score now for the scan)."""
+    import aj_db, aj_events, aj_config
+    aj_db.aj_init()
+    sub = next((a for a in argv if not a.startswith("-")), "status")
+    if sub == "run":
+        import aj_operator
+        cfg = aj_config.get_config()
+        syms = aj_operator._scan_universe()[:int(cfg.get("event_symbols_per_cycle", 10))]
+        _print({"ingest": aj_events.ingest_and_score(syms, cfg),
+                "outcomes": aj_events.score_due_outcomes()})
+    else:
+        _print(aj_events.event_skill())
+
+
+def cmd_lab(argv):
+    """Research Scientist: propose | run | watchdog | status (default)."""
+    import aj_db, aj_lab
+    aj_db.aj_init()
+    sub = next((a for a in argv if not a.startswith("-")), "status")
+    if sub == "propose":
+        _print(aj_lab.propose())
+    elif sub == "run":
+        _print(aj_lab.run_next())
+    elif sub == "watchdog":
+        _print(aj_lab.check_promotions())
+    else:
+        _print(aj_lab.status())
 
 
 def cmd_kill(argv):
@@ -125,15 +175,45 @@ def cmd_secret(argv):
         secret --set alpaca_key_id=@/path/key   # read value from a file
         secret --set alpaca_key_id=@env:KID      # read value from $KID
         secret --set alpaca_key_id=             # getpass prompt (no echo)
-    The legacy `--set scope=value` inline form still works but is discouraged."""
+    The legacy `--set scope=value` inline form still works but is discouraged.
+
+    `secret --rotate-key` rotates the MASTER key: every stored blob is
+    re-encrypted under a freshly generated Fernet key (atomic-ish — aborts
+    untouched unless every blob decrypts first). Prints counts only, never
+    key material."""
     import aj_db, aj_secrets
     aj_db.aj_init()
+    if "--rotate-key" in argv:
+        r = aj_secrets.rotate_master_key()
+        # Counts + locations only — the key itself must NEVER hit stdout (it
+        # would land in shell history / CI logs). The operator reads the key
+        # file directly if an external AUGUR_SECRETS_KEY source needs updating.
+        out = {"ok": bool(r.get("ok")), "rotated": r.get("rotated", 0)}
+        if r.get("key_file"):
+            out["key_file"] = r["key_file"]
+        if r.get("env_key_active"):
+            out["warning"] = ("AUGUR_SECRETS_KEY is set: update the external "
+                              "env source to the new key (see key_file) or the "
+                              "next restart cannot decrypt the rotated secrets")
+        if r.get("error"):
+            out["error"] = r["error"]
+        _print(out)
+        return 0 if out["ok"] else 1
     i, stored = 0, []
     while i < len(argv):
         if argv[i] == "--set" and i + 1 < len(argv) and "=" in argv[i + 1]:
             k, raw = argv[i + 1].split("=", 1)
             scope = k.strip()
             v = _read_secret_value(scope, raw.strip())
+            # An empty resolved value (typo'd @env:NAME, empty file/stdin)
+            # would silently ENCRYPT AND OVERWRITE a working credential — the
+            # breakage only surfacing later as opaque broker auth failures.
+            # Refuse it; the getpass path already re-prompts interactively.
+            if not v:
+                stored.append({scope: "refused: resolved value is empty "
+                                      "(check @env:/@file source)"})
+                i += 2
+                continue
             ok = aj_secrets.store(scope, v)
             stored.append({scope: "stored" if ok else "failed"})
             i += 2
@@ -215,6 +295,70 @@ def cmd_preset(argv):
         _print({"preset": name, "applied": True})
 
 
+def cmd_explain(argv):
+    """Human-readable decision funnel for one operator cycle (the latest by
+    default, or `--cycle CYCLE_ID`). Reads the aj_cycle_stats observability
+    snapshot only — plain text, no network, never touches the trading path."""
+    import aj_db
+    aj_db.aj_init()
+    cyc = None
+    if "--cycle" in argv:
+        i = argv.index("--cycle")
+        if i + 1 < len(argv):
+            cyc = argv[i + 1]
+    if cyc:
+        rows = aj_db.query("SELECT * FROM aj_cycle_stats WHERE cycle_id=?", (cyc,))
+    else:
+        rows = aj_db.query("SELECT * FROM aj_cycle_stats ORDER BY ts DESC LIMIT 1")
+    if not rows:
+        print("no cycle stats found" +
+              (" for cycle {!r}".format(cyc) if cyc else " — run a cycle first"))
+        return 1
+    r = rows[0]
+
+    def _i(k):
+        try:
+            return int(r.get(k) or 0)
+        except (TypeError, ValueError):
+            return 0
+
+    print("cycle   : {}".format(r.get("cycle_id")))
+    print("ts      : {}   session: {}   mode: {}".format(
+        r.get("ts"), r.get("session") or "?", r.get("mode") or "?"))
+    print("funnel  : scanned {} -> with_signal {} -> executed {}   (exits {})".format(
+        _i("scanned"), _i("with_signal"), _i("executed"), _i("exits")))
+
+    # Per-symbol dispositions, grouped by result so the operator reads "what
+    # blocked everything this cycle" at a glance rather than scanning JSON.
+    try:
+        scan = json.loads(r.get("scan_json") or "[]") or []
+    except (TypeError, ValueError):
+        scan = []
+    if not scan:
+        print("(no per-symbol scan rows recorded for this cycle)")
+        return 0
+    groups = {}
+    for row in scan:
+        groups.setdefault(str(row.get("result") or "?"), []).append(row)
+
+    def _num(v, fmt):
+        try:
+            return fmt.format(float(v))
+        except (TypeError, ValueError):
+            return "-"
+    # 'executed' first (the outcome), then the block reasons by frequency.
+    order = sorted(groups, key=lambda k: (k != "executed", -len(groups[k]), k))
+    for res in order:
+        rows_g = groups[res]
+        print("\n{} ({}):".format(res, len(rows_g)))
+        for row in rows_g:
+            print("  {:<10} edge={:>7}  prob_up={:>5}".format(
+                str(row.get("symbol") or "?"),
+                _num(row.get("edge"), "{:+.2f}"),
+                _num(row.get("prob_up"), "{:.2f}")))
+    return 0
+
+
 def cmd_verify(argv):
     import aj_db, database as dbase
     aj_db.aj_init()
@@ -237,6 +381,8 @@ _CMDS = {
     "recon": cmd_recon, "config": cmd_config, "verify": cmd_verify,
     "secret": cmd_secret, "verify-pass": cmd_verify_pass,
     "analytics": cmd_analytics, "journal": cmd_journal, "preset": cmd_preset,
+    "explain": cmd_explain, "replay": cmd_replay, "lab": cmd_lab,
+    "events": cmd_events,
 }
 
 
@@ -251,8 +397,10 @@ def main(argv=None):
         print("unknown command: {}\n{}".format(cmd, __doc__), file=sys.stderr)
         return 2
     try:
-        fn(argv[1:])
-        return 0
+        # Propagate a command's explicit exit code (e.g. cmd_run's invalid-mode
+        # 2) — swallowing it made every misconfigured invocation exit 0.
+        rc = fn(argv[1:])
+        return int(rc) if isinstance(rc, int) else 0
     except Exception as e:
         # Emit the full traceback to stderr (an operator debugging a kill/recon
         # failure needs it), but keep the secret-handling commands from echoing

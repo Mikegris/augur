@@ -252,3 +252,38 @@ def complete_tiered(prompt: str, tier: str = DEEP, system: Optional[str] = None,
     tagged_role = "{}#{}".format(role or "council", t)
     return complete(prompt, system=system, role=tagged_role, max_tokens=max_tokens,
                     quality_floor=quality_floor, model=model, **kw)
+
+
+# ── strict-JSON call adapter (council CallFn path) ────────────────────────────
+# Council roles that demand STRICT JSON (analysts, research manager, trader,
+# risk debaters, arbiter) should request NATIVE JSON output from the backend
+# (chat_any(json_mode=True)) instead of relying on prompt discipline alone.
+# The council threads an OPTIONAL `json_mode` keyword through its injected
+# call(tier, role, system, prompt) function; legacy 4-positional callables
+# (injected test fakes, aj_analyst_util.default_call) MUST keep working, so
+# support is detected by SIGNATURE — never by calling and catching TypeError,
+# which would double-invoke (and double-spend) whenever a TypeError originated
+# INSIDE the call body.
+
+def _accepts_json_mode(call: Any) -> bool:
+    """True iff `call` can take a json_mode keyword (an explicit parameter or a
+    **kwargs catch-all). Fail-closed to False on uninspectable callables — the
+    plain 4-arg invocation is always safe."""
+    try:
+        import inspect
+        params = inspect.signature(call).parameters
+        return ("json_mode" in params or
+                any(p.kind is inspect.Parameter.VAR_KEYWORD
+                    for p in params.values()))
+    except (TypeError, ValueError):
+        return False
+
+
+def call_json(call: Any, tier: str, role: str, system: str,
+              prompt: str) -> Optional[str]:
+    """Invoke a council completion for a STRICT-JSON role, passing
+    json_mode=True when the callable supports it (backward compatible: the
+    default stays False everywhere else, so existing callers are unchanged)."""
+    if _accepts_json_mode(call):
+        return call(tier, role, system, prompt, json_mode=True)
+    return call(tier, role, system, prompt)

@@ -1,0 +1,9094 @@
+{
+ "kind": "replay",
+ "start": "2023-01-03",
+ "end": "2025-12-31",
+ "symbols": [
+  "AAPL",
+  "MSFT",
+  "NVDA",
+  "AMZN",
+  "GOOGL",
+  "META",
+  "TSLA",
+  "JPM",
+  "XOM",
+  "UNH"
+ ],
+ "cash": 100000.0,
+ "forecaster": "pit",
+ "config_overrides": [
+  "metalabel_enabled=true",
+  "metalabel_retrain_min_new=999999",
+  "metalabel_prob_threshold=0.3"
+ ],
+ "days": 752,
+ "halts": 0,
+ "daily": [
+  {
+   "date": "2023-01-03",
+   "equity": 99996.0,
+   "available": 89996.0,
+   "executed": 2,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-01-04",
+   "equity": 100144.04,
+   "available": 79992.0,
+   "executed": 2,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-01-05",
+   "equity": 100028.08,
+   "available": 65047.33311907532,
+   "executed": 3,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-01-06",
+   "equity": 100733.93,
+   "available": 50041.33311907532,
+   "executed": 3,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-01-09",
+   "equity": 100371.56,
+   "available": 35384.33352348351,
+   "executed": 3,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-01-10",
+   "equity": 101494.2,
+   "available": 15376.33352348351,
+   "executed": 4,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-01-11",
+   "equity": 102209.84,
+   "available": 0.0,
+   "executed": 4,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-01-12",
+   "equity": 103542.95,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-01-13",
+   "equity": 104747.49,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-01-17",
+   "equity": 103509.17,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-01-18",
+   "equity": 101448.15,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-01-19",
+   "equity": 101932.18,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-01-20",
+   "equity": 103898.87,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-01-23",
+   "equity": 105462.45,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-01-24",
+   "equity": 105632.81,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-01-25",
+   "equity": 105187.38,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-01-26",
+   "equity": 108109.98,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-01-27",
+   "equity": 109402.89,
+   "available": 8521.308979416746,
+   "executed": 7,
+   "exits": 1,
+   "ok": true
+  },
+  {
+   "date": "2023-01-30",
+   "equity": 107754.99,
+   "available": 15.211678013788514,
+   "executed": 2,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-01-31",
+   "equity": 109432.25,
+   "available": 15.211678013788514,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-02-01",
+   "equity": 109968.47,
+   "available": 15.211678013788514,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-02-02",
+   "equity": 111847.72,
+   "available": 24665.825510234474,
+   "executed": 6,
+   "exits": 1,
+   "ok": true
+  },
+  {
+   "date": "2023-02-03",
+   "equity": 111828.32,
+   "available": 0.0,
+   "executed": 6,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-02-06",
+   "equity": 111112.94,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-02-07",
+   "equity": 114144.01,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-02-08",
+   "equity": 111619.78,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-02-09",
+   "equity": 109686.29,
+   "available": 8719.691883130876,
+   "executed": 5,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-02-10",
+   "equity": 109511.47,
+   "available": 0.0,
+   "executed": 2,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-02-13",
+   "equity": 111501.21,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-02-14",
+   "equity": 112023.85,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-02-15",
+   "equity": 112116.55,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-02-16",
+   "equity": 110152.23,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-02-17",
+   "equity": 109322.42,
+   "available": 0.0,
+   "executed": 2,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-02-21",
+   "equity": 107023.98,
+   "available": 17285.589923192707,
+   "executed": 2,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-02-22",
+   "equity": 106708.77,
+   "available": 52896.03805519272,
+   "executed": 2,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-02-23",
+   "equity": 107958.76,
+   "available": 47894.03805519272,
+   "executed": 1,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-02-24",
+   "equity": 107084.7,
+   "available": 72183.96437203136,
+   "executed": 1,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-02-27",
+   "equity": 107042.06,
+   "available": 76824.17174403135,
+   "executed": 1,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-02-28",
+   "equity": 107625.67,
+   "available": 64493.551393273934,
+   "executed": 3,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-03-01",
+   "equity": 107116.33,
+   "available": 54489.551393273934,
+   "executed": 2,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-03-02",
+   "equity": 107499.28,
+   "available": 44485.551393273934,
+   "executed": 2,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-03-03",
+   "equity": 110328.24,
+   "available": 30109.252484941953,
+   "executed": 3,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-03-06",
+   "equity": 110044.24,
+   "available": 11013.622247474308,
+   "executed": 4,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-03-07",
+   "equity": 108850.28,
+   "available": 30289.79224747431,
+   "executed": 2,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-03-08",
+   "equity": 109399.3,
+   "available": 25399.71837046029,
+   "executed": 3,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-03-09",
+   "equity": 107798.91,
+   "available": 20397.71837046029,
+   "executed": 1,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-03-10",
+   "equity": 106632.95,
+   "available": 33226.33139327394,
+   "executed": 1,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-03-13",
+   "equity": 107119.67,
+   "available": 33226.33139327394,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-03-14",
+   "equity": 112214.18,
+   "available": 28224.33139327394,
+   "executed": 1,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-03-15",
+   "equity": 113685.38,
+   "available": 13218.331393273938,
+   "executed": 3,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-03-16",
+   "equity": 117577.4,
+   "available": 349.6681326470389,
+   "executed": 5,
+   "exits": 1,
+   "ok": true
+  },
+  {
+   "date": "2023-03-17",
+   "equity": 113785.54,
+   "available": 23.29969176197119,
+   "executed": 1,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-03-20",
+   "equity": 114429.18,
+   "available": 23.29969176197119,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-03-21",
+   "equity": 116918.34,
+   "available": 23.29969176197119,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-03-22",
+   "equity": 115564.19,
+   "available": 23.29969176197119,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-03-23",
+   "equity": 117926.37,
+   "available": 23.29969176197119,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-03-24",
+   "equity": 118766.51,
+   "available": 23.29969176197119,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-03-27",
+   "equity": 116892.57,
+   "available": 23.29969176197119,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-03-28",
+   "equity": 115725.7,
+   "available": 23.29969176197119,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-03-29",
+   "equity": 118193.63,
+   "available": 23.29969176197119,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-03-30",
+   "equity": 119470.7,
+   "available": 23.29969176197119,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-03-31",
+   "equity": 121759.41,
+   "available": 63018.77711857501,
+   "executed": 6,
+   "exits": 1,
+   "ok": true
+  },
+  {
+   "date": "2023-04-03",
+   "equity": 122069.86,
+   "available": 25628.298120632302,
+   "executed": 8,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-04-04",
+   "equity": 122150.86,
+   "available": 0.0,
+   "executed": 6,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-04-05",
+   "equity": 121111.69,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-04-06",
+   "equity": 123114.55,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-04-10",
+   "equity": 122195.03,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-04-11",
+   "equity": 120742.22,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-04-12",
+   "equity": 119944.21,
+   "available": 0.0,
+   "executed": 5,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-04-13",
+   "equity": 122545.71,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-04-14",
+   "equity": 122518.33,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-04-17",
+   "equity": 121513.83,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-04-18",
+   "equity": 121579.34,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-04-19",
+   "equity": 121185.35,
+   "available": 8731.58624549978,
+   "executed": 1,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-04-20",
+   "equity": 120685.14,
+   "available": 0.0,
+   "executed": 2,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-04-21",
+   "equity": 120478.75,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-04-24",
+   "equity": 120519.81,
+   "available": 14010.50457697233,
+   "executed": 4,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-04-25",
+   "equity": 118549.94,
+   "available": 18558.47551791498,
+   "executed": 5,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-04-26",
+   "equity": 118326.98,
+   "available": 3811.022182452638,
+   "executed": 3,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-04-27",
+   "equity": 121505.22,
+   "available": 0.0,
+   "executed": 2,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-04-28",
+   "equity": 121538.94,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-05-01",
+   "equity": 120225.73,
+   "available": 0.0,
+   "executed": 4,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-05-02",
+   "equity": 117901.32,
+   "available": 28183.64482792831,
+   "executed": 1,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-05-03",
+   "equity": 117365.3,
+   "available": 8551.881476616461,
+   "executed": 4,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-05-04",
+   "equity": 116395.23,
+   "available": 34143.77147661646,
+   "executed": 3,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-05-05",
+   "equity": 118529.53,
+   "available": 9272.218395847685,
+   "executed": 5,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-05-08",
+   "equity": 118485.06,
+   "available": 0.0,
+   "executed": 2,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-05-09",
+   "equity": 117836.95,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-05-10",
+   "equity": 118880.87,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-05-11",
+   "equity": 118998.91,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-05-12",
+   "equity": 117989.68,
+   "available": 23854.383965025096,
+   "executed": 1,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-05-15",
+   "equity": 118362.94,
+   "available": 0.0,
+   "executed": 5,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-05-16",
+   "equity": 118911.35,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-05-17",
+   "equity": 119931.28,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-05-18",
+   "equity": 121812.63,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-05-19",
+   "equity": 121524.55,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-05-22",
+   "equity": 121784.75,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-05-23",
+   "equity": 120193.48,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-05-24",
+   "equity": 120479.6,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-05-25",
+   "equity": 122278.37,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-05-26",
+   "equity": 125118.95,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-05-30",
+   "equity": 125637.99,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-05-31",
+   "equity": 125441.35,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-06-01",
+   "equity": 127673.43,
+   "available": 0.0,
+   "executed": 7,
+   "exits": 1,
+   "ok": true
+  },
+  {
+   "date": "2023-06-02",
+   "equity": 128610.85,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-06-05",
+   "equity": 128435.34,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-06-06",
+   "equity": 128321.07,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-06-07",
+   "equity": 125589.84,
+   "available": 190.82215767788875,
+   "executed": 1,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-06-08",
+   "equity": 127096.65,
+   "available": 9.091292491255444,
+   "executed": 1,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-06-09",
+   "equity": 127315.14,
+   "available": 9.091292491255444,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-06-12",
+   "equity": 129345.91,
+   "available": 9.091292491255444,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-06-13",
+   "equity": 129634.59,
+   "available": 9.091292491255444,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-06-14",
+   "equity": 130240.22,
+   "available": 9.091292491255444,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-06-15",
+   "equity": 132332.47,
+   "available": 9.091292491255444,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-06-16",
+   "equity": 131010.12,
+   "available": 9.091292491255444,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-06-20",
+   "equity": 130608.78,
+   "available": 9.091292491255444,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-06-21",
+   "equity": 129374.4,
+   "available": 46.341292491255444,
+   "executed": 3,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-06-22",
+   "equity": 131565.39,
+   "available": 0.0,
+   "executed": 4,
+   "exits": 1,
+   "ok": true
+  },
+  {
+   "date": "2023-06-23",
+   "equity": 130845.97,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-06-26",
+   "equity": 129005.79,
+   "available": 26583.715523636132,
+   "executed": 4,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-06-27",
+   "equity": 130659.23,
+   "available": 6648.986490242041,
+   "executed": 4,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-06-28",
+   "equity": 130648.82,
+   "available": 9901.037694242048,
+   "executed": 3,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-06-29",
+   "equity": 130421.92,
+   "available": 9833.521359826878,
+   "executed": 3,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-06-30",
+   "equity": 133126.76,
+   "available": 0.0,
+   "executed": 2,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-07-03",
+   "equity": 132337.64,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-07-05",
+   "equity": 132433.26,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-07-06",
+   "equity": 132277.09,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-07-07",
+   "equity": 131809.84,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-07-10",
+   "equity": 130691.15,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-07-11",
+   "equity": 130982.46,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-07-12",
+   "equity": 133018.26,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-07-13",
+   "equity": 134411.83,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-07-14",
+   "equity": 134190.51,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-07-17",
+   "equity": 135778.48,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-07-18",
+   "equity": 136067.67,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-07-19",
+   "equity": 137113.66,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-07-20",
+   "equity": 134314.6,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-07-21",
+   "equity": 132992.87,
+   "available": 5127.097427826877,
+   "executed": 3,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-07-24",
+   "equity": 133332.04,
+   "available": 5493.004175524569,
+   "executed": 6,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-07-25",
+   "equity": 133966.8,
+   "available": 0.0,
+   "executed": 2,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-07-26",
+   "equity": 134032.47,
+   "available": 0.0,
+   "executed": 3,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-07-27",
+   "equity": 133281.89,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-07-28",
+   "equity": 134758.68,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-07-31",
+   "equity": 135366.29,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-08-01",
+   "equity": 134755.77,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-08-02",
+   "equity": 132663.1,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-08-03",
+   "equity": 132121.32,
+   "available": 68874.49376956772,
+   "executed": 6,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-08-04",
+   "equity": 131993.4,
+   "available": 43864.49376956773,
+   "executed": 5,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-08-07",
+   "equity": 133052.33,
+   "available": 13888.237598975502,
+   "executed": 6,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-08-08",
+   "equity": 132350.01,
+   "available": 0.0,
+   "executed": 3,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-08-09",
+   "equity": 131018.96,
+   "available": 0.0,
+   "executed": 6,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-08-10",
+   "equity": 131290.27,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-08-11",
+   "equity": 132087.52,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-08-14",
+   "equity": 132997.3,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-08-15",
+   "equity": 130345.2,
+   "available": 25570.70946540778,
+   "executed": 2,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-08-16",
+   "equity": 129070.64,
+   "available": 20568.70946540778,
+   "executed": 1,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-08-17",
+   "equity": 129194.66,
+   "available": 39784.47462786449,
+   "executed": 3,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-08-18",
+   "equity": 128945.06,
+   "available": 34837.7429126295,
+   "executed": 1,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-08-21",
+   "equity": 128912.09,
+   "available": 34837.7429126295,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-08-22",
+   "equity": 128815.33,
+   "available": 25129.776882312934,
+   "executed": 2,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-08-23",
+   "equity": 129621.42,
+   "available": 10438.093020139382,
+   "executed": 3,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-08-24",
+   "equity": 127694.12,
+   "available": 10438.093020139382,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-08-25",
+   "equity": 128848.47,
+   "available": 10438.093020139382,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-08-28",
+   "equity": 129622.62,
+   "available": 29669.84931716944,
+   "executed": 2,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-08-29",
+   "equity": 131181.42,
+   "available": 19707.301407502306,
+   "executed": 2,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-08-30",
+   "equity": 132260.35,
+   "available": 2699.5334697906474,
+   "executed": 4,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-08-31",
+   "equity": 132573.77,
+   "available": 0.0,
+   "executed": 2,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-09-01",
+   "equity": 133750.85,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-09-05",
+   "equity": 133815.47,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-09-06",
+   "equity": 133504.77,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-09-07",
+   "equity": 133260.24,
+   "available": 0.0,
+   "executed": 3,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-09-08",
+   "equity": 134749.89,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-09-11",
+   "equity": 134227.88,
+   "available": 0.0,
+   "executed": 1,
+   "exits": 1,
+   "ok": true
+  },
+  {
+   "date": "2023-09-12",
+   "equity": 135360.01,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-09-13",
+   "equity": 135463.43,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-09-14",
+   "equity": 137328.95,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-09-15",
+   "equity": 135719.56,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-09-18",
+   "equity": 136583.46,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-09-19",
+   "equity": 136288.26,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-09-20",
+   "equity": 133716.29,
+   "available": 0.0,
+   "executed": 4,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-09-21",
+   "equity": 131240.25,
+   "available": 45262.90041861967,
+   "executed": 3,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-09-22",
+   "equity": 131353.46,
+   "available": 35172.29144458963,
+   "executed": 4,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-09-25",
+   "equity": 132370.28,
+   "available": 20166.291444589628,
+   "executed": 3,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-09-26",
+   "equity": 132295.51,
+   "available": 10185.265977769403,
+   "executed": 2,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-09-27",
+   "equity": 135183.11,
+   "available": 181.26597776940253,
+   "executed": 2,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-09-28",
+   "equity": 135097.29,
+   "available": 0.0,
+   "executed": 1,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-09-29",
+   "equity": 133102.84,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-10-02",
+   "equity": 132215.88,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-10-03",
+   "equity": 131930.68,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-10-04",
+   "equity": 128497.98,
+   "available": 87866.027492,
+   "executed": 2,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-10-05",
+   "equity": 128801.65,
+   "available": 82864.027492,
+   "executed": 1,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-10-06",
+   "equity": 129746.54,
+   "available": 63415.85408410951,
+   "executed": 4,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-10-09",
+   "equity": 130086.11,
+   "available": 43979.94483710188,
+   "executed": 4,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-10-10",
+   "equity": 130048.5,
+   "available": 19270.545113402015,
+   "executed": 5,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-10-11",
+   "equity": 130953.89,
+   "available": 0.0,
+   "executed": 4,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-10-12",
+   "equity": 130572.78,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-10-13",
+   "equity": 130501.09,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-10-16",
+   "equity": 131364.77,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-10-17",
+   "equity": 131410.09,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-10-18",
+   "equity": 130239.9,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-10-19",
+   "equity": 129381.66,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-10-20",
+   "equity": 127810.13,
+   "available": 2838.238693856885,
+   "executed": 4,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-10-23",
+   "equity": 128016.2,
+   "available": 0.0,
+   "executed": 1,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-10-24",
+   "equity": 128728.68,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-10-25",
+   "equity": 126188.18,
+   "available": 41057.71398585689,
+   "executed": 3,
+   "exits": 1,
+   "ok": true
+  },
+  {
+   "date": "2023-10-26",
+   "equity": 125088.88,
+   "available": 31083.394571758043,
+   "executed": 2,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-10-27",
+   "equity": 124781.23,
+   "available": 21118.654182984064,
+   "executed": 2,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-10-30",
+   "equity": 126240.27,
+   "available": 6112.654182984064,
+   "executed": 3,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-10-31",
+   "equity": 127148.89,
+   "available": 0.0,
+   "executed": 2,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-11-01",
+   "equity": 127782.11,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-11-02",
+   "equity": 128776.43,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-11-03",
+   "equity": 128621.92,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-11-06",
+   "equity": 129525.33,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-11-07",
+   "equity": 130809.5,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-11-08",
+   "equity": 130965.56,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-11-09",
+   "equity": 130902.21,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-11-10",
+   "equity": 132515.41,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-11-13",
+   "equity": 132282.07,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-11-14",
+   "equity": 132587.37,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-11-15",
+   "equity": 132093.94,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-11-16",
+   "equity": 133118.56,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-11-17",
+   "equity": 131901.69,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-11-20",
+   "equity": 132751.57,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-11-21",
+   "equity": 132735.0,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-11-22",
+   "equity": 134083.41,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-11-24",
+   "equity": 134513.66,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-11-27",
+   "equity": 134203.73,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-11-28",
+   "equity": 134224.43,
+   "available": 19292.408373281378,
+   "executed": 6,
+   "exits": 1,
+   "ok": true
+  },
+  {
+   "date": "2023-11-29",
+   "equity": 133123.64,
+   "available": 0.0,
+   "executed": 4,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-11-30",
+   "equity": 135711.12,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-12-01",
+   "equity": 134878.78,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-12-04",
+   "equity": 134415.14,
+   "available": 3551.0020883127945,
+   "executed": 4,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-12-05",
+   "equity": 135222.26,
+   "available": 0.0,
+   "executed": 1,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-12-06",
+   "equity": 134600.12,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-12-07",
+   "equity": 134861.69,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-12-08",
+   "equity": 135424.26,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-12-11",
+   "equity": 134076.25,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-12-12",
+   "equity": 134830.58,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-12-13",
+   "equity": 135786.99,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-12-14",
+   "equity": 133266.32,
+   "available": 87032.93859903142,
+   "executed": 3,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-12-15",
+   "equity": 133676.42,
+   "available": 72170.24558753509,
+   "executed": 3,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-12-18",
+   "equity": 134341.73,
+   "available": 52363.778022705315,
+   "executed": 4,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-12-19",
+   "equity": 134756.07,
+   "available": 22762.041460352335,
+   "executed": 6,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-12-20",
+   "equity": 133691.64,
+   "available": 2754.041460352335,
+   "executed": 4,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-12-21",
+   "equity": 134702.3,
+   "available": 0.0,
+   "executed": 1,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-12-22",
+   "equity": 134459.76,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-12-26",
+   "equity": 134634.82,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-12-27",
+   "equity": 134837.9,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-12-28",
+   "equity": 135018.19,
+   "available": 4665.391725687539,
+   "executed": 1,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2023-12-29",
+   "equity": 134174.54,
+   "available": 0.0,
+   "executed": 1,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-01-02",
+   "equity": 132428.73,
+   "available": 6764.437512000004,
+   "executed": 5,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-01-03",
+   "equity": 131790.95,
+   "available": 0.0,
+   "executed": 2,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-01-04",
+   "equity": 130337.84,
+   "available": 27421.421874153806,
+   "executed": 5,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-01-05",
+   "equity": 130683.16,
+   "available": 12415.421874153806,
+   "executed": 3,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-01-08",
+   "equity": 131494.23,
+   "available": 28.020188261463773,
+   "executed": 3,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-01-09",
+   "equity": 131328.74,
+   "available": 9540.753338107661,
+   "executed": 1,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-01-10",
+   "equity": 133076.84,
+   "available": 0.0,
+   "executed": 3,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-01-11",
+   "equity": 132885.49,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-01-12",
+   "equity": 132849.66,
+   "available": 9610.78397841184,
+   "executed": 1,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-01-16",
+   "equity": 131940.12,
+   "available": 0.0,
+   "executed": 3,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-01-17",
+   "equity": 131483.09,
+   "available": 45346.8304014495,
+   "executed": 1,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-01-18",
+   "equity": 132959.24,
+   "available": 27860.545883463106,
+   "executed": 4,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-01-19",
+   "equity": 135097.77,
+   "available": 10263.886122639153,
+   "executed": 4,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-01-22",
+   "equity": 134685.21,
+   "available": 0.0,
+   "executed": 4,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-01-23",
+   "equity": 135667.92,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-01-24",
+   "equity": 137379.34,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-01-25",
+   "equity": 138720.63,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-01-26",
+   "equity": 138736.54,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-01-29",
+   "equity": 140707.47,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-01-30",
+   "equity": 139902.36,
+   "available": 0.0,
+   "executed": 2,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-01-31",
+   "equity": 134519.92,
+   "available": 19993.400486888477,
+   "executed": 4,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-02-01",
+   "equity": 136065.98,
+   "available": 0.0,
+   "executed": 5,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-02-02",
+   "equity": 150892.57,
+   "available": 76956.051172,
+   "executed": 3,
+   "exits": 2,
+   "ok": true
+  },
+  {
+   "date": "2024-02-05",
+   "equity": 150155.88,
+   "available": 54332.21328318364,
+   "executed": 5,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-02-06",
+   "equity": 149988.17,
+   "available": 27208.0773976289,
+   "executed": 6,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-02-07",
+   "equity": 151758.55,
+   "available": 0.0,
+   "executed": 6,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-02-08",
+   "equity": 151568.03,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-02-09",
+   "equity": 153546.47,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-02-12",
+   "equity": 152520.41,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-02-13",
+   "equity": 149865.16,
+   "available": 0.0,
+   "executed": 4,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-02-14",
+   "equity": 151688.6,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-02-15",
+   "equity": 151717.3,
+   "available": 0.0,
+   "executed": 2,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-02-16",
+   "equity": 150688.38,
+   "available": 32472.72518204111,
+   "executed": 7,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-02-20",
+   "equity": 149510.85,
+   "available": 7500.4730479370555,
+   "executed": 5,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-02-21",
+   "equity": 149837.3,
+   "available": 0.0,
+   "executed": 2,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-02-22",
+   "equity": 155188.43,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-02-23",
+   "equity": 155257.88,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-02-26",
+   "equity": 154982.88,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-02-27",
+   "equity": 154702.36,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-02-28",
+   "equity": 154122.89,
+   "available": 9553.503659937058,
+   "executed": 1,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-02-29",
+   "equity": 156141.65,
+   "available": 0.0,
+   "executed": 3,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-03-01",
+   "equity": 158128.31,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-03-04",
+   "equity": 158283.51,
+   "available": 0.0,
+   "executed": 4,
+   "exits": 1,
+   "ok": true
+  },
+  {
+   "date": "2024-03-05",
+   "equity": 156793.41,
+   "available": 0.0,
+   "executed": 4,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-03-06",
+   "equity": 157506.1,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-03-07",
+   "equity": 159882.63,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-03-08",
+   "equity": 158913.32,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-03-11",
+   "equity": 155890.43,
+   "available": 50165.71194758248,
+   "executed": 3,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-03-12",
+   "equity": 157618.43,
+   "available": 22646.601253161767,
+   "executed": 6,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-03-13",
+   "equity": 157864.23,
+   "available": 0.0,
+   "executed": 6,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-03-14",
+   "equity": 157323.23,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-03-15",
+   "equity": 156525.46,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-03-18",
+   "equity": 159003.36,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-03-19",
+   "equity": 159632.2,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-03-20",
+   "equity": 161567.98,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-03-21",
+   "equity": 162750.85,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-03-22",
+   "equity": 162703.2,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-03-25",
+   "equity": 161788.33,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-03-26",
+   "equity": 160784.41,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-03-27",
+   "equity": 161702.12,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-03-28",
+   "equity": 161341.65,
+   "available": 35201.33256625026,
+   "executed": 4,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-04-01",
+   "equity": 161405.87,
+   "available": 10191.332566250247,
+   "executed": 5,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-04-02",
+   "equity": 161519.63,
+   "available": 0.0,
+   "executed": 3,
+   "exits": 1,
+   "ok": true
+  },
+  {
+   "date": "2024-04-03",
+   "equity": 161496.77,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-04-04",
+   "equity": 159707.54,
+   "available": 0.0,
+   "executed": 3,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-04-05",
+   "equity": 162034.74,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-04-08",
+   "equity": 162357.51,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-04-09",
+   "equity": 162456.38,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-04-10",
+   "equity": 162117.42,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-04-11",
+   "equity": 162947.57,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-04-12",
+   "equity": 157524.13,
+   "available": 59557.61218589595,
+   "executed": 5,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-04-15",
+   "equity": 156426.76,
+   "available": 40143.05350203505,
+   "executed": 4,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-04-16",
+   "equity": 155792.12,
+   "available": 29472.84113194482,
+   "executed": 4,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-04-17",
+   "equity": 155533.58,
+   "available": 14784.222601175803,
+   "executed": 3,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-04-18",
+   "equity": 155280.5,
+   "available": 39708.70814527437,
+   "executed": 4,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-04-19",
+   "equity": 155629.07,
+   "available": 29704.708145274373,
+   "executed": 2,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-04-22",
+   "equity": 156311.04,
+   "available": 14698.708145274373,
+   "executed": 3,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-04-23",
+   "equity": 156995.01,
+   "available": 0.0,
+   "executed": 3,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-04-24",
+   "equity": 157372.62,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-04-25",
+   "equity": 156768.77,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-04-26",
+   "equity": 160011.71,
+   "available": 71681.10789922246,
+   "executed": 2,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-04-29",
+   "equity": 157718.35,
+   "available": 61864.368087443814,
+   "executed": 2,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-04-30",
+   "equity": 156070.21,
+   "available": 52402.923714579425,
+   "executed": 4,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-05-01",
+   "equity": 156467.17,
+   "available": 42398.923714579425,
+   "executed": 2,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-05-02",
+   "equity": 158478.29,
+   "available": 22917.077352623186,
+   "executed": 4,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-05-03",
+   "equity": 159578.19,
+   "available": 2909.077352623186,
+   "executed": 4,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-05-06",
+   "equity": 160130.69,
+   "available": 0.0,
+   "executed": 1,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-05-07",
+   "equity": 162364.36,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-05-08",
+   "equity": 161655.12,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-05-09",
+   "equity": 162594.9,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-05-10",
+   "equity": 162186.56,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-05-13",
+   "equity": 162676.72,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-05-14",
+   "equity": 163628.88,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-05-15",
+   "equity": 165251.29,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-05-16",
+   "equity": 166297.5,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-05-17",
+   "equity": 167587.5,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-05-20",
+   "equity": 167412.57,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-05-21",
+   "equity": 168586.87,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-05-22",
+   "equity": 167485.94,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-05-23",
+   "equity": 165079.28,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-05-24",
+   "equity": 165349.0,
+   "available": 0.0,
+   "executed": 3,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-05-28",
+   "equity": 165686.99,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-05-29",
+   "equity": 163655.83,
+   "available": 44361.27459740072,
+   "executed": 1,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-05-30",
+   "equity": 161734.39,
+   "available": 26797.978685164788,
+   "executed": 4,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-05-31",
+   "equity": 162126.82,
+   "available": 0.0,
+   "executed": 6,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-06-03",
+   "equity": 163242.58,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-06-04",
+   "equity": 163489.11,
+   "available": 4133.584657136686,
+   "executed": 1,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-06-05",
+   "equity": 165388.15,
+   "available": 47.54756150637695,
+   "executed": 1,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-06-06",
+   "equity": 165714.07,
+   "available": 47.54756150637695,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-06-07",
+   "equity": 165064.42,
+   "available": 47.54756150637695,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-06-10",
+   "equity": 164953.9,
+   "available": 47.54756150637695,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-06-11",
+   "equity": 168429.43,
+   "available": 9714.947561506371,
+   "executed": 1,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-06-12",
+   "equity": 170443.85,
+   "available": 28857.580393050855,
+   "executed": 5,
+   "exits": 1,
+   "ok": true
+  },
+  {
+   "date": "2024-06-13",
+   "equity": 168945.02,
+   "available": 11266.93757569154,
+   "executed": 4,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-06-14",
+   "equity": 170054.83,
+   "available": 0.0,
+   "executed": 4,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-06-17",
+   "equity": 170762.87,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-06-18",
+   "equity": 169355.76,
+   "available": 0.0,
+   "executed": 2,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-06-20",
+   "equity": 169514.57,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-06-21",
+   "equity": 170672.79,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-06-24",
+   "equity": 169872.76,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-06-25",
+   "equity": 174253.04,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-06-26",
+   "equity": 174584.87,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-06-27",
+   "equity": 175652.84,
+   "available": 82295.39018972917,
+   "executed": 5,
+   "exits": 1,
+   "ok": true
+  },
+  {
+   "date": "2024-06-28",
+   "equity": 173898.05,
+   "available": 42381.03758547886,
+   "executed": 8,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-07-01",
+   "equity": 175261.56,
+   "available": 12369.037585478887,
+   "executed": 6,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-07-02",
+   "equity": 176595.1,
+   "available": 0.0,
+   "executed": 3,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-07-03",
+   "equity": 177224.08,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-07-05",
+   "equity": 181043.76,
+   "available": 4788.491569478851,
+   "executed": 1,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-07-08",
+   "equity": 180167.68,
+   "available": 9748.136173478866,
+   "executed": 2,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-07-09",
+   "equity": 180253.14,
+   "available": 0.0,
+   "executed": 2,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-07-10",
+   "equity": 182543.68,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-07-11",
+   "equity": 177123.01,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-07-12",
+   "equity": 176257.59,
+   "available": 30260.89017269459,
+   "executed": 4,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-07-15",
+   "equity": 177331.87,
+   "available": 5250.8901726945915,
+   "executed": 5,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-07-16",
+   "equity": 177707.91,
+   "available": 0.0,
+   "executed": 5,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-07-17",
+   "equity": 176274.95,
+   "available": 55515.15024696542,
+   "executed": 6,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-07-18",
+   "equity": 174137.89,
+   "available": 36078.73856317281,
+   "executed": 4,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-07-19",
+   "equity": 173586.43,
+   "available": 16594.71486329494,
+   "executed": 4,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-07-22",
+   "equity": 173043.72,
+   "available": 0.0,
+   "executed": 4,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-07-23",
+   "equity": 172578.88,
+   "available": 28753.458605771797,
+   "executed": 2,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-07-24",
+   "equity": 170679.26,
+   "available": 23751.458605771797,
+   "executed": 1,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-07-25",
+   "equity": 170362.49,
+   "available": 70818.52071728562,
+   "executed": 4,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-07-26",
+   "equity": 172012.33,
+   "available": 55830.00792054934,
+   "executed": 3,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-07-29",
+   "equity": 171275.24,
+   "available": 41081.92515843197,
+   "executed": 3,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-07-30",
+   "equity": 173705.42,
+   "available": 26075.92515843197,
+   "executed": 3,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-07-31",
+   "equity": 173010.92,
+   "available": 11069.925158431972,
+   "executed": 3,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-08-01",
+   "equity": 170662.64,
+   "available": 0.0,
+   "executed": 3,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-08-02",
+   "equity": 169585.64,
+   "available": 61515.791778759434,
+   "executed": 4,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-08-05",
+   "equity": 166469.51,
+   "available": 56513.791778759434,
+   "executed": 1,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-08-06",
+   "equity": 166059.41,
+   "available": 79387.132864,
+   "executed": 3,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-08-07",
+   "equity": 165678.89,
+   "available": 74385.132864,
+   "executed": 1,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-08-08",
+   "equity": 165906.9,
+   "available": 59434.91516350214,
+   "executed": 3,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-08-09",
+   "equity": 164896.4,
+   "available": 44428.91516350214,
+   "executed": 3,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-08-12",
+   "equity": 165910.33,
+   "available": 24420.915163502155,
+   "executed": 4,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-08-13",
+   "equity": 167861.75,
+   "available": 5051.367160251219,
+   "executed": 4,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-08-14",
+   "equity": 169048.62,
+   "available": 0.0,
+   "executed": 2,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-08-15",
+   "equity": 169711.06,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-08-16",
+   "equity": 168947.16,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-08-19",
+   "equity": 169362.93,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-08-20",
+   "equity": 168874.62,
+   "available": 14290.955794250083,
+   "executed": 2,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-08-21",
+   "equity": 168805.3,
+   "available": 0.0,
+   "executed": 3,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-08-22",
+   "equity": 168549.09,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-08-23",
+   "equity": 169697.93,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-08-26",
+   "equity": 169826.4,
+   "available": 0.0,
+   "executed": 2,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-08-27",
+   "equity": 169784.45,
+   "available": 0.0,
+   "executed": 2,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-08-28",
+   "equity": 169811.16,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-08-29",
+   "equity": 170721.38,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-08-30",
+   "equity": 170751.55,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-09-03",
+   "equity": 171099.47,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-09-04",
+   "equity": 172033.83,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-09-05",
+   "equity": 170693.29,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-09-06",
+   "equity": 169464.46,
+   "available": 42219.642863999994,
+   "executed": 3,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-09-09",
+   "equity": 169129.02,
+   "available": 37217.642863999994,
+   "executed": 1,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-09-10",
+   "equity": 169582.19,
+   "available": 37188.542863999995,
+   "executed": 3,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-09-11",
+   "equity": 167743.05,
+   "available": 27184.54286399998,
+   "executed": 2,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-09-12",
+   "equity": 167639.27,
+   "available": 17180.54286399998,
+   "executed": 2,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-09-13",
+   "equity": 168930.83,
+   "available": 2233.8887785616316,
+   "executed": 3,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-09-16",
+   "equity": 167638.03,
+   "available": 0.0,
+   "executed": 1,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-09-17",
+   "equity": 165485.91,
+   "available": 127665.456444,
+   "executed": 1,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-09-18",
+   "equity": 165254.13,
+   "available": 107734.55426561226,
+   "executed": 4,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-09-19",
+   "equity": 166374.59,
+   "available": 78268.45792251287,
+   "executed": 6,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-09-20",
+   "equity": 166435.86,
+   "available": 49024.09102061514,
+   "executed": 6,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-09-23",
+   "equity": 166897.36,
+   "available": 24334.221599375895,
+   "executed": 5,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-09-24",
+   "equity": 166519.24,
+   "available": 257.8412485766239,
+   "executed": 5,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-09-25",
+   "equity": 166086.82,
+   "available": 29.886264595850662,
+   "executed": 1,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-09-26",
+   "equity": 165412.12,
+   "available": 23376.301606761604,
+   "executed": 1,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-09-27",
+   "equity": 164393.69,
+   "available": 3368.3016067616045,
+   "executed": 4,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-09-30",
+   "equity": 165078.38,
+   "available": 0.0,
+   "executed": 2,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-10-01",
+   "equity": 163375.86,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-10-02",
+   "equity": 162615.36,
+   "available": 30873.913761938195,
+   "executed": 4,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-10-03",
+   "equity": 162403.01,
+   "available": 59303.14518487327,
+   "executed": 5,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-10-04",
+   "equity": 163790.11,
+   "available": 34864.4271304249,
+   "executed": 5,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-10-07",
+   "equity": 161407.34,
+   "available": 45306.39142293508,
+   "executed": 4,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-10-08",
+   "equity": 161901.8,
+   "available": 23373.360465532693,
+   "executed": 7,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-10-09",
+   "equity": 161257.88,
+   "available": 0.0,
+   "executed": 5,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-10-10",
+   "equity": 160896.46,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-10-11",
+   "equity": 162412.46,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-10-14",
+   "equity": 163175.06,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-10-15",
+   "equity": 162029.56,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-10-16",
+   "equity": 161057.92,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-10-17",
+   "equity": 160478.54,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-10-18",
+   "equity": 160698.16,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-10-21",
+   "equity": 160805.91,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-10-22",
+   "equity": 162006.62,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-10-23",
+   "equity": 158871.41,
+   "available": 54331.907495954685,
+   "executed": 4,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-10-24",
+   "equity": 158781.82,
+   "available": 44347.84874460162,
+   "executed": 2,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-10-25",
+   "equity": 159295.34,
+   "available": 29341.848744601622,
+   "executed": 3,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-10-28",
+   "equity": 159953.57,
+   "available": 9333.848744601637,
+   "executed": 4,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-10-29",
+   "equity": 160404.79,
+   "available": 32113.88600883806,
+   "executed": 3,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-10-30",
+   "equity": 162036.51,
+   "available": 7103.886008838075,
+   "executed": 5,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-10-31",
+   "equity": 157987.79,
+   "available": 38479.67289298897,
+   "executed": 5,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-11-01",
+   "equity": 158889.94,
+   "available": 23473.672892988987,
+   "executed": 3,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-11-04",
+   "equity": 157223.01,
+   "available": 13469.672892988987,
+   "executed": 2,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-11-05",
+   "equity": 158245.11,
+   "available": 0.0,
+   "executed": 3,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-11-06",
+   "equity": 168182.08,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-11-07",
+   "equity": 168315.67,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-11-08",
+   "equity": 167031.72,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-11-11",
+   "equity": 168284.49,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-11-12",
+   "equity": 169274.1,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-11-13",
+   "equity": 168938.37,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-11-14",
+   "equity": 167181.24,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-11-15",
+   "equity": 165226.62,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-11-18",
+   "equity": 166363.42,
+   "available": 0.0,
+   "executed": 2,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-11-19",
+   "equity": 167702.63,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-11-20",
+   "equity": 165924.26,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-11-21",
+   "equity": 162113.54,
+   "available": 65502.36995386539,
+   "executed": 4,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-11-22",
+   "equity": 162775.75,
+   "available": 46026.90026661506,
+   "executed": 4,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-11-25",
+   "equity": 163990.77,
+   "available": 26347.15451456909,
+   "executed": 4,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-11-26",
+   "equity": 164899.85,
+   "available": 1546.5165437632531,
+   "executed": 5,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-11-27",
+   "equity": 164398.55,
+   "available": 4641.401022311475,
+   "executed": 4,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-11-29",
+   "equity": 165024.23,
+   "available": 12.347382186388131,
+   "executed": 1,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-12-02",
+   "equity": 164731.41,
+   "available": 12.347382186388131,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-12-03",
+   "equity": 164949.54,
+   "available": 12.347382186388131,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-12-04",
+   "equity": 165755.15,
+   "available": 12.347382186388131,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-12-05",
+   "equity": 165564.76,
+   "available": 24054.417382186388,
+   "executed": 1,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-12-06",
+   "equity": 167344.09,
+   "available": 0.0,
+   "executed": 5,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-12-09",
+   "equity": 166412.37,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-12-10",
+   "equity": 165982.11,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-12-11",
+   "equity": 167401.77,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-12-12",
+   "equity": 166650.03,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-12-13",
+   "equity": 165678.59,
+   "available": 75834.62365018639,
+   "executed": 1,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-12-16",
+   "equity": 167250.34,
+   "available": 105197.3864421864,
+   "executed": 4,
+   "exits": 1,
+   "ok": true
+  },
+  {
+   "date": "2024-12-17",
+   "equity": 167537.49,
+   "available": 80187.3864421864,
+   "executed": 5,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-12-18",
+   "equity": 164844.3,
+   "available": 60330.24204438437,
+   "executed": 4,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-12-19",
+   "equity": 165196.63,
+   "available": 40407.410421875786,
+   "executed": 4,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-12-20",
+   "equity": 166187.73,
+   "available": 34496.730421875785,
+   "executed": 5,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-12-23",
+   "equity": 166666.61,
+   "available": 19490.7304218758,
+   "executed": 3,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-12-24",
+   "equity": 168314.45,
+   "available": 0.0,
+   "executed": 4,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-12-26",
+   "equity": 168027.16,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-12-27",
+   "equity": 165609.85,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-12-30",
+   "equity": 163650.97,
+   "available": 28604.14064530228,
+   "executed": 2,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2024-12-31",
+   "equity": 162512.07,
+   "available": 23515.24389889813,
+   "executed": 3,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-01-02",
+   "equity": 160894.13,
+   "available": 111578.98000000001,
+   "executed": 3,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-01-03",
+   "equity": 161506.52,
+   "available": 106576.98000000001,
+   "executed": 1,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-01-06",
+   "equity": 162955.45,
+   "available": 91570.98000000001,
+   "executed": 3,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-01-07",
+   "equity": 162300.73,
+   "available": 86444.20999999999,
+   "executed": 3,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-01-08",
+   "equity": 161660.29,
+   "available": 71526.58678781046,
+   "executed": 3,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-01-10",
+   "equity": 161051.25,
+   "available": 61522.586787810455,
+   "executed": 2,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-01-13",
+   "equity": 160594.42,
+   "available": 51518.58678781047,
+   "executed": 2,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-01-14",
+   "equity": 159685.79,
+   "available": 129796.599102731,
+   "executed": 5,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-01-15",
+   "equity": 159944.19,
+   "available": 109788.599102731,
+   "executed": 4,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-01-16",
+   "equity": 158757.44,
+   "available": 99784.599102731,
+   "executed": 2,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-01-17",
+   "equity": 159326.36,
+   "available": 89780.599102731,
+   "executed": 2,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-01-21",
+   "equity": 160166.57,
+   "available": 64770.599102730994,
+   "executed": 5,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-01-22",
+   "equity": 159671.93,
+   "available": 32343.499985576156,
+   "executed": 7,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-01-23",
+   "equity": 160829.39,
+   "available": 1.2474367119866656,
+   "executed": 8,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-01-24",
+   "equity": 160541.23,
+   "available": 1.2474367119866656,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-01-27",
+   "equity": 160052.23,
+   "available": 0.0,
+   "executed": 6,
+   "exits": 1,
+   "ok": true
+  },
+  {
+   "date": "2025-01-28",
+   "equity": 160418.31,
+   "available": 33189.50401228197,
+   "executed": 2,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-01-29",
+   "equity": 159940.24,
+   "available": 8179.50401228197,
+   "executed": 5,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-01-30",
+   "equity": 159969.6,
+   "available": 0.0,
+   "executed": 7,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-01-31",
+   "equity": 160071.99,
+   "available": 0.0,
+   "executed": 2,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-02-03",
+   "equity": 160638.93,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-02-04",
+   "equity": 161701.23,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-02-05",
+   "equity": 160773.84,
+   "available": 0.0,
+   "executed": 2,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-02-06",
+   "equity": 162183.54,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-02-07",
+   "equity": 160689.03,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-02-10",
+   "equity": 160754.3,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-02-11",
+   "equity": 161711.78,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-02-12",
+   "equity": 161173.95,
+   "available": 36097.23918800001,
+   "executed": 1,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-02-13",
+   "equity": 161698.23,
+   "available": 21309.15990608836,
+   "executed": 3,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-02-14",
+   "equity": 162093.11,
+   "available": 6303.15990608836,
+   "executed": 3,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-02-18",
+   "equity": 161304.25,
+   "available": 19118.886790088378,
+   "executed": 4,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-02-19",
+   "equity": 160208.41,
+   "available": 4112.886790088378,
+   "executed": 3,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-02-20",
+   "equity": 155990.37,
+   "available": 70858.13664051829,
+   "executed": 3,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-02-21",
+   "equity": 154989.24,
+   "available": 61005.724775680945,
+   "executed": 2,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-02-24",
+   "equity": 153953.36,
+   "available": 104936.31590352177,
+   "executed": 3,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-02-25",
+   "equity": 153736.54,
+   "available": 100060.17498285067,
+   "executed": 1,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-02-26",
+   "equity": 152646.95,
+   "available": 100060.17498285067,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-02-27",
+   "equity": 152242.01,
+   "available": 137465.26069252187,
+   "executed": 1,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-02-28",
+   "equity": 152396.68,
+   "available": 128382.39873347874,
+   "executed": 2,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-03-03",
+   "equity": 151690.2,
+   "available": 147394.657761671,
+   "executed": 1,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-03-04",
+   "equity": 151652.3,
+   "available": 147394.657761671,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-03-05",
+   "equity": 151648.87,
+   "available": 147394.657761671,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-03-06",
+   "equity": 151641.47,
+   "available": 147394.657761671,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-03-07",
+   "equity": 151708.97,
+   "available": 147394.657761671,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-03-10",
+   "equity": 151496.18,
+   "available": 146514.34782098018,
+   "executed": 2,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-03-11",
+   "equity": 151378.54,
+   "available": 146514.34782098018,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-03-12",
+   "equity": 151377.2,
+   "available": 146514.34782098018,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-03-13",
+   "equity": 151356.7,
+   "available": 146514.34782098018,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-03-14",
+   "equity": 151498.64,
+   "available": 141535.927751192,
+   "executed": 1,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-03-17",
+   "equity": 151660.28,
+   "available": 131634.4263247507,
+   "executed": 2,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-03-18",
+   "equity": 151687.24,
+   "available": 121630.42632475069,
+   "executed": 2,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-03-19",
+   "equity": 151984.65,
+   "available": 111626.42632475069,
+   "executed": 2,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-03-20",
+   "equity": 152328.98,
+   "available": 101622.42632475069,
+   "executed": 2,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-03-21",
+   "equity": 152438.57,
+   "available": 91618.42632475069,
+   "executed": 2,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-03-24",
+   "equity": 152509.39,
+   "available": 81614.42632475069,
+   "executed": 2,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-03-25",
+   "equity": 152595.28,
+   "available": 56604.42632475069,
+   "executed": 5,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-03-26",
+   "equity": 153299.68,
+   "available": 46435.25632475069,
+   "executed": 4,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-03-27",
+   "equity": 152826.11,
+   "available": 36431.25632475069,
+   "executed": 2,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-03-28",
+   "equity": 152348.2,
+   "available": 40777.99632475069,
+   "executed": 4,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-03-31",
+   "equity": 153720.5,
+   "available": 30773.99632475069,
+   "executed": 2,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-04-01",
+   "equity": 153710.83,
+   "available": 20769.99632475069,
+   "executed": 2,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-04-02",
+   "equity": 153492.68,
+   "available": 10765.99632475069,
+   "executed": 2,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-04-03",
+   "equity": 151635.19,
+   "available": 5763.996324750689,
+   "executed": 1,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-04-04",
+   "equity": 144293.73,
+   "available": 68152.98857355869,
+   "executed": 1,
+   "exits": 1,
+   "ok": true
+  },
+  {
+   "date": "2025-04-07",
+   "equity": 144240.97,
+   "available": 63150.988573558694,
+   "executed": 1,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-04-08",
+   "equity": 148624.97,
+   "available": 58148.988573558694,
+   "executed": 1,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-04-09",
+   "equity": 152779.35,
+   "available": 48232.4613622441,
+   "executed": 2,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-04-10",
+   "equity": 155400.8,
+   "available": 43230.4613622441,
+   "executed": 1,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-04-11",
+   "equity": 156399.97,
+   "available": 28224.461362244103,
+   "executed": 3,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-04-14",
+   "equity": 153999.1,
+   "available": 8216.461362244103,
+   "executed": 4,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-04-15",
+   "equity": 153076.45,
+   "available": 0.0,
+   "executed": 2,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-04-16",
+   "equity": 152250.24,
+   "available": 31705.828573558698,
+   "executed": 5,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-04-17",
+   "equity": 125235.38,
+   "available": 125235.38,
+   "executed": 0,
+   "exits": 1,
+   "ok": true
+  },
+  {
+   "date": "2025-04-21",
+   "equity": 125235.38,
+   "available": 125235.38,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-04-22",
+   "equity": 125235.38,
+   "available": 125235.38,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-04-23",
+   "equity": 125235.38,
+   "available": 125235.38,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-04-24",
+   "equity": 125231.39,
+   "available": 115254.07625376436,
+   "executed": 2,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-04-25",
+   "equity": 125259.58,
+   "available": 95246.07625376436,
+   "executed": 4,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-04-28",
+   "equity": 125140.75,
+   "available": 65639.18521596714,
+   "executed": 6,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-04-29",
+   "equity": 125347.48,
+   "available": 36225.17754949193,
+   "executed": 6,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-04-30",
+   "equity": 124996.64,
+   "available": 21219.177549491924,
+   "executed": 3,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-05-01",
+   "equity": 128369.84,
+   "available": 0.0,
+   "executed": 5,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-05-02",
+   "equity": 130305.04,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-05-05",
+   "equity": 129769.3,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-05-06",
+   "equity": 128584.74,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-05-07",
+   "equity": 127165.82,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-05-08",
+   "equity": 128786.64,
+   "available": 16449.906913764356,
+   "executed": 6,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-05-09",
+   "equity": 128687.45,
+   "available": 0.0,
+   "executed": 4,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-05-12",
+   "equity": 134767.38,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-05-13",
+   "equity": 136240.61,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-05-14",
+   "equity": 136945.13,
+   "available": 5.411302514869021,
+   "executed": 7,
+   "exits": 1,
+   "ok": true
+  },
+  {
+   "date": "2025-05-15",
+   "equity": 136391.52,
+   "available": 5.411302514869021,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-05-16",
+   "equity": 136659.98,
+   "available": 5.411302514869021,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-05-19",
+   "equity": 136771.37,
+   "available": 5.411302514869021,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-05-20",
+   "equity": 136328.72,
+   "available": 1557.699621585838,
+   "executed": 1,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-05-21",
+   "equity": 134524.07,
+   "available": 0.0,
+   "executed": 3,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-05-22",
+   "equity": 135149.13,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-05-23",
+   "equity": 134152.66,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-05-27",
+   "equity": 137142.14,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-05-28",
+   "equity": 136226.03,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-05-29",
+   "equity": 136741.94,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-05-30",
+   "equity": 136699.45,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-06-02",
+   "equity": 137217.13,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-06-03",
+   "equity": 137417.92,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-06-04",
+   "equity": 137523.37,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-06-05",
+   "equity": 137711.16,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-06-06",
+   "equity": 139724.99,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-06-09",
+   "equity": 140803.12,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-06-10",
+   "equity": 141070.78,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-06-11",
+   "equity": 140439.47,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-06-12",
+   "equity": 141166.33,
+   "available": 27611.38825860543,
+   "executed": 6,
+   "exits": 1,
+   "ok": true
+  },
+  {
+   "date": "2025-06-13",
+   "equity": 140216.79,
+   "available": 0.0,
+   "executed": 6,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-06-16",
+   "equity": 142430.51,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-06-17",
+   "equity": 142021.04,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-06-18",
+   "equity": 141994.77,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-06-20",
+   "equity": 140749.27,
+   "available": 0.0,
+   "executed": 4,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-06-23",
+   "equity": 141154.79,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-06-24",
+   "equity": 142705.77,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-06-25",
+   "equity": 143057.65,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-06-26",
+   "equity": 145691.54,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-06-27",
+   "equity": 146933.96,
+   "available": 0.0,
+   "executed": 1,
+   "exits": 1,
+   "ok": true
+  },
+  {
+   "date": "2025-06-30",
+   "equity": 146642.06,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-07-01",
+   "equity": 146986.98,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-07-02",
+   "equity": 146794.28,
+   "available": 25968.69765989187,
+   "executed": 6,
+   "exits": 1,
+   "ok": true
+  },
+  {
+   "date": "2025-07-03",
+   "equity": 148224.55,
+   "available": 0.0,
+   "executed": 6,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-07-07",
+   "equity": 147537.68,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-07-08",
+   "equity": 147007.73,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-07-09",
+   "equity": 148489.21,
+   "available": 7265.182108789973,
+   "executed": 1,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-07-10",
+   "equity": 148472.94,
+   "available": 0.0,
+   "executed": 2,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-07-11",
+   "equity": 149039.54,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-07-14",
+   "equity": 148966.49,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-07-15",
+   "equity": 148745.08,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-07-16",
+   "equity": 147661.56,
+   "available": 20166.53433860636,
+   "executed": 2,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-07-17",
+   "equity": 148083.9,
+   "available": 19505.464203219053,
+   "executed": 6,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-07-18",
+   "equity": 148841.7,
+   "available": 0.0,
+   "executed": 5,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-07-21",
+   "equity": 150315.23,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-07-22",
+   "equity": 149682.62,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-07-23",
+   "equity": 150064.94,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-07-24",
+   "equity": 151740.97,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-07-25",
+   "equity": 151813.7,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-07-28",
+   "equity": 152197.7,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-07-29",
+   "equity": 151560.58,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-07-30",
+   "equity": 151317.74,
+   "available": 60.5753933678061,
+   "executed": 7,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-07-31",
+   "equity": 153305.77,
+   "available": 0.0,
+   "executed": 1,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-08-01",
+   "equity": 145669.85,
+   "available": 70475.09616581607,
+   "executed": 5,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-08-04",
+   "equity": 147725.3,
+   "available": 53126.468272813785,
+   "executed": 4,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-08-05",
+   "equity": 146760.34,
+   "available": 38120.468272813785,
+   "executed": 3,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-08-06",
+   "equity": 146998.24,
+   "available": 18673.890117772666,
+   "executed": 4,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-08-07",
+   "equity": 146626.6,
+   "available": 0.0,
+   "executed": 4,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-08-08",
+   "equity": 148664.08,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-08-11",
+   "equity": 148298.77,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-08-12",
+   "equity": 150584.53,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-08-13",
+   "equity": 149077.98,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-08-14",
+   "equity": 149581.38,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-08-15",
+   "equity": 149514.85,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-08-18",
+   "equity": 148588.76,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-08-19",
+   "equity": 146440.28,
+   "available": 40423.77757720305,
+   "executed": 4,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-08-20",
+   "equity": 145350.96,
+   "available": 30841.83965683433,
+   "executed": 4,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-08-21",
+   "equity": 145210.79,
+   "available": 49095.39858014833,
+   "executed": 5,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-08-22",
+   "equity": 147620.9,
+   "available": 24294.301156625887,
+   "executed": 5,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-08-25",
+   "equity": 148188.14,
+   "available": 4518.098352648296,
+   "executed": 4,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-08-26",
+   "equity": 147643.28,
+   "available": 0.0,
+   "executed": 2,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-08-27",
+   "equity": 148345.05,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-08-28",
+   "equity": 150099.44,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-08-29",
+   "equity": 151211.32,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-09-02",
+   "equity": 150217.63,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-09-03",
+   "equity": 158082.97,
+   "available": 58272.06592283203,
+   "executed": 5,
+   "exits": 1,
+   "ok": true
+  },
+  {
+   "date": "2025-09-04",
+   "equity": 158958.54,
+   "available": 28260.06592283203,
+   "executed": 6,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-09-05",
+   "equity": 158381.71,
+   "available": 8277.332930470351,
+   "executed": 4,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-09-08",
+   "equity": 158862.04,
+   "available": 0.0,
+   "executed": 2,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-09-09",
+   "equity": 162491.48,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-09-10",
+   "equity": 160412.3,
+   "available": 26432.42450800001,
+   "executed": 6,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-09-11",
+   "equity": 161686.05,
+   "available": 6453.791048828352,
+   "executed": 4,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-09-12",
+   "equity": 161465.21,
+   "available": 9562.276540828345,
+   "executed": 5,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-09-15",
+   "equity": 162056.14,
+   "available": 0.0,
+   "executed": 3,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-09-16",
+   "equity": 161325.79,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-09-17",
+   "equity": 161940.13,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-09-18",
+   "equity": 160715.13,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-09-19",
+   "equity": 161365.31,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-09-22",
+   "equity": 161613.54,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-09-23",
+   "equity": 163179.12,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-09-24",
+   "equity": 163641.69,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-09-25",
+   "equity": 162795.67,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-09-26",
+   "equity": 163403.47,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-09-29",
+   "equity": 162368.39,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-09-30",
+   "equity": 161824.05,
+   "available": 30183.302234165792,
+   "executed": 2,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-10-01",
+   "equity": 162130.26,
+   "available": 2866.3856190947263,
+   "executed": 6,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-10-02",
+   "equity": 162967.25,
+   "available": 0.0,
+   "executed": 2,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-10-03",
+   "equity": 164578.19,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-10-06",
+   "equity": 164959.46,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-10-07",
+   "equity": 165079.9,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-10-08",
+   "equity": 165906.42,
+   "available": 25229.64507062092,
+   "executed": 3,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-10-09",
+   "equity": 164768.14,
+   "available": 33413.71511601726,
+   "executed": 6,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-10-10",
+   "equity": 160373.86,
+   "available": 59531.90719420329,
+   "executed": 2,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-10-13",
+   "equity": 161543.29,
+   "available": 69470.76936622764,
+   "executed": 2,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-10-14",
+   "equity": 161634.04,
+   "available": 64468.76936622765,
+   "executed": 1,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-10-15",
+   "equity": 161938.28,
+   "available": 54464.76936622765,
+   "executed": 2,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-10-16",
+   "equity": 160781.37,
+   "available": 44521.06614275794,
+   "executed": 2,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-10-17",
+   "equity": 160865.6,
+   "available": 29986.17954090867,
+   "executed": 3,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-10-20",
+   "equity": 163568.05,
+   "available": 19756.336001921984,
+   "executed": 4,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-10-21",
+   "equity": 163376.43,
+   "available": 0.0,
+   "executed": 4,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-10-22",
+   "equity": 161979.17,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-10-23",
+   "equity": 161924.67,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-10-24",
+   "equity": 163516.36,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-10-27",
+   "equity": 165993.45,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-10-28",
+   "equity": 166561.93,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-10-29",
+   "equity": 163385.98,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-10-30",
+   "equity": 160512.22,
+   "available": 107641.98640136732,
+   "executed": 1,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-10-31",
+   "equity": 160821.32,
+   "available": 84968.54524130432,
+   "executed": 5,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-11-03",
+   "equity": 161447.11,
+   "available": 67189.65876068914,
+   "executed": 6,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-11-04",
+   "equity": 160191.7,
+   "available": 47186.09473041254,
+   "executed": 4,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-11-05",
+   "equity": 161317.55,
+   "available": 27194.36482086083,
+   "executed": 4,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-11-06",
+   "equity": 160518.5,
+   "available": 7482.281639827903,
+   "executed": 5,
+   "exits": 1,
+   "ok": true
+  },
+  {
+   "date": "2025-11-07",
+   "equity": 159563.32,
+   "available": 0.0,
+   "executed": 2,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-11-10",
+   "equity": 162615.42,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-11-11",
+   "equity": 163868.6,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-11-12",
+   "equity": 162375.79,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-11-13",
+   "equity": 159036.02,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-11-14",
+   "equity": 157694.28,
+   "available": 19396.62952782793,
+   "executed": 2,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-11-17",
+   "equity": 158093.27,
+   "available": 9392.629527827929,
+   "executed": 2,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-11-18",
+   "equity": 156715.79,
+   "available": 29073.2016398279,
+   "executed": 2,
+   "exits": 1,
+   "ok": true
+  },
+  {
+   "date": "2025-11-19",
+   "equity": 158507.97,
+   "available": 19347.01219778334,
+   "executed": 2,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-11-20",
+   "equity": 157249.44,
+   "available": 14345.01219778334,
+   "executed": 1,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-11-21",
+   "equity": 160747.07,
+   "available": 4903.2487652398195,
+   "executed": 2,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-11-24",
+   "equity": 166451.38,
+   "available": 86878.85553407835,
+   "executed": 1,
+   "exits": 1,
+   "ok": true
+  },
+  {
+   "date": "2025-11-25",
+   "equity": 166345.09,
+   "available": 100749.17545869629,
+   "executed": 3,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-11-26",
+   "equity": 166414.04,
+   "available": 90780.15351594612,
+   "executed": 2,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-11-28",
+   "equity": 166716.87,
+   "available": 60786.13391567348,
+   "executed": 6,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-12-01",
+   "equity": 167335.89,
+   "available": 45659.10351594613,
+   "executed": 5,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-12-02",
+   "equity": 168299.57,
+   "available": 30674.823515946133,
+   "executed": 5,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-12-03",
+   "equity": 168027.39,
+   "available": 662.8235159461328,
+   "executed": 6,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-12-04",
+   "equity": 167595.16,
+   "available": 13.71761426187004,
+   "executed": 1,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-12-05",
+   "equity": 167581.57,
+   "available": 13.71761426187004,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-12-08",
+   "equity": 166268.14,
+   "available": 4934.497614261869,
+   "executed": 1,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-12-09",
+   "equity": 165099.84,
+   "available": 14543.761631887726,
+   "executed": 3,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-12-10",
+   "equity": 165843.06,
+   "available": 171.16389839688782,
+   "executed": 3,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-12-11",
+   "equity": 164859.48,
+   "available": 17.908812490932178,
+   "executed": 1,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-12-12",
+   "equity": 164234.84,
+   "available": 17.908812490932178,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-12-15",
+   "equity": 162841.79,
+   "available": 17.908812490932178,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-12-16",
+   "equity": 162819.14,
+   "available": 3858.6087283558736,
+   "executed": 2,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-12-17",
+   "equity": 160299.03,
+   "available": 110286.01999999999,
+   "executed": 5,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-12-18",
+   "equity": 160803.85,
+   "available": 105284.01999999999,
+   "executed": 1,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-12-19",
+   "equity": 160523.87,
+   "available": 85276.01999999999,
+   "executed": 4,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-12-22",
+   "equity": 160793.45,
+   "available": 75040.88326063652,
+   "executed": 6,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-12-23",
+   "equity": 161400.74,
+   "available": 47659.45887245609,
+   "executed": 6,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-12-24",
+   "equity": 161808.46,
+   "available": 15109.99304835347,
+   "executed": 7,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-12-26",
+   "equity": 161360.06,
+   "available": 0.0,
+   "executed": 4,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-12-29",
+   "equity": 160640.86,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-12-30",
+   "equity": 161326.2,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  },
+  {
+   "date": "2025-12-31",
+   "equity": 160252.2,
+   "available": 0.0,
+   "executed": 0,
+   "exits": 0,
+   "ok": true
+  }
+ ],
+ "labels": {
+  "built": 0,
+  "total": 199,
+  "base_rate": 0.2613065326633166
+ },
+ "metalabel": {
+  "imported": true,
+  "oos_auc": 0.5999200348938645,
+  "n_train": 1530,
+  "promoted": true,
+  "skips": 204
+ },
+ "caveats": [
+  "survivorship_bias: universe is names fetchable today; delisted names are underrepresented \u2014 prefer RELATIVE config comparisons over absolute returns"
+ ],
+ "trades": {
+  "trades": 199,
+  "wins": 52,
+  "losses": 147,
+  "win_rate": 0.261,
+  "avg_win": 3136.65,
+  "avg_loss": 702.44,
+  "gross_profit": 163106.0,
+  "gross_loss": 103258.69,
+  "profit_factor": 1.58,
+  "net": 59847.31
+ },
+ "gate": {
+  "pass": 1366
+ },
+ "total_return_pct": 60.26,
+ "cagr_pct": 17.12,
+ "sharpe": 0.87,
+ "max_drawdown_pct": 31.53,
+ "benchmark_daily": [
+  {
+   "date": "2023-01-03",
+   "close": 380.82
+  },
+  {
+   "date": "2023-01-04",
+   "close": 383.76
+  },
+  {
+   "date": "2023-01-05",
+   "close": 379.38
+  },
+  {
+   "date": "2023-01-06",
+   "close": 388.08
+  },
+  {
+   "date": "2023-01-09",
+   "close": 387.86
+  },
+  {
+   "date": "2023-01-10",
+   "close": 390.58
+  },
+  {
+   "date": "2023-01-11",
+   "close": 395.52
+  },
+  {
+   "date": "2023-01-12",
+   "close": 396.96
+  },
+  {
+   "date": "2023-01-13",
+   "close": 398.5
+  },
+  {
+   "date": "2023-01-17",
+   "close": 397.77
+  },
+  {
+   "date": "2023-01-18",
+   "close": 391.49
+  },
+  {
+   "date": "2023-01-19",
+   "close": 388.64
+  },
+  {
+   "date": "2023-01-20",
+   "close": 395.88
+  },
+  {
+   "date": "2023-01-23",
+   "close": 400.63
+  },
+  {
+   "date": "2023-01-24",
+   "close": 400.2
+  },
+  {
+   "date": "2023-01-25",
+   "close": 400.35
+  },
+  {
+   "date": "2023-01-26",
+   "close": 404.75
+  },
+  {
+   "date": "2023-01-27",
+   "close": 405.68
+  },
+  {
+   "date": "2023-01-30",
+   "close": 400.59
+  },
+  {
+   "date": "2023-01-31",
+   "close": 406.48
+  },
+  {
+   "date": "2023-02-01",
+   "close": 410.8
+  },
+  {
+   "date": "2023-02-02",
+   "close": 416.78
+  },
+  {
+   "date": "2023-02-03",
+   "close": 412.35
+  },
+  {
+   "date": "2023-02-06",
+   "close": 409.83
+  },
+  {
+   "date": "2023-02-07",
+   "close": 415.19
+  },
+  {
+   "date": "2023-02-08",
+   "close": 410.65
+  },
+  {
+   "date": "2023-02-09",
+   "close": 407.09
+  },
+  {
+   "date": "2023-02-10",
+   "close": 408.04
+  },
+  {
+   "date": "2023-02-13",
+   "close": 412.83
+  },
+  {
+   "date": "2023-02-14",
+   "close": 412.64
+  },
+  {
+   "date": "2023-02-15",
+   "close": 413.98
+  },
+  {
+   "date": "2023-02-16",
+   "close": 408.28
+  },
+  {
+   "date": "2023-02-17",
+   "close": 407.26
+  },
+  {
+   "date": "2023-02-21",
+   "close": 399.09
+  },
+  {
+   "date": "2023-02-22",
+   "close": 398.54
+  },
+  {
+   "date": "2023-02-23",
+   "close": 400.66
+  },
+  {
+   "date": "2023-02-24",
+   "close": 396.38
+  },
+  {
+   "date": "2023-02-27",
+   "close": 397.73
+  },
+  {
+   "date": "2023-02-28",
+   "close": 396.26
+  },
+  {
+   "date": "2023-03-01",
+   "close": 394.74
+  },
+  {
+   "date": "2023-03-02",
+   "close": 397.81
+  },
+  {
+   "date": "2023-03-03",
+   "close": 404.19
+  },
+  {
+   "date": "2023-03-06",
+   "close": 404.47
+  },
+  {
+   "date": "2023-03-07",
+   "close": 398.27
+  },
+  {
+   "date": "2023-03-08",
+   "close": 398.92
+  },
+  {
+   "date": "2023-03-09",
+   "close": 391.56
+  },
+  {
+   "date": "2023-03-10",
+   "close": 385.91
+  },
+  {
+   "date": "2023-03-13",
+   "close": 385.36
+  },
+  {
+   "date": "2023-03-14",
+   "close": 391.73
+  },
+  {
+   "date": "2023-03-15",
+   "close": 389.28
+  },
+  {
+   "date": "2023-03-16",
+   "close": 396.11
+  },
+  {
+   "date": "2023-03-17",
+   "close": 389.99
+  },
+  {
+   "date": "2023-03-20",
+   "close": 393.74
+  },
+  {
+   "date": "2023-03-21",
+   "close": 398.91
+  },
+  {
+   "date": "2023-03-22",
+   "close": 392.11
+  },
+  {
+   "date": "2023-03-23",
+   "close": 393.17
+  },
+  {
+   "date": "2023-03-24",
+   "close": 395.75
+  },
+  {
+   "date": "2023-03-27",
+   "close": 396.49
+  },
+  {
+   "date": "2023-03-28",
+   "close": 395.6
+  },
+  {
+   "date": "2023-03-29",
+   "close": 401.35
+  },
+  {
+   "date": "2023-03-30",
+   "close": 403.7
+  },
+  {
+   "date": "2023-03-31",
+   "close": 409.39
+  },
+  {
+   "date": "2023-04-03",
+   "close": 410.95
+  },
+  {
+   "date": "2023-04-04",
+   "close": 408.67
+  },
+  {
+   "date": "2023-04-05",
+   "close": 407.6
+  },
+  {
+   "date": "2023-04-06",
+   "close": 409.19
+  },
+  {
+   "date": "2023-04-10",
+   "close": 409.61
+  },
+  {
+   "date": "2023-04-11",
+   "close": 409.72
+  },
+  {
+   "date": "2023-04-12",
+   "close": 408.05
+  },
+  {
+   "date": "2023-04-13",
+   "close": 413.47
+  },
+  {
+   "date": "2023-04-14",
+   "close": 412.46
+  },
+  {
+   "date": "2023-04-17",
+   "close": 413.94
+  },
+  {
+   "date": "2023-04-18",
+   "close": 414.21
+  },
+  {
+   "date": "2023-04-19",
+   "close": 414.14
+  },
+  {
+   "date": "2023-04-20",
+   "close": 411.88
+  },
+  {
+   "date": "2023-04-21",
+   "close": 412.2
+  },
+  {
+   "date": "2023-04-24",
+   "close": 412.63
+  },
+  {
+   "date": "2023-04-25",
+   "close": 406.08
+  },
+  {
+   "date": "2023-04-26",
+   "close": 404.36
+  },
+  {
+   "date": "2023-04-27",
+   "close": 412.41
+  },
+  {
+   "date": "2023-04-28",
+   "close": 415.93
+  },
+  {
+   "date": "2023-05-01",
+   "close": 415.51
+  },
+  {
+   "date": "2023-05-02",
+   "close": 410.84
+  },
+  {
+   "date": "2023-05-03",
+   "close": 408.02
+  },
+  {
+   "date": "2023-05-04",
+   "close": 405.13
+  },
+  {
+   "date": "2023-05-05",
+   "close": 412.63
+  },
+  {
+   "date": "2023-05-08",
+   "close": 412.74
+  },
+  {
+   "date": "2023-05-09",
+   "close": 410.93
+  },
+  {
+   "date": "2023-05-10",
+   "close": 412.85
+  },
+  {
+   "date": "2023-05-11",
+   "close": 412.13
+  },
+  {
+   "date": "2023-05-12",
+   "close": 411.59
+  },
+  {
+   "date": "2023-05-15",
+   "close": 413.01
+  },
+  {
+   "date": "2023-05-16",
+   "close": 410.25
+  },
+  {
+   "date": "2023-05-17",
+   "close": 415.23
+  },
+  {
+   "date": "2023-05-18",
+   "close": 419.23
+  },
+  {
+   "date": "2023-05-19",
+   "close": 418.62
+  },
+  {
+   "date": "2023-05-22",
+   "close": 418.79
+  },
+  {
+   "date": "2023-05-23",
+   "close": 414.09
+  },
+  {
+   "date": "2023-05-24",
+   "close": 411.09
+  },
+  {
+   "date": "2023-05-25",
+   "close": 414.65
+  },
+  {
+   "date": "2023-05-26",
+   "close": 420.02
+  },
+  {
+   "date": "2023-05-30",
+   "close": 420.18
+  },
+  {
+   "date": "2023-05-31",
+   "close": 417.85
+  },
+  {
+   "date": "2023-06-01",
+   "close": 421.82
+  },
+  {
+   "date": "2023-06-02",
+   "close": 427.92
+  },
+  {
+   "date": "2023-06-05",
+   "close": 427.1
+  },
+  {
+   "date": "2023-06-06",
+   "close": 428.03
+  },
+  {
+   "date": "2023-06-07",
+   "close": 426.55
+  },
+  {
+   "date": "2023-06-08",
+   "close": 429.13
+  },
+  {
+   "date": "2023-06-09",
+   "close": 429.9
+  },
+  {
+   "date": "2023-06-12",
+   "close": 433.8
+  },
+  {
+   "date": "2023-06-13",
+   "close": 436.66
+  },
+  {
+   "date": "2023-06-14",
+   "close": 437.18
+  },
+  {
+   "date": "2023-06-15",
+   "close": 442.6
+  },
+  {
+   "date": "2023-06-16",
+   "close": 439.46
+  },
+  {
+   "date": "2023-06-20",
+   "close": 437.18
+  },
+  {
+   "date": "2023-06-21",
+   "close": 434.94
+  },
+  {
+   "date": "2023-06-22",
+   "close": 436.51
+  },
+  {
+   "date": "2023-06-23",
+   "close": 433.21
+  },
+  {
+   "date": "2023-06-26",
+   "close": 431.44
+  },
+  {
+   "date": "2023-06-27",
+   "close": 436.17
+  },
+  {
+   "date": "2023-06-28",
+   "close": 436.39
+  },
+  {
+   "date": "2023-06-29",
+   "close": 438.11
+  },
+  {
+   "date": "2023-06-30",
+   "close": 443.28
+  },
+  {
+   "date": "2023-07-03",
+   "close": 443.79
+  },
+  {
+   "date": "2023-07-05",
+   "close": 443.13
+  },
+  {
+   "date": "2023-07-06",
+   "close": 439.66
+  },
+  {
+   "date": "2023-07-07",
+   "close": 438.55
+  },
+  {
+   "date": "2023-07-10",
+   "close": 439.66
+  },
+  {
+   "date": "2023-07-11",
+   "close": 442.46
+  },
+  {
+   "date": "2023-07-12",
+   "close": 446.02
+  },
+  {
+   "date": "2023-07-13",
+   "close": 449.56
+  },
+  {
+   "date": "2023-07-14",
+   "close": 449.28
+  },
+  {
+   "date": "2023-07-17",
+   "close": 450.84
+  },
+  {
+   "date": "2023-07-18",
+   "close": 454.19
+  },
+  {
+   "date": "2023-07-19",
+   "close": 455.2
+  },
+  {
+   "date": "2023-07-20",
+   "close": 452.18
+  },
+  {
+   "date": "2023-07-21",
+   "close": 452.18
+  },
+  {
+   "date": "2023-07-24",
+   "close": 454.2
+  },
+  {
+   "date": "2023-07-25",
+   "close": 455.44
+  },
+  {
+   "date": "2023-07-26",
+   "close": 455.51
+  },
+  {
+   "date": "2023-07-27",
+   "close": 452.49
+  },
+  {
+   "date": "2023-07-28",
+   "close": 456.92
+  },
+  {
+   "date": "2023-07-31",
+   "close": 457.79
+  },
+  {
+   "date": "2023-08-01",
+   "close": 456.48
+  },
+  {
+   "date": "2023-08-02",
+   "close": 450.13
+  },
+  {
+   "date": "2023-08-03",
+   "close": 448.84
+  },
+  {
+   "date": "2023-08-04",
+   "close": 446.81
+  },
+  {
+   "date": "2023-08-07",
+   "close": 450.71
+  },
+  {
+   "date": "2023-08-08",
+   "close": 448.75
+  },
+  {
+   "date": "2023-08-09",
+   "close": 445.75
+  },
+  {
+   "date": "2023-08-10",
+   "close": 445.91
+  },
+  {
+   "date": "2023-08-11",
+   "close": 445.65
+  },
+  {
+   "date": "2023-08-14",
+   "close": 448.11
+  },
+  {
+   "date": "2023-08-15",
+   "close": 442.89
+  },
+  {
+   "date": "2023-08-16",
+   "close": 439.64
+  },
+  {
+   "date": "2023-08-17",
+   "close": 436.29
+  },
+  {
+   "date": "2023-08-18",
+   "close": 436.5
+  },
+  {
+   "date": "2023-08-21",
+   "close": 439.34
+  },
+  {
+   "date": "2023-08-22",
+   "close": 438.15
+  },
+  {
+   "date": "2023-08-23",
+   "close": 443.03
+  },
+  {
+   "date": "2023-08-24",
+   "close": 436.89
+  },
+  {
+   "date": "2023-08-25",
+   "close": 439.97
+  },
+  {
+   "date": "2023-08-28",
+   "close": 442.76
+  },
+  {
+   "date": "2023-08-29",
+   "close": 449.16
+  },
+  {
+   "date": "2023-08-30",
+   "close": 451.01
+  },
+  {
+   "date": "2023-08-31",
+   "close": 450.35
+  },
+  {
+   "date": "2023-09-01",
+   "close": 451.19
+  },
+  {
+   "date": "2023-09-05",
+   "close": 449.24
+  },
+  {
+   "date": "2023-09-06",
+   "close": 446.22
+  },
+  {
+   "date": "2023-09-07",
+   "close": 444.85
+  },
+  {
+   "date": "2023-09-08",
+   "close": 445.52
+  },
+  {
+   "date": "2023-09-11",
+   "close": 448.45
+  },
+  {
+   "date": "2023-09-12",
+   "close": 445.99
+  },
+  {
+   "date": "2023-09-13",
+   "close": 446.51
+  },
+  {
+   "date": "2023-09-14",
+   "close": 450.36
+  },
+  {
+   "date": "2023-09-15",
+   "close": 443.37
+  },
+  {
+   "date": "2023-09-18",
+   "close": 443.63
+  },
+  {
+   "date": "2023-09-19",
+   "close": 442.71
+  },
+  {
+   "date": "2023-09-20",
+   "close": 438.64
+  },
+  {
+   "date": "2023-09-21",
+   "close": 431.39
+  },
+  {
+   "date": "2023-09-22",
+   "close": 430.42
+  },
+  {
+   "date": "2023-09-25",
+   "close": 432.23
+  },
+  {
+   "date": "2023-09-26",
+   "close": 425.88
+  },
+  {
+   "date": "2023-09-27",
+   "close": 426.05
+  },
+  {
+   "date": "2023-09-28",
+   "close": 428.52
+  },
+  {
+   "date": "2023-09-29",
+   "close": 427.48
+  },
+  {
+   "date": "2023-10-02",
+   "close": 427.31
+  },
+  {
+   "date": "2023-10-03",
+   "close": 421.59
+  },
+  {
+   "date": "2023-10-04",
+   "close": 424.66
+  },
+  {
+   "date": "2023-10-05",
+   "close": 424.5
+  },
+  {
+   "date": "2023-10-06",
+   "close": 429.54
+  },
+  {
+   "date": "2023-10-09",
+   "close": 432.29
+  },
+  {
+   "date": "2023-10-10",
+   "close": 434.54
+  },
+  {
+   "date": "2023-10-11",
+   "close": 436.32
+  },
+  {
+   "date": "2023-10-12",
+   "close": 433.66
+  },
+  {
+   "date": "2023-10-13",
+   "close": 431.5
+  },
+  {
+   "date": "2023-10-16",
+   "close": 436.04
+  },
+  {
+   "date": "2023-10-17",
+   "close": 436.02
+  },
+  {
+   "date": "2023-10-18",
+   "close": 430.21
+  },
+  {
+   "date": "2023-10-19",
+   "close": 426.43
+  },
+  {
+   "date": "2023-10-20",
+   "close": 421.19
+  },
+  {
+   "date": "2023-10-23",
+   "close": 420.46
+  },
+  {
+   "date": "2023-10-24",
+   "close": 423.63
+  },
+  {
+   "date": "2023-10-25",
+   "close": 417.55
+  },
+  {
+   "date": "2023-10-26",
+   "close": 412.55
+  },
+  {
+   "date": "2023-10-27",
+   "close": 410.68
+  },
+  {
+   "date": "2023-10-30",
+   "close": 415.59
+  },
+  {
+   "date": "2023-10-31",
+   "close": 418.2
+  },
+  {
+   "date": "2023-11-01",
+   "close": 422.66
+  },
+  {
+   "date": "2023-11-02",
+   "close": 430.76
+  },
+  {
+   "date": "2023-11-03",
+   "close": 434.69
+  },
+  {
+   "date": "2023-11-06",
+   "close": 435.69
+  },
+  {
+   "date": "2023-11-07",
+   "close": 436.93
+  },
+  {
+   "date": "2023-11-08",
+   "close": 437.25
+  },
+  {
+   "date": "2023-11-09",
+   "close": 433.84
+  },
+  {
+   "date": "2023-11-10",
+   "close": 440.61
+  },
+  {
+   "date": "2023-11-13",
+   "close": 440.19
+  },
+  {
+   "date": "2023-11-14",
+   "close": 448.73
+  },
+  {
+   "date": "2023-11-15",
+   "close": 449.68
+  },
+  {
+   "date": "2023-11-16",
+   "close": 450.23
+  },
+  {
+   "date": "2023-11-17",
+   "close": 450.79
+  },
+  {
+   "date": "2023-11-20",
+   "close": 454.26
+  },
+  {
+   "date": "2023-11-21",
+   "close": 453.27
+  },
+  {
+   "date": "2023-11-22",
+   "close": 455.02
+  },
+  {
+   "date": "2023-11-24",
+   "close": 455.3
+  },
+  {
+   "date": "2023-11-27",
+   "close": 454.48
+  },
+  {
+   "date": "2023-11-28",
+   "close": 454.93
+  },
+  {
+   "date": "2023-11-29",
+   "close": 454.61
+  },
+  {
+   "date": "2023-11-30",
+   "close": 456.4
+  },
+  {
+   "date": "2023-12-01",
+   "close": 459.1
+  },
+  {
+   "date": "2023-12-04",
+   "close": 456.69
+  },
+  {
+   "date": "2023-12-05",
+   "close": 456.6
+  },
+  {
+   "date": "2023-12-06",
+   "close": 454.76
+  },
+  {
+   "date": "2023-12-07",
+   "close": 458.23
+  },
+  {
+   "date": "2023-12-08",
+   "close": 460.2
+  },
+  {
+   "date": "2023-12-11",
+   "close": 461.99
+  },
+  {
+   "date": "2023-12-12",
+   "close": 464.1
+  },
+  {
+   "date": "2023-12-13",
+   "close": 470.5
+  },
+  {
+   "date": "2023-12-14",
+   "close": 472.01
+  },
+  {
+   "date": "2023-12-15",
+   "close": 469.33
+  },
+  {
+   "date": "2023-12-18",
+   "close": 471.97
+  },
+  {
+   "date": "2023-12-19",
+   "close": 474.84
+  },
+  {
+   "date": "2023-12-20",
+   "close": 468.26
+  },
+  {
+   "date": "2023-12-21",
+   "close": 472.7
+  },
+  {
+   "date": "2023-12-22",
+   "close": 473.65
+  },
+  {
+   "date": "2023-12-26",
+   "close": 475.65
+  },
+  {
+   "date": "2023-12-27",
+   "close": 476.51
+  },
+  {
+   "date": "2023-12-28",
+   "close": 476.69
+  },
+  {
+   "date": "2023-12-29",
+   "close": 475.31
+  },
+  {
+   "date": "2024-01-02",
+   "close": 472.65
+  },
+  {
+   "date": "2024-01-03",
+   "close": 468.79
+  },
+  {
+   "date": "2024-01-04",
+   "close": 467.28
+  },
+  {
+   "date": "2024-01-05",
+   "close": 467.92
+  },
+  {
+   "date": "2024-01-08",
+   "close": 474.6
+  },
+  {
+   "date": "2024-01-09",
+   "close": 473.88
+  },
+  {
+   "date": "2024-01-10",
+   "close": 476.56
+  },
+  {
+   "date": "2024-01-11",
+   "close": 476.35
+  },
+  {
+   "date": "2024-01-12",
+   "close": 476.68
+  },
+  {
+   "date": "2024-01-16",
+   "close": 474.93
+  },
+  {
+   "date": "2024-01-17",
+   "close": 472.29
+  },
+  {
+   "date": "2024-01-18",
+   "close": 476.49
+  },
+  {
+   "date": "2024-01-19",
+   "close": 482.43
+  },
+  {
+   "date": "2024-01-22",
+   "close": 483.45
+  },
+  {
+   "date": "2024-01-23",
+   "close": 484.86
+  },
+  {
+   "date": "2024-01-24",
+   "close": 485.39
+  },
+  {
+   "date": "2024-01-25",
+   "close": 488.03
+  },
+  {
+   "date": "2024-01-26",
+   "close": 487.41
+  },
+  {
+   "date": "2024-01-29",
+   "close": 491.27
+  },
+  {
+   "date": "2024-01-30",
+   "close": 490.89
+  },
+  {
+   "date": "2024-01-31",
+   "close": 482.88
+  },
+  {
+   "date": "2024-02-01",
+   "close": 489.2
+  },
+  {
+   "date": "2024-02-02",
+   "close": 494.35
+  },
+  {
+   "date": "2024-02-05",
+   "close": 492.55
+  },
+  {
+   "date": "2024-02-06",
+   "close": 493.98
+  },
+  {
+   "date": "2024-02-07",
+   "close": 498.1
+  },
+  {
+   "date": "2024-02-08",
+   "close": 498.32
+  },
+  {
+   "date": "2024-02-09",
+   "close": 501.2
+  },
+  {
+   "date": "2024-02-12",
+   "close": 500.98
+  },
+  {
+   "date": "2024-02-13",
+   "close": 494.08
+  },
+  {
+   "date": "2024-02-14",
+   "close": 498.57
+  },
+  {
+   "date": "2024-02-15",
+   "close": 502.01
+  },
+  {
+   "date": "2024-02-16",
+   "close": 499.51
+  },
+  {
+   "date": "2024-02-20",
+   "close": 496.76
+  },
+  {
+   "date": "2024-02-21",
+   "close": 497.21
+  },
+  {
+   "date": "2024-02-22",
+   "close": 507.5
+  },
+  {
+   "date": "2024-02-23",
+   "close": 507.85
+  },
+  {
+   "date": "2024-02-26",
+   "close": 505.99
+  },
+  {
+   "date": "2024-02-27",
+   "close": 506.93
+  },
+  {
+   "date": "2024-02-28",
+   "close": 506.26
+  },
+  {
+   "date": "2024-02-29",
+   "close": 508.08
+  },
+  {
+   "date": "2024-03-01",
+   "close": 512.85
+  },
+  {
+   "date": "2024-03-04",
+   "close": 512.3
+  },
+  {
+   "date": "2024-03-05",
+   "close": 507.18
+  },
+  {
+   "date": "2024-03-06",
+   "close": 509.75
+  },
+  {
+   "date": "2024-03-07",
+   "close": 514.81
+  },
+  {
+   "date": "2024-03-08",
+   "close": 511.72
+  },
+  {
+   "date": "2024-03-11",
+   "close": 511.28
+  },
+  {
+   "date": "2024-03-12",
+   "close": 516.78
+  },
+  {
+   "date": "2024-03-13",
+   "close": 515.97
+  },
+  {
+   "date": "2024-03-14",
+   "close": 514.95
+  },
+  {
+   "date": "2024-03-15",
+   "close": 509.83
+  },
+  {
+   "date": "2024-03-18",
+   "close": 512.86
+  },
+  {
+   "date": "2024-03-19",
+   "close": 515.71
+  },
+  {
+   "date": "2024-03-20",
+   "close": 520.48
+  },
+  {
+   "date": "2024-03-21",
+   "close": 522.2
+  },
+  {
+   "date": "2024-03-22",
+   "close": 521.21
+  },
+  {
+   "date": "2024-03-25",
+   "close": 519.77
+  },
+  {
+   "date": "2024-03-26",
+   "close": 518.81
+  },
+  {
+   "date": "2024-03-27",
+   "close": 523.17
+  },
+  {
+   "date": "2024-03-28",
+   "close": 523.07
+  },
+  {
+   "date": "2024-04-01",
+   "close": 522.16
+  },
+  {
+   "date": "2024-04-02",
+   "close": 518.84
+  },
+  {
+   "date": "2024-04-03",
+   "close": 519.41
+  },
+  {
+   "date": "2024-04-04",
+   "close": 513.07
+  },
+  {
+   "date": "2024-04-05",
+   "close": 518.43
+  },
+  {
+   "date": "2024-04-08",
+   "close": 518.72
+  },
+  {
+   "date": "2024-04-09",
+   "close": 519.32
+  },
+  {
+   "date": "2024-04-10",
+   "close": 514.12
+  },
+  {
+   "date": "2024-04-11",
+   "close": 518.0
+  },
+  {
+   "date": "2024-04-12",
+   "close": 510.85
+  },
+  {
+   "date": "2024-04-15",
+   "close": 504.45
+  },
+  {
+   "date": "2024-04-16",
+   "close": 503.53
+  },
+  {
+   "date": "2024-04-17",
+   "close": 500.55
+  },
+  {
+   "date": "2024-04-18",
+   "close": 499.52
+  },
+  {
+   "date": "2024-04-19",
+   "close": 495.16
+  },
+  {
+   "date": "2024-04-22",
+   "close": 499.72
+  },
+  {
+   "date": "2024-04-23",
+   "close": 505.65
+  },
+  {
+   "date": "2024-04-24",
+   "close": 505.41
+  },
+  {
+   "date": "2024-04-25",
+   "close": 503.49
+  },
+  {
+   "date": "2024-04-26",
+   "close": 508.26
+  },
+  {
+   "date": "2024-04-29",
+   "close": 510.06
+  },
+  {
+   "date": "2024-04-30",
+   "close": 501.98
+  },
+  {
+   "date": "2024-05-01",
+   "close": 500.35
+  },
+  {
+   "date": "2024-05-02",
+   "close": 505.03
+  },
+  {
+   "date": "2024-05-03",
+   "close": 511.29
+  },
+  {
+   "date": "2024-05-06",
+   "close": 516.57
+  },
+  {
+   "date": "2024-05-07",
+   "close": 517.14
+  },
+  {
+   "date": "2024-05-08",
+   "close": 517.19
+  },
+  {
+   "date": "2024-05-09",
+   "close": 520.17
+  },
+  {
+   "date": "2024-05-10",
+   "close": 520.84
+  },
+  {
+   "date": "2024-05-13",
+   "close": 520.91
+  },
+  {
+   "date": "2024-05-14",
+   "close": 523.3
+  },
+  {
+   "date": "2024-05-15",
+   "close": 529.78
+  },
+  {
+   "date": "2024-05-16",
+   "close": 528.69
+  },
+  {
+   "date": "2024-05-17",
+   "close": 529.45
+  },
+  {
+   "date": "2024-05-20",
+   "close": 530.06
+  },
+  {
+   "date": "2024-05-21",
+   "close": 531.36
+  },
+  {
+   "date": "2024-05-22",
+   "close": 529.83
+  },
+  {
+   "date": "2024-05-23",
+   "close": 525.96
+  },
+  {
+   "date": "2024-05-24",
+   "close": 529.44
+  },
+  {
+   "date": "2024-05-28",
+   "close": 529.81
+  },
+  {
+   "date": "2024-05-29",
+   "close": 526.1
+  },
+  {
+   "date": "2024-05-30",
+   "close": 522.61
+  },
+  {
+   "date": "2024-05-31",
+   "close": 527.37
+  },
+  {
+   "date": "2024-06-03",
+   "close": 527.8
+  },
+  {
+   "date": "2024-06-04",
+   "close": 528.39
+  },
+  {
+   "date": "2024-06-05",
+   "close": 534.67
+  },
+  {
+   "date": "2024-06-06",
+   "close": 534.66
+  },
+  {
+   "date": "2024-06-07",
+   "close": 534.01
+  },
+  {
+   "date": "2024-06-10",
+   "close": 535.66
+  },
+  {
+   "date": "2024-06-11",
+   "close": 536.95
+  },
+  {
+   "date": "2024-06-12",
+   "close": 541.36
+  },
+  {
+   "date": "2024-06-13",
+   "close": 542.45
+  },
+  {
+   "date": "2024-06-14",
+   "close": 542.78
+  },
+  {
+   "date": "2024-06-17",
+   "close": 547.1
+  },
+  {
+   "date": "2024-06-18",
+   "close": 548.49
+  },
+  {
+   "date": "2024-06-20",
+   "close": 547.0
+  },
+  {
+   "date": "2024-06-21",
+   "close": 544.51
+  },
+  {
+   "date": "2024-06-24",
+   "close": 542.74
+  },
+  {
+   "date": "2024-06-25",
+   "close": 544.83
+  },
+  {
+   "date": "2024-06-26",
+   "close": 545.51
+  },
+  {
+   "date": "2024-06-27",
+   "close": 546.37
+  },
+  {
+   "date": "2024-06-28",
+   "close": 544.22
+  },
+  {
+   "date": "2024-07-01",
+   "close": 545.34
+  },
+  {
+   "date": "2024-07-02",
+   "close": 549.01
+  },
+  {
+   "date": "2024-07-03",
+   "close": 551.46
+  },
+  {
+   "date": "2024-07-05",
+   "close": 554.64
+  },
+  {
+   "date": "2024-07-08",
+   "close": 555.28
+  },
+  {
+   "date": "2024-07-09",
+   "close": 555.82
+  },
+  {
+   "date": "2024-07-10",
+   "close": 561.32
+  },
+  {
+   "date": "2024-07-11",
+   "close": 556.48
+  },
+  {
+   "date": "2024-07-12",
+   "close": 559.99
+  },
+  {
+   "date": "2024-07-15",
+   "close": 561.53
+  },
+  {
+   "date": "2024-07-16",
+   "close": 564.86
+  },
+  {
+   "date": "2024-07-17",
+   "close": 556.94
+  },
+  {
+   "date": "2024-07-18",
+   "close": 552.66
+  },
+  {
+   "date": "2024-07-19",
+   "close": 548.99
+  },
+  {
+   "date": "2024-07-22",
+   "close": 554.65
+  },
+  {
+   "date": "2024-07-23",
+   "close": 553.78
+  },
+  {
+   "date": "2024-07-24",
+   "close": 541.23
+  },
+  {
+   "date": "2024-07-25",
+   "close": 538.41
+  },
+  {
+   "date": "2024-07-26",
+   "close": 544.44
+  },
+  {
+   "date": "2024-07-29",
+   "close": 544.76
+  },
+  {
+   "date": "2024-07-30",
+   "close": 542.0
+  },
+  {
+   "date": "2024-07-31",
+   "close": 550.81
+  },
+  {
+   "date": "2024-08-01",
+   "close": 543.01
+  },
+  {
+   "date": "2024-08-02",
+   "close": 532.9
+  },
+  {
+   "date": "2024-08-05",
+   "close": 517.38
+  },
+  {
+   "date": "2024-08-06",
+   "close": 522.15
+  },
+  {
+   "date": "2024-08-07",
+   "close": 518.66
+  },
+  {
+   "date": "2024-08-08",
+   "close": 530.65
+  },
+  {
+   "date": "2024-08-09",
+   "close": 532.99
+  },
+  {
+   "date": "2024-08-12",
+   "close": 533.27
+  },
+  {
+   "date": "2024-08-13",
+   "close": 542.04
+  },
+  {
+   "date": "2024-08-14",
+   "close": 543.75
+  },
+  {
+   "date": "2024-08-15",
+   "close": 553.07
+  },
+  {
+   "date": "2024-08-16",
+   "close": 554.31
+  },
+  {
+   "date": "2024-08-19",
+   "close": 559.61
+  },
+  {
+   "date": "2024-08-20",
+   "close": 558.7
+  },
+  {
+   "date": "2024-08-21",
+   "close": 560.62
+  },
+  {
+   "date": "2024-08-22",
+   "close": 556.22
+  },
+  {
+   "date": "2024-08-23",
+   "close": 562.13
+  },
+  {
+   "date": "2024-08-26",
+   "close": 560.79
+  },
+  {
+   "date": "2024-08-27",
+   "close": 561.56
+  },
+  {
+   "date": "2024-08-28",
+   "close": 558.3
+  },
+  {
+   "date": "2024-08-29",
+   "close": 558.35
+  },
+  {
+   "date": "2024-08-30",
+   "close": 563.68
+  },
+  {
+   "date": "2024-09-03",
+   "close": 552.08
+  },
+  {
+   "date": "2024-09-04",
+   "close": 550.95
+  },
+  {
+   "date": "2024-09-05",
+   "close": 549.61
+  },
+  {
+   "date": "2024-09-06",
+   "close": 540.36
+  },
+  {
+   "date": "2024-09-09",
+   "close": 546.41
+  },
+  {
+   "date": "2024-09-10",
+   "close": 548.79
+  },
+  {
+   "date": "2024-09-11",
+   "close": 554.42
+  },
+  {
+   "date": "2024-09-12",
+   "close": 559.09
+  },
+  {
+   "date": "2024-09-13",
+   "close": 562.01
+  },
+  {
+   "date": "2024-09-16",
+   "close": 562.84
+  },
+  {
+   "date": "2024-09-17",
+   "close": 563.07
+  },
+  {
+   "date": "2024-09-18",
+   "close": 561.4
+  },
+  {
+   "date": "2024-09-19",
+   "close": 570.98
+  },
+  {
+   "date": "2024-09-20",
+   "close": 568.25
+  },
+  {
+   "date": "2024-09-23",
+   "close": 569.67
+  },
+  {
+   "date": "2024-09-24",
+   "close": 571.3
+  },
+  {
+   "date": "2024-09-25",
+   "close": 570.04
+  },
+  {
+   "date": "2024-09-26",
+   "close": 572.3
+  },
+  {
+   "date": "2024-09-27",
+   "close": 571.47
+  },
+  {
+   "date": "2024-09-30",
+   "close": 573.76
+  },
+  {
+   "date": "2024-10-01",
+   "close": 568.62
+  },
+  {
+   "date": "2024-10-02",
+   "close": 568.86
+  },
+  {
+   "date": "2024-10-03",
+   "close": 567.82
+  },
+  {
+   "date": "2024-10-04",
+   "close": 572.98
+  },
+  {
+   "date": "2024-10-07",
+   "close": 567.8
+  },
+  {
+   "date": "2024-10-08",
+   "close": 573.17
+  },
+  {
+   "date": "2024-10-09",
+   "close": 577.14
+  },
+  {
+   "date": "2024-10-10",
+   "close": 576.13
+  },
+  {
+   "date": "2024-10-11",
+   "close": 579.58
+  },
+  {
+   "date": "2024-10-14",
+   "close": 584.32
+  },
+  {
+   "date": "2024-10-15",
+   "close": 579.78
+  },
+  {
+   "date": "2024-10-16",
+   "close": 582.3
+  },
+  {
+   "date": "2024-10-17",
+   "close": 582.35
+  },
+  {
+   "date": "2024-10-18",
+   "close": 584.59
+  },
+  {
+   "date": "2024-10-21",
+   "close": 583.63
+  },
+  {
+   "date": "2024-10-22",
+   "close": 583.32
+  },
+  {
+   "date": "2024-10-23",
+   "close": 577.99
+  },
+  {
+   "date": "2024-10-24",
+   "close": 579.24
+  },
+  {
+   "date": "2024-10-25",
+   "close": 579.04
+  },
+  {
+   "date": "2024-10-28",
+   "close": 580.83
+  },
+  {
+   "date": "2024-10-29",
+   "close": 581.77
+  },
+  {
+   "date": "2024-10-30",
+   "close": 580.01
+  },
+  {
+   "date": "2024-10-31",
+   "close": 568.64
+  },
+  {
+   "date": "2024-11-01",
+   "close": 571.04
+  },
+  {
+   "date": "2024-11-04",
+   "close": 569.81
+  },
+  {
+   "date": "2024-11-05",
+   "close": 576.7
+  },
+  {
+   "date": "2024-11-06",
+   "close": 591.04
+  },
+  {
+   "date": "2024-11-07",
+   "close": 595.61
+  },
+  {
+   "date": "2024-11-08",
+   "close": 598.19
+  },
+  {
+   "date": "2024-11-11",
+   "close": 598.76
+  },
+  {
+   "date": "2024-11-12",
+   "close": 596.9
+  },
+  {
+   "date": "2024-11-13",
+   "close": 597.19
+  },
+  {
+   "date": "2024-11-14",
+   "close": 593.35
+  },
+  {
+   "date": "2024-11-15",
+   "close": 585.75
+  },
+  {
+   "date": "2024-11-18",
+   "close": 588.15
+  },
+  {
+   "date": "2024-11-19",
+   "close": 590.3
+  },
+  {
+   "date": "2024-11-20",
+   "close": 590.5
+  },
+  {
+   "date": "2024-11-21",
+   "close": 593.67
+  },
+  {
+   "date": "2024-11-22",
+   "close": 595.51
+  },
+  {
+   "date": "2024-11-25",
+   "close": 597.53
+  },
+  {
+   "date": "2024-11-26",
+   "close": 600.65
+  },
+  {
+   "date": "2024-11-27",
+   "close": 598.83
+  },
+  {
+   "date": "2024-11-29",
+   "close": 602.55
+  },
+  {
+   "date": "2024-12-02",
+   "close": 603.63
+  },
+  {
+   "date": "2024-12-03",
+   "close": 603.91
+  },
+  {
+   "date": "2024-12-04",
+   "close": 607.66
+  },
+  {
+   "date": "2024-12-05",
+   "close": 606.66
+  },
+  {
+   "date": "2024-12-06",
+   "close": 607.81
+  },
+  {
+   "date": "2024-12-09",
+   "close": 604.68
+  },
+  {
+   "date": "2024-12-10",
+   "close": 602.8
+  },
+  {
+   "date": "2024-12-11",
+   "close": 607.46
+  },
+  {
+   "date": "2024-12-12",
+   "close": 604.33
+  },
+  {
+   "date": "2024-12-13",
+   "close": 604.21
+  },
+  {
+   "date": "2024-12-16",
+   "close": 606.79
+  },
+  {
+   "date": "2024-12-17",
+   "close": 604.29
+  },
+  {
+   "date": "2024-12-18",
+   "close": 586.28
+  },
+  {
+   "date": "2024-12-19",
+   "close": 586.1
+  },
+  {
+   "date": "2024-12-20",
+   "close": 591.15
+  },
+  {
+   "date": "2024-12-23",
+   "close": 594.69
+  },
+  {
+   "date": "2024-12-24",
+   "close": 601.3
+  },
+  {
+   "date": "2024-12-26",
+   "close": 601.34
+  },
+  {
+   "date": "2024-12-27",
+   "close": 595.01
+  },
+  {
+   "date": "2024-12-30",
+   "close": 588.22
+  },
+  {
+   "date": "2024-12-31",
+   "close": 586.08
+  },
+  {
+   "date": "2025-01-02",
+   "close": 584.64
+  },
+  {
+   "date": "2025-01-03",
+   "close": 591.95
+  },
+  {
+   "date": "2025-01-06",
+   "close": 595.36
+  },
+  {
+   "date": "2025-01-07",
+   "close": 588.63
+  },
+  {
+   "date": "2025-01-08",
+   "close": 589.49
+  },
+  {
+   "date": "2025-01-10",
+   "close": 580.49
+  },
+  {
+   "date": "2025-01-13",
+   "close": 581.39
+  },
+  {
+   "date": "2025-01-14",
+   "close": 582.19
+  },
+  {
+   "date": "2025-01-15",
+   "close": 592.78
+  },
+  {
+   "date": "2025-01-16",
+   "close": 591.64
+  },
+  {
+   "date": "2025-01-17",
+   "close": 597.58
+  },
+  {
+   "date": "2025-01-21",
+   "close": 603.05
+  },
+  {
+   "date": "2025-01-22",
+   "close": 606.44
+  },
+  {
+   "date": "2025-01-23",
+   "close": 609.75
+  },
+  {
+   "date": "2025-01-24",
+   "close": 607.97
+  },
+  {
+   "date": "2025-01-27",
+   "close": 599.37
+  },
+  {
+   "date": "2025-01-28",
+   "close": 604.52
+  },
+  {
+   "date": "2025-01-29",
+   "close": 601.81
+  },
+  {
+   "date": "2025-01-30",
+   "close": 605.04
+  },
+  {
+   "date": "2025-01-31",
+   "close": 601.82
+  },
+  {
+   "date": "2025-02-03",
+   "close": 597.77
+  },
+  {
+   "date": "2025-02-04",
+   "close": 601.78
+  },
+  {
+   "date": "2025-02-05",
+   "close": 604.22
+  },
+  {
+   "date": "2025-02-06",
+   "close": 606.32
+  },
+  {
+   "date": "2025-02-07",
+   "close": 600.77
+  },
+  {
+   "date": "2025-02-10",
+   "close": 604.85
+  },
+  {
+   "date": "2025-02-11",
+   "close": 605.31
+  },
+  {
+   "date": "2025-02-12",
+   "close": 603.36
+  },
+  {
+   "date": "2025-02-13",
+   "close": 609.73
+  },
+  {
+   "date": "2025-02-14",
+   "close": 609.7
+  },
+  {
+   "date": "2025-02-18",
+   "close": 611.49
+  },
+  {
+   "date": "2025-02-19",
+   "close": 612.93
+  },
+  {
+   "date": "2025-02-20",
+   "close": 610.38
+  },
+  {
+   "date": "2025-02-21",
+   "close": 599.94
+  },
+  {
+   "date": "2025-02-24",
+   "close": 597.21
+  },
+  {
+   "date": "2025-02-25",
+   "close": 594.24
+  },
+  {
+   "date": "2025-02-26",
+   "close": 594.54
+  },
+  {
+   "date": "2025-02-27",
+   "close": 585.05
+  },
+  {
+   "date": "2025-02-28",
+   "close": 594.18
+  },
+  {
+   "date": "2025-03-03",
+   "close": 583.77
+  },
+  {
+   "date": "2025-03-04",
+   "close": 576.86
+  },
+  {
+   "date": "2025-03-05",
+   "close": 583.06
+  },
+  {
+   "date": "2025-03-06",
+   "close": 572.71
+  },
+  {
+   "date": "2025-03-07",
+   "close": 575.92
+  },
+  {
+   "date": "2025-03-10",
+   "close": 560.58
+  },
+  {
+   "date": "2025-03-11",
+   "close": 555.92
+  },
+  {
+   "date": "2025-03-12",
+   "close": 558.87
+  },
+  {
+   "date": "2025-03-13",
+   "close": 551.42
+  },
+  {
+   "date": "2025-03-14",
+   "close": 562.81
+  },
+  {
+   "date": "2025-03-17",
+   "close": 567.15
+  },
+  {
+   "date": "2025-03-18",
+   "close": 561.02
+  },
+  {
+   "date": "2025-03-19",
+   "close": 567.13
+  },
+  {
+   "date": "2025-03-20",
+   "close": 565.49
+  },
+  {
+   "date": "2025-03-21",
+   "close": 563.98
+  },
+  {
+   "date": "2025-03-24",
+   "close": 574.08
+  },
+  {
+   "date": "2025-03-25",
+   "close": 575.46
+  },
+  {
+   "date": "2025-03-26",
+   "close": 568.59
+  },
+  {
+   "date": "2025-03-27",
+   "close": 567.08
+  },
+  {
+   "date": "2025-03-28",
+   "close": 555.66
+  },
+  {
+   "date": "2025-03-31",
+   "close": 559.39
+  },
+  {
+   "date": "2025-04-01",
+   "close": 560.97
+  },
+  {
+   "date": "2025-04-02",
+   "close": 564.52
+  },
+  {
+   "date": "2025-04-03",
+   "close": 536.7
+  },
+  {
+   "date": "2025-04-04",
+   "close": 505.28
+  },
+  {
+   "date": "2025-04-07",
+   "close": 504.38
+  },
+  {
+   "date": "2025-04-08",
+   "close": 496.48
+  },
+  {
+   "date": "2025-04-09",
+   "close": 548.62
+  },
+  {
+   "date": "2025-04-10",
+   "close": 524.58
+  },
+  {
+   "date": "2025-04-11",
+   "close": 533.94
+  },
+  {
+   "date": "2025-04-14",
+   "close": 539.12
+  },
+  {
+   "date": "2025-04-15",
+   "close": 537.61
+  },
+  {
+   "date": "2025-04-16",
+   "close": 525.66
+  },
+  {
+   "date": "2025-04-17",
+   "close": 526.41
+  },
+  {
+   "date": "2025-04-21",
+   "close": 513.88
+  },
+  {
+   "date": "2025-04-22",
+   "close": 527.25
+  },
+  {
+   "date": "2025-04-23",
+   "close": 535.42
+  },
+  {
+   "date": "2025-04-24",
+   "close": 546.69
+  },
+  {
+   "date": "2025-04-25",
+   "close": 550.64
+  },
+  {
+   "date": "2025-04-28",
+   "close": 550.85
+  },
+  {
+   "date": "2025-04-29",
+   "close": 554.32
+  },
+  {
+   "date": "2025-04-30",
+   "close": 554.54
+  },
+  {
+   "date": "2025-05-01",
+   "close": 558.47
+  },
+  {
+   "date": "2025-05-02",
+   "close": 566.76
+  },
+  {
+   "date": "2025-05-05",
+   "close": 563.51
+  },
+  {
+   "date": "2025-05-06",
+   "close": 558.8
+  },
+  {
+   "date": "2025-05-07",
+   "close": 561.15
+  },
+  {
+   "date": "2025-05-08",
+   "close": 565.06
+  },
+  {
+   "date": "2025-05-09",
+   "close": 564.34
+  },
+  {
+   "date": "2025-05-12",
+   "close": 582.99
+  },
+  {
+   "date": "2025-05-13",
+   "close": 586.84
+  },
+  {
+   "date": "2025-05-14",
+   "close": 587.59
+  },
+  {
+   "date": "2025-05-15",
+   "close": 590.46
+  },
+  {
+   "date": "2025-05-16",
+   "close": 594.2
+  },
+  {
+   "date": "2025-05-19",
+   "close": 594.85
+  },
+  {
+   "date": "2025-05-20",
+   "close": 592.85
+  },
+  {
+   "date": "2025-05-21",
+   "close": 582.86
+  },
+  {
+   "date": "2025-05-22",
+   "close": 583.09
+  },
+  {
+   "date": "2025-05-23",
+   "close": 579.11
+  },
+  {
+   "date": "2025-05-27",
+   "close": 591.15
+  },
+  {
+   "date": "2025-05-28",
+   "close": 587.73
+  },
+  {
+   "date": "2025-05-29",
+   "close": 590.05
+  },
+  {
+   "date": "2025-05-30",
+   "close": 589.39
+  },
+  {
+   "date": "2025-06-02",
+   "close": 592.71
+  },
+  {
+   "date": "2025-06-03",
+   "close": 596.09
+  },
+  {
+   "date": "2025-06-04",
+   "close": 595.93
+  },
+  {
+   "date": "2025-06-05",
+   "close": 593.05
+  },
+  {
+   "date": "2025-06-06",
+   "close": 599.14
+  },
+  {
+   "date": "2025-06-09",
+   "close": 599.68
+  },
+  {
+   "date": "2025-06-10",
+   "close": 603.08
+  },
+  {
+   "date": "2025-06-11",
+   "close": 601.36
+  },
+  {
+   "date": "2025-06-12",
+   "close": 603.75
+  },
+  {
+   "date": "2025-06-13",
+   "close": 597.0
+  },
+  {
+   "date": "2025-06-16",
+   "close": 602.68
+  },
+  {
+   "date": "2025-06-17",
+   "close": 597.53
+  },
+  {
+   "date": "2025-06-18",
+   "close": 597.44
+  },
+  {
+   "date": "2025-06-20",
+   "close": 594.28
+  },
+  {
+   "date": "2025-06-23",
+   "close": 600.15
+  },
+  {
+   "date": "2025-06-24",
+   "close": 606.78
+  },
+  {
+   "date": "2025-06-25",
+   "close": 607.12
+  },
+  {
+   "date": "2025-06-26",
+   "close": 611.87
+  },
+  {
+   "date": "2025-06-27",
+   "close": 614.91
+  },
+  {
+   "date": "2025-06-30",
+   "close": 617.85
+  },
+  {
+   "date": "2025-07-01",
+   "close": 617.65
+  },
+  {
+   "date": "2025-07-02",
+   "close": 620.45
+  },
+  {
+   "date": "2025-07-03",
+   "close": 625.34
+  },
+  {
+   "date": "2025-07-07",
+   "close": 620.68
+  },
+  {
+   "date": "2025-07-08",
+   "close": 620.34
+  },
+  {
+   "date": "2025-07-09",
+   "close": 624.06
+  },
+  {
+   "date": "2025-07-10",
+   "close": 625.82
+  },
+  {
+   "date": "2025-07-11",
+   "close": 623.62
+  },
+  {
+   "date": "2025-07-14",
+   "close": 624.81
+  },
+  {
+   "date": "2025-07-15",
+   "close": 622.14
+  },
+  {
+   "date": "2025-07-16",
+   "close": 624.22
+  },
+  {
+   "date": "2025-07-17",
+   "close": 628.04
+  },
+  {
+   "date": "2025-07-18",
+   "close": 627.58
+  },
+  {
+   "date": "2025-07-21",
+   "close": 628.77
+  },
+  {
+   "date": "2025-07-22",
+   "close": 628.86
+  },
+  {
+   "date": "2025-07-23",
+   "close": 634.21
+  },
+  {
+   "date": "2025-07-24",
+   "close": 634.42
+  },
+  {
+   "date": "2025-07-25",
+   "close": 637.1
+  },
+  {
+   "date": "2025-07-28",
+   "close": 636.94
+  },
+  {
+   "date": "2025-07-29",
+   "close": 635.26
+  },
+  {
+   "date": "2025-07-30",
+   "close": 634.46
+  },
+  {
+   "date": "2025-07-31",
+   "close": 632.08
+  },
+  {
+   "date": "2025-08-01",
+   "close": 621.72
+  },
+  {
+   "date": "2025-08-04",
+   "close": 631.17
+  },
+  {
+   "date": "2025-08-05",
+   "close": 627.97
+  },
+  {
+   "date": "2025-08-06",
+   "close": 632.78
+  },
+  {
+   "date": "2025-08-07",
+   "close": 632.25
+  },
+  {
+   "date": "2025-08-08",
+   "close": 637.18
+  },
+  {
+   "date": "2025-08-11",
+   "close": 635.92
+  },
+  {
+   "date": "2025-08-12",
+   "close": 642.69
+  },
+  {
+   "date": "2025-08-13",
+   "close": 644.89
+  },
+  {
+   "date": "2025-08-14",
+   "close": 644.95
+  },
+  {
+   "date": "2025-08-15",
+   "close": 643.44
+  },
+  {
+   "date": "2025-08-18",
+   "close": 643.3
+  },
+  {
+   "date": "2025-08-19",
+   "close": 639.81
+  },
+  {
+   "date": "2025-08-20",
+   "close": 638.11
+  },
+  {
+   "date": "2025-08-21",
+   "close": 635.55
+  },
+  {
+   "date": "2025-08-22",
+   "close": 645.31
+  },
+  {
+   "date": "2025-08-25",
+   "close": 642.47
+  },
+  {
+   "date": "2025-08-26",
+   "close": 645.16
+  },
+  {
+   "date": "2025-08-27",
+   "close": 646.63
+  },
+  {
+   "date": "2025-08-28",
+   "close": 648.92
+  },
+  {
+   "date": "2025-08-29",
+   "close": 645.05
+  },
+  {
+   "date": "2025-09-02",
+   "close": 640.27
+  },
+  {
+   "date": "2025-09-03",
+   "close": 643.74
+  },
+  {
+   "date": "2025-09-04",
+   "close": 649.12
+  },
+  {
+   "date": "2025-09-05",
+   "close": 647.24
+  },
+  {
+   "date": "2025-09-08",
+   "close": 648.83
+  },
+  {
+   "date": "2025-09-09",
+   "close": 650.33
+  },
+  {
+   "date": "2025-09-10",
+   "close": 652.21
+  },
+  {
+   "date": "2025-09-11",
+   "close": 657.63
+  },
+  {
+   "date": "2025-09-12",
+   "close": 657.41
+  },
+  {
+   "date": "2025-09-15",
+   "close": 660.91
+  },
+  {
+   "date": "2025-09-16",
+   "close": 660.0
+  },
+  {
+   "date": "2025-09-17",
+   "close": 659.18
+  },
+  {
+   "date": "2025-09-18",
+   "close": 662.26
+  },
+  {
+   "date": "2025-09-19",
+   "close": 663.7
+  },
+  {
+   "date": "2025-09-22",
+   "close": 666.84
+  },
+  {
+   "date": "2025-09-23",
+   "close": 663.21
+  },
+  {
+   "date": "2025-09-24",
+   "close": 661.1
+  },
+  {
+   "date": "2025-09-25",
+   "close": 658.05
+  },
+  {
+   "date": "2025-09-26",
+   "close": 661.82
+  },
+  {
+   "date": "2025-09-29",
+   "close": 663.68
+  },
+  {
+   "date": "2025-09-30",
+   "close": 666.18
+  },
+  {
+   "date": "2025-10-01",
+   "close": 668.45
+  },
+  {
+   "date": "2025-10-02",
+   "close": 669.22
+  },
+  {
+   "date": "2025-10-03",
+   "close": 669.21
+  },
+  {
+   "date": "2025-10-06",
+   "close": 671.61
+  },
+  {
+   "date": "2025-10-07",
+   "close": 669.12
+  },
+  {
+   "date": "2025-10-08",
+   "close": 673.11
+  },
+  {
+   "date": "2025-10-09",
+   "close": 671.16
+  },
+  {
+   "date": "2025-10-10",
+   "close": 653.02
+  },
+  {
+   "date": "2025-10-13",
+   "close": 663.04
+  },
+  {
+   "date": "2025-10-14",
+   "close": 662.23
+  },
+  {
+   "date": "2025-10-15",
+   "close": 665.17
+  },
+  {
+   "date": "2025-10-16",
+   "close": 660.64
+  },
+  {
+   "date": "2025-10-17",
+   "close": 664.39
+  },
+  {
+   "date": "2025-10-20",
+   "close": 671.3
+  },
+  {
+   "date": "2025-10-21",
+   "close": 671.29
+  },
+  {
+   "date": "2025-10-22",
+   "close": 667.8
+  },
+  {
+   "date": "2025-10-23",
+   "close": 671.76
+  },
+  {
+   "date": "2025-10-24",
+   "close": 677.25
+  },
+  {
+   "date": "2025-10-27",
+   "close": 685.24
+  },
+  {
+   "date": "2025-10-28",
+   "close": 687.06
+  },
+  {
+   "date": "2025-10-29",
+   "close": 687.39
+  },
+  {
+   "date": "2025-10-30",
+   "close": 679.83
+  },
+  {
+   "date": "2025-10-31",
+   "close": 682.06
+  },
+  {
+   "date": "2025-11-03",
+   "close": 683.34
+  },
+  {
+   "date": "2025-11-04",
+   "close": 675.24
+  },
+  {
+   "date": "2025-11-05",
+   "close": 677.58
+  },
+  {
+   "date": "2025-11-06",
+   "close": 670.31
+  },
+  {
+   "date": "2025-11-07",
+   "close": 670.97
+  },
+  {
+   "date": "2025-11-10",
+   "close": 681.44
+  },
+  {
+   "date": "2025-11-11",
+   "close": 683.0
+  },
+  {
+   "date": "2025-11-12",
+   "close": 683.38
+  },
+  {
+   "date": "2025-11-13",
+   "close": 672.04
+  },
+  {
+   "date": "2025-11-14",
+   "close": 671.93
+  },
+  {
+   "date": "2025-11-17",
+   "close": 665.67
+  },
+  {
+   "date": "2025-11-18",
+   "close": 660.08
+  },
+  {
+   "date": "2025-11-19",
+   "close": 662.63
+  },
+  {
+   "date": "2025-11-20",
+   "close": 652.53
+  },
+  {
+   "date": "2025-11-21",
+   "close": 659.03
+  },
+  {
+   "date": "2025-11-24",
+   "close": 668.73
+  },
+  {
+   "date": "2025-11-25",
+   "close": 675.02
+  },
+  {
+   "date": "2025-11-26",
+   "close": 679.68
+  },
+  {
+   "date": "2025-11-28",
+   "close": 683.39
+  },
+  {
+   "date": "2025-12-01",
+   "close": 680.27
+  },
+  {
+   "date": "2025-12-02",
+   "close": 681.53
+  },
+  {
+   "date": "2025-12-03",
+   "close": 683.89
+  },
+  {
+   "date": "2025-12-04",
+   "close": 684.39
+  },
+  {
+   "date": "2025-12-05",
+   "close": 685.69
+  },
+  {
+   "date": "2025-12-08",
+   "close": 683.63
+  },
+  {
+   "date": "2025-12-09",
+   "close": 683.04
+  },
+  {
+   "date": "2025-12-10",
+   "close": 687.57
+  },
+  {
+   "date": "2025-12-11",
+   "close": 689.17
+  },
+  {
+   "date": "2025-12-12",
+   "close": 681.76
+  },
+  {
+   "date": "2025-12-15",
+   "close": 680.73
+  },
+  {
+   "date": "2025-12-16",
+   "close": 678.87
+  },
+  {
+   "date": "2025-12-17",
+   "close": 671.4
+  },
+  {
+   "date": "2025-12-18",
+   "close": 676.47
+  },
+  {
+   "date": "2025-12-19",
+   "close": 680.59
+  },
+  {
+   "date": "2025-12-22",
+   "close": 684.83
+  },
+  {
+   "date": "2025-12-23",
+   "close": 687.96
+  },
+  {
+   "date": "2025-12-24",
+   "close": 690.38
+  },
+  {
+   "date": "2025-12-26",
+   "close": 690.31
+  },
+  {
+   "date": "2025-12-29",
+   "close": 687.85
+  },
+  {
+   "date": "2025-12-30",
+   "close": 687.01
+  },
+  {
+   "date": "2025-12-31",
+   "close": 681.92
+  }
+ ],
+ "benchmark_return_pct": 79.07,
+ "alpha_pct": -18.81,
+ "information_ratio": -0.15,
+ "tracking_error_pct": 18.66,
+ "run_id": "val_filtered_t30",
+ "db_path": "data/replays/val_filtered_t30/replay.db"
+}

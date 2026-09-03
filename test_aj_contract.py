@@ -35,8 +35,11 @@ _TABLES = ("aj_orders", "aj_fills", "aj_proposals", "aj_risk_events",
 
 def _reset():
     conn = db.get_conn()
-    for t in _TABLES:
-        conn.execute("DELETE FROM {}".format(t))
+    # audit_maintenance: aj_audit is append-only (v10 triggers); the test
+    # reset is explicit maintenance and must use the scoped unlock.
+    with aj_db.audit_maintenance():
+        for t in _TABLES:
+            conn.execute("DELETE FROM {}".format(t))
     conn.execute("DELETE FROM settings WHERE key LIKE 'aj_%' OR key LIKE '__aj_%'")
     conn.commit()
     try:

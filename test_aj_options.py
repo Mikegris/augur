@@ -15,6 +15,11 @@ import aj_db                    # noqa: E402
 import aj_options as O          # noqa: E402
 
 aj_db.aj_init()
+# Deterministic session: the routing tests run full proposals through the risk
+# gate, which correctly blocks on weekends/holidays via the real calendar —
+# stub it so the suite passes regardless of the day it runs (same fix as
+# test_aj_cycle after the July-4 observed holiday).
+aj_db.market_session = lambda dt=None: "regular"
 
 
 def _future(days):
@@ -42,7 +47,10 @@ def test_pick_contract_atm_call():
         {"strike": 150, "bid": 5.0, "ask": 5.2, "lastPrice": 5.1},   # ATM (spot 151)
         {"strike": 160, "bid": 1.0, "ask": 1.2, "lastPrice": 1.1},
     ]
-    c = O.pick_contract("AAPL", "buy", {"option_target_dte": 35, "option_moneyness": 0.0},
+    # min OI 0: these fixtures carry no openInterest and the illiquid
+    # fallback is now gated OFF by default — this test is about ATM selection.
+    c = O.pick_contract("AAPL", "buy", {"option_target_dte": 35, "option_moneyness": 0.0,
+                                        "option_min_open_interest": 0},
                         spot=151.0, expirations=[exp], chain_fn=_chain(calls))
     assert c is not None
     assert c["strike"] == 150            # nearest to spot
@@ -55,7 +63,8 @@ def test_pick_contract_atm_call():
 def test_pick_contract_otm_via_moneyness():
     exp = _future(40)
     calls = [{"strike": 150, "bid": 5, "ask": 5.2}, {"strike": 160, "bid": 1, "ask": 1.2}]
-    c = O.pick_contract("AAPL", "buy", {"option_moneyness": 0.06},   # ~+6% OTM of 151 = 160
+    c = O.pick_contract("AAPL", "buy", {"option_moneyness": 0.06,   # ~+6% OTM of 151 = 160
+                                        "option_min_open_interest": 0},
                         spot=151.0, expirations=[exp], chain_fn=_chain(calls))
     assert c["strike"] == 160
 
@@ -185,6 +194,32 @@ def test_pick_contract_liquidity_filter():
     c = O.pick_contract("AAPL", "buy", {"option_min_open_interest": 50, "option_max_spread_pct": 0.30},
                         spot=151.0, expirations=[exp], chain_fn=_chain(calls))
     assert c["strike"] == 145, c
+    # a screened (liquid) pick must NOT carry the illiquid-fallback marker
+    assert "illiquid_fallback" not in c, c
+
+
+def test_pick_contract_illiquid_fallback_suppressed_by_default():
+    """Nothing passes the OI/spread screen + flag OFF (default) → None, NOT a
+    silent fallback to an untradeable contract (caller does equity instead)."""
+    exp = _future(40)
+    calls = [{"strike": 150, "bid": 1.0, "ask": 3.0, "openInterest": 0, "volume": 0}]
+    c = O.pick_contract("AAPL", "buy",
+                        {"option_min_open_interest": 50, "option_max_spread_pct": 0.30},
+                        spot=151.0, expirations=[exp], chain_fn=_chain(calls))
+    assert c is None, c
+
+
+def test_pick_contract_illiquid_fallback_honored_with_flag():
+    """option_allow_illiquid_fallback=True keeps the old behavior AND stamps
+    illiquid_fallback: True on the payload for observability."""
+    exp = _future(40)
+    calls = [{"strike": 150, "bid": 1.0, "ask": 3.0, "openInterest": 0, "volume": 0}]
+    c = O.pick_contract("AAPL", "buy",
+                        {"option_min_open_interest": 50, "option_max_spread_pct": 0.30,
+                         "option_allow_illiquid_fallback": True},
+                        spot=151.0, expirations=[exp], chain_fn=_chain(calls))
+    assert c is not None and c["strike"] == 150, c
+    assert c.get("illiquid_fallback") is True, c
 
 
 def test_option_fee_per_contract():
@@ -205,7 +240,9 @@ def test_close_expired_options():
     for t in ("aj_fills", "aj_orders"):
         conn.execute("DELETE FROM " + t)
     conn.commit()
-    sym = O.format_symbol("AAPL", _future(-3), "call", 150.0)   # already expired
+    # already expired, deep OTM (strike far above any spot) so the intrinsic-
+    # value expiry pricing books it worthless — the full-premium-loss case
+    sym = O.format_symbol("AAPL", _future(-3), "call", 99999.0)
     oid = aj_db.insert("aj_orders", proposal_id=0, client_order_id="seed1", broker="paper",
                        mode="paper", symbol=sym, side="buy", qty=2, order_type="limit",
                        state="filled", filled_qty=2, avg_fill_price=500.0,
@@ -270,3 +307,41 @@ if __name__ == "__main__":
             print("  [XX] {}: unexpected {}: {}".format(fn.__name__, type(e).__name__, e))
     print("PASS" if failed == 0 else "{} FAILED".format(failed))
     sys.exit(1 if failed else 0)
+
+
+def test_mark_cache_ttl_and_last_good():
+    """Marks are cached (TTL), served last-good ('stale') when the chain feed
+    fails, expire past the horizon, and injected chain_fn bypasses the cache."""
+    calls = {"n": 0, "fail": False}
+
+    def fake_chain(und, exp):
+        calls["n"] += 1
+        if calls["fail"]:
+            return {"calls": [], "puts": []}
+        return {"calls": [{"strike": 150.0, "bid": 7.0, "ask": 7.4}], "puts": []}
+
+    orig_chain, orig_now = O._default_chain, O._now_s
+    t = [1000.0]
+    O._default_chain = fake_chain
+    O._now_s = lambda: t[0]
+    try:
+        sym = O.format_symbol("AAPL", _future(40), "call", 150.0)
+        m1 = O.mark(sym)
+        assert abs(m1 - 720.0) < 1e-6 and calls["n"] == 1
+        assert O.mark(sym) == m1 and calls["n"] == 1          # fresh cache hit
+        assert O.mark_status(sym) == "fresh"
+        t[0] += O._MARK_TTL_S + 1
+        calls["fail"] = True
+        assert O.mark(sym) == m1                               # last-good serve
+        assert O.mark_status(sym) == "stale"
+        t[0] += O._MARK_LAST_GOOD_S + 1
+        assert O.mark(sym) is None                             # horizon expired
+        assert O.mark_status(sym) is None
+        # injected chain_fn bypasses the cache (deterministic fixtures)
+        m = O.mark(sym, chain_fn=_chain([{"strike": 150.0, "bid": 1.0, "ask": 1.2}]))
+        assert abs(m - 110.0) < 1e-6
+    finally:
+        O._default_chain = orig_chain
+        O._now_s = orig_now
+        O._MARK_CACHE.clear()
+        O._MARK_STATUS.clear()

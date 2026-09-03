@@ -460,8 +460,12 @@ def test_23_preset_escalation():
     try:
         r = AU.maybe_escalate({"auto_preset_escalation": True})
         check(r["changed"] and r["to"] == "aggressive", "23 escalation: strong record steps up to aggressive")
-        # deep drawdown steps back down
-        A._equity_curve = lambda: [{"equity_usd": 1000.0}, {"equity_usd": 800.0}]  # 20% dd
+        # deep drawdown steps back down. equity_usd rows are CUMULATIVE P&L;
+        # current_drawdown_pct now adds the capital base (typed-config default
+        # compound_base_equity_usd = 10k), so a 20% EQUITY drawdown is
+        # peak 10k+1000 = 11k -> 10k-1200 = 8.8k (the old 1000->800 stub only
+        # reads 20% under the buggy P&L-relative math).
+        A._equity_curve = lambda: [{"equity_usd": 1000.0}, {"equity_usd": -1200.0}]  # 20% dd
         r2 = AU.maybe_escalate({"auto_preset_escalation": True})
         check(r2["changed"] and r2["to"] == "moderate", "23 escalation: a drawdown steps back down")
         check(AU.maybe_escalate({})["changed"] is False, "23 escalation: off → no change")
@@ -487,6 +491,68 @@ def test_24_daily_reflection():
         aj_analytics.trade_stats, aj_analytics.attribution, aj_risk.compute_day_pnl = o_ts, o_at, o_pnl
 
 
+def test_24b_journal_dual_write_and_weekly_rollup():
+    # test_24 already ran write_reflection for today: the dual-write must have
+    # landed exactly one 'reflection' journal row for today's ET date.
+    today = AU._et_date()
+    rows = aj_db.query(
+        "SELECT payload_json FROM aj_journal WHERE kind='reflection' AND date=?",
+        (today,))
+    check(len(rows) == 1, "24b journal: reflection dual-written to aj_journal")
+    payload = json.loads(rows[0]["payload_json"]) if rows else {}
+    check(payload.get("date") == today and payload.get("takeaway"),
+          "24b journal: journal payload mirrors the reflection")
+    # first-write-wins: a repeat write_reflection must not add a second row
+    AU.write_reflection()
+    rows2 = aj_db.query(
+        "SELECT id FROM aj_journal WHERE kind='reflection' AND date=?", (today,))
+    check(len(rows2) == 1, "24b journal: repeat write is idempotent (1 row)")
+    # ...and a direct duplicate journal write is refused by UNIQUE(kind,date)
+    check(AU._journal_write("reflection", today, {"x": 1}) is False,
+          "24b journal: UNIQUE(kind,date) rejects a second same-day write")
+
+    # seed two earlier days so the weekly rollup has a real window to compose
+    import datetime as _dt
+    d1 = (_dt.date.fromisoformat(today) - _dt.timedelta(days=1)).isoformat()
+    d2 = (_dt.date.fromisoformat(today) - _dt.timedelta(days=2)).isoformat()
+    AU._journal_write("reflection", d1, {"date": d1, "day_pnl_usd": -30.0,
+                                         "win_rate": 0.4, "takeaway": "rough day"})
+    AU._journal_write("reflection", d2, {"date": d2, "day_pnl_usd": 200.0,
+                                         "win_rate": 0.8, "takeaway": "great day"})
+    roll = AU.weekly_rollup()
+    check(len(roll["days"]) == 3 and roll["period"].endswith(today),
+          "24b weekly: rollup covers the seeded 7-day window")
+    check(roll["best_day"]["date"] == d2 and roll["worst_day"]["date"] == d1,
+          "24b weekly: best/worst day picked by day P&L")
+    # avg win-rate over the days that have one (0.62 from test_24 + 0.4 + 0.8);
+    # weekly_rollup rounds to 4 decimals, so compare at that precision
+    check(abs(roll["avg_win_rate"] - (0.62 + 0.4 + 0.8) / 3.0) < 1e-3,
+          "24b weekly: avg win-rate composed across days")
+    check(abs(roll["total_day_pnl"] - (80.0 - 30.0 + 200.0)) < 1e-6,
+          "24b weekly: total day P&L summed across days")
+    check(len(roll["takeaways"]) == 3, "24b weekly: takeaways collected")
+    # idempotent persistence. test_24's write_reflection already bootstrapped a
+    # 1-day weekly row (no prior weekly existed -> stale path); clear it so we
+    # exercise the full bootstrap -> write -> re-run no-op sequence here.
+    conn = database.get_conn()
+    conn.execute("DELETE FROM aj_journal WHERE kind='weekly'")
+    conn.commit()
+    AU._maybe_write_weekly()
+    AU._maybe_write_weekly()
+    wk = aj_db.query("SELECT date, payload_json FROM aj_journal WHERE kind='weekly'")
+    check(len(wk) == 1 and wk[0]["date"] == today,
+          "24b weekly: _maybe_write_weekly idempotent via UNIQUE(kind,date)")
+    check(json.loads(wk[0]["payload_json"])["days"] == roll["days"],
+          "24b weekly: persisted rollup matches the composed one")
+    # a fresh weekly row from today is NOT stale -> no rewrite on a weekday
+    # (unless today happens to be the ET Sunday, when the last-day path fires)
+    ent = AU.journal_entries(kind="reflection", limit=10)
+    check([e["date"] for e in ent][:3] == [today, d1, d2],
+          "24b journal: journal_entries newest-first with parsed payloads")
+    check(ent[0]["payload"].get("takeaway") == payload.get("takeaway"),
+          "24b journal: journal_entries payload parsed")
+
+
 def test_25_premarket_briefing():
     _reset_alpha_patches()
     import aj_operator
@@ -502,6 +568,15 @@ def test_25_premarket_briefing():
         check(syms == ["B", "D", "F"], "25 briefing: ranks the top-K ideas")
         check(b.get("regime") in ("bull", "bear", "chop"), "25 briefing: tags the market regime")
         check(AU.get_briefing()["ideas"], "25 briefing: persisted and re-readable")
+        # 24b: the briefing dual-writes into aj_journal under the ET date;
+        # a repeat write_briefing (early-return path) must not duplicate it
+        AU.write_briefing({"opportunity_radar_top_k": 3})
+        jrows = aj_db.query(
+            "SELECT payload_json FROM aj_journal WHERE kind='briefing' AND date=?",
+            (AU._et_date(),))
+        check(len(jrows) == 1, "25 briefing: dual-written to aj_journal once")
+        check(json.loads(jrows[0]["payload_json"]).get("ideas"),
+              "25 briefing: journal payload carries the ideas")
     finally:
         aj_operator._scan_universe = orig_scan
 
